@@ -15,7 +15,6 @@ from pydantic_ai.tools import ToolDefinition
 from linktools.ai.agent import AgentCompiler
 from linktools.ai.capability import CapabilityContribution, tool_metadata
 from linktools.ai.core import ExecutionStatus, JsonValue
-from linktools.ai.model import ModelResolver
 from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
 from linktools.ai.spec import AgentSpec
 
@@ -58,7 +57,7 @@ async def test_runtime_uses_registered_tool_semantics_after_authoring_mutation()
     candidate.value.description = "Changed through captured value"
     candidate.value.timeout = 0.000001
     compiler = AgentCompiler(
-        model_resolver=capture.models, candidates=capture.contributions,
+        models=capture.models, candidates=capture.contributions,
         agents={spec.id: spec},
     )
     binding = compiler.bind(compiler.compile(spec))
@@ -163,9 +162,9 @@ async def test_restored_tool_preserves_validator_callable_and_prepare_hook() -> 
     )
     candidate = CapabilityContribution.from_opaque("tool", "checked", source)
     spec = AgentSpec("default", allow_tools=("checked",))
-    models = ModelResolver({"default": _ModelBinding()})
+    models = {"default": _ModelBinding()}
     compiler = AgentCompiler(
-        model_resolver=models, candidates=(candidate,), agents={spec.id: spec},
+        models=models, candidates=(candidate,), agents={spec.id: spec},
     )
     original_binding = compiler.bind(compiler.compile(spec))
 

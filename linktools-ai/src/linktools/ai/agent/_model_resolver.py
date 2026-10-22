@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Immutable model routes with deferred, once-only binding resolution."""
+"""Immutable model routes with deferred, per-admission binding resolution."""
 
 import inspect
 from collections.abc import Callable, Mapping
-from threading import RLock
+from threading import RLock, local
 from types import MappingProxyType
 from typing import Protocol, cast, runtime_checkable
 
@@ -12,7 +12,7 @@ from pydantic_ai.models import Model
 
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
-from ._contract import ModelBinding, model_thinking_control
+from ..model import ModelBinding, model_thinking_control
 
 
 @runtime_checkable
@@ -20,11 +20,16 @@ class _MaterializableModel(Protocol):
     def materialize(self) -> Model: ...
 
 
-class ModelResolver:
+class _LoadingRoutes(local):
+    def __init__(self) -> None:
+        self.routes: set[str] = set()
+
+
+class _ModelResolver:
     """Capture route sources without loading models or creating provider clients."""
 
     def __init__(self, sources: Mapping[str, ModelBinding | Callable[[], ModelBinding]]) -> None:
-        bindings: dict[str, ModelBinding] = {}
+        bindings: dict[str, ModelBinding | Callable[[], ModelBinding]] = {}
         for route, source in sources.items():
             if not isinstance(route, str) or not route.strip():
                 raise ValueError("model route must be non-empty")
@@ -33,24 +38,30 @@ class ModelResolver:
             if isinstance(source, _MaterializableModel):
                 bindings[route] = cast(ModelBinding, source)
             elif callable(source):
-                bindings[route] = _LazyModelBinding(source)
+                bindings[route] = source
             else:
                 raise TypeError("model source must be a ModelBinding or synchronous loader")
         self._bindings = MappingProxyType(bindings)
+        self._loading = _LoadingRoutes()
 
     def resolve(self, route_id: str) -> ModelBinding:
         try:
-            return self._bindings[route_id]
+            source = self._bindings[route_id]
+            return source if isinstance(source, _MaterializableModel) else _LazyModelBinding(
+                lambda: self._load(route_id, source)
+            )
         except KeyError as error:
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND) from error
 
-    def restore(self, payload: Mapping[str, JsonValue], *, route_id: str | None = None) -> ModelBinding:
-        if route_id is None:
-            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
-        binding = self.resolve(route_id)
-        if dict(binding.contract) != dict(payload):
-            raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
-        return binding
+    def _load(self, route: str, source: Callable[[], ModelBinding]) -> ModelBinding:
+        if route in self._loading.routes:
+            raise AIError(ErrorCode.MODEL_CONFIG_INVALID, "Recursive model loader")
+        self._loading.routes.add(route)
+        try:
+            return source()
+        finally:
+            self._loading.routes.remove(route)
+
 
 
 class _LazyModelBinding:
@@ -98,4 +109,4 @@ class _LazyModelBinding:
         return self._resolve().materialize()
 
 
-__all__ = ["ModelResolver"]
+__all__ = []

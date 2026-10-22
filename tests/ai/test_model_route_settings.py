@@ -6,7 +6,8 @@ from typing import Any
 
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelBinding, ModelResolver, create_model
+from linktools.ai.agent._model_resolver import _ModelResolver
+from linktools.ai.model import ModelBinding, create_model
 from linktools.ai.model._binding import _RetryingModel
 from pydantic_ai.messages import (
     BinaryContent,
@@ -218,7 +219,7 @@ def test_openai_max_tokens_changes_model_contract() -> None:
     assert dict(plain.contract) != dict(configured.contract)
 
 
-def test_model_registry_restore_requires_exact_model_contract() -> None:
+def test_model_restore_keeps_registered_identity_when_configuration_changes() -> None:
     historical = create_model(protocol="openai",
         model="gpt-test",
         max_tokens=1024,
@@ -228,13 +229,9 @@ def test_model_registry_restore_requires_exact_model_contract() -> None:
         max_tokens=2048,
     )
 
-    with pytest.raises(AIError) as raised:
-        ModelResolver({"default": registry}).restore(
-            dict(historical.contract),
-            route_id="default",
-        )
-
-    assert raised.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
+    restored = _ModelResolver({"default": registry}).resolve("default")
+    assert restored is registry
+    assert restored.contract != historical.contract
 
 
 def test_openai_route_materializes_settings_and_retries() -> None:

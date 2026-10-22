@@ -212,8 +212,8 @@ async def test_runtime_features_rejects_multiple_sources() -> None:
     with pytest.raises(TypeError, match="features"):
         async with Runtime.open(
             "sandbox-conflict", storage=RuntimeStorage.in_memory(),
-            features=model_features(RuntimeUsageModels(), (RuntimeFeatures("first", sandbox=DisabledSandbox()),
-                              RuntimeFeatures("second", sandbox=DisabledSandbox()))),
+            features=(RuntimeFeatures("first", sandbox=DisabledSandbox()),
+                      RuntimeFeatures("second", sandbox=DisabledSandbox())),
         ):
             pytest.fail("multiple feature sources were accepted")
 

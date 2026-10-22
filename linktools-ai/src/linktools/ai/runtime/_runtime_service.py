@@ -731,9 +731,8 @@ class Runtime(Generic[AppT]):
         )
         if session_id is not None and (not isinstance(session_id, str) or not session_id.strip()):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        binding = await self._resolve_agent_binding(
-            self._compiler.bind(compiled_agent, output=output)
-        )
+        binding = self._compiler.bind(compiled_agent, output=output)
+        binding = await self._resolve_agent_binding(binding)
         if session_id is None:
             handle = await self._execution_service.start(
                 binding.binding_digest,
@@ -742,6 +741,7 @@ class Runtime(Generic[AppT]):
                 budget_scope_id=budget_scope_id,
                 requires_task_invocation_capture=requires_task_invocation_capture,
                 binding_contract=binding.binding_contract,
+                resolved_binding=binding,
             )
         else:
             await self._ensure_session(compiled_agent, session_id, resolved_principal)
@@ -763,6 +763,7 @@ class Runtime(Generic[AppT]):
                 session_id,
                 resume_request,
                 binding_contract=binding.binding_contract,
+                resolved_binding=binding,
                 dependency_hold_id=dependency_hold_id,
                 budget_scope_id=budget_scope_id,
                 requires_task_invocation_capture=requires_task_invocation_capture,

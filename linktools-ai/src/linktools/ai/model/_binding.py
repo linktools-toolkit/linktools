@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Immutable model semantics, connection resolution and bounded transport retries."""
+"""Immutable model semantics, static connection settings and bounded transport retries."""
 
 import asyncio
 import math
-from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import InitVar, dataclass, field
 from typing import ClassVar
@@ -38,11 +38,6 @@ class _ProviderModelBinding:
     max_retries: int = 2
     retry_delay: "int | float" = 1.0
     max_tokens: "int | None" = None
-    connection_resolver: "Callable[[], Mapping[str, object]] | None" = field(
-        default=None,
-        repr=False,
-        compare=False,
-    )
 
     profile: InitVar[Mapping[str, JsonValue] | None] = None
     _profile_overrides: ImmutableJsonMapping = field(init=False)
@@ -59,10 +54,6 @@ class _ProviderModelBinding:
         if not model:
             raise ValueError("model binding is incomplete")
         object.__setattr__(self, "_input_mime_types", expand_input_types(input_types))
-        if self.connection_resolver is not None and not callable(
-            self.connection_resolver
-        ):
-            raise ValueError("model connection resolver must be callable")
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "base_url", _normalize_base_url(self.base_url))
         if self.api_key is not None and not self.api_key.strip():
@@ -106,15 +97,14 @@ class _ProviderModelBinding:
         return {"mode": mode, "enabled_by_default": bool(profile.get("thinking_enabled_by_default"))}
 
     def materialize(self) -> Model:
-        connection = _resolved_connection(self)
         try:
             settings: ModelSettings = {}
-            if connection["timeout"] is not None:
-                settings["timeout"] = connection["timeout"]
+            if self.timeout is not None:
+                settings["timeout"] = self.timeout
             if self.max_tokens is not None:
                 settings["max_tokens"] = self.max_tokens
 
-            model = self._build_model(connection, settings)
+            model = self._build_model(settings)
         except UserError as error:
             raise AIError(
                 ErrorCode.MODEL_CONFIG_INVALID,
@@ -127,12 +117,12 @@ class _ProviderModelBinding:
         _logger.debug(
             "Model materialized: model=%s credential=%s",
             self.model,
-            connection["api_key"] is not None,
+            self.api_key is not None,
         )
         return _RetryingModel(
             model,
-            int(connection["max_retries"]),
-            connection["retry_delay"],
+            self.max_retries,
+            self.retry_delay,
             input_binding=self,
         )
 
@@ -147,64 +137,8 @@ class _ProviderModelBinding:
             canonical_json_bytes(self._profile_overrides), strict=True,
         )
 
-    def _build_model(self, connection: Mapping[str, object], settings: ModelSettings) -> Model:
+    def _build_model(self, settings: ModelSettings) -> Model:
         raise NotImplementedError
-
-def _resolved_connection(binding: _ProviderModelBinding) -> dict[str, object]:
-    values: dict[str, object] = {
-        "base_url": binding.base_url,
-        "api_key": binding.api_key,
-        "timeout": binding.timeout,
-        "max_retries": binding.max_retries,
-        "retry_delay": binding.retry_delay,
-    }
-    resolver = binding.connection_resolver
-    if resolver is None:
-        return values
-    try:
-        overrides = resolver()
-    except AIError:
-        raise
-    except Exception as error:
-        raise AIError(
-            ErrorCode.MODEL_CONFIG_INVALID,
-            safe_details={"reason": "connection_resolver_failed"},
-        ) from error
-    if not isinstance(overrides, Mapping):
-        error = TypeError("connection resolver must return a mapping")
-        raise AIError(
-            ErrorCode.MODEL_CONFIG_INVALID,
-            safe_details={"reason": "connection_resolver_invalid"},
-        ) from error
-    allowed = frozenset(values)
-    if any(key not in allowed for key in overrides):
-        error = ValueError("connection resolver returned an unsupported field")
-        raise AIError(
-            ErrorCode.MODEL_CONFIG_INVALID,
-            safe_details={"reason": "connection_resolver_field_invalid"},
-        ) from error
-    values.update(overrides)
-    try:
-        if values["base_url"] is not None and not isinstance(
-            values["base_url"], str
-        ):
-            raise ValueError("base_url must be a string")
-        values["base_url"] = _normalize_base_url(values["base_url"])
-        _validate_optional_string("api_key", values["api_key"])
-        if isinstance(values["api_key"], str) and not values["api_key"].strip():
-            values["api_key"] = None
-        _validate_positive_number("timeout", values["timeout"])
-        if values["max_retries"] is None:
-            raise ValueError("max_retries must be a non-negative integer")
-        _validate_non_negative_integer("max_retries", values["max_retries"])
-        _validate_non_negative_number("retry_delay", values["retry_delay"])
-    except (TypeError, ValueError) as error:
-        raise AIError(
-            ErrorCode.MODEL_CONFIG_INVALID,
-            safe_details={"reason": "connection_resolver_value_invalid"},
-        ) from error
-    return values
-
 
 def _validate_positive_number(name: str, value: "int | float | None") -> None:
     if value is None:
@@ -218,11 +152,6 @@ def _validate_positive_number(name: str, value: "int | float | None") -> None:
         raise ValueError(f"{name} must be a finite positive number")
 
 
-def _validate_optional_string(name: str, value: object) -> None:
-    if value is not None and not isinstance(value, str):
-        raise ValueError(f"{name} must be a string")
-
-
 def _validate_positive_integer(name: str, value: "int | None") -> None:
     if value is None:
         return
@@ -230,9 +159,7 @@ def _validate_positive_integer(name: str, value: "int | None") -> None:
         raise ValueError(f"{name} must be a positive integer")
 
 
-def _validate_non_negative_integer(name: str, value: "int | None") -> None:
-    if value is None:
-        return
+def _validate_non_negative_integer(name: str, value: int) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{name} must be a non-negative integer")
 

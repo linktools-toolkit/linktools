@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Regression coverage for durable execution binding invariants."""
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.model import ModelResolver, create_model
+from linktools.ai.model import create_model
 
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -154,7 +154,7 @@ def _execution(
 
 def _compiler() -> AgentCompiler:
     return AgentCompiler(
-        model_resolver=ModelResolver({"default": create_model(protocol='openai', model="gpt-test")}),
+        models={"default": create_model(protocol='openai', model="gpt-test")},
         candidates=(),
         agents={"agent": AgentSpec("agent")},
     )
@@ -351,26 +351,26 @@ async def test_feature_capture_keeps_replaced_model_connection() -> None:
         base_url="https://first.example/v1", api_key="first-key",
     ))
     first_capture = await features.capture()
-    first = first_capture.models.resolve("default")
+    first = first_capture.models["default"]
 
     features.model("default", create_model(
         protocol="openai", model="gpt-test",
         base_url="https://second.example/v1", api_key="second-key",
     ))
-    second = (await features.capture()).models.resolve("default")
+    second = (await features.capture()).models["default"]
 
     assert second is not first
     assert dict(second.contract) == dict(first.contract)
-    assert first_capture.models.resolve("default") is first
+    assert first_capture.models["default"] is first
 
 
 def test_agent_identity_ignores_model_but_catalog_uses_current_binding() -> None:
-    resolver = ModelResolver({
+    models = {
         "first": create_model(protocol="openai", model="gpt-test", base_url="https://first.example/v1"),
         "second": create_model(protocol="openai", model="gpt-test", base_url="https://second.example/v1"),
-    })
+    }
     compiler = AgentCompiler(
-        model_resolver=resolver,
+        models=models,
         candidates=(),
         agents={"agent": AgentSpec("agent", model="first")},
     )
@@ -379,14 +379,15 @@ def test_agent_identity_ignores_model_but_catalog_uses_current_binding() -> None
 
     assert first.compiled_agent.spec.id == second.compiled_agent.spec.id
     assert first.compiled_agent.spec.revision == second.compiled_agent.spec.revision
-    assert first.binding_digest == second.binding_digest
+    assert first.binding_digest != second.binding_digest
     assert first.binding_contract != second.binding_contract
     assert first.compiled_agent.model is not second.compiled_agent.model
 
     catalog = AgentCatalog({"agent": first.compiled_agent})
     assert catalog.register_binding(first) is first
     assert catalog.register_binding(second) is second
-    assert catalog.binding(first.binding_digest) is second
+    assert catalog.binding(first.binding_digest) is first
+    assert catalog.binding(second.binding_digest) is second
 
 
 def test_current_binding_contract_has_minimal_wire_shape() -> None:
@@ -460,12 +461,12 @@ def test_restore_rejects_tool_contract_drift_without_revision_bump() -> None:
     assert first_candidate.revision == second_candidate.revision
 
     first_compiler = AgentCompiler(
-        model_resolver=ModelResolver({"default": create_model(protocol='openai', model="gpt-test")}),
+        models={"default": create_model(protocol='openai', model="gpt-test")},
         candidates=(first_candidate,),
         agents={"agent": spec},
     )
     second_compiler = AgentCompiler(
-        model_resolver=ModelResolver({"default": create_model(protocol='openai', model="gpt-test")}),
+        models={"default": create_model(protocol='openai', model="gpt-test")},
         candidates=(second_candidate,),
         agents={"agent": spec},
     )
@@ -572,3 +573,15 @@ def test_binding_preserves_selected_pin_version_error() -> None:
 def test_execution_binding_digest_is_derived_from_binding_contract() -> None:
     value = _execution(planning=True, thinking=True)
     assert value.binding_digest == value.binding.binding_digest
+
+
+def test_model_diagnostics_do_not_affect_contract_equality_or_other_guards() -> None:
+    original = _binding_contract()
+    current = replace(original, model_contract={"api": "anthropic", "model_identity": "other", "profile": {"supports_thinking": True}})
+    assert original == current
+    assert original.binding_digest == current.binding_digest
+    assert original.to_payload() != current.to_payload()
+    assert original != replace(current, agent_spec=replace(current.agent_spec, model="other-route"))
+    assert original != replace(current, agent_spec=replace(current.agent_spec, instructions=("changed",)))
+    assert original != replace(current, selected=(CapabilityPin("tool", "different", {"version": 1, "revision": 1}),))
+    assert original != replace(current, output_mode="structured", output_schema={"type": "object"})

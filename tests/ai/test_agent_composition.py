@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Focused regression coverage for the final Agent composition contract."""
-from linktools.ai.model import ModelResolver, create_model
+from linktools.ai.model import create_model
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -195,7 +195,7 @@ async def test_binding_preserves_declaration_order_and_capability_registration_o
     )
     spec = AgentSpec("agent")
     compiler = AgentCompiler(
-        model_resolver=ModelResolver({"default": create_model(protocol='openai', model="test-model")}),
+        models={"default": create_model(protocol='openai', model="test-model")},
         candidates=(*capture.contributions, skill),
         agents={spec.id: spec},
     )
@@ -240,6 +240,7 @@ class _CaptureSessionExecution:
         request: ExecutionRequest,
         *,
         binding_contract: object | None = None,
+        resolved_binding: object | None = None,
         dependency_hold_id: str | None = None,
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
@@ -249,6 +250,7 @@ class _CaptureSessionExecution:
         self.session_id = session_id
         self.request = request
         self.binding_contract = binding_contract
+        self.resolved_binding = resolved_binding
         self.dependency_hold_id = dependency_hold_id
         self.requires_task_invocation_capture = requires_task_invocation_capture
         self.budget_scope_id = budget_scope_id

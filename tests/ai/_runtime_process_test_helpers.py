@@ -148,7 +148,18 @@ def _runtime_process(
                 backend._commit_reconciled_terminal = ordered_terminal
             if execution_id is None:
                 backend = runtime._execution_service.runtime_backend()
-                if phase == "admitted":
+                if phase == "reserved":
+                    original_prepare = backend.prepare_start
+
+                    async def pause_prepare(request, execution, identity):
+                        nonlocal execution_id
+                        execution_id = execution.execution_id
+                        admitted.set()
+                        await release_admission.wait()
+                        return await original_prepare(request, execution, identity)
+
+                    backend.prepare_start = pause_prepare
+                elif phase == "admitted":
                     original_launch = backend.launch
 
                     async def pause_launch(request, execution, **kwargs):

@@ -746,8 +746,9 @@ class Agent(Generic[AppT]):
 
     @property
     def model(self) -> ModelBinding:
-        """Current captured model binding, without resolving its connection."""
-        return self._runtime._compiled_agent(self.id, self.revision, self._compiled_agent).model
+        """Current model for inspection; no provider client is created."""
+        compiled = self._runtime._compiled_agent(self.id, self.revision, self._compiled_agent)
+        return self._runtime._compiler.bind(compiled).compiled_agent.model
 
     @property
     def compiled(self) -> "CompiledAgent | None":

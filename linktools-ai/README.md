@@ -268,15 +268,14 @@ startup budget, and report readiness only after the context opens successfully.
 `Runtime.open()` imposes no fixed startup deadline. Reuse the opened Runtime for
 its service lifetime; execution deadlines do not replace a startup budget.
 
-Connection settings are resolved when a binding is materialized, independently
-for each run. Model semantics can be loaded once per captured feature mapping,
-while connection credentials can rotate between runs. To give multiple routes
-the same static binding, register that object under each name:
+A feature loader reads model configuration for each agent run. Its resolved
+binding is reused within that run; the next run reads updated configuration.
+To give multiple routes the same static binding, register that object under each name:
 
 ```python
 binding = create_model(
     protocol="openai", model="gpt-4o-mini",
-    connection_resolver=lambda: {"api_key": get_api_key()},
+    api_key=get_api_key(),
 )
 features.model("production", binding)
 features.model("default", binding)
@@ -299,15 +298,15 @@ from linktools.ai.runtime import RuntimeFeatures
 
 features = RuntimeFeatures()
 features.model("assistant", create_model(protocol="anthropic", model="claude-sonnet-4-5"))
-# Or defer model semantics until first use. The synchronous function returns a binding.
+# Or load one fresh binding for each agent run. The function is synchronous.
 features.model("deferred", lambda: create_model(protocol="openai", model="gpt-4o"))
 ```
 
 Runtime captures the route mapping at opening without evaluating every loader.
-Each captured lazy route caches its first successful binding. Client resources
-are still created and released per model run. Connection credential refresh is
-separate: `connection_resolver` is evaluated when materializing a model, not at
-registration. See [model protocols](docs/model-protocols.md) for the full lifecycle,
+A callable is evaluated once per agent run. That run uses the same binding for
+contract capture, model validation, tool rounds and retries; the next run reloads
+it. Concurrent runs do not share mutable loader results. Client resources are
+created and released per run. See [model protocols](docs/model-protocols.md) for
 custom bindings, profiles, restore boundaries and trace semantics.
 
 ## 2. Define application capabilities and Agents
@@ -796,7 +795,7 @@ result = (await agent.run(
 The exact durable binding stores:
 
 - the v1 `AgentSpec` contract;
-- the resolved model contract;
+- the resolved model configuration as diagnostic metadata (identity is the registered model ID);
 - the selected capability pins, including bound Skill Asset version references when Execution state is durable;
 - selected Subagent ids and their direct execution bindings;
 - `output_mode`;
@@ -884,11 +883,12 @@ still need concrete MIME types. Text files can be selected explicitly, for
 example with `mime:text/plain`, without changing ordinary prompt text handling.
 
 Capture expands categories, normalizes, deduplicates, and sorts the MIME values.
-The model contract stores only that resolved `input_mime_types` list, which
-contributes to its digest. Restore uses the stored list without expanding it
-again against a potentially different SDK. `input_mime_types` is the captured
-contract/display field, not the Python or YAML authoring argument. Web settings
-show the actual captured MIME values rather than the authoring category labels.
+Model diagnostic metadata stores the resolved `input_mime_types` list, not
+model identity. Restore resolves the current binding by registered ID and validates
+new inputs against its current permissions and SDK support. Callers own consistency
+when changing configuration. `input_mime_types` is the diagnostic/display field,
+not the Python or YAML authoring argument. Web settings show the current resolved
+MIME values rather than authoring category labels.
 
 The allowlist declares application permission, not guaranteed provider support.
 SDK encoding restrictions and existing resource limits still apply. Transport
@@ -897,7 +897,8 @@ byte-limit configuration is needed.
 
 Configure attachment permissions with `input_types`. Captured model contracts
 must contain the resolved `input_mime_types` list; missing permissions do not
-implicitly allow attachments. Restored bindings must match their captured contract.
+implicitly allow attachments. Configuration changes under the same registered ID
+do not change model identity or block restoration; current attachment checks still apply.
 
 Execution file input uses the same durable boundary:
 

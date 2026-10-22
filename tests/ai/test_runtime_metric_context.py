@@ -294,7 +294,7 @@ async def test_metrics_resources_do_not_enter_captured_agent_binding_identity() 
             compiled = runtime.agents.get().derive(instructions=("fixed binding",)).compiled
             assert compiled is not None
             compiler = AgentCompiler(
-                model_resolver=capture.models, candidates=(),
+                models=capture.models, candidates=(),
                 agents={compiled.spec.id: compiled.spec},
             )
             bindings.append(compiler.bind(compiled).binding_contract.to_payload())

@@ -713,12 +713,13 @@ class DefaultExecutionService:
         self,
         binding_digest: str,
         binding_contract: "AgentBindingContract | None" = None,
+        resolved_binding: AgentBinding | None = None,
     ) -> AgentBinding:
         if binding_contract is None:
             return self._catalog.binding(binding_digest)
         if binding_contract.binding_digest != binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        binding = self._compiler.restore(binding_contract)
+        binding = resolved_binding if resolved_binding is not None else self._compiler.restore(binding_contract)
         if (
             binding.binding_digest != binding_digest
             or binding.binding_contract != binding_contract
@@ -1771,6 +1772,7 @@ class DefaultExecutionService:
         *,
         dependency_hold_id: "str | None" = None,
         binding_contract: "AgentBindingContract | None" = None,
+        resolved_binding: AgentBinding | None = None,
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
     ) -> ExecutionHandle:
@@ -1785,6 +1787,7 @@ class DefaultExecutionService:
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id,
             binding_contract=binding_contract,
+            resolved_binding=resolved_binding,
         )
 
     async def resolve_existing(
@@ -1879,6 +1882,7 @@ class DefaultExecutionService:
         request: ExecutionRequest,
         *,
         binding_contract: "AgentBindingContract | None" = None,
+        resolved_binding: AgentBinding | None = None,
         dependency_hold_id: "str | None" = None,
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
@@ -1901,6 +1905,7 @@ class DefaultExecutionService:
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id,
             binding_contract=binding_contract,
+            resolved_binding=resolved_binding,
         )
 
     async def start_subagent(
@@ -1912,6 +1917,7 @@ class DefaultExecutionService:
         root_execution_id: str,
         parent_invocation_id: str,
         binding_contract: "AgentBindingContract | None" = None,
+        resolved_binding: AgentBinding | None = None,
     ) -> ExecutionHandle:
         return await self._start(
             binding_digest,
@@ -1922,6 +1928,7 @@ class DefaultExecutionService:
             lineage_kind=ExecutionLineageKind.SUBAGENT,
             scope="execution.subagent",
             binding_contract=binding_contract,
+            resolved_binding=resolved_binding,
         )
 
     async def replay_subagent(
@@ -2069,6 +2076,7 @@ class DefaultExecutionService:
         prepare_local_stream: bool = False,
         dependency_hold_id: "str | None" = None,
         binding_contract: "AgentBindingContract | None" = None,
+        resolved_binding: AgentBinding | None = None,
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
     ) -> ExecutionHandle:
@@ -2101,6 +2109,7 @@ class DefaultExecutionService:
                     requires_task_invocation_capture=requires_task_invocation_capture,
                     budget_scope_id=budget_scope_id,
                     binding_contract=binding_contract,
+                    resolved_binding=resolved_binding,
                     capture_metric=capture_metric,
                 )
             async with self._session_guard(request.principal.tenant_id, session_id):
@@ -2122,6 +2131,7 @@ class DefaultExecutionService:
                     requires_task_invocation_capture=requires_task_invocation_capture,
                     budget_scope_id=budget_scope_id,
                     binding_contract=binding_contract,
+                    resolved_binding=resolved_binding,
                     capture_metric=capture_metric,
                 )
         finally:
@@ -2148,6 +2158,7 @@ class DefaultExecutionService:
         prepare_local_stream: bool = False,
         dependency_hold_id: "str | None" = None,
         binding_contract: "AgentBindingContract | None" = None,
+        resolved_binding: AgentBinding | None = None,
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
         capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
@@ -2167,7 +2178,9 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
         context = await self._canonicalize_request(request)
         request = context.request
-        binding = self._binding(binding_digest, binding_contract)
+        binding = self._binding(binding_digest, binding_contract, resolved_binding)
+        request = replace(request, resolved_binding=binding)
+        context = replace(context, request=request)
         parent: ExecutionRecord | None = None
         if lineage_kind is ExecutionLineageKind.SUBAGENT:
             if parent_execution_id is None or not parent_invocation_id:

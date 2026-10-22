@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Focused regressions for durable composition and close ownership."""
-from linktools.ai.model import ModelResolver, create_model
+from linktools.ai.model import create_model
 
 from linktools.ai.runtime.state import RuntimeState
 import asyncio
@@ -81,7 +81,7 @@ def _compiler(
     candidates: tuple[CapabilityContribution[object], ...] = (),
 ) -> AgentCompiler:
     return AgentCompiler(
-        model_resolver=ModelResolver({"default": create_model(protocol='openai', model="gpt-test")}),
+        models={"default": create_model(protocol='openai', model="gpt-test")},
         candidates=candidates,
         agents={"durable-contract": _spec()},
     )

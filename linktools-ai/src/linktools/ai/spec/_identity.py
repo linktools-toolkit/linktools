@@ -62,7 +62,7 @@ def binding_digest_payload(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     _require_format_v1(payload)
     agent_spec = _mapping(payload["agent_spec"])
-    model_contract = _mapping(payload["model_contract"])
+    _mapping(payload["model_contract"])  # Diagnostic metadata, not model identity.
     selected = payload["selected"]
     subagents = payload["subagents"]
     if not isinstance(selected, list) or not isinstance(subagents, list):
@@ -111,7 +111,7 @@ def binding_digest_payload(
     result: dict[str, JsonValue] = {
         "contract": "agent-binding-v1",
         "agent": agent_ref_payload(agent_spec),
-        "model": dict(model_contract),
+        "model": _text(agent_spec.get("model")),
         "selected": selected_refs,
         "subagents": subagent_refs,
         "output": {

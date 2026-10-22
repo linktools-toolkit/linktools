@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Captured file support is shared across admission, replay and SDK requests."""
-from linktools.ai.model import ModelResolver, create_model
+from linktools.ai.agent._model_resolver import _ModelResolver
+from linktools.ai.model import create_model
 
 import json
 
@@ -47,18 +48,18 @@ def test_invalid_mime_declarations_fail_at_capture(values: object) -> None:
         create_model(protocol='openai', model="test", input_types=values)
 
 
-def test_captured_allowlist_is_normalized_immutable_and_restores_strictly() -> None:
+def test_captured_allowlist_is_normalized_immutable_and_restore_uses_current_route() -> None:
     values = ["mime: IMAGE/PNG ", "mime:image/png", "mime:text/*"]
-    resolver = ModelResolver({"default": create_model(protocol='openai', model="test", input_types=values)})
+    resolver = _ModelResolver({"default": create_model(protocol='openai', model="test", input_types=values)})
     values.append("mime:application/pdf")
     original = resolver.resolve("default")
     assert original.contract["input_mime_types"] == ["image/png", "text/*"]
     stored = json.loads(json.dumps(original.contract))
-    assert resolver.restore(stored, route_id="default").contract == original.contract
+    assert resolver.resolve("default").contract == original.contract
     stored["input_mime_types"].append("application/pdf")
-    with pytest.raises(AIError) as raised:
-        resolver.restore(stored, route_id="default")
-    assert raised.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
+    restored = resolver.resolve("default")
+    assert restored.contract == original.contract
+    assert restored.contract != stored
 
 
 @pytest.mark.parametrize("content", (
@@ -202,8 +203,8 @@ def test_registered_old_contract_cannot_grant_file_permissions(vision: bool) -> 
         def materialize(self) -> TestModel:
             return TestModel()
 
-    registry = ModelResolver({"default": HostBinding()})
-    restored = registry.restore(dict(HostBinding.contract), route_id="default")
+    registry = _ModelResolver({"default": HostBinding()})
+    restored = registry.resolve("default")
     for mime_type in ("application/pdf", "image/png"):
         with pytest.raises(AIError) as raised:
             validate_model_input(restored, mime_type)
@@ -230,13 +231,13 @@ def test_categories_explicit_mime_and_duplicates_share_canonical_contract() -> N
     registry = create_model(protocol='openai', model="test", input_types=[
         "image", "document", "mime:audio/*", "mime:image/png", "image", "mime:application/x-private",
     ])
-    resolver = ModelResolver({"default": registry})
+    resolver = _ModelResolver({"default": registry})
     expected = sorted(set((*get_args(ImageMediaType), *get_args(DocumentMediaType), "audio/*", "application/x-private")))
-    explicit = ModelResolver({"default": create_model(protocol='openai', model="test", input_types=["mime:" + mime for mime in expected])})
+    explicit = _ModelResolver({"default": create_model(protocol='openai', model="test", input_types=["mime:" + mime for mime in expected])})
     binding = resolver.resolve("default")
     assert binding.contract["input_mime_types"] == expected
     assert binding.contract == explicit.resolve("default").contract
-    assert resolver.restore(json.loads(json.dumps(binding.contract)), route_id="default").contract == binding.contract
+    assert resolver.resolve("default").contract == binding.contract
     assert validate_model_input(binding, "audio/wav") is None
     assert validate_model_input(binding, "application/x-private", input_kind="uploaded") is None
 
@@ -277,10 +278,10 @@ def test_captured_mime_list_is_not_reexpanded_after_sdk_category_changes(monkeyp
     monkeypatch.setattr(_input, "ImageMediaType", Literal["image/png", "image/x-future"])
     assert original.contract == stored
     assert validate_model_input(original, "image/jpeg") is None
-    current = ModelResolver({"default": create_model(protocol='openai', model="test", input_types=["image"])})
-    with pytest.raises(AIError) as raised:
-        current.restore(stored, route_id="default")
-    assert raised.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
+    current = _ModelResolver({"default": create_model(protocol='openai', model="test", input_types=["image"])})
+    restored = current.resolve("default")
+    assert restored.contract != stored
+    assert validate_model_input(restored, "image/x-future") is None
 
 
 def test_captured_contract_rejects_sdk_literal_objects() -> None:

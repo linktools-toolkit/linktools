@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Protocol-specific model construction without route or client ownership."""
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
@@ -21,7 +21,6 @@ def create_model(
     max_retries: int = 2,
     retry_delay: "int | float" = 1.0,
     max_tokens: "int | None" = None,
-    connection_resolver: "Callable[[], Mapping[str, object]] | None" = None,
 ) -> ModelBinding:
     """Construct a model binding without creating a client or resolving credentials."""
     if protocol == "openai":
@@ -47,7 +46,6 @@ def create_model(
         max_retries=max_retries,
         retry_delay=retry_delay,
         max_tokens=max_tokens,
-        connection_resolver=connection_resolver,
     )
 
 

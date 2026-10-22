@@ -16,7 +16,7 @@ from linktools.ai.core import (
     Principal,
     TenantAuthorizationPolicy,
 )
-from linktools.ai.model import ModelResolver, create_model
+from linktools.ai.model import create_model
 from linktools.ai.runtime import ExecutionRequest, RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime._event import LiveExecutionEventBroker
 from linktools.ai.runtime._execution import (
@@ -37,9 +37,9 @@ from ._runtime_test_helpers import execution_owner_fields
 
 def _binding() -> AgentBinding:
     spec = AgentSpec("agent", model="model")
-    models = ModelResolver({"model": create_model(protocol="openai", model="gpt-test")})
+    models = {"model": create_model(protocol="openai", model="gpt-test")}
     compiler = AgentCompiler(
-        model_resolver=models, candidates=(), agents={spec.id: spec},
+        models=models, candidates=(), agents={spec.id: spec},
     )
     return compiler.bind(compiler.compile(spec))
 

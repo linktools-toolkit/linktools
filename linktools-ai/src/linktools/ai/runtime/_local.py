@@ -396,23 +396,25 @@ class LocalExecutionBackend:
     def tenant_id(self) -> str:
         return self._tenant_id
 
-    def _execution_binding(self, execution: ExecutionRecord) -> AgentBinding:
-        binding = (
-            self._catalog.binding(execution.binding_digest)
-            if self._restore_binding is None
-            else self._restore_binding(execution.binding)
-        )
-        if binding.binding_digest != execution.binding_digest:
+    def _execution_binding(self, execution: ExecutionRecord, binding: AgentBinding | None = None) -> AgentBinding:
+        if binding is None:
+            binding = (
+                self._catalog.binding(execution.binding_digest)
+                if self._restore_binding is None
+                else self._restore_binding(execution.binding)
+            )
+        if (binding.binding_digest != execution.binding_digest
+                or binding.binding_contract != execution.binding):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return binding
 
-    def validate_binding(self, execution: ExecutionRecord) -> None:
-        self._execution_binding(execution)
+    def validate_binding(self, execution: ExecutionRecord, *, binding: AgentBinding | None = None) -> AgentBinding:
+        return self._execution_binding(execution, binding)
 
-    async def validate_recovery_inputs(self, execution: ExecutionRecord) -> None:
-        await self._executor.validate_recovery_inputs(
-            self._execution_binding(execution), execution.tool_response_ref,
-        )
+    async def validate_recovery_inputs(self, execution: ExecutionRecord, *, binding: AgentBinding | None = None) -> AgentBinding:
+        binding = self._execution_binding(execution, binding)
+        await self._executor.validate_recovery_inputs(binding, execution.tool_response_ref)
+        return binding
 
     async def load_execution(
         self,
@@ -621,7 +623,7 @@ class LocalExecutionBackend:
                 self._tenant_id,
             )
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        self._execution_binding(execution)
+        self._execution_binding(execution, request.resolved_binding)
         if (
             request.mode != execution.mode
             or request.planning is not execution.planning
@@ -939,7 +941,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await self._input_materializer.restore(execution.stored_user_input)
 
-    def _can_prepare_initial_attempt(self, execution: ExecutionRecord) -> bool:
+    def _can_prepare_initial_attempt(self, execution: ExecutionRecord, binding: AgentBinding | None = None) -> bool:
         if (type(self) is not LocalExecutionBackend or execution.restart_checkpoints
                 or execution.durable_trace or execution.binding_kind != "agent"
                 or execution.parent_execution_id is not None
@@ -953,7 +955,7 @@ class LocalExecutionBackend:
                   self._conversation.sessions.state_store, self._recovery.checkpoints.state_store)
         if any(store.storage_group is not stores[0].storage_group for store in stores):
             return False
-        binding = self._execution_binding(execution)
+        binding = self._execution_binding(execution, binding)
         return not (execution.memory_scope is not None
                     and select_harness_memory_tools(binding.compiled_agent.tool_policy))
 
@@ -978,7 +980,7 @@ class LocalExecutionBackend:
     ) -> str | None:
         execution = reservation.execution
         if (coordination is None or self._pending_turns.coordination is None
-                or not execution.conversation or not self._can_prepare_initial_attempt(execution)
+                or not execution.conversation or not self._can_prepare_initial_attempt(execution, request.resolved_binding)
                 or execution.budget_scope_id is not None or execution.memory_scope is not None
                 or not self._conversation_durable or not self._execution_objects_durable
                 or not isinstance(self._run_store, RuntimeAgentRunStore)):
@@ -1241,7 +1243,7 @@ class LocalExecutionBackend:
         await self._validate_start(request, execution)
         if execution.status is not ExecutionStatus.PENDING_START:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._execution_binding(execution)
+        self._execution_binding(execution, request.resolved_binding)
         now = datetime.now(timezone.utc)
         candidate = RecoveryCheckpoint(
             execution_id=execution.execution_id,
@@ -1370,6 +1372,8 @@ class LocalExecutionBackend:
         if recovery_operation is not None and not self._accepting:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
                 safe_details={"phase": "recovery_launch_rejected"})
+        if request.resolved_binding is None:
+            request = replace(request, resolved_binding=self._execution_binding(execution))
         await self._validate_start(request, execution)
         checkpoint = await self._recovery.checkpoints.get(
             execution.execution_id,
@@ -1472,7 +1476,7 @@ class LocalExecutionBackend:
         initial_attempt = None
         if (resume is None and producer_generation is None and recovery_operation is None
                 and checkpoint.state is RecoveryCheckpointState.ADMITTED
-                and self._can_prepare_initial_attempt(current)):
+                and self._can_prepare_initial_attempt(current, request.resolved_binding)):
             initial_attempt = _InitialAttemptCapture(current, checkpoint)
         self._terminal_events[execution.execution_id] = asyncio.Event()
         run = (self._run(request, execution, resume, producer_generation=producer_generation)
@@ -1902,6 +1906,7 @@ class LocalExecutionBackend:
             thinking=current.thinking,
             correlation=current.correlation,
             tool_response_ref=current.tool_response_ref,
+            resolved_binding=decision.binding,
         )
         if not self._prepare_recovery_relaunch(current.execution_id):
             return
@@ -3441,7 +3446,7 @@ class LocalExecutionBackend:
                     expected_recovery_revision=checkpoint.revision,
                     expected_recovery_state=checkpoint.state,
                 )
-                if self._can_prepare_initial_attempt(current):
+                if self._can_prepare_initial_attempt(current, request.resolved_binding):
                     prepared_admission = admission_claim
                 else:
                     current, checkpoint = (
@@ -3462,6 +3467,7 @@ class LocalExecutionBackend:
                 resume = await self._recovery_coordinator.reconcile_waiting_deferred(
                     checkpoint,
                     current,
+                    binding=request.resolved_binding,
                 )
                 if resume is None:
                     return
@@ -3475,7 +3481,7 @@ class LocalExecutionBackend:
                 or (checkpoint.agent_run_id is None and prepared_admission is None)
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            binding = self._execution_binding(current)
+            binding = self._execution_binding(current, request.resolved_binding)
             compiled_agent = binding.compiled_agent
             initial_repository_instructions = await self.load_repository_instructions(
                 current.repository_instructions

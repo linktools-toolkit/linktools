@@ -61,13 +61,13 @@ async def test_invalid_module_route_is_rejected_before_storage_initialization(
         pytest.fail("invalid declarations must fail before model resolution")
 
     monkeypatch.setattr(RuntimeState, "initialize", unexpected_initialize)
-    monkeypatch.setattr(_FeatureModels, "capture", unexpected_model_capture)
     features = _features(capability(storage=object()))
+    features.model("default", unexpected_model_capture)
     with pytest.raises(TypeError, match="storage must be StorageRoute"):
         async with Runtime.open(
             "invalid-route",
             storage=RuntimeStorage.in_memory(),
-            features=model_features(_FeatureModels(), features),
+            features=features,
         ):
             pytest.fail("invalid declaration must not activate Runtime")
 

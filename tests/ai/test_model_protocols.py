@@ -12,7 +12,8 @@ from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.tools import ToolDefinition
 
 from linktools.ai.errors import AIError
-from linktools.ai.model import ModelClientRequestRecorder, ModelResolver, ModelBinding, create_model, validate_model_input
+from linktools.ai.agent._model_resolver import _ModelResolver
+from linktools.ai.model import ModelClientRequestRecorder, ModelBinding, create_model, validate_model_input
 from linktools.ai.model import _anthropic, _openai
 from linktools.ai.runtime._message import decode_model_messages, encode_model_messages
 
@@ -73,10 +74,10 @@ async def test_native_tool_turn_survives_durable_restore_and_client_reentry(monk
 
     profile = {'openai_chat_thinking_field': 'reasoning_content', 'openai_chat_send_back_thinking_parts': 'field'} if kind == 'openai' else None
     models, clients = model_binding(monkeypatch, kind, model_name, handler, profile=profile)
-    resolver = ModelResolver({"default": models})
+    resolver = _ModelResolver({"default": models})
     binding = resolver.resolve('default')
     contract = json.loads(json.dumps(dict(binding.contract)))
-    restored = resolver.restore(contract, route_id='default').materialize()
+    restored = resolver.resolve('default').materialize()
     params = ModelRequestParameters(function_tools=[ToolDefinition(name='lookup', parameters_json_schema={'type': 'object', 'properties': {'key': {'type': 'integer'}}})])
     initial = [ModelRequest(parts=[UserPromptPart('find')])]
     with ModelClientRequestRecorder(record_http_bodies=True) as capture:
@@ -112,16 +113,16 @@ async def test_public_registration_matches_model_type_and_restores(kind, api, mo
     binding = create_model(protocol=api, model=model_name)
     features = RuntimeFeatures()
     features.model("selected", binding)
-    resolver = (await features.capture()).models
-    actual = resolver.resolve("selected").contract
+    sources = (await features.capture()).models
+    resolver = _ModelResolver(sources)
+    actual = sources["selected"].contract
     assert actual == binding.contract
     assert actual.get("api", "openai") == api
-    assert resolver.restore(actual, route_id="selected").contract == actual
+    assert resolver.resolve("selected").contract == actual
     if api == "openai":
         assert "api" not in actual
     elif api == "anthropic":
-        with pytest.raises(AIError):
-            resolver.restore(dict(actual, api="anthropic-messages"), route_id="selected")
+        assert resolver.resolve("selected").contract == actual
 
 
 def test_profile_overrides_are_explicit_frozen_and_contract_owned():
@@ -138,8 +139,7 @@ def test_profile_overrides_are_explicit_frozen_and_contract_owned():
     assert binding.contract['profile']['supports_thinking'] is True
     assert create_model(protocol="openai-responses", model='same').contract != expected
     models = create_model(protocol='openai', model='same', profile={'supports_thinking': False})
-    with pytest.raises(AIError):
-        ModelResolver({'default': models}).restore(binding.contract, route_id='default')
+    assert _ModelResolver({'default': models}).resolve('default') is models
     for invalid in ({'supports_thinking': 'yes'}, {'unknown_capability': True}, {'json_schema_transformer': object}, {'supports_thinking': float('nan')}):
         with pytest.raises((TypeError, ValueError)):
             create_model(protocol="openai", model='same', profile=invalid)
@@ -304,7 +304,7 @@ def test_thinking_control_uses_frozen_effective_profile_without_connections_is_p
                            profile={"supports_thinking": True})
     monkeypatch.setattr(_openai, "DefaultAsyncHttpxClient", lambda **kwargs: pytest.fail("capability read created client"))
     assert model_thinking_control(binding)["mode"] == "controllable"
-    resolver = ModelResolver({"default": binding, "alias": binding})
+    resolver = _ModelResolver({"default": binding, "alias": binding})
     assert model_thinking_control(resolver.resolve("alias")) == model_thinking_control(binding)
     always = create_model(protocol="anthropic", model="fixture", profile={"thinking_always_enabled":True,"thinking_enabled_by_default":True})
     assert model_thinking_control(always)["mode"] == "always_on"
@@ -370,10 +370,9 @@ def test_generic_factory_forwards_all_options(monkeypatch, kind, api, model_name
         received.update(kwargs)
         return sentinel
     monkeypatch.setattr(module, name, construct)
-    resolver = lambda: {"api_key": "fixture-secret"}
     options = dict(model=model_name, input_types=("image",), profile={"supports_thinking": True},
                    base_url="https://model.invalid/v1", api_key="fixture-secret", timeout=9,
-                   max_retries=3, retry_delay=0.2, max_tokens=99, connection_resolver=resolver)
+                   max_retries=3, retry_delay=0.2, max_tokens=99)
     assert create_model(protocol=api, **options) is sentinel
     assert received == options
 

@@ -293,10 +293,10 @@ async def test_recovery_reads_fixture_only_before_actual_resume_and_preserves_or
         async def load_recovery_checkpoint(self, execution_id: str, *, tenant_id: str) -> RecoveryCheckpoint:
             return checkpoint
 
-        def validate_binding(self, value: ExecutionRecord) -> None:
+        def validate_binding(self, value: ExecutionRecord, *, binding: object = None) -> None:
             assert value is execution
 
-        async def validate_recovery_inputs(self, value: ExecutionRecord) -> None:
+        async def validate_recovery_inputs(self, value: ExecutionRecord, *, binding: object = None) -> None:
             checked.append(value.tool_response_ref)
             raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
 

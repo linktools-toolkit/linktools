@@ -46,41 +46,45 @@ an existing `ModelBinding`:
 
 ```python
 def load_assistant():
-    return create_model(protocol="anthropic", model="configured-model",
-                        connection_resolver=resolve_current_connection)
+    config = load_configuration()
+    return create_model(protocol="anthropic", model=config["model"],
+                        base_url=config["base_url"], api_key=config["api_key"])
 
 features.model("assistant", load_assistant)
 ```
 
-The feature capture freezes route names and sources. First semantic use (for
-example, reading a model contract or thinking capability) resolves a route once;
-concurrent reads share its first successful result. An unused route is not loaded.
-A failed load can be retried; asynchronous loaders and recursive same-route loads
-are rejected. A later feature registration affects future captures only. Reusing
-one capture shares its resolved bindings. Start a new capture to change model
-semantics; a changed contract cannot silently restore a different historical model.
+The feature capture freezes route names and sources, not a callable's future
+results. Each agent run resolves its own binding once and uses that same binding
+for durable contract capture, input validation, tool rounds and model retries.
+The next run calls the loader again, so updated configuration and credentials
+apply without a second connection-resolver API. Concurrent runs are isolated.
+Unused routes are not loaded; explicit metadata inspection may resolve a binding
+without creating a provider client. A failed load can be retried; asynchronous
+loaders and recursive same-route loads are rejected. A later feature registration
+affects future captures only.
 
-Model binding resolution does not create HTTP clients. `materialize()` evaluates
-`connection_resolver` for the current run, preserving credential rotation and
-per-run connection snapshots; it must not change model/profile/input semantics.
+The registered route name is model identity. Recovery resolves the current binding
+under that same route; protocol, provider model, profile and connection changes do
+not change identity or block task execution. Callers own configuration consistency.
+Historical `model_contract` metadata describes the captured configuration for
+diagnostics, not an equality requirement. Actual requests retain their own model
+and protocol trace metadata. Agent, tool, output and execution ownership checks
+remain unchanged. Static binding declarations reuse their declared configuration.
+
+Model binding resolution does not create HTTP clients. `materialize()` creates
+the client from the resolved binding's static settings. SDK-native environment
+defaults still apply to omitted connection values.
 The caller owns the returned model's async context and releases its client when
 the run ends. Custom `ModelBinding` implementations still provide provider,
 model_identity, contract and materialize; the route name belongs only to Features.
 For diagnostics outside Runtime, use `async with binding.materialize() as model:`.
 
-The earlier pre-release `openai-chat` / `anthropic-messages` type spellings are not
-aliases; update configuration to the current spellings. A captured pre-release
-Anthropic contract with the previous discriminator is not a valid restore target
-for the current binding; do not edit stored snapshots to bypass contract checks.
-Existing Python registration names do not change. Chat's binding contract continues to omit the API field, preserving
-its existing contract/digest; readers interpret that established omission as
-`openai`, while Responses and Anthropic carry an explicit API discriminator.
-
-The three factory/register pairs have symmetric connection and input-type options.
-OpenAI Chat is unchanged; new binding contracts distinguish `openai-responses`
-and `anthropic`. Provider/model identity remains separate from the API.
-An API switch, profile change, or different captured binding is not an interchangeable
-restore target, even if the displayed model name matches.
+The earlier pre-release `openai-chat` / `anthropic-messages` authoring values are
+not aliases; update configuration to the current spellings. Chat diagnostic
+metadata omits the API field, interpreted as `openai`; Responses and Anthropic
+include their explicit API. All three protocols share `create_model` options.
+Protocol and provider model metadata describe a request, not the registered model
+identity. A current binding may use a different protocol under the same route.
 
 ## Explicit profiles
 

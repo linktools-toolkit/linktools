@@ -329,7 +329,7 @@ async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
         def _validate_recovery_identity(self, value: object) -> None:
             assert value is execution
 
-        def validate_binding(self, value: object) -> None:
+        def validate_binding(self, value: object, *, binding: object = None) -> None:
             assert value is execution
 
         async def _reconcile_session_recovery(

@@ -247,6 +247,7 @@ class SubagentDispatcher:
                 root_execution_id=root_execution_id,
                 parent_invocation_id=invocation_id,
                 binding_contract=child_binding.binding_contract,
+                resolved_binding=child_binding,
             )
         except AIError as error:
             if error.code is not ErrorCode.IDEMPOTENCY_CONFLICT:

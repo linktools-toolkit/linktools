@@ -105,7 +105,8 @@ class AgentBindingContract:
     """Persist identity inputs and locators required to restore one Agent binding."""
 
     agent_spec: AgentSpec
-    model_contract: Mapping[str, JsonValue]
+    # Captured diagnostic configuration is not registered-model identity.
+    model_contract: Mapping[str, JsonValue] = field(compare=False)
     selected: "tuple[CapabilityPin, ...]"
     subagents: "tuple[SubagentRef, ...]"
     output_mode: OutputMode
@@ -313,8 +314,6 @@ class AgentBinding:
             or not isinstance(self.binding_contract, AgentBindingContract)
             or AgentSpecCodec().to_contract_payload(self.compiled_agent.spec)
             != AgentSpecCodec().to_contract_payload(self.binding_contract.agent_spec)
-            or dict(self.compiled_agent.model.contract)
-            != dict(self.binding_contract.model_contract)
             or _compiled_agent_selected_pins(self.compiled_agent) != self.binding_contract.selected
             or self.compiled_agent.selected_subagents != self.binding_contract.subagent_ids
             or self.output_binding.mode != self.binding_contract.output_mode

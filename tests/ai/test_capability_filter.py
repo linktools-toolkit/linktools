@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Application capability filters narrow one captured candidate universe."""
 from ._runtime_test_helpers import model_features
-from linktools.ai.model import ModelResolver, create_model
+from linktools.ai.model import create_model
 
 from dataclasses import dataclass, replace
 
@@ -44,7 +44,7 @@ async def contributions():
 
 def _compiler(contributions, capability_filter=None):
     return AgentCompiler(
-        model_resolver=ModelResolver({"default": create_model(protocol='openai', model="test")}),
+        models={"default": create_model(protocol='openai', model="test")},
         candidates=contributions,
         agents={item.id: item.value for item in contributions if item.kind == "agent"},
         capability_filter=capability_filter,

@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Generic, Protocol, TypeVar, overload
 
 from linktools.core import environ
-from ..agent import AgentBindingContract
+from ..agent import AgentBinding, AgentBindingContract
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -91,6 +91,7 @@ class SessionExecutionService(Protocol[HandleT_co]):
         request: ResumeSessionRequest,
         *,
         binding_contract: AgentBindingContract | None = None,
+        resolved_binding: AgentBinding | None = None,
         dependency_hold_id: str | None = None,
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
@@ -368,6 +369,7 @@ class SessionManager(Generic[HandleT]):
         request: ResumeSessionRequest,
         *,
         binding_contract: "AgentBindingContract | None" = None,
+        resolved_binding: "AgentBinding | None" = None,
         dependency_hold_id: "str | None" = None,
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
@@ -377,7 +379,7 @@ class SessionManager(Generic[HandleT]):
             binding_digest,
             session_id,
             request,
-            binding_contract=binding_contract,
+            binding_contract=binding_contract, resolved_binding=resolved_binding,
             dependency_hold_id=dependency_hold_id,
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id,
@@ -391,6 +393,7 @@ class SessionManager(Generic[HandleT]):
         request: ResumeSessionRequest,
         *,
         binding_contract: "AgentBindingContract | None" = None,
+        resolved_binding: "AgentBinding | None" = None,
         dependency_hold_id: "str | None" = None,
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
@@ -421,7 +424,7 @@ class SessionManager(Generic[HandleT]):
                 binding_digest,
                 session_id,
                 request,
-                binding_contract=binding_contract,
+                binding_contract=binding_contract, resolved_binding=resolved_binding,
                 dependency_hold_id=dependency_hold_id,
                 requires_task_invocation_capture=requires_task_invocation_capture,
                 budget_scope_id=budget_scope_id,

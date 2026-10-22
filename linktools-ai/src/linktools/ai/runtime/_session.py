@@ -11,7 +11,7 @@ from typing import Protocol
 
 
 from ..session import SessionPendingExecutionLookup, SessionReleaseCallback, SessionManager
-from ..agent import AgentBindingContract
+from ..agent import AgentBinding, AgentBindingContract
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -71,6 +71,7 @@ class _SessionExecutionService(ExecutionService, Protocol):
         request: ExecutionRequest,
         *,
         binding_contract: "AgentBindingContract | None" = None,
+        resolved_binding: "AgentBinding | None" = None,
         dependency_hold_id: "str | None" = None,
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
@@ -113,6 +114,7 @@ class _SessionExecutionAdapter:
     async def start_for_session(self, agent_id: str, binding_digest: str, session_id: str,
                                 request: ResumeSessionRequest, *,
                                 binding_contract: AgentBindingContract | None = None,
+                                resolved_binding: AgentBinding | None = None,
                                 dependency_hold_id: str | None = None,
                                 requires_task_invocation_capture: bool = False,
                                 budget_scope_id: str | None = None) -> ExecutionHandle:
@@ -124,7 +126,7 @@ class _SessionExecutionAdapter:
         )
         return await self._execution.start_for_session(
             agent_id, binding_digest, session_id, execution_request,
-            binding_contract=binding_contract, dependency_hold_id=dependency_hold_id,
+            binding_contract=binding_contract, resolved_binding=resolved_binding, dependency_hold_id=dependency_hold_id,
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id,
         )

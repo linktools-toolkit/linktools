@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Model bindings, resolver, and binding contracts."""
+"""Model construction, custom binding contracts, and model input types."""
 
 from pydantic_ai.messages import AudioMediaType, DocumentMediaType, ImageMediaType, VideoMediaType
 
 from ._contract import ModelBinding, model_thinking_control
 from ._client_request import ModelClientRequest, ModelClientRequestRecorder, ModelClientResponse
 from ._errors import model_binding_error
-from ._resolver import ModelResolver
 from ._factory import create_model
 from ._input import validate_model_input, validate_model_inputs
 
@@ -25,7 +24,7 @@ __all__ = [
 
     "AudioMediaType", "DocumentMediaType", "ImageMediaType", "VideoMediaType",
     "model_thinking_control",
-    "ModelBinding", "create_model", "ModelResolver", "model_binding_error",
+    "ModelBinding", "create_model", "model_binding_error",
     "ModelClientRequest", "ModelClientRequestRecorder", "ModelClientResponse",
     "validate_model_input", "validate_model_inputs",
 ]

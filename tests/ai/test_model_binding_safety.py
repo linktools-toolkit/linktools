@@ -14,9 +14,9 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelResolver, ModelBinding, create_model, model_binding_error
-from linktools.ai.model._openai import _OpenAIModelBinding
-from linktools.ai.model._binding import _RetryingModel, _resolved_connection
+from linktools.ai.agent._model_resolver import _ModelResolver
+from linktools.ai.model import ModelBinding, create_model, model_binding_error
+from linktools.ai.model._binding import _RetryingModel
 
 
 def test_model_binding_contract_excludes_secret_material() -> None:
@@ -28,78 +28,36 @@ def test_model_binding_contract_excludes_secret_material() -> None:
     assert binding.model_identity == "openai:gpt-test"
 
 
-def test_openai_connection_resolver_is_lazy_and_overrides_defaults() -> None:
-    calls: list[str] = []
-
-    def resolve() -> dict[str, object]:
-        calls.append("called")
-        return {"api_key": "resolved", "max_retries": 4}
-
-    binding = _OpenAIModelBinding(
-        "gpt-test",
-        api_key="default",
-        connection_resolver=resolve,
-    )
-
-    assert calls == []
-    values = _resolved_connection(binding)
-    assert values["api_key"] == "resolved"
-    assert values["max_retries"] == 4
-    assert calls == ["called"]
+def test_static_connection_values_are_normalized() -> None:
+    binding = create_model(protocol="openai", model="gpt-test",
+                           base_url="  https://EXAMPLE.com/v1/  ", api_key="   ")
+    assert binding.base_url == "https://example.com/v1"
+    assert binding.api_key is None
 
 
-def test_openai_connection_resolver_rejects_model_fields() -> None:
-    binding = _OpenAIModelBinding(
-        "gpt-test",
-        connection_resolver=lambda: {"model": "other"},
-    )
-
-    with pytest.raises(AIError) as raised:
-        _resolved_connection(binding)
-    assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
-
-
-def test_openai_connection_resolver_normalizes_connection_values() -> None:
-    binding = _OpenAIModelBinding(
-        "gpt-test",
-        connection_resolver=lambda: {
-            "base_url": "  https://EXAMPLE.com/v1/  ",
-            "api_key": "   ",
-        },
-    )
-    values = _resolved_connection(binding)
-    assert values["base_url"] == "https://example.com/v1"
-    assert values["api_key"] is None
-
-
-def test_openai_connection_resolver_invalid_values_keep_a_cause() -> None:
-    binding = _OpenAIModelBinding(
-        "gpt-test",
-        connection_resolver=lambda: {"max_retries": None},
-    )
-
-    with pytest.raises(AIError) as raised:
-        _resolved_connection(binding)
-    assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
-    assert raised.value.__cause__ is not None
+@pytest.mark.parametrize("field,value", [("timeout", 0), ("max_retries", -1), ("max_retries", None),
+                                         ("retry_delay", -1), ("max_tokens", 0)])
+def test_static_connection_and_request_settings_are_validated(field, value) -> None:
+    with pytest.raises(ValueError):
+        create_model(protocol="openai", model="gpt-test", **{field: value})
 
 
 def test_model_route_capture_keeps_shared_binding_when_source_map_changes() -> None:
     original = create_model(protocol="openai", model="gpt-old")
     source = {"target": original, "alias": original, "alias-2": original}
-    snapshot = ModelResolver(source)
+    snapshot = _ModelResolver(source)
     source["target"] = create_model(protocol="openai", model="gpt-new")
     assert snapshot.resolve("target") is original
     assert snapshot.resolve("alias") is original
     assert snapshot.resolve("alias-2") is original
-    assert ModelResolver(source).resolve("target").model_identity == "openai:gpt-new"
+    assert _ModelResolver(source).resolve("target").model_identity == "openai:gpt-new"
     with pytest.raises(AttributeError):
         snapshot.resolve("alias").model = "changed"
 
 
 def test_model_resolver_requires_an_existing_route() -> None:
     with pytest.raises(AIError) as raised:
-        ModelResolver({}).resolve("missing")
+        _ModelResolver({}).resolve("missing")
     assert raised.value.code is ErrorCode.MODEL_CONNECTION_NOT_FOUND
 
 

@@ -59,7 +59,6 @@ def _same_compiled_agent(left: CompiledAgent, right: CompiledAgent) -> bool:
     return (
         AgentSpecCodec().to_contract_payload(left.spec)
         == AgentSpecCodec().to_contract_payload(right.spec)
-        and dict(left.model.contract) == dict(right.model.contract)
         and tuple((item.kind, item.id, item.revision, item.contract) for item in left.selected_tools) == tuple((item.kind, item.id, item.revision, item.contract) for item in right.selected_tools)
         and tuple((item.kind, item.id, item.revision, item.contract) for item in left.selected_skills) == tuple((item.kind, item.id, item.revision, item.contract) for item in right.selected_skills)
         and tuple((item.kind, item.id, item.revision, item.contract) for item in left.selected_mcp) == tuple((item.kind, item.id, item.revision, item.contract) for item in right.selected_mcp)

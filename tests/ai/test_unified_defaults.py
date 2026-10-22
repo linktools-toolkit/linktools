@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Namespaced defaults freeze at declaration and resolve before durable binding."""
-from linktools.ai.model import ModelResolver, create_model
+from linktools.ai.model import create_model
 
 from dataclasses import dataclass, replace
 
@@ -16,7 +16,7 @@ from linktools.ai.spec import AgentSpec
 
 def _compiler(defaults=None, candidates=()):
     return AgentCompiler(
-        model_resolver=ModelResolver({"default": create_model(protocol='openai', model="gpt-test")}),
+        models={"default": create_model(protocol='openai', model="gpt-test")},
         candidates=candidates, agents={}, defaults=defaults,
     )
 
@@ -91,5 +91,5 @@ def test_removed_retry_keywords_have_no_alias(name):
     with pytest.raises(TypeError):
         RuntimeFeatures("defaults", **{name: 3})
     with pytest.raises(TypeError):
-        AgentCompiler(model_resolver=ModelResolver({"default": create_model(protocol='openai', model="gpt-test")}),
+        AgentCompiler(models={"default": create_model(protocol='openai', model="gpt-test")},
                       candidates=(), agents={}, **{name: 3})

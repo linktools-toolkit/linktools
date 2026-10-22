@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Durable Skill and Subagent declaration contracts."""
-from linktools.ai.model import ModelResolver, create_model
+from linktools.ai.model import create_model
 
 import json
 from pathlib import Path
@@ -44,7 +44,7 @@ def _load_json(name: str) -> dict[str, object]:
 
 def _compiler(agents: dict[str, AgentSpec]) -> AgentCompiler:
     return AgentCompiler(
-        model_resolver=ModelResolver({"default": create_model(protocol='openai', model="gpt-test")}),
+        models={"default": create_model(protocol='openai', model="gpt-test")},
         candidates=(),
         agents=agents,
     )
@@ -92,9 +92,9 @@ def test_v1_binding_restores_from_explicitly_registered_matching_contract() -> N
         def materialize(self) -> TestModel:
             return TestModel()
 
-    registry = ModelResolver({"default": RegisteredBinding()})
+    models = {"default": RegisteredBinding()}
     compiler = AgentCompiler(
-        model_resolver=registry, candidates=(),
+        models=models, candidates=(),
         agents={
             "parent": AgentSpec("parent", allow_subagents=("child",)),
             "child": AgentSpec("child", allow_subagents=()),

@@ -16,7 +16,8 @@ def test_custom_model_startup_defers_openai_until_provider_operations(tmp_path: 
 
         from pydantic_ai.messages import BinaryContent
         from pydantic_ai.models.test import TestModel
-        from linktools.ai.model import ModelResolver, create_model, model_binding_error, validate_model_inputs
+        from linktools.ai.agent._model_resolver import _ModelResolver
+        from linktools.ai.model import create_model, model_binding_error, validate_model_inputs
         from linktools.ai.runtime import Runtime
 
         class OfflineBinding:
@@ -28,7 +29,7 @@ def test_custom_model_startup_defers_openai_until_provider_operations(tmp_path: 
             def materialize(self) -> TestModel:
                 return TestModel(custom_output_text="offline answer")
 
-        resolver = ModelResolver({"offline": OfflineBinding()})
+        resolver = _ModelResolver({"offline": OfflineBinding()})
         binding = resolver.resolve("offline")
         assert isinstance(binding.materialize(), TestModel)
         decisions = validate_model_inputs(

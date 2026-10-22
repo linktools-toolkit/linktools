@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from linktools.ai.model import ModelResolver, create_model
+from linktools.ai.model import create_model
 from ._runtime_test_helpers import workspace_features
 
 import json
@@ -289,9 +289,9 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
         allow_skills=(),
         allow_subagents=(),
     )
-    models = ModelResolver({"default": create_model(protocol='openai', model="gpt-test")})
+    models = {"default": create_model(protocol='openai', model="gpt-test")}
     compiler = AgentCompiler(
-        model_resolver=models,
+        models=models,
         candidates=candidates,
         agents={spec.id: spec},
     )
@@ -307,7 +307,7 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
     assert dict(pin.contract) == baseline["read_file"]
 
     restored = AgentCompiler(
-        model_resolver=models,
+        models=models,
         candidates=candidates,
         agents={spec.id: spec},
     ).restore(binding.binding_contract)

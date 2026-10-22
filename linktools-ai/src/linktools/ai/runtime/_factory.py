@@ -42,7 +42,6 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..session import SessionPendingExecutionLookup
 from ..observe import Metrics
-from ..model import ModelResolver
 from ..spec import (
     AgentSpec,
     RuleInstructionResolver,
@@ -295,18 +294,12 @@ async def compose_runtime_components(
             for candidate in candidates
             if candidate.kind == "agent"
         }
-        resolver = ModelResolver({}) if captured is None else captured.models
-        if "default" not in agents:
-            try:
-                resolver.resolve("default")
-            except AIError as error:
-                if error.code is not ErrorCode.MODEL_CONNECTION_NOT_FOUND:
-                    raise
-            else:
-                agents["default"] = AgentSpec("default")
+        models = {} if captured is None else captured.models
+        if "default" not in agents and "default" in models:
+            agents["default"] = AgentSpec("default")
         compiler = AgentCompiler(
             defaults=None if captured is None else captured.defaults,
-            model_resolver=resolver,
+            models=models,
             candidates=tuple(
                 candidate
                 for candidate in candidates

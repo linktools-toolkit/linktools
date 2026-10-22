@@ -17,7 +17,8 @@ from ..capability import (
 )
 from ..core import ImmutableJsonMapping, JsonValue
 from ..errors import AIError, ErrorCode
-from ..model import ModelBinding, ModelResolver
+from ..model import ModelBinding
+from ._model_resolver import _ModelResolver
 from ..spec import (
     DEFAULT_AGENT_RETRIES,
     AgentSpec,
@@ -58,13 +59,13 @@ class AgentCompiler:
     def __init__(
         self,
         *,
-        model_resolver: ModelResolver,
+        models: Mapping[str, ModelBinding | Callable[[], ModelBinding]],
         candidates: Sequence[CapabilityContribution[object]],
         agents: Mapping[str, AgentSpec],
         capability_filter: CapabilityFilter | None = None,
         defaults: Mapping[str, JsonValue] | None = None,
     ) -> None:
-        if model_resolver is None:
+        if models is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         settings = ImmutableJsonMapping({} if defaults is None else defaults)
         agent_settings = settings.get("agent", {})
@@ -89,7 +90,7 @@ class AgentCompiler:
         if capability_filter is not None and not callable(capability_filter):
             raise TypeError("capability_filter must be callable or None")
         self._capability_filter = capability_filter
-        self._models = model_resolver
+        self._models = _ModelResolver(models)
         self._candidates = ordered
         self._by_identity = {(item.kind, item.id): item for item in ordered}
         self._agents: Mapping[str, AgentSpec] = MappingProxyType(current_agents)
@@ -232,6 +233,8 @@ class AgentCompiler:
         output: "type[BaseModel] | OutputBinding | None",
         subagents: Sequence[SubagentRef],
     ) -> AgentBinding:
+        # A current admission owns one binding, shared by contract and execution.
+        compiled_agent = replace(compiled_agent, model=self._models.resolve(compiled_agent.spec.model))
         output_binding = (
             output if isinstance(output, OutputBinding) else bind_output(output)
         )
@@ -251,15 +254,15 @@ class AgentCompiler:
             binding_contract,
         )
 
-    def restore(self, binding_contract: AgentBindingContract) -> AgentBinding:
+    def restore(
+        self, binding_contract: AgentBindingContract, *, model: ModelBinding | None = None,
+    ) -> AgentBinding:
         """Restore exact historical semantics without expanding current selectors."""
         if not isinstance(binding_contract, AgentBindingContract):
             raise TypeError("binding_contract must be AgentBindingContract")
         try:
-            model = self._models.restore(
-                binding_contract.model_contract,
-                route_id=binding_contract.agent_spec.model,
-            )
+            if model is None:
+                model = self._models.resolve(binding_contract.agent_spec.model)
             selected = self._restore_selected(binding_contract.selected)
             tool_policy, mcp_policy = self._restore_policies(
                 binding_contract.agent_spec,
