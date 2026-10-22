@@ -99,11 +99,15 @@ async def test_malformed_event_type_preserves_observed_bytes(path: str, terminal
 @pytest.mark.parametrize("path,terminal", [("responses", "response.completed"), ("messages", "message_stop")])
 @pytest.mark.parametrize("ending", ["eof", "terminal", "read_error", "close_error"])
 async def test_deep_sse_json_retains_bytes_without_changing_transport_outcome(path: str, terminal: str, ending: str) -> None:
-    # CPython JSON decoder limits can exceed the Python recursion limit.
+    # Native JSON nesting limits vary independently of the Python recursion limit.
     depth = 10000
     body = b'data: {"type":"error","details":' + b'[' * depth + b'0' + b']' * depth + b'}\n\n'
-    with pytest.raises(RecursionError):
+    try:
         json.loads(body.removeprefix(b"data: "))
+    except RecursionError:
+        decode_failed = True
+    else:
+        decode_failed = False
     if ending == "terminal":
         body += b'data: ' + json.dumps({"type": terminal}).encode() + b'\n\n'
     failure = httpx2.ReadError("read failed") if ending == "read_error" else RuntimeError("close failed")
@@ -126,16 +130,19 @@ async def test_deep_sse_json_retains_bytes_without_changing_transport_outcome(pa
     observed = recorder.requests[0].response
     assert observed.body == body and observed.format == "sse" and observed.status_code == 200
     assert observed.content_encoding is None
-    assert not observed.complete and observed.capture_error == "response_decode_failed"
+    assert observed.complete is not decode_failed
+    assert observed.capture_error == ("response_decode_failed" if decode_failed else None)
     assert source.received == [body] and source.closes == 1
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure_at", ["Response", "EventSource"])
+@pytest.mark.parametrize("failure_at", ["Response", "EventSource", "_terminal_event"])
 async def test_diagnostic_replica_failure_retains_known_response_metadata(monkeypatch: pytest.MonkeyPatch, failure_at: str) -> None:
     from linktools.ai.model import _http
 
     def fail(*args: object, **kwargs: object) -> None:
+        if failure_at == "_terminal_event":
+            raise RecursionError("private decoder details")
         raise RuntimeError("private decoder details")
 
     monkeypatch.setattr(_http, failure_at, fail)
