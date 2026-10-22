@@ -154,6 +154,8 @@ def _terminal_event(api: str, data: str, event: str | None) -> bool:
     if not isinstance(payload, dict):
         return False
     kind = payload.get("type", event)
+    if not isinstance(kind, str):
+        return False
     if api == "openai-responses":
         return kind in {"response.completed", "response.failed", "response.incomplete", "error"}
     if api == "anthropic-messages":

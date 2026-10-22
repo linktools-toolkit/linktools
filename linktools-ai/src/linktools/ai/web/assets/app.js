@@ -132,8 +132,8 @@ function setDisabled() {
   ['send','planning','thinking','memory','files','prompt'].forEach(id => $(id).disabled=readonly || state.session?.status === 'CLOSED' || !state.selectedSession);
   const control=state.session?.thinking_control, mode=control?.mode;
   if(mode==='always_on'){$('thinking').checked=true;$('thinking').disabled=true;}
-  else if(mode==='undeclared' || mode==='unknown'){$('thinking').checked=false;$('thinking').disabled=true;}
-  if($('thinking-hint'))$('thinking-hint').textContent=mode==='always_on'?'Thinking is always on for this model.':mode==='controllable'?`Thinking control is available. Model default: ${control.enabled_by_default?'on':'off'}; this checkbox selects the next request.`:'Thinking control is not declared. Returned reasoning remains visible; compatible models may require a profile override.';
+  else if(mode==='undeclared'){$('thinking').checked=false;$('thinking').disabled=true;}
+  if($('thinking-hint'))$('thinking-hint').textContent=mode==='always_on'?'Thinking is always on for this model.':mode==='controllable'?`Thinking control is available. Model default: ${control.enabled_by_default?'on':'off'}; this checkbox selects the next request.`:mode==='unknown'?'Thinking control is unknown. Choose the request setting; Runtime will validate it. Returned reasoning remains visible.':'Thinking control is not declared. Returned reasoning remains visible; compatible models may require a profile override.';
   ['rename-session','fork-session','close-session'].forEach(id => $(id).disabled=readonly || !state.session);
   const ending=state.actionsPending.has(`${state.selectedExecution}:end-stopped`);
   const recoverable=['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(state.execution?.status);

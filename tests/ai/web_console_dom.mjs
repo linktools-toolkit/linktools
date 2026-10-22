@@ -160,13 +160,21 @@ assert.doesNotMatch(node('conversation').textContent,/Original request timeline/
 assert.equal(node('request-context')?.hidden ?? true,true);
 assert.equal(node('native-mode').className.includes('active'),false);
 if(process.argv[3]==='thinking') {
-  for(const [mode,checked,disabled] of [['always_on',true,true],['controllable',true,false],['undeclared',false,true],['unknown',false,true]]) {
+  for(const [mode,checked,disabled] of [['always_on',true,true],['controllable',true,false],['undeclared',false,true],['unknown',false,false]]) {
     sessions.get('a').thinking_control={mode,enabled_by_default:true};await refresh();
     assert.equal(node('thinking').checked,checked);assert.equal(node('thinking').disabled,disabled);
     assert.match(node('thinking-hint').textContent,mode==='always_on'?/always on/:mode==='controllable'?/checkbox selects the next request/:/Returned reasoning remains visible/);
   }
   sessions.get('a').thinking_control={mode:'controllable',enabled_by_default:true};await refresh();
   assert.equal(node('thinking').checked,false,'model default must not overwrite the current request selection');
+  sessions.get('a').thinking_control={mode:'unknown'};node('thinking').checked=true;await refresh();
+  assert.equal(node('thinking').checked,true);assert.equal(node('thinking').disabled,false);
+  sessions.get('a').status='CLOSED';await refresh();assert.equal(node('thinking').disabled,true);
+  sessions.get('a').status='OPEN';await refresh();assert.equal(node('thinking').disabled,false);
+  node('prompt').value='Hello';await node('composer').requestSubmit();
+  const submitted=calls.findLast(call=>call.method==='POST' && call.key==='/api/sessions/a/messages');
+  assert.equal(submitted.body.thinking,true);
+  console.log('THINKING_REQUEST='+JSON.stringify(submitted.body));
   console.log('Thinking controls follow the declared profile without hiding returned content');process.exit(0);
 }
 if(process.argv[3]==='protocols') {

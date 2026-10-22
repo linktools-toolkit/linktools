@@ -64,3 +64,32 @@ async def test_protocol_disconnect_and_disabled_capture_do_not_invent_completion
         assert captured.response.body == (body if enabled else None)
         assert not captured.response.complete
         assert (captured.body is not None) == enabled
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path,terminal", [("responses", "response.completed"), ("messages", "message_stop")])
+@pytest.mark.parametrize("finished", [False, True])
+async def test_malformed_event_type_preserves_observed_bytes(path: str, terminal: str, finished: bool) -> None:
+    malformed = b'data: {"type":{}}\n\ndata: {"type":[]}\n\n'
+    ending = b'data: ' + json.dumps({"type": terminal}).encode() + b'\n\n'
+    chunks = [malformed, ending] if finished else [malformed, httpx2.ReadError("disconnected")]
+    source = _Stream(chunks)
+    async with httpx2.AsyncClient(
+        transport=httpx2.MockTransport(lambda request: httpx2.Response(
+            200, headers={"content-type": "text/event-stream"}, stream=source,
+        )),
+        event_hooks={"request": [capture_request], "response": [capture_response]},
+    ) as client:
+        with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
+            if finished:
+                response = await client.post(f"https://model.invalid/v1/{path}", json={"input": "hello"})
+                assert response.content == malformed + ending
+            else:
+                with pytest.raises(httpx2.ReadError):
+                    await client.post(f"https://model.invalid/v1/{path}", json={"input": "hello"})
+    observed = recorder.requests[0].response
+    assert observed.body == malformed + (ending if finished else b'')
+    assert observed.complete is finished
+    assert observed.capture_error is None
+    assert source.received == ([malformed, ending] if finished else [malformed])
+    assert source.closes == 1

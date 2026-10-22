@@ -150,3 +150,42 @@ assert.equal(nodes['settings-content'].children[1].children.find(item=>item.tag=
 '''
     result = subprocess.run([node, "--input-type=module", "-e", script, str(source)], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.asyncio
+async def test_unknown_thinking_control_preserves_custom_binding_request(tmp_path: Path) -> None:
+    import json
+    from pydantic_ai.models.test import TestModel
+    from linktools.ai.model import ModelRegistry
+    from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
+    from linktools.ai.web import create_app
+    from .test_model_client_request_capture import _ModelBinding
+    from .test_web_console_viewers import _client
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the optional Web client tests")
+    assets = Path(__file__).parents[2] / "linktools-ai/src/linktools/ai/web/assets"
+    result = subprocess.run([node, str(Path(__file__).with_name("web_console_dom.mjs")),
+                             str(assets), "thinking"], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(next(line.removeprefix("THINKING_REQUEST=") for line in result.stdout.splitlines()
+                              if line.startswith("THINKING_REQUEST=")))
+    models = ModelRegistry()
+    models.register(_ModelBinding(TestModel(custom_output_text="ok", profile={
+        "supports_thinking": True, "thinking_always_enabled": True,
+    })))
+    features = RuntimeFeatures("custom")
+    features.agent("default", model="default", allow_tools=())
+    async with Runtime.open("custom", models=models, features=features,
+                            storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
+        await runtime.agents.get("default").create_session("a")
+        async with _client(create_app(runtime=runtime)) as http:
+            meta = await http.get("/api/session", params={"session_id": "a", "include_timeline": "false"})
+            assert meta.json()["thinking_control"]["mode"] == "unknown"
+            started = await http.post("/api/session/messages", params={"session_id": "a"}, json=payload,
+                                      headers={"X-LinkTools-Console": "1"})
+            assert started.status_code == 202, started.text
+            execution = await runtime.executions.get(started.json()["execution_id"])
+            outcome = (await execution.wait()).result
+            assert outcome.status.value == "SUCCEEDED", outcome
