@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Preparation uses captured control values without claiming producer authority."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from pathlib import Path
@@ -44,8 +45,8 @@ async def test_changes_after_launch_are_observed_before_provider(
         return await original(worker, *args, **kwargs)
 
     monkeypatch.setattr(LocalExecutionBackend, "_run", delayed)
-    async with Runtime.open("launch-change", storage=first_state, models=models, features=group) as first, Runtime.open(
-        "launch-change", storage=second_state, models=models, features=group,
+    async with Runtime.open("launch-change", storage=first_state, features=model_features(models, group)) as first, Runtime.open(
+        "launch-change", storage=second_state, features=model_features(models, group),
     ) as second:
         session = await first.agents.get().create_session("session", metadata={"marker": "before"})
         execution = await session.start("question", idempotency_key="same")
@@ -115,8 +116,8 @@ async def test_other_runtime_claims_before_delayed_worker_without_duplicate_prov
         return await original(worker, *args, **kwargs)
 
     monkeypatch.setattr(LocalExecutionBackend, "_run", delayed)
-    async with Runtime.open("launch-winner", storage=first_state, models=models, features=group) as first, Runtime.open(
-        "launch-winner", storage=second_state, models=models, features=group,
+    async with Runtime.open("launch-winner", storage=first_state, features=model_features(models, group)) as first, Runtime.open(
+        "launch-winner", storage=second_state, features=model_features(models, group),
     ) as second:
         await first.agents.get().create_session("session")
         one = await first.agents.get().session("session").start("question", idempotency_key="same")

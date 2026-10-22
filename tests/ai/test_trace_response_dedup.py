@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Shared response content preserves independent evidence and ordered occurrences."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 import hashlib
@@ -91,8 +92,7 @@ async def test_trace_response_payload_storage_and_metadata_reads(
 
     async with _storage(backend, tmp_path) as storage:
         async with Runtime.open(
-            "response-dedup", storage=storage, features=_features(),
-            models=_FeatureModels(_FeatureFunctionModel(model)),
+            "response-dedup", storage=storage, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), _features()),
         ) as runtime:
             objects = runtime._state.archive_object_store(RuntimeDomain.TRACE)
             domain_objects = runtime._state.object_store(RuntimeDomain.TRACE)
@@ -233,8 +233,7 @@ async def test_unsuccessful_requests_without_response_preserve_no_response(
 
     async with _storage(backend, tmp_path) as storage:
         async with Runtime.open(
-            "response-dedup", storage=storage, features=_features(),
-            models=_FeatureModels(_FeatureFunctionModel(model)),
+            "response-dedup", storage=storage, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), _features()),
         ) as runtime:
             execution = await runtime.agents.get().start("question")
             if outcome == "CANCELLED":
@@ -272,8 +271,7 @@ async def test_compaction_response_retains_independent_evidence(
         ))
     async with _storage(backend, tmp_path) as storage:
         async with Runtime.open(
-            "response-dedup", storage=storage, features=_features(),
-            models=_FeatureModels(_FeatureFunctionModel(model, profile={"context_window": 1000})),
+            "response-dedup", storage=storage, features=model_features(_FeatureModels(_FeatureFunctionModel(model, profile={"context_window": 1000})), _features()),
         ) as runtime:
             execution = await runtime.agents.get().start(
                 "continue", input_context=ExecutionInputContext.from_messages(history),
@@ -447,8 +445,7 @@ async def test_interrupted_partial_response_shares_retained_transcript(
 
     async with _storage(backend, tmp_path) as storage:
         async with Runtime.open(
-            "response-dedup", storage=storage, features=_features(),
-            models=_FeatureModels(FunctionModel(stream_function=stream)),
+            "response-dedup", storage=storage, features=model_features(_FeatureModels(FunctionModel(stream_function=stream)), _features()),
         ) as runtime:
             execution = await runtime.agents.get().start("question")
             if outcome == "CANCELLED":

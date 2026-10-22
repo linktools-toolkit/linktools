@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Live cached Conversation turns share Session display paging without durable writes."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.runtime.state import RuntimeState
 import asyncio
@@ -57,7 +58,7 @@ async def _runtimes(tmp_path, *, cache, shared=True):
         for _ in range(2 if shared and cache is not None else 1):
             storage = RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache)
             runtime = await stack.enter_async_context(Runtime.open(
-                "pending-session-display", storage=storage, models=models, features=group(),
+                "pending-session-display", storage=storage, features=model_features(models, group()),
             ))
             values.append((runtime, runtime._state))
         try:

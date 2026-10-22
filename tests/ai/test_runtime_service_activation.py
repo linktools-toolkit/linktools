@@ -10,7 +10,7 @@ from typing import TypeVar
 import pytest
 
 from linktools.ai.core import TaskStatus
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime.state import RuntimeDomain
@@ -70,7 +70,7 @@ async def test_idle_services_do_not_read_write_or_launch_workers(
                 monkeypatch.setattr(group, name, guard_group_operation(getattr(group, name)))
 
     monkeypatch.setattr(RuntimeState, "initialize", initialize_and_guard)
-    async with Runtime.open("idle-services", models=ModelRegistry(), storage=storage) as runtime:
+    async with Runtime.open("idle-services", storage=storage) as runtime:
         assert runtime.tasks is not None
         assert runtime.evaluations is not None
         assert runtime.artifacts is not None
@@ -93,7 +93,7 @@ async def test_task_service_activates_on_call_without_agent_capabilities() -> No
     task = Task("service.activation", run, effect_policy="none")
     graph = TaskGraph("service-activation", (TaskNode("run", task=task),))
     async with Runtime.open(
-        "service-activation", models=ModelRegistry(), storage=RuntimeStorage.in_memory(),
+        "service-activation", storage=RuntimeStorage.in_memory(),
     ) as runtime:
         assert calls == []
         execution = await runtime.tasks.bind(task).start(graph, idempotency_key="activate")

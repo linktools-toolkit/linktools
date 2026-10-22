@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Graph recovery authorizes control separately from bound execution identity."""
+from ._runtime_test_helpers import model_features
+from linktools.ai.model import create_model
 
 from linktools.ai.runtime.state import RuntimeState
 
@@ -27,7 +29,7 @@ from linktools.ai.core import (
     canonical_sha256,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.state._contracts import ExecutionRecord
 from linktools.ai.task import (
@@ -111,8 +113,8 @@ async def _graph_recovery(
     capabilities = RuntimeFeatures("bound-recovery", authorization=authorization)
     capabilities.agent("default", model="default", allow_tools=())
     async with Runtime.open(
-        "bound-recovery", models=ModelRegistry.openai(model="gpt-test"),
-        storage=storage, features=capabilities,
+        "bound-recovery",
+        storage=storage, features=model_features(create_model(protocol='openai', model="gpt-test"), capabilities),
     ) as runtime:
         task = runtime.tasks.from_agent("test.bound-agent", runtime.agents.get("default"))
         graph = TaskGraph("bound-graph", tuple(

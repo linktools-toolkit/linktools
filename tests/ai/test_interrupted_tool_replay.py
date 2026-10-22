@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Interrupted tool evidence does not replace a recovered terminal result."""
+from ._runtime_test_helpers import model_features
 
 from dataclasses import replace
 from functools import partial
@@ -329,8 +330,7 @@ async def test_runtime_composition_records_failed_tool_trace() -> None:
     features.agent("default", model="default", allow_tools=("explode",))
     features.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
-        "failed-tool-trace", features=features, storage=RuntimeStorage.in_memory(),
-        models=_FeatureModels(TestModel(call_tools=["explode"], custom_output_text="done")),
+        "failed-tool-trace", features=model_features(_FeatureModels(TestModel(call_tools=["explode"], custom_output_text="done")), features), storage=RuntimeStorage.in_memory(),
     ) as runtime:
         execution = await runtime.agents.get().start("invoke tool")
         await execution.wait(timeout_seconds=5)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Runtime scheduling combines pressure without combining durable owners."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from dataclasses import replace
@@ -56,8 +57,8 @@ async def test_runtime_metrics_and_trace_share_only_matching_buffer_and_timing(s
     )
     metrics = Metrics.in_memory(commit=metric_policy)
     async with Runtime.open(
-        "shared-flush", storage=RuntimeStorage.in_memory(), models=_FeatureModels(),
-        features=_features(TraceCapability(commit=trace_policy)), metrics=metrics,
+        "shared-flush", storage=RuntimeStorage.in_memory(),
+        features=model_features(_FeatureModels(), _features(TraceCapability(commit=trace_policy))), metrics=metrics,
     ) as runtime:
         store = await _prepare_trace(runtime, trace_policy)
         archive = store.read_store(RuntimeDomain.TRACE)
@@ -84,11 +85,11 @@ async def test_same_metrics_dataset_and_buffer_do_not_share_pressure_across_runt
     metrics = Metrics.in_memory(commit=policy)
     feature = TraceCapability(commit=policy)
     async with Runtime.open(
-        "same-name", storage=RuntimeStorage.in_memory(), models=_FeatureModels(),
-        features=_features(feature), metrics=metrics,
+        "same-name", storage=RuntimeStorage.in_memory(),
+        features=model_features(_FeatureModels(), _features(feature)), metrics=metrics,
     ) as first, Runtime.open(
-        "same-name", storage=RuntimeStorage.in_memory(), models=_FeatureModels(),
-        features=_features(feature), metrics=metrics,
+        "same-name", storage=RuntimeStorage.in_memory(),
+        features=model_features(_FeatureModels(), _features(feature)), metrics=metrics,
     ) as second:
         store = await _prepare_trace(first, policy)
         assert await first._metric_control.try_record(_observation("first"))
@@ -108,8 +109,8 @@ async def test_trace_stop_does_not_flush_other_owner_pending_metrics():
     policy = CommitPolicy.batch(buffer=buffer, batch_size=10, flush_interval=60)
     metrics = Metrics.in_memory(commit=policy)
     async with Runtime.open(
-        "local-stop", storage=RuntimeStorage.in_memory(), models=_FeatureModels(),
-        features=_features(TraceCapability(commit=policy)), metrics=metrics,
+        "local-stop", storage=RuntimeStorage.in_memory(),
+        features=model_features(_FeatureModels(), _features(TraceCapability(commit=policy))), metrics=metrics,
     ) as runtime:
         store = await _prepare_trace(runtime, policy)
         assert await runtime._metric_control.try_record(_observation("pending"))
@@ -131,8 +132,8 @@ async def test_metric_source_failure_does_not_prevent_shared_trace_flush():
     policy = CommitPolicy.batch(buffer=buffer, batch_size=2, flush_interval=60)
     metrics = Metrics.from_store(FailingStore(), commit=policy)
     async with Runtime.open(
-        "independent-errors", storage=RuntimeStorage.in_memory(), models=_FeatureModels(),
-        features=_features(TraceCapability(commit=policy)), metrics=metrics,
+        "independent-errors", storage=RuntimeStorage.in_memory(),
+        features=model_features(_FeatureModels(), _features(TraceCapability(commit=policy))), metrics=metrics,
     ) as runtime:
         store = await _prepare_trace(runtime, policy)
         assert await runtime._metric_control.try_record(_observation("failed"))

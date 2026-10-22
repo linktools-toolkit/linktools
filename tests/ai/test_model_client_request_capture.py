@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Original client requests remain separate from SDK message projections."""
+from ._runtime_test_helpers import model_features
+from linktools.ai.model import create_model
 
 import asyncio
 import json
@@ -28,7 +30,7 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, PromptLimits, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 
-from linktools.ai.model import ModelClientRequestRecorder, ModelRegistry
+from linktools.ai.model import ModelBinding, ModelClientRequestRecorder
 from linktools.ai.model import _http, _openai
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._compaction import CompactionCapability
@@ -47,12 +49,12 @@ class _ObservedHttpClient(DefaultAsyncHttpxClient):
         await super().aclose()
 
 
-def _registry(
+def _binding(
     monkeypatch: pytest.MonkeyPatch,
     handler: Callable[..., object],
     *,
     retries: int = 0,
-) -> tuple[ModelRegistry, list[_ObservedHttpClient]]:
+) -> tuple[ModelBinding, list[_ObservedHttpClient]]:
     clients: list[_ObservedHttpClient] = []
 
     def create_client(**kwargs: object) -> httpx2.AsyncClient:
@@ -63,7 +65,7 @@ def _registry(
         return client
 
     monkeypatch.setattr(_openai, "DefaultAsyncHttpxClient", create_client)
-    registry = ModelRegistry.openai(
+    registry = create_model(protocol='openai',
         model="gpt-4o", base_url="https://capture.invalid/v1",
         api_key="connection-secret-never-captured", max_retries=retries,
         retry_delay=0,
@@ -74,8 +76,8 @@ def _registry(
 def _model(
     monkeypatch: pytest.MonkeyPatch, handler: Callable[..., object], *, retries: int = 0,
 ) -> tuple[Model, list[_ObservedHttpClient]]:
-    registry, clients = _registry(monkeypatch, handler, retries=retries)
-    return registry.capture().resolve("default").materialize(), clients
+    registry, clients = _binding(monkeypatch, handler, retries=retries)
+    return registry.materialize(), clients
 
 
 def _response(request: httpx2.Request) -> httpx2.Response:
@@ -364,12 +366,12 @@ async def test_model_client_request_capture_runtime_closes_owned_client(
             await asyncio.Event().wait()
         return _response(request)
 
-    registry, clients = _registry(monkeypatch, handler)
+    registry, clients = _binding(monkeypatch, handler)
     storage = RuntimeStorage.in_memory()
     features = _agents()
     features.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     async with Runtime.open(
-        "default", models=registry, storage=storage, features=features,
+        "default", storage=storage, features=model_features(registry, features),
     ) as runtime:
         with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
             execution = await runtime.agents.get("default").start("hello")
@@ -441,10 +443,9 @@ async def test_model_client_request_capture_runtime_preserves_custom_model_lifec
     failure: str,
 ) -> None:
     model = _LifecycleModel(failure)
-    registry = ModelRegistry()
-    registry.register(_ModelBinding(model))
+    registry = _ModelBinding(model)
     async with Runtime.open(
-        "default", models=registry, storage=RuntimeStorage.in_memory(), features=_agents(),
+        "default", storage=RuntimeStorage.in_memory(), features=model_features(registry, _agents()),
     ) as runtime:
         result = (await runtime.agents.get("default").run("hello", timeout_seconds=5)).result
     assert result.status is ExecutionStatus.FAILED
@@ -462,10 +463,9 @@ async def test_model_client_request_capture_runtime_leaves_borrowed_client_open(
         model = OpenAIChatModel("gpt-4o", provider=OpenAIProvider(
             base_url="https://capture.invalid/v1", api_key="test", http_client=client,
         ))
-        registry = ModelRegistry()
-        registry.register(_ModelBinding(model))
+        registry = _ModelBinding(model)
         async with Runtime.open(
-            "default", models=registry, storage=RuntimeStorage.in_memory(), features=_agents(),
+            "default", storage=RuntimeStorage.in_memory(), features=model_features(registry, _agents()),
         ) as runtime:
             result = (await runtime.agents.get("default").run("hello", timeout_seconds=5)).result
         assert result.status is ExecutionStatus.SUCCEEDED

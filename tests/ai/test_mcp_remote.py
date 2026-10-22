@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Real localhost MCP protocol, execution boundary, and recovery contracts."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 import json
@@ -544,20 +545,8 @@ class _RemoteModelBinding:
         return _UsageFunctionModel(request)
 
 
-class _RemoteModels(RuntimeUsageModels):
-    def resolve(self, route_id: str) -> _RemoteModelBinding:
-        assert route_id == "default"
-        return _RemoteModelBinding()
-
-    def restore(
-        self,
-        payload: Mapping[str, JsonValue],
-        *,
-        route_id: str | None = None,
-    ) -> _RemoteModelBinding:
-        assert route_id in (None, "default")
-        assert dict(payload) == _RemoteModelBinding.contract
-        return _RemoteModelBinding()
+class _RemoteModels(_RemoteModelBinding):
+    pass
 
 
 def _group(*servers: MCPServerSpec, sandbox: Any = None) -> RuntimeFeatures[object]:
@@ -596,9 +585,8 @@ async def test_remote_only_runtime_uses_host_network_without_opening_sandbox(
     async with _serve() as remote:
         async with Runtime.open(
             "remote-only",
-            models=_RemoteModels(),
             storage=RuntimeStorage.in_memory(),
-            features=_group(_spec(remote), sandbox=sandbox),
+            features=model_features(_RemoteModels(), _group(_spec(remote), sandbox=sandbox)),
         ) as runtime:
             result = (await runtime.agents.get("default").run("echo", timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED
@@ -614,9 +602,8 @@ async def test_unselected_offline_remote_does_not_connect() -> None:
         )
         async with Runtime.open(
             "remote-selection",
-            models=_RemoteModels(),
             storage=RuntimeStorage.in_memory(),
-            features=_group(_spec(remote), offline),
+            features=model_features(_RemoteModels(), _group(_spec(remote), offline)),
         ) as runtime:
             result = (await runtime.agents.get("default").run("echo", timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED
@@ -635,9 +622,8 @@ async def test_lost_remote_result_requires_confirmation_and_recovery_does_not_re
         features.capability(CheckpointCapability(), scope="runtime")
         async with Runtime.open(
             "remote-recovery",
-            models=_RemoteModels(),
             storage=storage,
-            features=features,
+            features=model_features(_RemoteModels(), features),
         ) as runtime:
             execution = await runtime.agents.get("default").start("echo")
             with pytest.raises(AIError) as raised:
@@ -659,9 +645,8 @@ async def test_lost_remote_result_requires_confirmation_and_recovery_does_not_re
         try:
             async with Runtime.open(
                 "remote-recovery",
-                models=_RemoteModels(),
                 storage=restored,
-                features=restored_features,
+                features=model_features(_RemoteModels(), restored_features),
             ) as runtime:
                 execution = await runtime.executions.get(execution_id)
                 resolution = await execution.resolve_tool_effect(
@@ -757,9 +742,8 @@ async def test_parallel_runtimes_do_not_share_service_credentials() -> None:
         async def run(label: str) -> None:
             async with Runtime.open(
                 f"remote-{label}",
-                models=_RemoteModels(),
                 storage=RuntimeStorage.in_memory(),
-                features=_group(_spec(remote, headers={"Authorization": f"Bearer {label}"})),
+                features=model_features(_RemoteModels(), _group(_spec(remote, headers={"Authorization": f"Bearer {label}"}))),
             ) as runtime:
                 result = (await runtime.agents.get("default").run(
                     "echo", timeout_seconds=10
@@ -814,20 +798,8 @@ class _MixedModelBinding(_RemoteModelBinding):
         return TestModel(custom_output_text="done")
 
 
-class _MixedModels(_RemoteModels):
-    def resolve(self, route_id: str) -> _MixedModelBinding:
-        assert route_id == "default"
-        return _MixedModelBinding()
-
-    def restore(
-        self,
-        payload: Mapping[str, JsonValue],
-        *,
-        route_id: str | None = None,
-    ) -> _MixedModelBinding:
-        assert route_id in (None, "default")
-        assert dict(payload) == _MixedModelBinding.contract
-        return _MixedModelBinding()
+class _MixedModels(_MixedModelBinding):
+    pass
 
 
 @pytest.mark.asyncio
@@ -894,9 +866,8 @@ async def test_mixed_stdio_and_http_keep_separate_process_and_network_boundaries
         )
         async with Runtime.open(
             "mixed-mcp",
-            models=_MixedModels(),
             storage=RuntimeStorage.in_memory(),
-            features=group,
+            features=model_features(_MixedModels(), group),
         ) as runtime:
             result = (await runtime.agents.get("default").run(
                 "call both", timeout_seconds=15
@@ -985,9 +956,8 @@ async def test_cleanup_failure_preserves_confirmed_tool_result_and_idempotent_re
         storage = RuntimeStorage.in_memory()
         async with Runtime.open(
             "remote-cleanup",
-            models=_RemoteModels(),
             storage=storage,
-            features=_group(_spec(remote)),
+            features=model_features(_RemoteModels(), _group(_spec(remote))),
         ) as runtime:
             execution = await runtime.agents.get("default").start(
                 "echo",
@@ -1079,9 +1049,8 @@ async def test_mixed_runtime_does_not_bypass_failed_local_sandbox() -> None:
         )
         async with Runtime.open(
             "mixed-unavailable",
-            models=_MixedModels(),
             storage=RuntimeStorage.in_memory(),
-            features=group,
+            features=model_features(_MixedModels(), group),
         ) as runtime:
             result = (await runtime.agents.get("default").run(
                 "call both", timeout_seconds=10

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Response evidence survives invalid calls and asynchronous event handoff."""
+from ._runtime_test_helpers import model_features
 
 import pytest
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, UserPromptPart
@@ -134,7 +135,7 @@ async def test_model_response_evidence_capture_blocks_duplicate_tool_effects() -
     rejected_error = None
     try:
         async with Runtime.open(
-            "invalid-response", models=_Models(_UsageFunctionModel(model)), features=features,
+            "invalid-response", features=model_features(_Models(_UsageFunctionModel(model)), features),
             storage=RuntimeStorage.in_memory(),
         ) as runtime:
             execution = await runtime.agents.get().start("run work")

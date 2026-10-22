@@ -42,7 +42,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..session import SessionPendingExecutionLookup
 from ..observe import Metrics
-from ..model import ModelRegistry
+from ..model import ModelResolver
 from ..spec import (
     AgentSpec,
     RuleInstructionResolver,
@@ -135,7 +135,6 @@ async def compose_runtime_components(
     *,
     app: "AppT | None" = None,
     tenant_id: "str | None" = None,
-    models: ModelRegistry,
     storage: RuntimeStorage,
     metrics: Metrics | None = None,
     features: "RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None" = None,
@@ -296,7 +295,7 @@ async def compose_runtime_components(
             for candidate in candidates
             if candidate.kind == "agent"
         }
-        resolver = models.capture()
+        resolver = ModelResolver({}) if captured is None else captured.models
         if "default" not in agents:
             try:
                 resolver.resolve("default")

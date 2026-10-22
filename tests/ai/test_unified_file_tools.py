@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Unified model-facing file operations and publication boundaries."""
+from linktools.ai.model import create_model
 
 from ._runtime_test_helpers import workspace_features
 
@@ -16,7 +17,7 @@ from linktools.ai.capability import ToolCallRetry, workspace_capabilities
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.workspace import LocalSandbox, ReadOnlySandboxPolicy, Workspace
 
 _PNG = base64.b64decode(
@@ -26,14 +27,14 @@ _PNG = base64.b64decode(
 
 
 def _binding():
-    return ModelRegistry.openai(
+    return create_model(protocol='openai',
         model="explicit-test",
         input_types=(
             "mime:image/png",
             "mime:text/plain",
             "mime:text/csv",
         ),
-    ).capture().resolve("default")
+    )
 
 
 def _tools(root: Path, session, *, limits=None, binding=None, names=None):
@@ -126,7 +127,7 @@ async def test_unified_read_later_failure_returns_no_partial_batch(tmp_path: Pat
     (tmp_path / "image.png").write_bytes(_PNG)
     session = await LocalSandbox().open(root=tmp_path)
     try:
-        denied = ModelRegistry.openai(model="no-inputs", input_types=()).capture().resolve("default")
+        denied = create_model(protocol='openai', model="no-inputs", input_types=())
         with pytest.raises(ToolCallRetry) as rejected:
             await _tools(tmp_path, session, binding=denied)["read_file"].function(["notes.txt", "image.png"])
         facts = json.loads(str(rejected.value).split(" File: ", 1)[1])
@@ -201,7 +202,7 @@ def test_unified_file_behavior_revisions_do_not_bump_unchanged_tools(tmp_path: P
 @pytest.mark.asyncio
 async def test_legacy_attach_obeys_explicit_model_route_before_publication(tmp_path: Path) -> None:
     (tmp_path / "report.pdf").write_bytes(b"%PDF-1.7\n")
-    binding = ModelRegistry.openai(model="no-files", input_types=()).capture().resolve("default")
+    binding = create_model(protocol='openai', model="no-files", input_types=())
     session = await LocalSandbox().open(root=tmp_path)
     try:
         with pytest.raises(ToolCallRetry):
@@ -311,7 +312,7 @@ async def test_generic_text_detection_keeps_structured_text_attachment_hint(tmp_
     import mimetypes
     mimetypes.add_type(mime, Path(name).suffix)
     (tmp_path / name).write_text("key,value\none,two\n", encoding="utf-8")
-    binding = ModelRegistry.openai(model="known-text", input_types=(f"mime:{mime}",)).capture().resolve("default")
+    binding = create_model(protocol='openai', model="known-text", input_types=(f"mime:{mime}",))
     session = await LocalSandbox().open(root=tmp_path)
     try:
         value = (await _tools(tmp_path, session, binding=binding)["read_file"].function(name, as_file=True)).return_value
@@ -338,7 +339,7 @@ async def test_unsupported_attachment_reports_facts_without_content_or_native_de
     (tmp_path / name).write_bytes(body)
     session = await LocalSandbox().open(root=tmp_path)
     try:
-        denied = ModelRegistry.openai(model="no-inputs").capture().resolve("default")
+        denied = create_model(protocol='openai', model="no-inputs")
         with pytest.raises(ToolCallRetry) as rejected:
             await _tools(tmp_path, session, binding=denied)["read_file"].function(name, as_file=as_file)
         facts = json.loads(str(rejected.value).split(" File: ", 1)[1])
@@ -354,7 +355,7 @@ async def test_default_attachment_deny_keeps_bounded_text_preview_available(tmp_
     (tmp_path / "large.txt").write_text("line\n" * 10000, encoding="utf-8")
     session = await LocalSandbox().open(root=tmp_path)
     try:
-        denied = ModelRegistry.openai(model="no-inputs").capture().resolve("default")
+        denied = create_model(protocol='openai', model="no-inputs")
         result = await _tools(tmp_path, session, binding=denied)["read_file"].function("large.txt", offset=1, limit=2)
         assert result.return_value["texts"][0]["content"] == "line\nline\n"
         assert result.return_value["files"] == []

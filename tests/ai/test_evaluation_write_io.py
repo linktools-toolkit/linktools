@@ -19,7 +19,7 @@ from linktools.ai.core import service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import CaseRef, CaseSpec, DatasetRef, DatasetSpec
 from linktools.ai.migrate import provision_database
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeStorage
 
 
@@ -84,8 +84,8 @@ async def _assert_sql_publication(engine: AsyncEngine) -> None:
     await provision_database(engine)
     state, peer_state = RuntimeStorage.sql(engine), RuntimeStorage.sql(engine)
     context = RuntimeContext(None, tenant_id=_PRINCIPAL.tenant_id)
-    async with Runtime.open("evaluation-io", models=ModelRegistry(), storage=state, context=context) as runtime:
-        async with Runtime.open("evaluation-io", models=ModelRegistry(), storage=peer_state, context=context) as peer:
+    async with Runtime.open("evaluation-io", storage=state, context=context) as runtime:
+        async with Runtime.open("evaluation-io", storage=peer_state, context=context) as peer:
             statements: list[tuple[str, bool]] = []
             large_parameters: list[int] = []
             def capture(conn, cursor, sql, params, context, many):
@@ -140,10 +140,10 @@ async def test_publication_batches_preserve_backend_atomicity(tmp_path: Path, ba
     state = (RuntimeStorage.in_memory() if backend == "memory"
              else RuntimeStorage.filesystem(tmp_path))
     context = RuntimeContext(None, tenant_id=_PRINCIPAL.tenant_id)
-    async with Runtime.open("evaluation-io", models=ModelRegistry(), storage=state, context=context) as runtime:
+    async with Runtime.open("evaluation-io", storage=state, context=context) as runtime:
         await _assert_publication(runtime, runtime, runtime._state)
     if backend == "filesystem":
-        async with Runtime.open("evaluation-io", models=ModelRegistry(),
+        async with Runtime.open("evaluation-io",
                                 storage=RuntimeStorage.filesystem(tmp_path), context=context) as reopened:
             cases = await reopened.evaluations.list_cases(DatasetRef("atomic", 2), principal=_PRINCIPAL)
             assert len(cases.items) == 71

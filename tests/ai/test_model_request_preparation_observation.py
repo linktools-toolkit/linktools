@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Recorded model requests match the prepared input sent to the provider."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 import json
@@ -126,8 +127,8 @@ async def test_imported_request_publishes_prepared_provider_input_at_completion(
     metric_store = InMemoryMetricStore()
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
     metrics = Metrics.from_store(metric_store, namespace="prepared-input")
-    async with Runtime.open("prepared-input", metrics=metrics, models=_TaskTestModels(), storage=RuntimeStorage.filesystem(tmp_path),
-                            features=group) as runtime:
+    async with Runtime.open("prepared-input", metrics=metrics, storage=RuntimeStorage.filesystem(tmp_path),
+                            features=model_features(_TaskTestModels(), group)) as runtime:
         execution = await runtime.agents.get().start("new question", input_context=imported)
         try:
             await asyncio.wait_for(entered.wait(), timeout=5)

@@ -14,14 +14,14 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry, model_binding_error
+from linktools.ai.model import ModelResolver, ModelBinding, create_model, model_binding_error
 from linktools.ai.model._openai import _OpenAIModelBinding
 from linktools.ai.model._binding import _RetryingModel, _resolved_connection
 
 
 def test_model_binding_contract_excludes_secret_material() -> None:
-    registry = ModelRegistry.openai(model="gpt-test", api_key="secret")
-    binding = registry.capture().resolve("default")
+    registry = create_model(protocol="openai", model="gpt-test", api_key="secret")
+    binding = registry
 
     assert "secret" not in repr(binding)
     assert "secret" not in repr(dict(binding.contract))
@@ -36,7 +36,6 @@ def test_openai_connection_resolver_is_lazy_and_overrides_defaults() -> None:
         return {"api_key": "resolved", "max_retries": 4}
 
     binding = _OpenAIModelBinding(
-        "route",
         "gpt-test",
         api_key="default",
         connection_resolver=resolve,
@@ -51,7 +50,6 @@ def test_openai_connection_resolver_is_lazy_and_overrides_defaults() -> None:
 
 def test_openai_connection_resolver_rejects_model_fields() -> None:
     binding = _OpenAIModelBinding(
-        "route",
         "gpt-test",
         connection_resolver=lambda: {"model": "other"},
     )
@@ -63,7 +61,6 @@ def test_openai_connection_resolver_rejects_model_fields() -> None:
 
 def test_openai_connection_resolver_normalizes_connection_values() -> None:
     binding = _OpenAIModelBinding(
-        "route",
         "gpt-test",
         connection_resolver=lambda: {
             "base_url": "  https://EXAMPLE.com/v1/  ",
@@ -77,7 +74,6 @@ def test_openai_connection_resolver_normalizes_connection_values() -> None:
 
 def test_openai_connection_resolver_invalid_values_keep_a_cause() -> None:
     binding = _OpenAIModelBinding(
-        "route",
         "gpt-test",
         connection_resolver=lambda: {"max_retries": None},
     )
@@ -88,24 +84,22 @@ def test_openai_connection_resolver_invalid_values_keep_a_cause() -> None:
     assert raised.value.__cause__ is not None
 
 
-def test_model_alias_resolves_to_an_immutable_binding() -> None:
-    registry = ModelRegistry()
-    registry.register_openai("target", model="gpt-old")
-    registry.register_alias("alias", "target")
-    registry.register_alias("alias-2", "alias")
-    registry.register_openai("target", model="gpt-new")
-
-    snapshot = registry.capture()
-    assert snapshot.resolve("alias").model_identity == "openai:gpt-old"
-    assert snapshot.resolve("alias-2").model_identity == "openai:gpt-old"
-    assert snapshot.resolve("target").model_identity == "openai:gpt-new"
+def test_model_route_capture_keeps_shared_binding_when_source_map_changes() -> None:
+    original = create_model(protocol="openai", model="gpt-old")
+    source = {"target": original, "alias": original, "alias-2": original}
+    snapshot = ModelResolver(source)
+    source["target"] = create_model(protocol="openai", model="gpt-new")
+    assert snapshot.resolve("target") is original
+    assert snapshot.resolve("alias") is original
+    assert snapshot.resolve("alias-2") is original
+    assert ModelResolver(source).resolve("target").model_identity == "openai:gpt-new"
     with pytest.raises(AttributeError):
-        setattr(snapshot.resolve("alias"), "_target", snapshot.resolve("target"))
+        snapshot.resolve("alias").model = "changed"
 
 
-def test_model_alias_requires_an_existing_target() -> None:
+def test_model_resolver_requires_an_existing_route() -> None:
     with pytest.raises(AIError) as raised:
-        ModelRegistry().register_alias("alias", "missing")
+        ModelResolver({}).resolve("missing")
     assert raised.value.code is ErrorCode.MODEL_CONNECTION_NOT_FOUND
 
 

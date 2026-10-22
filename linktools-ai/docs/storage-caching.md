@@ -136,13 +136,13 @@ features.capability(TraceCapability(
     storage=execution_route.with_cache(None),
 ))
 async with Runtime.open(
-    "app", models=models, storage=storage, features=features,
+    "app", storage=storage, features=features,
 ) as runtime:
     ...
 ```
 
-Here `hot_cache` is a host-provided `CacheBackend` and `models` is the configured
-`ModelRegistry`. `with_cache(None)` changes only the hot-read resource, preserving
+Here `hot_cache` is a host-provided `CacheBackend`; model bindings, if needed,
+are registered with `features.model(name, binding_or_loader)`. `with_cache(None)` changes only the hot-read resource, preserving
 the route's transaction identity. It does not disable Trace publication or
 Checkpoint safety writes. To choose a different Trace hot cache, pass that
 backend to `with_cache` instead.

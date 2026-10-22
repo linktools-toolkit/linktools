@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Successful callback cleanup acknowledges delivery without reopening a stream."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from dataclasses import replace
@@ -37,8 +38,8 @@ async def test_live_wait_acknowledges_callback_cleanup_without_waiting_for_model
     group = RuntimeFeatures("wait-cleanup-ack")
     group.agent("default", model="default", allow_tools=())
     async with Runtime.open(
-        "wait-cleanup-ack", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), features=group,
+        "wait-cleanup-ack",
+        storage=RuntimeStorage.in_memory(), features=model_features(_Models(_UsageFunctionModel(model)), group),
     ) as runtime:
         execution = await runtime.agents.get().start("hello")
         await asyncio.wait_for(model_started.wait(), 10)

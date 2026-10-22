@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Retention removes owned bytes while preserving native fences and shared refs."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.runtime.state import RuntimeState
 from collections.abc import AsyncIterator
@@ -174,7 +175,7 @@ async def test_public_expiry_purge_and_reopen_do_not_revive_private_evidence(bac
         content_retention_seconds=None if dataset_deadline is not None else 60, metadata_retention_seconds=120)
     storage = storage_for(backend, tmp_path, objects)
     async with Runtime.open("evaluation-retention", storage=storage,
-                            models=RuntimeUsageModels(), context=RuntimeContext(None, tenant_id="tenant")) as runtime:
+                            features=model_features(RuntimeUsageModels()), context=RuntimeContext(None, tenant_id="tenant")) as runtime:
         engine = runtime.tasks.bind(*tasks)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("retained-source", 1), cases=(
             CaseSpec.task(CaseRef("retained-source", "one", 1), input={"answer": "answer"}, expected="answer"),
@@ -253,7 +254,7 @@ async def test_public_expiry_purge_and_reopen_do_not_revive_private_evidence(bac
     monkeypatch.undo()
     if backend != "memory":
         async with Runtime.open("evaluation-retention", storage=storage_for(backend, tmp_path, objects),
-                                models=RuntimeUsageModels(), context=RuntimeContext(None, tenant_id="tenant")) as reopened:
+                                features=model_features(RuntimeUsageModels()), context=RuntimeContext(None, tenant_id="tenant")) as reopened:
             with pytest.raises(AIError) as unavailable:
                 await reopened.evaluations.start(request, engine=reopened.tasks.bind(*tasks))
             assert unavailable.value.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE
@@ -286,7 +287,7 @@ async def test_expired_prepared_payload_is_fenced_before_deletion_and_cannot_res
     storage = RuntimeStorage.filesystem(tmp_path)
     monkeypatch.setattr(RuntimeEvaluations, "_watch", lambda *args, **kwargs: None)
     async with Runtime.open("evaluation-retention", storage=storage,
-                            models=RuntimeUsageModels(), context=RuntimeContext(None, tenant_id="tenant")) as runtime:
+                            features=model_features(RuntimeUsageModels()), context=RuntimeContext(None, tenant_id="tenant")) as runtime:
         tasks = (Task("retention.prepared", target, effect_policy="none"), Task("retention.score", score, effect_policy="none"))
         engine = runtime.tasks.bind(*tasks)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("prepared", 1), cases=(
@@ -336,7 +337,7 @@ async def test_literal_capture_deadline_deletes_owned_copy_without_deleting_borr
     deadline = datetime.now(timezone.utc) + timedelta(seconds=60)
     storage = RuntimeStorage.filesystem(tmp_path)
     async with Runtime.open("evaluation-retention", storage=storage,
-                            models=RuntimeUsageModels(), context=RuntimeContext(None, tenant_id="tenant")) as runtime:
+                            features=model_features(RuntimeUsageModels()), context=RuntimeContext(None, tenant_id="tenant")) as runtime:
         original = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("original", 1), cases=(
             CaseSpec.agent(CaseRef("original", "one", 1), prompt="independently retained source"),
         )), principal=principal, idempotency_key="original")
@@ -386,7 +387,7 @@ async def test_literal_capture_deadline_deletes_owned_copy_without_deleting_borr
             await runtime.evaluations._compiler.case(spec.cases[0], principal=principal)
         assert unavailable.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
     async with Runtime.open("evaluation-retention", storage=RuntimeStorage.filesystem(tmp_path),
-                            models=RuntimeUsageModels(), context=RuntimeContext(None, tenant_id="tenant")) as runtime:
+                            features=model_features(RuntimeUsageModels()), context=RuntimeContext(None, tenant_id="tenant")) as runtime:
         with pytest.raises(AIError) as unavailable:
             await runtime.evaluations._captures.read_agent(owned, principal=principal)
         assert unavailable.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
@@ -406,7 +407,7 @@ async def test_literal_capture_deadline_deletes_owned_copy_without_deleting_borr
     restored_root = tmp_path / "restored"
     await RuntimeState.restore_snapshot(snapshot_ref, object_store=snapshot, root=restored_root, limits=limits)
     async with Runtime.open("evaluation-retention", storage=RuntimeStorage.from_root(restored_root),
-                            models=RuntimeUsageModels(), context=RuntimeContext(None, tenant_id="tenant")) as runtime:
+                            features=model_features(RuntimeUsageModels()), context=RuntimeContext(None, tenant_id="tenant")) as runtime:
         with pytest.raises(AIError) as unavailable:
             await runtime.evaluations._compiler.case(spec.cases[0], principal=principal)
         assert unavailable.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE

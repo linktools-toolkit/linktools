@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Callable graph captures retain the current invocation's accepted inputs."""
+from ._runtime_test_helpers import model_features
 
 from collections.abc import Mapping
 
@@ -37,7 +38,7 @@ async def test_callable_graph_recapture_uses_current_accepted_input(
     original = Task("capture.original", echo, effect_policy="none")
     current = Task("capture.current", echo, normalize=normalize, effect_policy="none")
     scorer = Task("capture.score", _score, effect_policy="none")
-    async with Runtime.open("callable-graph", models=FixtureModels(), context=CONTEXT,
+    async with Runtime.open("callable-graph", features=model_features(FixtureModels()), context=CONTEXT,
                             storage=RuntimeStorage.in_memory()) as runtime:
         engine = runtime.tasks.bind(original, current, scorer)
         source = await engine.start(TaskGraph("source", (
@@ -107,7 +108,7 @@ async def test_callable_graph_recapture_keeps_live_and_frozen_dependencies() -> 
 
     producer = Task("capture.produce", produce, effect_policy="none")
     consumer = Task("capture.consume", consume, effect_policy="none")
-    async with Runtime.open("callable-dependencies", models=FixtureModels(), context=CONTEXT,
+    async with Runtime.open("callable-dependencies", features=model_features(FixtureModels()), context=CONTEXT,
                             storage=RuntimeStorage.in_memory()) as runtime:
         engine = runtime.tasks.bind(producer, consumer)
         source = await engine.start(TaskGraph("source", (
@@ -154,7 +155,7 @@ async def test_callable_graph_capture_distinguishes_unstarted_from_missing_invoc
 
     task = Task("capture.echo", echo, effect_policy="none")
     gate = Task("capture.gate", fail, effect_policy="none")
-    async with Runtime.open("callable-unavailable", models=FixtureModels(), context=CONTEXT,
+    async with Runtime.open("callable-unavailable", features=model_features(FixtureModels()), context=CONTEXT,
                             storage=RuntimeStorage.in_memory()) as runtime:
         engine = runtime.tasks.bind(task, gate)
         source = await engine.start(TaskGraph("source", (TaskNode("target", task=task, input={"value": 1}),)),

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Execution input and final tool-boundary regressions."""
+from linktools.ai.model import create_model
 
 from linktools.ai.runtime.state import RuntimeState
 from dataclasses import fields, replace
@@ -173,10 +174,10 @@ async def test_execution_freezes_materialized_input_once() -> None:
         canonical = await service._canonicalize_request(
             _request(files=("evidence.txt",))
         )
-        from linktools.ai.model import ModelRegistry
-        model = ModelRegistry.openai(
+
+        model = create_model(protocol='openai',
             model="test", input_types=("mime:text/plain",),
-        ).capture().resolve("default")
+        )
         binding = SimpleNamespace(compiled_agent=SimpleNamespace(model=model))
         prepared = await service._freeze_input(canonical, binding)
         assert prepared.request.files == ()

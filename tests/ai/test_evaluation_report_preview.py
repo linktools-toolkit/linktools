@@ -12,7 +12,7 @@ from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationSpec,
     StartEvaluationRequest,
 )
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._store import RecordQuery
@@ -33,7 +33,7 @@ async def test_repeated_report_previews_preserve_state_and_objects(
     scorer = Task("preview.exact", exact, effect_policy="none")
     storage = storage_for(backend, tmp_path)
     async with Runtime.open(
-        "report-preview", models=ModelRegistry(), storage=storage, context=CONTEXT,
+        "report-preview", storage=storage, context=CONTEXT,
     ) as runtime:
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("preview", 1), (
             CaseSpec.task(CaseRef("preview", "one", 1), input={"answer": "yes"}, expected="yes"),

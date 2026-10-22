@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Regression coverage for execution-owned Asset version bindings."""
+from linktools.ai.model import ModelResolver, create_model
 
 import asyncio
 from collections.abc import Mapping
@@ -36,7 +37,7 @@ from linktools.ai.core import (
     canonical_sha256,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime._agent_binding_resolver import _AgentBindingResolver
 from linktools.ai.runtime._context import RuntimeContext
@@ -155,7 +156,7 @@ async def _fixture() -> _BindingFixture:
         ),
     }
     compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+        model_resolver=ModelResolver({"default": create_model(protocol='openai', model="gpt-test")}),
         candidates=candidates,
         agents=specs,
     )
@@ -443,7 +444,7 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
         allow_capabilities=(),
     )
     compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+        model_resolver=ModelResolver({"default": create_model(protocol='openai', model="gpt-test")}),
         candidates=(CapabilityContribution.from_declaration(server),),
         agents={specification.id: specification},
     )
@@ -498,7 +499,7 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
         allow_capabilities=(),
     )
     compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+        model_resolver=ModelResolver({"default": create_model(protocol='openai', model="gpt-test")}),
         candidates=(CapabilityContribution.from_declaration(server),),
         agents={specification.id: specification},
     )
@@ -583,7 +584,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
             ),
         }
         compiler = AgentCompiler(
-            model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+            model_resolver=ModelResolver({"default": create_model(protocol='openai', model="gpt-test")}),
             candidates=(contribution,),
             agents=specs,
         )

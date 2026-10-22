@@ -15,11 +15,12 @@ quota = GlobalRateLimit(
 )
 group = RuntimeFeatures("application")
 group.capability(quota, id="host.rate-limit")
+group.model("default", binding)
 group.agent("default", allow_capabilities=())
 
 capture = await group.capture()
 async with Runtime.open(
-    "application", models=models, storage=storage, features=capture,
+    "application", storage=storage, features=capture,
 ) as runtime:
     ...
 ```
@@ -111,7 +112,7 @@ Shared storage provisioning is independent of service activation.
 recording. Supply the borrowed dataset at the sole Runtime entry point:
 
 ```python
-async with Runtime.open("app", models=models, storage=storage, features=group, metrics=metrics) as runtime:
+async with Runtime.open("app", storage=storage, features=group, metrics=metrics) as runtime:
     ...
 ```
 
@@ -153,7 +154,7 @@ single-transaction deferred turns. Shared SQL engines, caches, and object stores
 remain borrowed resources.
 
 The workspace ACP convenience entry point accepts the same execution declaration:
-`ACPApplication.for_workspace(workspace, models=models, storage=storage,
+`ACPApplication.for_workspace(workspace, features=features, storage=storage,
 execution=ExecutionCapability(retain_history=True, coordination=cache))`. Without
 an explicit execution declaration, ACP defaults to retaining history. An explicit
 declaration controls retention as well as commit and coordination; workspace
@@ -347,7 +348,7 @@ storage, and a lost lease never permits two canonical terminal results.
 
 The [executable example](../examples/runtime_rate_limits.py) implements an
 application-owned `GlobalRateLimit` with a local asynchronous rolling window.
-It requires no Redis package, ModelRegistry configuration or LinkTools backend
+It requires no Redis package, model configuration or LinkTools backend
 protocol. Run it with `python linktools-ai/examples/runtime_rate_limits.py` after
 installing the package; its demonstration uses an offline native `FunctionModel`.
 

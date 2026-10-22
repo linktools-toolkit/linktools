@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Workspace attach_files tool contracts."""
+from linktools.ai.model import create_model
 
 from ._runtime_test_helpers import workspace_features
 
@@ -16,7 +17,7 @@ from linktools.ai.capability import (
     workspace_capabilities,
 )
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.model import ModelBinding, ModelRegistry
+from linktools.ai.model import ModelBinding
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
@@ -29,7 +30,6 @@ def _workspace_tool_contributions(workspace: Workspace):
     return tuple(
         workspace_features("workspace", workspace=workspace)._contributions
     )
-
 
 
 class _AttachmentSession:
@@ -225,7 +225,7 @@ async def test_attach_files_rejects_unknown_image_before_read(
 ) -> None:
     workspace = Workspace.load(tmp_path)
     session = _AttachmentSession({"evidence.png": b"png"})
-    boundary, tool = await _boundary(workspace, session, model_binding=ModelRegistry.openai(model="gpt-test").capture().resolve("default"))
+    boundary, tool = await _boundary(workspace, session, model_binding=create_model(protocol='openai', model="gpt-test"))
 
     with pytest.raises(
         ToolCallRetry,

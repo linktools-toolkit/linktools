@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Derived input capture plans retain source authority without preflight writes."""
+from ._runtime_test_helpers import model_features
 
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -42,7 +43,7 @@ async def test_derived_input_description_matches_publication_without_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("input-planning", models=FixtureModels(), context=CONTEXT,
+    async with Runtime.open("input-planning", features=model_features(FixtureModels()), context=CONTEXT,
                             storage=storage) as runtime:
         source = await _source_capture(runtime)
         captures = runtime._input_captures
@@ -75,7 +76,7 @@ async def test_derived_input_description_matches_publication_without_writes(
 async def test_derived_input_publication_cannot_replace_its_authorized_source(
     tmp_path: Path, changed: str,
 ) -> None:
-    async with Runtime.open("input-authority", models=FixtureModels(), context=CONTEXT,
+    async with Runtime.open("input-authority", features=model_features(FixtureModels()), context=CONTEXT,
                             storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         source = await _source_capture(runtime)
         captures = runtime._input_captures
@@ -102,7 +103,7 @@ async def test_owned_input_expiry_fences_only_its_reserved_derivation(
     tmp_path: Path, materialized: bool,
 ) -> None:
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("input-fence", models=FixtureModels(), context=CONTEXT,
+    async with Runtime.open("input-fence", features=model_features(FixtureModels()), context=CONTEXT,
                             storage=storage) as runtime:
         source = await _source_capture(runtime)
         captures = runtime._input_captures
@@ -136,7 +137,7 @@ async def test_owned_input_expiry_fences_only_its_reserved_derivation(
 
 @pytest.mark.asyncio
 async def test_retained_input_capture_cannot_be_expired_before_object_cleanup(tmp_path: Path) -> None:
-    async with Runtime.open("input-transfer", models=FixtureModels(), context=CONTEXT,
+    async with Runtime.open("input-transfer", features=model_features(FixtureModels()), context=CONTEXT,
                             storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         source = await _source_capture(runtime)
         captures = runtime._input_captures

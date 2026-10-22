@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Web reads and explicit controls share the cross-process Runtime owner."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from pathlib import Path
@@ -42,8 +43,8 @@ async def test_web_reads_live_process_history_without_taking_ownership(tmp_path:
 
     try:
         async with Runtime.open(
-            _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=RuntimeStorage.sqlite(database), features=_capabilities(),
+            _NAMESPACE,
+            storage=RuntimeStorage.sqlite(database), features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities()),
         ) as runtime, RuntimeHistory.open(
             _NAMESPACE, storage=RuntimeStorage.sqlite(database),
         ) as history, client(create_app(runtime=runtime)) as writable, client(create_app(history=history)) as readonly:
@@ -96,8 +97,8 @@ async def test_web_recovery_requires_explicit_control_after_process_exit(
             await asyncio.to_thread(owner.crash)
         storage = RuntimeStorage.sqlite(database)
         async with Runtime.open(
-            _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=storage, features=_capabilities(),
+            _NAMESPACE,
+            storage=storage, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities()),
         ) as runtime, client(create_app(runtime=runtime)) as http:
             if cancel_first:
                 await _wait_for_committed(
@@ -154,8 +155,8 @@ async def test_web_recovery_requires_explicit_control_after_process_exit(
                 assert info["status"] in {"CANCELLING", "CANCELLED"}
                 assert not calls
         async with Runtime.open(
-            _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=RuntimeStorage.sqlite(database), features=_capabilities(),
+            _NAMESPACE,
+            storage=RuntimeStorage.sqlite(database), features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities()),
         ) as runtime, client(create_app(runtime=runtime)) as http:
             if control == "cancel_after_exit":
                 replay = await http.post(

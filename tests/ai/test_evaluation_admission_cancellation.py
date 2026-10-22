@@ -18,7 +18,7 @@ from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationSpec,
     StartEvaluationRequest,
 )
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime.state._evaluation_records import EvaluationRecord
 from linktools.ai.task import Task, TaskNodeContext
@@ -53,7 +53,7 @@ async def test_admission_cancellation_fences_both_start_orderings(
     scorer = Task("cancel-admission.score", score, effect_policy="none")
     storage = storage_for(backend, tmp_path)
     async with Runtime.open(
-        "cancel-admission", models=ModelRegistry(), storage=storage, context=CONTEXT,
+        "cancel-admission", storage=storage, context=CONTEXT,
     ) as runtime:
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("cancel", 1), (
             CaseSpec.task(CaseRef("cancel", "one", 1), input={"answer": "yes"}, expected="yes"),
@@ -128,7 +128,7 @@ async def test_admission_cancellation_preserves_authorization_and_request_identi
     scorer = Task("cancel-security.score", exact, effect_policy="none")
     storage = storage_for("filesystem", tmp_path)
     async with Runtime.open(
-        "cancel-security", models=ModelRegistry(), storage=storage, context=CONTEXT,
+        "cancel-security", storage=storage, context=CONTEXT,
         features=RuntimeFeatures("authorization", authorization=authorization),
     ) as runtime:
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("cancel", 1), (

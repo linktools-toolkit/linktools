@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Public capability configuration owns module routes, caches and read-only use."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 import hashlib
@@ -52,16 +53,18 @@ async def test_module_filesystem_routes_reopen_history_without_models_or_hooks(
         domain: StorageRoute.filesystem(root / "modules" / domain.value, transaction_root=root)
         for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.CHECKPOINT, RuntimeDomain.TRACE)
     }
-    features = await _features(
+    declarations = _features(
         ExecutionCapability(retain_history=True),
         CheckpointCapability(storage=routes[RuntimeDomain.CHECKPOINT]),
         TraceCapability(storage=routes[RuntimeDomain.TRACE]),
-    ).capture()
+    )
+    declarations.model("default", _FeatureModels())
+    features = await declarations.capture()
     def root_storage() -> RuntimeStorage:
         return RuntimeStorage(replace(RuntimeStorage.filesystem(root).plan, conversation=routes[RuntimeDomain.CONVERSATION]))
 
     state = root_storage()
-    async with Runtime.open("module-routes", metrics=Metrics.in_memory(), storage=state, models=_FeatureModels(), features=features) as runtime:
+    async with Runtime.open("module-routes", metrics=Metrics.in_memory(), storage=state, features=features) as runtime:
         session = await runtime.agents.get().create_session("session")
         execution = await session.start("question")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
@@ -129,7 +132,7 @@ async def test_module_resource_cache_inherits_or_explicitly_overrides_root(
         storage=state.plan.route(RuntimeDomain.TRACE).with_cache(trace_cache),
     ))
     features = _features(ExecutionCapability(retain_history=True), trace)
-    async with Runtime.open("module-cache", storage=state, models=_FeatureModels(), features=features) as runtime:
+    async with Runtime.open("module-cache", storage=state, features=model_features(_FeatureModels(), features)) as runtime:
         before_root = (root_cache.reads, root_cache.writes)
         before_module = (module_cache.reads, module_cache.writes)
         assert await runtime._state.conversation.sessions.get("missing", tenant_id="default") is None
@@ -170,7 +173,7 @@ async def test_atomic_module_route_rejects_a_different_transaction_group(
     with pytest.raises(AIError) as invalid:
         async with Runtime.open(
             "different-group", storage=RuntimeStorage.filesystem(root),
-            models=_FeatureModels(), features=_features(feature),
+            features=model_features(_FeatureModels(), _features(feature)),
         ):
             pytest.fail("an atomic module cannot silently split its transactions")
     assert invalid.value.code in {ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, ErrorCode.STORAGE_DEPENDENCY_NOT_READY}
@@ -192,7 +195,7 @@ async def test_split_conversation_route_uses_durable_admission_with_shared_cache
     features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
     async with Runtime.open(
         "split-conversation", storage=state,
-        models=_FeatureModels(FunctionModel(stream_function=model)), features=features,
+        features=model_features(_FeatureModels(FunctionModel(stream_function=model)), features),
     ) as runtime:
         session = await runtime.agents.get().create_session("session")
         execution = await session.start("question", idempotency_key="turn")

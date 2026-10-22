@@ -4,7 +4,6 @@
 
 ```text
 namespace
-    + ModelRegistry
     + RuntimeStorage
     + one RuntimeFeatures or RuntimeFeaturesCapture
         -> optional, independent Workspace and Sandbox via RuntimeFeatures(...)
@@ -49,7 +48,7 @@ def available(agent, contribution):
 
 group = RuntimeFeatures("application", filter=available)
 async with Runtime.open(
-    "application", models=models, storage=storage, features=group,
+    "application", storage=storage, features=group,
 ) as runtime:
     ...
 ```
@@ -117,7 +116,7 @@ independently of `allow_capabilities` and `RuntimeFeatures.filter`. Use explicit
 ```python
 group.capability(global_rate_limit, id="host.rate-limit")
 async with Runtime.open(
-    "application", models=models, storage=storage, features=group,
+    "application", storage=storage, features=group,
 ) as runtime:
     ...
 ```
@@ -159,7 +158,7 @@ python3 -m linktools ai run "review this change" --project /workspace/project --
 Useful options:
 
 - `--model-api` selects `openai` (default), `openai-responses`, or `anthropic`. This is the wire protocol, not a vendor/model-name guess. The same option works for `ai-run`, `ai-acp`, and `ai-web`.
-- Persist the selection in `.linktools/config.yaml` as `model_api: anthropic`, alongside `model: your-model`. `AI_MODEL_API` / the existing `LINKTOOLS_AI_MODEL_API` configuration can also select the protocol; an explicit CLI option wins.
+- Persist the selection in `.linktools/config.yaml` as `model_api: anthropic`, alongside `model: your-model`. `MODEL_API` / the existing `LINKTOOLS_MODEL_API` configuration can also select the protocol; an explicit CLI option wins.
 - `--base-url`, `--api-key`, and `--model` are one-shot overrides. With Anthropic Messages, the corresponding configuration/environment fields are `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, and `ANTHROPIC_MODEL`; both OpenAI protocols use the existing `OPENAI_*` fields. The selected protocol's existing LinkTools config resolver still supports `LINKTOOLS_`-prefixed configuration and its non-secret cache. Anthropic never falls back to OpenAI credentials or endpoints.
 - Model selection order is explicit nonempty CLI value, selected-protocol LinkTools configuration, workspace `model`, then the selected-protocol native fallback. Standard LinkTools configuration itself reads both native and `LINKTOOLS_`-prefixed environment variables. Connection settings use explicit CLI value, selected-protocol LinkTools configuration, then the native fallback. Empty connection values retain the native SDK fallback to the selected protocol's environment; they do not disable environment credentials. Credentials are secret fields and are not persisted by configuration resolution.
 - Install `linktools-ai[anthropic]` for Anthropic Messages, or `linktools-ai[openai]` for either OpenAI API; add `web` for `ai-web`, for example `linktools-ai[anthropic,web]`. Missing provider extras produce an installation hint before a Runtime is opened.
@@ -176,7 +175,7 @@ are selected after resolving the API, so configuring Anthropic does not require
 passing connection options on every invocation:
 
 ```bash
-export LINKTOOLS_AI_MODEL_API=anthropic
+export LINKTOOLS_MODEL_API=anthropic
 export LINKTOOLS_ANTHROPIC_MODEL=claude-sonnet-4-5
 export LINKTOOLS_ANTHROPIC_BASE_URL=https://api.anthropic.com
 # Supply LINKTOOLS_ANTHROPIC_API_KEY through your environment/secret manager.
@@ -194,7 +193,7 @@ the user profile is `~/.linktools/linktools.json`. For example:
 ```json
 {
   "config": {
-    "AI_MODEL_API": "anthropic",
+    "MODEL_API": "anthropic",
     "ANTHROPIC_MODEL": "claude-sonnet-4-5",
     "ANTHROPIC_BASE_URL": "https://api.anthropic.com"
   }
@@ -239,18 +238,18 @@ security, persisted history and explicit recovery of stopped executors.
 ```python
 from linktools.ai import RuntimeFeatures, Runtime, Workspace
 from linktools.ai.capability import WorkspaceCapability
-from linktools.ai.model import ModelRegistry
+from linktools.ai.model import create_model
 from linktools.ai.runtime import RuntimeStorage
 
 workspace = Workspace.initialize("/workspace/project")
-models = ModelRegistry.openai(model="gpt-4o-mini")
+binding = create_model(protocol="openai", model="gpt-4o-mini")
 storage = RuntimeStorage.in_memory()
 features = RuntimeFeatures("workspace")
+features.model("default", binding)
 features.capability(WorkspaceCapability(workspace))
 
 async with Runtime.open(
     "default",
-    models=models,
     storage=storage,
     features=features,
 ) as runtime:
@@ -269,19 +268,18 @@ startup budget, and report readiness only after the context opens successfully.
 `Runtime.open()` imposes no fixed startup deadline. Reuse the opened Runtime for
 its service lifetime; execution deadlines do not replace a startup budget.
 
-Connection settings can be resolved lazily for a route. The resolver runs only
-when that route is materialized, and each materialization resolves independently;
-there is no process-global first-use client cache or initialization lock. Concurrent
-first use may therefore create independent provider instances. An alias keeps the
-concrete binding that was registered as its target:
+Connection settings are resolved when a binding is materialized, independently
+for each run. Model semantics can be loaded once per captured feature mapping,
+while connection credentials can rotate between runs. To give multiple routes
+the same static binding, register that object under each name:
 
 ```python
-models.register_openai(
-    "production",
-    model="gpt-4o-mini",
+binding = create_model(
+    protocol="openai", model="gpt-4o-mini",
     connection_resolver=lambda: {"api_key": get_api_key()},
 )
-models.register_alias("default", "production")
+features.model("production", binding)
+features.model("default", binding)
 ```
 
 ### Protocols and thinking profiles
@@ -290,17 +288,27 @@ Install `linktools-ai[openai]` for Chat Completions and Responses, or
 `linktools-ai[anthropic]` for Messages; combine extras when using both.
 The base package does not install either provider SDK.
 
-`ModelRegistry.create(protocol="anthropic", model="claude-sonnet-4-5")` constructs
-one default-route registry from a protocol string (`openai`, `openai-responses`,
-or `anthropic`). It delegates to the corresponding dedicated factory with the
-same explicit options; the CLI uses this shared constructor as well. It is not
-an in-place route-registration operation.
+`create_model(protocol="anthropic", model="claude-sonnet-4-5")` returns a
+model binding without a route name. Protocols are `openai` (Chat Completions),
+`openai-responses`, and `anthropic`. Register bindings in the same feature
+container as tools and capabilities:
 
-`ModelRegistry.openai` / `register_openai` retain Chat Completions behavior.
-Use `openai_responses` / `register_openai_responses` for Responses, or
-`anthropic` / `register_anthropic` for Messages. They accept the same connection,
-retry, input-type and optional `profile` arguments. See [model protocols](docs/model-protocols.md)
-for explicit compatible-model profiles, restore boundaries and trace semantics.
+```python
+from linktools.ai.model import create_model
+from linktools.ai.runtime import RuntimeFeatures
+
+features = RuntimeFeatures()
+features.model("assistant", create_model(protocol="anthropic", model="claude-sonnet-4-5"))
+# Or defer model semantics until first use. The synchronous function returns a binding.
+features.model("deferred", lambda: create_model(protocol="openai", model="gpt-4o"))
+```
+
+Runtime captures the route mapping at opening without evaluating every loader.
+Each captured lazy route caches its first successful binding. Client resources
+are still created and released per model run. Connection credential refresh is
+separate: `connection_resolver` is evaluated when materializing a model, not at
+registration. See [model protocols](docs/model-protocols.md) for the full lifecycle,
+custom bindings, profiles, restore boundaries and trace semantics.
 
 ## 2. Define application capabilities and Agents
 
@@ -311,6 +319,7 @@ from linktools.ai import AgentContext, RuntimeFeatures, Runtime
 from linktools.ai.capability import WorkspaceCapability
 
 application = RuntimeFeatures[None]("application")
+application.model("default", binding)
 application.capability(WorkspaceCapability(workspace))
 
 @application.tool
@@ -328,7 +337,6 @@ application.agent(
 
 async with Runtime.open(
     "default",
-    models=models,
     storage=storage,
     features=application,
 ) as runtime:
@@ -845,9 +853,9 @@ MIME Literal values. Use a `mime:` prefix for an explicit MIME type or `type/*`
 family. Attachments that do not match the resulting MIME allowlist are rejected:
 
 ```python
-from linktools.ai.model import ModelRegistry
+from linktools.ai.model import create_model
 
-models = ModelRegistry.openai(
+binding = create_model(protocol="openai",
     model="your-model",
     input_types=["audio", "document", "mime:audio/*", "mime:application/pdf"],
 )
@@ -980,8 +988,8 @@ from linktools.ai.runtime import RuntimeContext
 context = RuntimeContext(app, tenant_id="tenant-a")
 async with Runtime.open(
     "web-chat",
-    models=models,
     storage=storage,
+    features=features,
     context=context,
 ) as runtime:
     ...
@@ -1050,7 +1058,7 @@ page = await runtime.executions.list(
 ```
 
 `RuntimeHistory.open()` provides the same read-only execution metadata and
-history projections without loading a ModelRegistry or compiling Agents. Pass the
+history projections without loading model bindings or compiling Agents. Pass the
 same `features=` declaration or capture when capabilities configure custom storage
 routes or caches; read-only opening does not activate hooks or metrics recording.
 Use `list_sessions(principal=..., cursor=..., limit=...)` for a paginated session
@@ -1208,8 +1216,8 @@ storage = RuntimeStorage.sqlite(runtime_root / "runtime.db")
 
 async with Runtime.open(
     "service-runtime",
-    models=models,
     storage=storage,
+    features=features,
 ) as runtime:
     ...
 ```

@@ -31,7 +31,6 @@ class _ProviderModelBinding:
     _provider: ClassVar[str] = "openai"
     _profile_type: ClassVar[type]
     _provider_type: ClassVar[type]
-    route_id: str
     model: str
     base_url: "str | None" = None
     api_key: "str | None" = field(default=None, repr=False, compare=False)
@@ -57,7 +56,7 @@ class _ProviderModelBinding:
         object.__setattr__(self, "_profile_overrides", ImmutableJsonMapping(declared))
         self._sdk_profile()
         model = self.model.strip().removeprefix(f"{self.provider}:")
-        if not self.route_id.strip() or not model:
+        if not model:
             raise ValueError("model binding is incomplete")
         object.__setattr__(self, "_input_mime_types", expand_input_types(input_types))
         if self.connection_resolver is not None and not callable(
@@ -126,8 +125,7 @@ class _ProviderModelBinding:
                 },
             ) from error
         _logger.debug(
-            "Model materialized: route=%s model=%s credential=%s",
-            self.route_id,
+            "Model materialized: model=%s credential=%s",
             self.model,
             connection["api_key"] is not None,
         )

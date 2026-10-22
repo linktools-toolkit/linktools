@@ -3,6 +3,7 @@
 """Logical model request progress is visible and converges to one result."""
 
 from __future__ import annotations
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from collections.abc import AsyncIterator, Mapping
@@ -1153,22 +1154,7 @@ class _BlockingModels:
             first_tool=first_tool,
         )
 
-    def capture(self) -> _BlockingModels:
-        return self
-
-    def resolve(self, route_id: str) -> _BlockingModelBinding:
-        if route_id != "default":
-            raise AssertionError(route_id)
-        return self.binding
-
-    def restore(
-        self,
-        payload: Mapping[str, JsonValue],
-        *,
-        route_id: str | None = None,
-    ) -> _BlockingModelBinding:
-        if route_id not in {None, "default"} or dict(payload) != self.binding.contract:
-            raise AssertionError("unexpected model snapshot")
+    def __call__(self) -> _BlockingModelBinding:
         return self.binding
 
 
@@ -1191,9 +1177,8 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
 
         async with Runtime.open(
             "default",
-            models=models,  # type: ignore[arg-type]
             storage=storage,
-            features=group,
+            features=model_features(models, group),
         ) as runtime:
             execution = await runtime.agents.get("default").start("TOP_SECRET_PROMPT")
             wait_task = asyncio.create_task(execution.wait())
@@ -1246,9 +1231,8 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
         if persistent:
             async with Runtime.open(
                 "default",
-                models=models,  # type: ignore[arg-type]
                 storage=RuntimeStorage.filesystem(storage_path),
-                features=group,
+                features=model_features(models, group),
             ) as reopened:
                 assert reopened.history is not None
                 page = await reopened.history.model_interactions(
@@ -1283,9 +1267,8 @@ def test_history_cursor_keeps_captured_identity_during_durable_completion(
 
         async with Runtime.open(
             "default",
-            models=models,  # type: ignore[arg-type]
             storage=storage,
-            features=group,
+            features=model_features(models, group),
         ) as runtime:
             execution = await runtime.agents.get("default").start("continue")
             wait_task = asyncio.create_task(execution.wait())
@@ -1381,9 +1364,8 @@ def test_public_content_mutation_does_not_change_live_or_archived_history(
 
         async with Runtime.open(
             "default",
-            models=models,  # type: ignore[arg-type]
             storage=storage,
-            features=group,
+            features=model_features(models, group),
         ) as runtime:
             execution = await runtime.agents.get("default").start("preserve content")
             wait_task = asyncio.create_task(execution.wait())
@@ -1485,9 +1467,9 @@ def test_history_refresh_survives_event_buffer_fallback_for_blocked_request(
 
         async with Runtime.open(
             "default",
-            metrics=metrics, models=models,  # type: ignore[arg-type]
+            metrics=metrics,   # type: ignore[arg-type]
             storage=RuntimeStorage.in_memory(),
-            features=group,
+            features=model_features(models, group),
         ) as runtime:
             execution = await runtime.agents.get("default").start("continue")
             wait_task = asyncio.create_task(execution.wait())

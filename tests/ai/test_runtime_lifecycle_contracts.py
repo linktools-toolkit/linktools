@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Runtime body and cleanup error precedence coverage."""
+from ._runtime_test_helpers import model_features
+from linktools.ai.model import create_model
 
 import asyncio
 from pathlib import Path
@@ -10,7 +12,7 @@ import pytest
 
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime import PromptLimits, RuntimeContext, RuntimeHistory, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime._runtime_service import _open_runtime
@@ -102,9 +104,8 @@ async def test_runtime_body_error_wins_over_cleanup_error(
         async with _open_runtime(
             "lifecycle",
             context=RuntimeContext(None),
-            models=ModelRegistry.openai(model="test-model"),
             storage=RuntimeStorage.in_memory(),
-            features=RuntimeFeatures("lifecycle", limits=PromptLimits()),
+            features=model_features(create_model(protocol='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
         ):
             raise ValueError("body secret")
 
@@ -125,9 +126,8 @@ async def test_runtime_body_error_wins_when_close_succeeds(
         async with _open_runtime(
             "lifecycle",
             context=RuntimeContext(None),
-            models=ModelRegistry.openai(model="test-model"),
             storage=RuntimeStorage.in_memory(),
-            features=RuntimeFeatures("lifecycle", limits=PromptLimits()),
+            features=model_features(create_model(protocol='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
         ):
             raise ValueError("body secret")
 
@@ -144,9 +144,8 @@ async def test_runtime_close_error_still_propagates_after_success(
         async with _open_runtime(
             "lifecycle",
             context=RuntimeContext(None),
-            models=ModelRegistry.openai(model="test-model"),
             storage=RuntimeStorage.in_memory(),
-            features=RuntimeFeatures("lifecycle", limits=PromptLimits()),
+            features=model_features(create_model(protocol='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
         ):
             pass
     assert raised.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
@@ -169,9 +168,8 @@ async def test_runtime_construction_error_wins_when_cleanup_fails(
         async with _open_runtime(
             "lifecycle",
             context=RuntimeContext(None),
-            models=ModelRegistry.openai(model="test-model"),
             storage=RuntimeStorage.in_memory(),
-            features=RuntimeFeatures("lifecycle", limits=PromptLimits()),
+            features=model_features(create_model(protocol='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
         ):
             pass
 
@@ -188,9 +186,8 @@ async def test_runtime_cancellation_wins_when_cleanup_fails(
         async with _open_runtime(
             "lifecycle",
             context=RuntimeContext(None),
-            models=ModelRegistry.openai(model="test-model"),
             storage=RuntimeStorage.in_memory(),
-            features=RuntimeFeatures("lifecycle", limits=PromptLimits()),
+            features=model_features(create_model(protocol='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
         ):
             raise asyncio.CancelledError
 
@@ -210,9 +207,8 @@ async def test_secondary_cleanup_log_excludes_business_payload(
         async with _open_runtime(
             "lifecycle",
             context=RuntimeContext(None),
-            models=ModelRegistry.openai(model="test-model"),
             storage=RuntimeStorage.in_memory(),
-            features=RuntimeFeatures("lifecycle", limits=PromptLimits()),
+            features=model_features(create_model(protocol='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
         ):
             raise ValueError("body secret")
 
@@ -329,7 +325,7 @@ async def test_compose_cleans_state_when_build_arguments_fail(
     with pytest.raises(RuntimeError, match="history reader construction failed"):
         await factory.compose_runtime_components(
             "lifecycle",
-            models=ModelRegistry.openai(model="test-model"),
+            features=model_features(create_model(protocol='openai', model="test-model")),
             storage=state,
         )
     assert state_owners[0].ready is False
@@ -357,7 +353,7 @@ async def test_compose_build_cleanup_preserves_construction_error(
     with pytest.raises(RuntimeError, match="build secret"):
         await factory.compose_runtime_components(
             "lifecycle",
-            models=ModelRegistry.openai(model="test-model"),
+            features=model_features(create_model(protocol='openai', model="test-model")),
             storage=state,
         )
 
@@ -388,7 +384,7 @@ async def test_compose_build_owns_state_after_transfer(
     with pytest.raises(RuntimeError, match="build failed"):
         await factory.compose_runtime_components(
             "lifecycle",
-            models=ModelRegistry.openai(model="test-model"),
+            features=model_features(create_model(protocol='openai', model="test-model")),
             storage=state,
         )
     assert close_calls == 1
@@ -469,7 +465,7 @@ async def test_build_abort_continues_after_input_cleanup_failure(
     with pytest.raises(RuntimeError, match="build failed"):
         await factory.compose_runtime_components(
             "lifecycle",
-            models=ModelRegistry.openai(model="test-model"),
+            features=model_features(create_model(protocol='openai', model="test-model")),
             storage=state,
         )
 
@@ -507,7 +503,7 @@ async def test_runtime_composition_defers_task_recovery_to_explicit_call(
     try:
         components = await factory.compose_runtime_components(
             "lifecycle",
-            models=ModelRegistry.openai(model="test-model"),
+            features=model_features(create_model(protocol='openai', model="test-model")),
             storage=state,
         )
 

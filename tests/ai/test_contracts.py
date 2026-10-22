@@ -25,7 +25,7 @@ from linktools.ai.core import (
     validate_tool_arguments,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
+from linktools.ai.model import ModelResolver, create_model
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime.state import RuntimeStoragePlan
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
@@ -186,12 +186,13 @@ def test_task_graph_exposes_deterministic_topological_order() -> None:
     assert shuffled.topological_order() == graph.topological_order()
 
 
-def test_model_registry_snapshot_is_instance_owned() -> None:
-    registry = ModelRegistry()
-    registry.register_openai("route", model="model")
-    snapshot = registry.capture()
+def test_model_resolver_is_instance_owned() -> None:
+    binding = create_model(protocol="openai", model="model")
+    sources = {"route": binding}
+    snapshot = ModelResolver(sources)
+    sources.clear()
     assert snapshot.resolve("route").model_identity == "openai:model"
-    assert snapshot.resolve("route").route_id == "route"
+    assert snapshot.resolve("route") is binding
 
 
 def test_runtime_storage_plan_rejects_an_invalid_domain() -> None:

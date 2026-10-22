@@ -3,6 +3,7 @@
 """Runtime automatic Metrics producer and fail-open regressions."""
 
 from __future__ import annotations
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from collections.abc import Mapping
@@ -61,27 +62,8 @@ class _TextModelBinding:
         return TestModel(custom_output_text="ok")
 
 
-class _TextModels:
-    def capture(self) -> _TextModels:
-        return self
-
-    def resolve(self, route_id: str) -> _TextModelBinding:
-        if route_id != "default":
-            raise AssertionError(route_id)
-        return _TextModelBinding()
-
-    def restore(
-        self,
-        payload: Mapping[str, JsonValue],
-        *,
-        route_id: str | None = None,
-    ) -> _TextModelBinding:
-        if (
-            route_id not in {None, "default"}
-            or dict(payload) != _TextModelBinding.contract
-        ):
-            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
-        return _TextModelBinding()
+class _TextModels(_TextModelBinding):
+    pass
 
 
 class _CaptureRecorder:
@@ -211,9 +193,9 @@ async def test_runtime_projects_model_agent_and_execution_metrics(tmp_path: Path
 
     async with Runtime.open(
         "default",
-        metrics=metrics, models=_TextModels(),  # type: ignore[arg-type]
+        metrics=metrics,   # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=_agent_group(),
+        features=model_features(_TextModels(), _agent_group()),
     ) as runtime:
         result = (await runtime.agents.get("default").run(secret, timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
@@ -258,9 +240,9 @@ async def test_runtime_metrics_backend_failure_does_not_change_execution_result(
 
     async with Runtime.open(
         "default",
-        metrics=metrics, models=_TextModels(),  # type: ignore[arg-type]
+        metrics=metrics,   # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=_agent_group(),
+        features=model_features(_TextModels(), _agent_group()),
     ) as runtime:
         result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
@@ -300,8 +282,7 @@ async def test_isolated_task_failure_keeps_results_events_and_metrics_consistent
 
     async with Runtime.open(
         "task-isolation-metrics",
-        metrics=metrics, features=features,
-        models=_TextModels(),  # type: ignore[arg-type]
+        metrics=metrics, features=model_features(_TextModels(), features),
         storage=RuntimeStorage.in_memory(),
     ) as runtime:
         run = await runtime.tasks.bind(failed_task, successful_task).start(
@@ -849,8 +830,8 @@ async def test_terminal_metric_cancellation_preserves_published_success_and_hist
     features = _agent_group()
     features.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
-        "terminal-order", metrics=metrics, models=_TextModels(), storage=RuntimeStorage.in_memory(),
-        features=features,
+        "terminal-order", metrics=metrics, storage=RuntimeStorage.in_memory(),
+        features=model_features(_TextModels(), features),
     ) as runtime:
         execution = await runtime.agents.get("default").start("hello")
         try:
@@ -924,8 +905,8 @@ async def test_pending_cancel_delivers_terminal_metric_in_caller_after_admission
 
     store = Store()
     async with Runtime.open(
-        "pending-cancel-metric", metrics=Metrics.from_store(store), models=_TextModels(), storage=RuntimeStorage.in_memory(),
-        features=_agent_group(),
+        "pending-cancel-metric", metrics=Metrics.from_store(store), storage=RuntimeStorage.in_memory(),
+        features=model_features(_TextModels(), _agent_group()),
     ) as runtime:
         starter = asyncio.create_task(runtime.agents.get("default").start("hello"))
         cancellation: asyncio.Task[object] | None = None

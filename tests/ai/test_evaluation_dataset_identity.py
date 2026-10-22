@@ -9,7 +9,7 @@ import pytest
 from linktools.ai.core import service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import CaseRef, CaseSpec, DatasetRef, DatasetSpec
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeStorage
 
 
@@ -26,7 +26,7 @@ async def test_dataset_capture_keys_preserve_structured_case_identity(tmp_path: 
         )
     )
     async with Runtime.open(
-        "dataset-identity", models=ModelRegistry(), storage=RuntimeStorage.filesystem(tmp_path),
+        "dataset-identity", storage=RuntimeStorage.filesystem(tmp_path),
         context=RuntimeContext(None, tenant_id=principal.tenant_id),
     ) as runtime:
         captures = []

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Local preview independence and Runtime-owned remote observation lifetimes."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -62,10 +63,10 @@ async def _runtimes(tmp_path, cache, *, finish_provider: asyncio.Event | None = 
     group.capability(ExecutionCapability(coordination=cache), scope="runtime")
     models = _Models(FunctionModel(stream_function=model))
     path = tmp_path / "state.db"
-    async with Runtime.open("stream-lifecycle", models=models, features=group,
+    async with Runtime.open("stream-lifecycle", features=model_features(models, group),
                             storage=RuntimeStorage.sqlite(path)) as owner:
         storage = RuntimeStorage.sqlite(path)
-        async with Runtime.open("stream-lifecycle", models=models, features=group, storage=storage) as reader:
+        async with Runtime.open("stream-lifecycle", features=model_features(models, group), storage=storage) as reader:
             execution = await owner.agents.get().start("question")
             try:
                 await asyncio.wait_for(entered.wait(), 5)
@@ -252,10 +253,10 @@ async def test_remote_watch_before_first_admission_receives_later_preview(tmp_pa
     group.capability(ExecutionCapability(coordination=cache), scope="runtime")
     models = _Models(FunctionModel(stream_function=model))
     path = tmp_path / "early.db"
-    async with Runtime.open("early-preview", models=models, features=group,
+    async with Runtime.open("early-preview", features=model_features(models, group),
                             storage=RuntimeStorage.sqlite(path)) as owner:
         reader_storage = RuntimeStorage.sqlite(path)
-        async with Runtime.open("early-preview", models=models, features=group,
+        async with Runtime.open("early-preview", features=model_features(models, group),
                                 storage=reader_storage) as reader:
             execution = await owner.agents.get().start("question")
             repository = reader._state.execution.executions

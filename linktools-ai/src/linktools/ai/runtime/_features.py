@@ -17,6 +17,7 @@ from pydantic_ai.tools import RunContext as PydanticRunContext
 from ..asset import AssetStoreReader
 from ..core import AuthorizationPolicy, ImmutableJsonMapping, JsonValue, PromptLimits
 from ..errors import AIError, ErrorCode
+from ..model import ModelBinding, ModelResolver
 from ..spec import (
     AgentSpec,
     AgentUsageLimits,
@@ -59,6 +60,7 @@ class RuntimeFeaturesCapture(Generic[AppT]):
     workspace: "Workspace | None"
     instructions: RepositoryInstructions
     _asset_reader: "AssetStoreReader | None" = field(repr=False, compare=False)
+    models: ModelResolver = field(default_factory=lambda: ModelResolver({}), repr=False, compare=False)
     sandbox: "Sandbox | None" = field(default=None, repr=False, compare=False)
     authorization: AuthorizationPolicy | None = field(default=None, repr=False, compare=False)
     limits: PromptLimits = field(default_factory=PromptLimits)
@@ -111,7 +113,7 @@ class RuntimeFeatures(Generic[AppT]):
 
     def __init__(
         self,
-        group_id: str,
+        group_id: str = "default",
         *,
         sandbox: "Sandbox | None" = None,
         authorization: AuthorizationPolicy | None = None,
@@ -134,6 +136,7 @@ class RuntimeFeatures(Generic[AppT]):
         self._workspace: Workspace | None = None
         self._sandbox = sandbox
         self._contributions: list[CapabilityContribution[AppT]] = []
+        self._models: dict[str, ModelBinding | Callable[[], ModelBinding]] = {}
 
     @property
     def id(self) -> str:
@@ -156,6 +159,14 @@ class RuntimeFeatures(Generic[AppT]):
     @property
     def sandbox(self) -> "Sandbox | None":
         return self._sandbox
+
+    def model(self, name: str, binding: ModelBinding | Callable[[], ModelBinding]) -> None:
+        """Declare a route; synchronous loaders run on first semantic use after capture."""
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("model route must be non-empty")
+        if inspect.iscoroutinefunction(binding):
+            raise TypeError("model loaders must be synchronous")
+        self._models[name] = binding
 
     def tool(
         self,
@@ -323,6 +334,7 @@ class RuntimeFeatures(Generic[AppT]):
     async def capture(self) -> "RuntimeFeaturesCapture[AppT]":
         """Capture registrations and declarations at one Asset revision."""
         authorization, limits = self._authorization, self._limits
+        models = ModelResolver(self._models)
         contributions = list(tuple(self._contributions))
         instruction_documents: list[RepositoryInstructionDocument] = []
         context: CapabilityLoadContext | None = None
@@ -345,6 +357,7 @@ class RuntimeFeatures(Generic[AppT]):
             self._workspace,
             RepositoryInstructions(tuple(instruction_documents)),
             asset_reader,
+            models=models,
             sandbox=self._sandbox,
             authorization=authorization,
             limits=limits,

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Task-owned Agents retain durable observation without Runtime opt-ins."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 
@@ -47,7 +48,7 @@ async def test_task_agent_trace_survives_terminal_release_and_reopen(tmp_path, d
     identities: list[str] = []
     storage = RuntimeStorage.sqlite(database)
     async with Runtime.open(
-        "task-agent-persistence", models=models, features=group, storage=storage,
+        "task-agent-persistence", features=model_features(models, group), storage=storage,
     ) as runtime:
         task = runtime.tasks.from_agent("answer", runtime.agents.get())
         graph_definition = TaskGraph("durable-agent", (TaskNode("answer", task=task, input=AgentTaskInput("question")),))
@@ -91,7 +92,7 @@ async def test_task_agent_trace_survives_terminal_release_and_reopen(tmp_path, d
             await waiting
     count = len(requests)
     async with Runtime.open(
-        "task-agent-persistence", models=models, features=group, storage=RuntimeStorage.sqlite(database),
+        "task-agent-persistence", features=model_features(models, group), storage=RuntimeStorage.sqlite(database),
     ) as reopened:
         for execution_id in identities:
             page = await reopened.history.model_interactions(execution_id, principal=reopened.default_principal)
@@ -129,11 +130,11 @@ async def test_delegated_guarantees_follow_frozen_parent_across_runtime(tmp_path
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "inherited-guarantees.db"
     original, delegated = RuntimeStorage.sqlite(database), RuntimeStorage.sqlite(database)
-    async with Runtime.open("inheritance", models=models, storage=original, features=capabilities(True)) as owner:
+    async with Runtime.open("inheritance", storage=original, features=model_features(models, capabilities(True))) as owner:
         root = await owner.agents.get().start("root", idempotency_key="root")
         try:
             await asyncio.wait_for(entered["root"].wait(), 5)
-            async with Runtime.open("inheritance", models=models, storage=delegated, features=capabilities(False)) as borrower:
+            async with Runtime.open("inheritance", storage=delegated, features=model_features(models, capabilities(False))) as borrower:
                 child_id = await _start_delegated_execution(borrower, borrower._state, root.execution_id, "child")
                 await asyncio.wait_for(entered["child"].wait(), 5)
                 grandchild_id = await _start_delegated_execution(borrower, borrower._state, child_id, "grandchild")
@@ -151,7 +152,7 @@ async def test_delegated_guarantees_follow_frozen_parent_across_runtime(tmp_path
         finally:
             release.set()
     reopened_storage = RuntimeStorage.sqlite(database)
-    async with Runtime.open("inheritance", models=models, storage=reopened_storage, features=capabilities(False)) as reopened:
+    async with Runtime.open("inheritance", storage=reopened_storage, features=model_features(models, capabilities(False))) as reopened:
         for execution_id in identities:
             record = await reopened._state.execution.executions.get(execution_id, tenant_id=reopened.tenant_id)
             assert record is not None

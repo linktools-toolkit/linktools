@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Runtime composition and ownership invariants."""
+from ._runtime_test_helpers import model_features
+from linktools.ai.model import create_model
 
 from linktools.ai.capability import TraceCapability
 import json
@@ -25,7 +27,7 @@ from linktools.ai.core import (
     Principal,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime import _factory as runtime_factory
 from linktools.ai.runtime._factory import compose_runtime_components
@@ -58,8 +60,7 @@ def test_runtime_runs_agents_and_tasks_when_mcp_client_is_unavailable(tmp_path: 
 
         from pydantic_ai.models.test import TestModel
         from linktools.ai.core import ExecutionStatus, TaskStatus
-        from linktools.ai.model import ModelRegistry
-        from linktools.ai.runtime import Runtime, RuntimeStorage
+        from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
         from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
 
         class OfflineModelBinding:
@@ -75,11 +76,11 @@ def test_runtime_runs_agents_and_tasks_when_mcp_client_is_unavailable(tmp_path: 
             return {"value": 42}
 
         async def main() -> None:
-            models = ModelRegistry()
-            models.register(OfflineModelBinding())
+            features = RuntimeFeatures()
+            features.model("default", OfflineModelBinding())
             task = Task("local.answer", answer, effect_policy="none")
             async with Runtime.open(
-                "without-mcp-client", models=models, storage=RuntimeStorage.in_memory(),
+                "without-mcp-client", features=features, storage=RuntimeStorage.in_memory(),
             ) as runtime:
                 agent_result = (await runtime.agents.get("default").run(
                     "Answer offline", timeout_seconds=10,
@@ -191,9 +192,8 @@ async def test_runtime_does_not_close_borrowed_asset_store(tmp_path: Path) -> No
     group.capability(group_assets, scope="runtime")
     components = await compose_runtime_components(
         "workspace",
-        models=ModelRegistry.openai(model="gpt-test"),
         storage=RuntimeStorage.in_memory(),
-        features=group,
+        features=model_features(create_model(protocol='openai', model="gpt-test"), group),
     )
 
     await components.close_callback()
@@ -228,9 +228,8 @@ async def test_runtime_rejects_source_change_during_assembly(
             asset_features.capability(AssetCapability(store), scope="runtime")
             await compose_runtime_components(
                 "workspace",
-                models=RuntimeUsageModels(),  # type: ignore[arg-type]
                 storage=RuntimeStorage.in_memory(),
-                features=asset_features,
+                features=model_features(RuntimeUsageModels(), asset_features),
             )
 
         assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
@@ -312,9 +311,8 @@ async def test_runtime_persists_model_usage_through_history_views() -> None:
     application.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "default",
-        models=RuntimeUsageModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=application,
+        features=model_features(RuntimeUsageModels(), application),
     ) as runtime:
         result = (await runtime.agents.get("default").run(
             "hello",
@@ -356,5 +354,5 @@ async def test_minimal_runtime_example_returns_public_wait_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     example = runpy.run_path(str(Path(__file__).resolve().parents[2] / "examples" / "minimal_runtime.py"))
-    monkeypatch.setattr(ModelRegistry, "openai", lambda **kwargs: RuntimeUsageModels())
+    monkeypatch.setitem(example["run"].__globals__, "create_model", lambda **kwargs: RuntimeUsageModels())
     assert await example["run"](tmp_path) == {"text": "done"}

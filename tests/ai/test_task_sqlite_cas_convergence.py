@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Regression coverage for TaskGraph optimistic CAS convergence."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.runtime.state import RuntimeState
 import asyncio
@@ -81,26 +82,8 @@ class _TaskTestModelBinding:
         return TestModel()
 
 
-class _TaskTestModels:
-    def capture(self) -> "_TaskTestModels":
-        return self
-
-    def resolve(self, route_id: str) -> _TaskTestModelBinding:
-        if route_id != "default":
-            raise AssertionError(f"unexpected model route: {route_id}")
-        return _TaskTestModelBinding()
-
-    def restore(
-        self,
-        payload: dict[str, JsonValue],
-        *,
-        route_id: str | None = None,
-    ) -> _TaskTestModelBinding:
-        if route_id not in {None, "default"}:
-            raise AssertionError(f"unexpected model route: {route_id}")
-        if dict(payload) != _TaskTestModelBinding.contract:
-            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
-        return _TaskTestModelBinding()
+class _TaskTestModels(_TaskTestModelBinding):
+    pass
 
 
 def _agent_group() -> RuntimeFeatures[object]:
@@ -247,7 +230,7 @@ async def test_sqlite_graph_state_keeps_one_snapshot_during_expansion(
     try:
         async with Runtime.open(
             "sqlite-dynamic-state",
-            models=_TaskTestModels(),  # type: ignore[arg-type]
+            features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
             storage=state,
         ) as runtime:
             repository = runtime._state.task.tasks
@@ -420,9 +403,8 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
 
     async with Runtime.open(
         "sqlite-dynamic-watch",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=storage,
-        features=_agent_group(),
+        features=model_features(_TaskTestModels(), _agent_group()),
     ) as runtime:
         agent_task = runtime.tasks.from_agent(
             "sqlite.watch.agent",
@@ -609,9 +591,8 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
     )
     async with Runtime.open(
         "sqlite-dynamic-watch",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=reopened_storage,
-        features=_agent_group(),
+        features=model_features(_TaskTestModels(), _agent_group()),
     ) as runtime:
         agent_task = runtime.tasks.from_agent(
             "sqlite.watch.agent",
@@ -666,9 +647,8 @@ async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
     )
     async with Runtime.open(
         "default",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=state,
-        features=_agent_group(),
+        features=model_features(_TaskTestModels(), _agent_group()),
     ) as runtime:
         task = _agent_task(runtime)
         engine = runtime.tasks.bind(task)
@@ -752,9 +732,8 @@ async def test_sqlite_public_runtime_task_failure_blocks_dependency(
     )
     async with Runtime.open(
         "default",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=state,
-        features=_agent_group(),
+        features=model_features(_TaskTestModels(), _agent_group()),
     ) as runtime:
         task = _agent_task(runtime)
         engine = runtime.tasks.bind(task)
@@ -816,9 +795,8 @@ async def test_sqlite_public_runtime_task_wait_timeout_and_cancel(
     )
     async with Runtime.open(
         "default",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=state,
-        features=_agent_group(),
+        features=model_features(_TaskTestModels(), _agent_group()),
     ) as runtime:
         task = _agent_task(runtime)
         engine = runtime.tasks.bind(task)

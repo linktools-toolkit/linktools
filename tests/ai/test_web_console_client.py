@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Deterministic Web client stream and projection invariants, without a model."""
+from ._runtime_test_helpers import model_features
 
 import shutil
 import subprocess
@@ -156,7 +157,7 @@ assert.equal(nodes['settings-content'].children[1].children.find(item=>item.tag=
 async def test_unknown_thinking_control_preserves_custom_binding_request(tmp_path: Path) -> None:
     import json
     from pydantic_ai.models.test import TestModel
-    from linktools.ai.model import ModelRegistry
+
     from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
     from linktools.ai.web import create_app
     from .test_model_client_request_capture import _ModelBinding
@@ -171,13 +172,12 @@ async def test_unknown_thinking_control_preserves_custom_binding_request(tmp_pat
     assert result.returncode == 0, result.stderr
     payload = json.loads(next(line.removeprefix("THINKING_REQUEST=") for line in result.stdout.splitlines()
                               if line.startswith("THINKING_REQUEST=")))
-    models = ModelRegistry()
-    models.register(_ModelBinding(TestModel(custom_output_text="ok", profile={
+    models = _ModelBinding(TestModel(custom_output_text="ok", profile={
         "supports_thinking": True, "thinking_always_enabled": True,
-    })))
+    }))
     features = RuntimeFeatures("custom")
     features.agent("default", model="default", allow_tools=())
-    async with Runtime.open("custom", models=models, features=features,
+    async with Runtime.open("custom", features=model_features(models, features),
                             storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         await runtime.agents.get("default").create_session("a")
         async with _client(create_app(runtime=runtime)) as http:

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Shared budgets keep their scope across public execution and graph APIs."""
+from ._runtime_test_helpers import model_features
 
 from pathlib import Path
 
@@ -27,8 +28,8 @@ async def test_execution_retries_and_default_forks_share_scope_but_explicit_fork
     capabilities.capability(TraceCapability(), scope="runtime")
     features = capabilities
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Runtime.open("budget-lineage", models=RuntimeUsageModels(),
-                            storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Runtime.open("budget-lineage",
+                            storage=RuntimeStorage.in_memory(), features=model_features(RuntimeUsageModels(), features)) as runtime:
         agent = runtime.agents.get()
         root = await agent.start("root", budget=RunBudget(model_requests=10), idempotency_key="budget-root")
         assert (await root.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -62,8 +63,8 @@ async def test_execution_retries_and_default_forks_share_scope_but_explicit_fork
 async def test_session_new_turns_have_independent_budgets() -> None:
     features = _capabilities()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Runtime.open("budget-session", models=RuntimeUsageModels(),
-                            storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Runtime.open("budget-session",
+                            storage=RuntimeStorage.in_memory(), features=model_features(RuntimeUsageModels(), features)) as runtime:
         session = runtime.agents.get().session("conversation")
         first = await session.start("first", budget=RunBudget(model_requests=1))
         assert (await first.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -84,8 +85,8 @@ async def test_graph_budget_is_read_only_during_description_and_shared_by_mixed_
         return context.node_id
 
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("budget-graph", models=RuntimeUsageModels(), storage=storage,
-                            features=_capabilities()) as runtime:
+    async with Runtime.open("budget-graph", storage=storage,
+                            features=model_features(RuntimeUsageModels(), _capabilities())) as runtime:
         agent_task = runtime.tasks.from_agent("budget.agent", runtime.agents.get())
         callable_task = Task("budget.callable", ordinary, effect_policy="none")
         engine = runtime.tasks.bind(agent_task, callable_task)
@@ -121,8 +122,8 @@ async def test_zero_budget_stops_model_before_output_and_subagent_inherits_spent
 
     group = _capabilities()
     group.agent("child", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open("budget-child", models=RuntimeUsageModels(),
-                            storage=RuntimeStorage.in_memory(), features=group) as runtime:
+    async with Runtime.open("budget-child",
+                            storage=RuntimeStorage.in_memory(), features=model_features(RuntimeUsageModels(), group)) as runtime:
         denied = await runtime.agents.get().start("blocked", budget=RunBudget(model_requests=0))
         result = (await denied.wait()).result
         assert result.status is ExecutionStatus.FAILED
@@ -154,8 +155,8 @@ async def test_zero_budget_stops_model_before_output_and_subagent_inherits_spent
 async def test_graph_siblings_and_expanded_nodes_share_actual_model_admission(expanded: bool) -> None:
     from linktools.ai.task import TaskExpander, TaskExpansionContext
 
-    async with Runtime.open("budget-concurrency", models=RuntimeUsageModels(),
-                            storage=RuntimeStorage.in_memory(), features=_capabilities()) as runtime:
+    async with Runtime.open("budget-concurrency",
+                            storage=RuntimeStorage.in_memory(), features=model_features(RuntimeUsageModels(), _capabilities())) as runtime:
         task = runtime.tasks.from_agent("budget.concurrent", runtime.agents.get())
 
         def expand(context: TaskExpansionContext) -> tuple[TaskNode, ...]:
@@ -189,16 +190,16 @@ async def test_budget_scope_survives_restart_and_missing_inherited_scope_fails_c
 
     features = _capabilities()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Runtime.open("budget-reopen", models=RuntimeUsageModels(),
-                            storage=RuntimeStorage.filesystem(tmp_path), features=features) as runtime:
+    async with Runtime.open("budget-reopen",
+                            storage=RuntimeStorage.filesystem(tmp_path), features=model_features(RuntimeUsageModels(), features)) as runtime:
         root = await runtime.agents.get().start("first", budget=RunBudget(model_requests=2))
         assert (await root.wait()).result.status is ExecutionStatus.SUCCEEDED
         execution_id = root.execution_id
         before = await root.budget_usage()
 
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("budget-reopen", models=RuntimeUsageModels(), storage=storage,
-                            features=features) as runtime:
+    async with Runtime.open("budget-reopen", storage=storage,
+                            features=model_features(RuntimeUsageModels(), features)) as runtime:
         restored = await runtime.executions.get(execution_id)
         assert await restored.budget_usage() == before
         retried = await restored.retry("second")

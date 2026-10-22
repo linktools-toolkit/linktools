@@ -3,6 +3,7 @@
 """Ordinary Runtime capabilities share atomic publication without sharing runs."""
 
 from __future__ import annotations
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from collections.abc import AsyncIterator, Hashable, Mapping, Sequence
@@ -284,7 +285,7 @@ async def _opened(
             capability.id = None
         features.capability(capability, id=id, revision=1, scope=scope)
     try:
-        async with Runtime.open("atomic-capabilities", storage=storage, features=features, models=_Models(_UsageFunctionModel(model)), metrics=metrics) as runtime:
+        async with Runtime.open("atomic-capabilities", storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=metrics) as runtime:
             opened = _Opened(runtime, probe, templates, release, ready)
             try:
                 yield opened

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Shared budgets gate dispatched model and tool effects, including compaction."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.runtime.state import RuntimeState
 import asyncio
@@ -227,7 +228,7 @@ async def test_expired_graph_budget_blocks_callable_without_unknown_effect(effec
         calls.append(context.node_id)
         return "done"
 
-    async with Runtime.open("budget-deadline", models=RuntimeUsageModels(),
+    async with Runtime.open("budget-deadline", features=model_features(RuntimeUsageModels()),
                             storage=RuntimeStorage.in_memory()) as runtime:
         task = Task("deadline.task", handler, effect_policy=effect_policy)
         engine = runtime.tasks.bind(task)
@@ -297,7 +298,7 @@ async def test_custom_runner_is_gated_before_dispatch(dimension: str) -> None:
     from ._runtime_test_helpers import RuntimeUsageModels
     from .test_task_mixed_node_reliability import _ExecutionBackedContractRunner
 
-    async with Runtime.open("runner-budget", models=RuntimeUsageModels(),
+    async with Runtime.open("runner-budget", features=model_features(RuntimeUsageModels()),
                             storage=RuntimeStorage.in_memory()) as runtime:
         runner = _ExecutionBackedContractRunner(runtime._execution_service)
         task = Task.from_runner("budget.runner", runner, contract={
@@ -328,7 +329,7 @@ async def test_failed_budget_preparation_does_not_leak_scope_into_unbudgeted_gra
         calls.append(context.node_id)
         return "done"
 
-    async with Runtime.open("budget-prepare", models=RuntimeUsageModels(),
+    async with Runtime.open("budget-prepare", features=model_features(RuntimeUsageModels()),
                             storage=RuntimeStorage.in_memory()) as runtime:
         task = Task("prepare.task", handler, effect_policy="none")
         engine = runtime.tasks.bind(task)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Authorized execution metadata exposes bound identities without loading content."""
+from ._runtime_test_helpers import model_features
 
 from collections import Counter
 from dataclasses import FrozenInstanceError, asdict, replace
@@ -192,6 +193,7 @@ async def test_graph_agent_refs_preserve_derived_binding_after_catalog_change_an
         return "unused"
 
     group.tool(business, revision=3)
+    group.model("default", RuntimeUsageModels())
     capture = await group.capture()
     capture = replace(capture, contributions=(*capture.contributions,
         CapabilityContribution.from_declaration(SkillDefinition(SkillSpec("guide", "Private guide", revision=2)))))
@@ -201,7 +203,7 @@ async def test_graph_agent_refs_preserve_derived_binding_after_catalog_change_an
         return {"prepared": True}
 
     application_task = Task("bound-ref-prepare", prepare, effect_policy="none")
-    async with Runtime.open("bound-refs", models=RuntimeUsageModels(),
+    async with Runtime.open("bound-refs",
                             storage=RuntimeStorage.sqlite(path), features=capture) as runtime:
         derived = runtime.agents.get("root").derive(allow_tools=())
         task = runtime.tasks.from_agent("bound-ref-agent", derived)
@@ -224,8 +226,8 @@ async def test_graph_agent_refs_preserve_derived_binding_after_catalog_change_an
 
     changed = RuntimeFeatures("bound-ref-test")
     changed.agent("root", revision=2, allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open("bound-refs", models=RuntimeUsageModels(),
-                            storage=RuntimeStorage.sqlite(path), features=changed) as current:
+    async with Runtime.open("bound-refs",
+                            storage=RuntimeStorage.sqlite(path), features=model_features(RuntimeUsageModels(), changed)) as current:
         assert current.agents.get("root").derive(model="default").compiled.skill_definitions == ()
         assert (await current.history.inspect_execution(execution_id, principal=principal)).capability_refs == info.capability_refs
     async with RuntimeHistory.open("bound-refs", storage=RuntimeStorage.sqlite(path)) as history:

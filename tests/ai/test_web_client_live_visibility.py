@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Completed client exchanges are readable before their execution finishes."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.core import CommitPolicy
 from linktools.ai.capability import TraceCapability
@@ -27,7 +28,7 @@ from linktools.ai.runtime.state._step_archive import (
 )
 from linktools.ai.web import create_app
 
-from .test_model_client_request_capture import _registry, _response
+from .test_model_client_request_capture import _binding, _response
 from .test_model_client_response_capture import _DONE, _Stream
 from .test_web_console_viewers import _client
 
@@ -72,15 +73,15 @@ async def test_web_client_live_visibility_follows_completed_request_commit(
         await release_tool.wait()
         return "tool finished"
 
-    models, clients = _registry(monkeypatch, handler)
+    models, clients = _binding(monkeypatch, handler)
     storage = RuntimeStorage.sqlite(tmp_path / "state.db")
     group = RuntimeFeatures[None]("web-client-live")
     group.tool(wait_for_release, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("wait_for_release",))
     group.capability(TraceCapability(record_http_bodies=True, storage=storage.plan.route(RuntimeDomain.TRACE), commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=3.0)), scope="runtime")
     async with Runtime.open(
-        "web-client-live", models=models, storage=storage,
-        features=group,
+        "web-client-live", storage=storage,
+        features=model_features(models, group),
     ) as runtime:
         commit = runtime._state.run_store.commit_captured_execution_projection
 

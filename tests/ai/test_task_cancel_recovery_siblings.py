@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Whole-graph cancellation still reaches live siblings of unknown effects."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from pathlib import Path
@@ -58,9 +59,8 @@ async def test_graph_cancel_quiesces_active_agent_sibling_when_an_effect_is_unkn
     try:
         async with Runtime.open(
             "cancel-unknown-sibling",
-            models=_TaskTestModels(),
             storage=storage,
-            features=group,
+            features=model_features(_TaskTestModels(), group),
         ) as runtime:
             unknown_task = runtime.tasks.from_agent(
                 "review.unknown", runtime.agents.get("unknown")

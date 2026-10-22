@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Pending turns keep one local owner until their canonical terminal commit."""
+from ._runtime_test_helpers import model_features
 
 from ._runtime_test_helpers import workspace_features
 
@@ -39,7 +40,7 @@ async def test_pending_session_commits_once_and_retains_canonical_replay(
     group.agent('default', model='default', allow_tools=())
     database = tmp_path / 'state.db'
     storage = RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    async with Runtime.open('pending', storage=storage, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
+    async with Runtime.open('pending', storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         original = SqlStorageContext.run_mutation
         commits = []
@@ -88,7 +89,7 @@ async def test_pending_session_commits_once_and_retains_canonical_replay(
         assert [part.content for message in calls[-1] for part in message.parts if isinstance(part, UserPromptPart)] == ['first', 'second']
         assert len(commits) == 2
         assert commits[0] == commits[1]
-    async with Runtime.open('pending', storage=RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)), models=_Models(_UsageFunctionModel(model)), features=group) as reopened:
+    async with Runtime.open('pending', storage=RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)), features=model_features(_Models(_UsageFunctionModel(model)), group)) as reopened:
         replay = await reopened.agents.get().session('session').start('first', idempotency_key='first')
         assert (await replay.wait()).result.output == {'text': 'answer'}
         assert len(calls) == 2
@@ -116,7 +117,7 @@ async def test_actual_effect_promotes_before_invocation_but_read_only_tool_stays
     group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)), scope="runtime")
     group.tool(lookup, effect_policy=effect_policy)
     group.agent('default', model='default', allow_tools=('lookup',))
-    async with Runtime.open('pending-tool', storage=state, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
+    async with Runtime.open('pending-tool', storage=state, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         original = SqlStorageContext.run_mutation
         commits = []
@@ -151,7 +152,7 @@ async def test_pending_cancel_promotes_and_quiesces_before_cancelled(tmp_path: P
     group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    async with Runtime.open('pending-cancel', storage=state, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
+    async with Runtime.open('pending-cancel', storage=state, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question')
         await asyncio.wait_for(entered.wait(), 5)
@@ -178,7 +179,7 @@ async def test_pending_watch_observes_progress_and_confirmed_terminal(tmp_path: 
     group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    async with Runtime.open('pending-watch', storage=state, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
+    async with Runtime.open('pending-watch', storage=state, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question')
         await asyncio.wait_for(entered.wait(), 5)
@@ -217,7 +218,7 @@ async def test_pending_approval_promotes_before_persisting_frontier(tmp_path: Pa
     group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)), scope="runtime")
     group.agent('default', model='default', allow_tools=('read_file',))
     state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    async with Runtime.open('pending-approval', storage=state, models=_ToolModels(), features=group) as runtime:
+    async with Runtime.open('pending-approval', storage=state, features=model_features(_ToolModels(), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('read a file')
         record = None
@@ -241,7 +242,7 @@ async def test_pending_sessionless_agent_commits_once(tmp_path: Path, monkeypatc
         assert commits == []
         return ModelResponse(parts=[TextPart('answer')])
     state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    async with Runtime.open('standalone-pending', storage=state, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
+    async with Runtime.open('standalone-pending', storage=state, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         original = SqlStorageContext.run_mutation
         async def count(context, callback, **kwargs):
             result = await original(context, callback, **kwargs)
@@ -267,7 +268,7 @@ async def test_pending_session_force_close_promotes_before_closing(tmp_path: Pat
     group = RuntimeFeatures('close-pending')
     group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)), scope="runtime")
     group.agent('default', model='default', allow_tools=())
-    async with Runtime.open('close-pending', storage=RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)), models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
+    async with Runtime.open('close-pending', storage=RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)), features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question')
         await asyncio.wait_for(entered.wait(), 5)
@@ -291,7 +292,7 @@ async def test_pending_unknown_commit_reconciles_without_replaying_model_or_comm
         calls.append(messages)
         return ModelResponse(parts=[TextPart('answer')])
     state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    async with Runtime.open('unknown-pending', storage=state, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
+    async with Runtime.open('unknown-pending', storage=state, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         storage_group = runtime._state.execution.executions.state_store.storage_group
         original_mutate = type(storage_group).mutate
@@ -341,7 +342,7 @@ async def test_pending_confirmed_rollback_releases_session_without_fabricating_c
     async def model(messages, info):
         return ModelResponse(parts=[TextPart('answer')])
     state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    context = Runtime.open('rollback-pending', storage=state, models=_Models(_UsageFunctionModel(model)), features=group)
+    context = Runtime.open('rollback-pending', storage=state, features=model_features(_Models(_UsageFunctionModel(model)), group))
     runtime = await context.__aenter__()
     try:
         session = await runtime.agents.get().create_session('session')

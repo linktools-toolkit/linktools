@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Trace observation batching is per run and never weakens explicit barriers."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.runtime.state import RuntimeState
 import asyncio
@@ -95,8 +96,7 @@ async def test_runtime_binds_trace_batch_options_before_model_work(options, expe
     feature = TraceCapability(commit=CommitPolicy.batch(buffer=buffer, **options))
     storage = RuntimeStorage.in_memory()
     async with Runtime.open(
-        "trace-options", features=_features(feature), storage=storage,
-        models=_FeatureModels(_FeatureFunctionModel(model)),
+        "trace-options", features=model_features(_FeatureModels(_FeatureFunctionModel(model)), _features(feature)), storage=storage,
     ) as runtime:
         execution = await runtime.agents.get().start("question")
         try:
@@ -206,8 +206,7 @@ async def test_trace_route_cache_does_not_supply_implicit_write_buffer():
 
     feature = TraceCapability(storage=StorageRoute.memory(cache=ReadCache(max_bytes=65536)))
     async with Runtime.open(
-        "trace-hot-cache", features=_features(feature), storage=RuntimeStorage.in_memory(),
-        models=_FeatureModels(),
+        "trace-hot-cache", features=model_features(_FeatureModels(), _features(feature)), storage=RuntimeStorage.in_memory(),
     ) as runtime:
         execution = await runtime.agents.get().start("question")
         assert (await execution.wait(timeout_seconds=5)).result is not None
@@ -239,15 +238,13 @@ async def test_shared_trace_capability_keeps_runtime_lifetimes_independent():
         return ModelResponse(parts=[TextPart("second")])
 
     async with Runtime.open(
-        "shared-trace", features=_features(feature), storage=RuntimeStorage.in_memory(),
-        models=_FeatureModels(_FeatureFunctionModel(blocked)),
+        "shared-trace", features=model_features(_FeatureModels(_FeatureFunctionModel(blocked)), _features(feature)), storage=RuntimeStorage.in_memory(),
     ) as second:
         pending = await second.agents.get().start("second")
         try:
             await asyncio.wait_for(entered.wait(), 2)
             async with Runtime.open(
-                "shared-trace", features=_features(feature), storage=RuntimeStorage.in_memory(),
-                models=_FeatureModels(),
+                "shared-trace", features=model_features(_FeatureModels(), _features(feature)), storage=RuntimeStorage.in_memory(),
             ) as first:
                 execution = await first.agents.get().start("first")
                 assert (await execution.wait(timeout_seconds=5)).result is not None

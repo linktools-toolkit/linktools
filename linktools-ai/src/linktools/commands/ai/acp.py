@@ -11,7 +11,7 @@ from linktools.cli import BaseCommand, CommandError
 from ._common import (
     _add_local_runtime_arguments,
     _load_workspace,
-    _local_runtime_models,
+    _local_runtime_model,
     _open_local_runtime,
     _run_async,
 )
@@ -35,7 +35,7 @@ class Command(BaseCommand):
 
             async with _open_local_runtime(
                 workspace,
-                models=_local_runtime_models(workspace, args),
+                model=_local_runtime_model(workspace, args),
             ) as runtime:
                 await serve_stdio(
                     ACPAgent(

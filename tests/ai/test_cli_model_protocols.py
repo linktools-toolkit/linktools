@@ -13,7 +13,7 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models import ModelRequestParameters
 
 from linktools.ai.workspace import Workspace
-from linktools.commands.ai._common import _local_model_options, _local_runtime_models
+from linktools.commands.ai._common import _local_model_options, _local_runtime_model
 from linktools.commands.ai.run import command as run_command
 from linktools.commands.ai.acp import command as acp_command
 from linktools.commands.ai.web import command as web_command
@@ -38,7 +38,7 @@ def test_cli_protocol_configuration_round_trip(monkeypatch, tmp_path, command, a
     options = _local_model_options(workspace, args)
     assert options == {"api": api, "model": f"{prefix.lower()}-model",
                        "api_key": f"{prefix.lower()}-fixture-key", "base_url": f"https://{prefix.lower()}.invalid/v1"}
-    binding = _local_runtime_models(workspace, args).capture().resolve("default")
+    binding = _local_runtime_model(workspace, args)
     assert binding.contract.get("api", "openai") == api
     assert "fixture-key" not in json.dumps(binding.contract)
     explicit = command.create_parser().parse_args(arguments + ["--model-api", "anthropic",
@@ -74,7 +74,7 @@ async def test_cli_configuration_invokes_native_protocol_offline(monkeypatch, tm
     options = _local_model_options(Workspace(tmp_path, {}), args)
     assert options["base_url"] == base_url
     assert options["api_key"] == "fixture-key"
-    binding = _local_runtime_models(Workspace(tmp_path, {}), args).capture().resolve("default")
+    binding = _local_runtime_model(Workspace(tmp_path, {}), args)
     async with binding.materialize() as model:
         result = await model.request([ModelRequest(parts=[UserPromptPart("hello")])], {"max_tokens": 128}, ModelRequestParameters())
     assert result.parts[0].content == "answer"
@@ -113,7 +113,7 @@ else:
 def test_protocol_cache_selection_does_not_reuse_openai_connection(monkeypatch, tmp_path):
     config = run_command.environ.build_config("cli-protocol-cache", "LINKTOOLS_")
     monkeypatch.setattr(run_command.environ, "config", config)
-    config.set("AI_MODEL_API", "anthropic")
+    config.set("MODEL_API", "anthropic")
     config.set("OPENAI_MODEL", "wrong-model")
     config.set("OPENAI_BASE_URL", "https://wrong.invalid/v1")
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
@@ -130,7 +130,7 @@ def test_invalid_workspace_protocol_fails_before_model_assembly(tmp_path, api):
     from linktools.ai.errors import AIError, ErrorCode
     from argparse import Namespace
     with pytest.raises(AIError) as raised:
-        _local_runtime_models(Workspace(tmp_path, {"model_api": api}),
+        _local_runtime_model(Workspace(tmp_path, {"model_api": api}),
                               Namespace(model_api=None, model="fixture", base_url=None, api_key=None))
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
 
@@ -143,15 +143,15 @@ def test_cli_standard_config_sources_preserve_protocol_fields(tmp_path, api, pre
     home.mkdir()
     project = tmp_path / "project"
     project.mkdir()
-    values = {"AI_MODEL_API": api, f"{prefix}_MODEL": "source-model",
+    values = {"MODEL_API": api, f"{prefix}_MODEL": "source-model",
               f"{prefix}_BASE_URL": "https://source.invalid", f"{prefix}_API_KEY": "source-fixture-key"}
     environment = {key: value for key, value in os.environ.items()
-                   if not key.startswith(("OPENAI_", "ANTHROPIC_", "LINKTOOLS_")) and key != "AI_MODEL_API"}
+                   if not key.startswith(("OPENAI_", "ANTHROPIC_", "LINKTOOLS_")) and key != "MODEL_API"}
     environment["HOME"] = str(home)
     if source == "profile":
         (home / ".linktools").mkdir()
         (home / ".linktools" / "linktools.json").write_text(json.dumps({"config": {
-            "AI_MODEL_API": "openai", f"{prefix}_MODEL": "global-model"}}))
+            "MODEL_API": "openai", f"{prefix}_MODEL": "global-model"}}))
         (project / ".linktools.json").write_text(json.dumps({"config": values}))
         # The existing profile source precedes prefixed process environment.
         environment[f"LINKTOOLS_{prefix}_MODEL"] = "environment-model"
@@ -167,19 +167,19 @@ import json, sys
 from pathlib import Path
 from linktools.core import environ
 from linktools.ai.workspace import Workspace
-from linktools.commands.ai._common import _local_runtime_models
+from linktools.commands.ai._common import _local_runtime_model
 from linktools.commands.ai.run import command as run
 from linktools.commands.ai.acp import command as acp
 from linktools.commands.ai.web import command as web
 api, prefix, source = sys.argv[1:]
-environ.config.persist_many({"AI_MODEL_API": api if source == "cache" else "openai",
+environ.config.persist_many({"MODEL_API": api if source == "cache" else "openai",
     prefix + "_MODEL": "source-model" if source == "cache" else "cached-model",
     prefix + "_BASE_URL": "https://source.invalid" if source == "cache" else "https://cached.invalid"})
 before = set(environ.config.persisted_keys())
 workspace = Workspace(Path.cwd(), {"model": "workspace-model"})
 for command, arguments in ((run, ["hello"]), (acp, []), (web, [])):
     args = command.create_parser().parse_args(arguments)
-    binding = _local_runtime_models(workspace, args).capture().resolve("default")
+    binding = _local_runtime_model(workspace, args)
     assert binding.contract.get("api", "openai") == api
     assert binding.model_identity == binding.provider + ":source-model"
     assert binding.base_url == "https://source.invalid"
@@ -187,12 +187,12 @@ for command, arguments in ((run, ["hello"]), (acp, []), (web, [])):
     assert "source-fixture-key" not in json.dumps(binding.contract)
     explicit = command.create_parser().parse_args(arguments + ["--model-api", api, "--model", "cli-model",
         "--base-url", "https://cli.invalid", "--api-key", "cli-fixture-key"])
-    overridden = _local_runtime_models(workspace, explicit).capture().resolve("default")
+    overridden = _local_runtime_model(workspace, explicit)
     assert overridden.model_identity == overridden.provider + ":cli-model"
     assert overridden.base_url == "https://cli.invalid"
     assert overridden.api_key == "cli-fixture-key"
     assert set(environ.config.persisted_keys()) == before
-    again = _local_runtime_models(workspace, args).capture().resolve("default")
+    again = _local_runtime_model(workspace, args)
     assert again.api_key == "source-fixture-key"
     assert again.model_identity == binding.model_identity
 assert not any("API_KEY" in key for key in environ.config.persisted_keys())

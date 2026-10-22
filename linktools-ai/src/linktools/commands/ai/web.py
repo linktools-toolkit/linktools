@@ -11,7 +11,7 @@ from linktools.cli import BaseCommand, CommandError
 from linktools.core import environ
 from ._common import (
     _add_local_runtime_arguments, _load_workspace, _local_metrics,
-    _local_runtime_assets, _local_models, _local_model_options,
+    _local_runtime_assets, _local_model, _local_model_options,
     _local_runtime_storage, _run_async,
 )
 
@@ -46,14 +46,14 @@ class Command(BaseCommand):
             from linktools.ai.runtime import Runtime
 
             model_options = _local_model_options(workspace, args)
-            models = _local_models(workspace, **model_options)
-            model_binding = models.capture().resolve("default")
+            model_binding = _local_model(workspace, **model_options)
             model_contract = model_binding.contract
             async with AsyncExitStack() as stack:
                 assets = _local_runtime_assets(workspace)
                 await assets.initialize()
                 stack.push_async_callback(assets.close)
                 features = RuntimeFeatures("workspace")
+                features.model("default", model_binding)
                 features.capability(AssetCapability(assets))
                 features.capability(WorkspaceCapability(workspace))
                 features.capability(ExecutionCapability(retain_history=True))
@@ -66,7 +66,7 @@ class Command(BaseCommand):
                     declarations.insert(0, {"kind": "agent", "id": "default", "revision": 1})
                 runtime = await stack.enter_async_context(Runtime.open(
                     "default", storage=_local_runtime_storage(workspace),
-                    models=models, features=capture, metrics=metrics,
+                    features=capture, metrics=metrics,
                 ))
                 status = {
                     "workspace": str(workspace.root),

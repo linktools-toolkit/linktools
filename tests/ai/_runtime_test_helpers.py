@@ -3,7 +3,7 @@
 """Shared helpers for Runtime tests and persistence fixtures."""
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any, TypeVar
 
@@ -23,8 +23,8 @@ from pydantic_ai.usage import RequestUsage, RunUsage
 from linktools.ai.asset import AssetStore
 from linktools.ai.capability import AssetCapability, WorkspaceCapability, tool_metadata
 from linktools.ai.runtime import RuntimeFeatures
+from linktools.ai.model import ModelBinding
 from linktools.ai.core import JsonValue
-from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import TraceCapability, CheckpointCapability
 from linktools.ai.runtime._tool_boundary import ManagedToolDescriptor
 from linktools.ai.runtime.state._contracts import StoredUserInput
@@ -32,6 +32,19 @@ from linktools.ai.storage import StoredPayload
 
 
 _ReadT = TypeVar("_ReadT")
+
+
+def model_features(
+    binding: ModelBinding | Callable[[], ModelBinding],
+    features: RuntimeFeatures | None = None,
+    *,
+    route_id: str = "default",
+) -> RuntimeFeatures:
+    """Declare an offline model on the feature set being exercised."""
+    if features is None:
+        features = RuntimeFeatures()
+    features.model(route_id, binding)
+    return features
 
 
 def _persistence_capabilities(*, restart: bool = False, trace: bool = False) -> RuntimeFeatures:
@@ -64,18 +77,6 @@ class _Models:
 
     def __init__(self, model: FunctionModel) -> None:
         self.model = model
-
-    def capture(self) -> "_Models":
-        return self
-
-    def resolve(self, route_id: str) -> "_Models":
-        assert route_id == "default"
-        return self
-
-    def restore(self, payload: Mapping[str, JsonValue], *, route_id: str | None = None) -> "_Models":
-        assert route_id in {None, "default"}
-        assert dict(payload) == self.contract
-        return self
 
     def materialize(self) -> FunctionModel:
         return self.model
@@ -186,24 +187,5 @@ class _RuntimeUsageModelBinding:
         return _UsageFunctionModel(_runtime_usage_model)
 
 
-class RuntimeUsageModels:
-    def capture(self) -> "RuntimeUsageModels":
-        return self
-
-    def resolve(self, route_id: str) -> _RuntimeUsageModelBinding:
-        if route_id != "default":
-            raise AssertionError(route_id)
-        return _RuntimeUsageModelBinding()
-
-    def restore(
-        self,
-        payload: Mapping[str, JsonValue],
-        *,
-        route_id: str | None = None,
-    ) -> _RuntimeUsageModelBinding:
-        if (
-            route_id not in {None, "default"}
-            or dict(payload) != _RuntimeUsageModelBinding.contract
-        ):
-            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
-        return _RuntimeUsageModelBinding()
+class RuntimeUsageModels(_RuntimeUsageModelBinding):
+    pass

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Tool targets and instruction metadata have separate error contracts."""
+from ._runtime_test_helpers import model_features
 
 from ._runtime_test_helpers import workspace_features
 
@@ -58,8 +59,8 @@ async def test_runtime_path_retry_rechecks_allowed_target(tmp_path: Path, bad_ta
     group.capability(TraceCapability(), scope="runtime")
     group.agent("reader", model="default", allow_tools=("read_file",))
     async with Runtime.open(
-        "paths", models=_Models(_UsageFunctionModel(model)), storage=RuntimeStorage.in_memory(),
-        features=group,
+        "paths", storage=RuntimeStorage.in_memory(),
+        features=model_features(_Models(_UsageFunctionModel(model)), group),
     ) as runtime:
         execution = await runtime.agents.get("reader").start("read")
         result = (await execution.wait(timeout_seconds=10)).result
@@ -100,8 +101,8 @@ async def test_runtime_instruction_failure_is_not_model_retry(tmp_path: Path, mo
     group.agent("reader", model="default", allow_tools=("read_file",))
     with nullcontext() if failure == "malformed_document" else pytest.raises(AIError, match=expected.value):
         async with Runtime.open(
-            "paths", models=_Models(_UsageFunctionModel(model)), storage=RuntimeStorage.in_memory(),
-            features=group,
+            "paths", storage=RuntimeStorage.in_memory(),
+            features=model_features(_Models(_UsageFunctionModel(model)), group),
         ) as runtime:
             execution = await runtime.agents.get("reader").start("read")
             if failure == "malformed_document":
@@ -148,8 +149,8 @@ async def test_shared_rule_boundary_allows_literal_paths_for_workspace_tools(tmp
     group.capability(TraceCapability(), scope="runtime")
     group.agent("reader", model="default", allow_tools=(name,))
     async with Runtime.open(
-        "literal-paths", models=_Models(_UsageFunctionModel(model)), storage=RuntimeStorage.in_memory(),
-        features=group,
+        "literal-paths", storage=RuntimeStorage.in_memory(),
+        features=model_features(_Models(_UsageFunctionModel(model)), group),
     ) as runtime:
         execution = await runtime.agents.get("reader").start("use the file")
         assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED

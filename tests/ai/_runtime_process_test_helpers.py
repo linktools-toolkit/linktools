@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Independent Runtime processes for live ownership and crash recovery tests."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 import multiprocessing
@@ -74,8 +75,8 @@ def _runtime_process(
 
         state = _storage(Path(database), phase)
         async with Runtime.open(
-            _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=state, features=_capabilities(conversation=mode == "session"),
+            _NAMESPACE,
+            storage=state, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(conversation=mode == "session")),
             auto_recover=auto_recover,
         ) as runtime:
             async def snapshot() -> dict[str, object]:

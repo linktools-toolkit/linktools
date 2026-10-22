@@ -47,7 +47,7 @@ from ..core import (
     validate_resource_id,
 )
 from ..errors import AIError, ErrorCode
-from ..model import ModelRegistry
+
 
 if TYPE_CHECKING:
     from ._evaluation import RuntimeEvaluations
@@ -390,7 +390,6 @@ class Runtime(Generic[AppT]):
         cls,
         namespace: str,
         *,
-        models: ModelRegistry,
         storage: RuntimeStorage,
         metrics: Metrics | None = None,
         context: None = None,
@@ -404,7 +403,6 @@ class Runtime(Generic[AppT]):
         cls,
         namespace: str,
         *,
-        models: ModelRegistry,
         storage: RuntimeStorage,
         metrics: Metrics | None = None,
         context: RuntimeContext[AppT],
@@ -417,7 +415,6 @@ class Runtime(Generic[AppT]):
         cls,
         namespace: str,
         *,
-        models: ModelRegistry,
         storage: RuntimeStorage,
         metrics: Metrics | None = None,
         context: "RuntimeContext[object] | None" = None,
@@ -450,7 +447,6 @@ class Runtime(Generic[AppT]):
         return _open_runtime(
             resolved_namespace,
             context=root_context,
-            models=models,
             storage=storage,
             metrics=metrics,
             features=features,
@@ -1484,7 +1480,6 @@ async def _open_runtime(
     namespace: str,
     *,
     context: RuntimeContext[object],
-    models: ModelRegistry,
     storage: RuntimeStorage,
     features: "RuntimeFeatures[object] | RuntimeFeaturesCapture[object] | None",
     metrics: Metrics | None = None,
@@ -1496,7 +1491,6 @@ async def _open_runtime(
         namespace,
         app=context.app,
         tenant_id=context.tenant_id,
-        models=models,
         storage=storage,
         metrics=metrics,
         features=features,

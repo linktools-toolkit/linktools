@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Independent readers observe committed model and tool boundaries."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.capability import TraceCapability
 import asyncio
@@ -54,7 +55,7 @@ def _writer_process(root: str, pipe: Connection) -> None:
         group.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "process-history", storage=RuntimeStorage.filesystem(Path(root)),
-            models=_Models(_UsageFunctionModel(model)), features=group,
+            features=model_features(_Models(_UsageFunctionModel(model)), group),
         ) as runtime:
             execution = await runtime.agents.get("default").start("process prompt")
             principal = runtime.default_principal

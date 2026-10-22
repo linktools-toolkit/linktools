@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Retry preserves imported pre-input context and its memory isolation."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.capability import ExecutionCapability, TraceCapability
 from pathlib import Path
@@ -35,7 +36,7 @@ async def test_retry_preserves_imported_history_and_metadata(tmp_path: Path, met
     storage = RuntimeStorage.filesystem(tmp_path)
     if trace:
         group.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open("retry-context", models=_NoToolsModels(), storage=storage, features=group) as runtime:
+    async with Runtime.open("retry-context", storage=storage, features=model_features(_NoToolsModels(), group)) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         source = await runtime.agents.get().start("superseded prompt", principal=principal, input_context=context)
         assert ((await source.wait()).result).status is ExecutionStatus.SUCCEEDED
@@ -53,7 +54,7 @@ async def test_retry_preserves_imported_history_and_metadata(tmp_path: Path, met
         note, = await archive.content_records((manifest["session_metadata"]["note"]["content_id"],))
         assert note.payload.kind == ("inline" if metadata_size == 16 else "object")
         source_id = source.execution_id
-    async with Runtime.open("retry-context", models=_NoToolsModels(), storage=storage, features=group) as runtime:
+    async with Runtime.open("retry-context", storage=storage, features=model_features(_NoToolsModels(), group)) as runtime:
         source = await runtime.executions.get(source_id, principal=principal)
         with capture_run_messages() as messages:
             retry = await source.retry("replacement prompt")
@@ -79,7 +80,7 @@ async def test_retry_imported_context_matches_native_fork_history(tmp_path: Path
     if trace:
         group.capability(TraceCapability(), scope="runtime")
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Runtime.open("retry-parity", models=_NoToolsModels(), storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
+    async with Runtime.open("retry-parity", storage=RuntimeStorage.filesystem(tmp_path), features=model_features(_NoToolsModels(), group)) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         agent = runtime.agents.get()
         first = await agent.start("historical question", principal=principal)
@@ -112,7 +113,7 @@ async def test_retry_imported_memory_uses_fresh_isolated_scope(tmp_path: Path) -
     context = ExecutionInputContext.from_messages((), memory={
         "facts.txt": {"content": "accepted memory", "version": "m1:" + "1" * 64},
     })
-    async with Runtime.open("retry-memory", models=_NoToolsModels(), storage=storage, features=group) as runtime:
+    async with Runtime.open("retry-memory", storage=storage, features=model_features(_NoToolsModels(), group)) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         agent = runtime.agents.get()
         with pytest.raises(AIError) as raised:

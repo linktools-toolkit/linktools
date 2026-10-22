@@ -21,7 +21,7 @@ from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationSpec,
     EvidenceAttachmentRef, EvidenceBundle, EvidenceRef, RescoreRequest, StartEvaluationRequest,
 )
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime import ExecutionView, Runtime, RuntimeStorage
 from linktools.ai.runtime import _evaluation as evaluation_module
 from linktools.ai.runtime._object import RuntimeObjectKeyFactory, put_runtime_object
@@ -471,7 +471,7 @@ async def test_current_window_rechecks_sources_before_returning_after_concurrent
 async def test_get_case_preserves_owner_expiry_and_missing_boundaries(tmp_path: Path, fault: str) -> None:
     storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
     policy = Policy()
-    async with Runtime.open("case-read", storage=storage, models=ModelRegistry(),
+    async with Runtime.open("case-read", storage=storage,
                             context=CONTEXT, features=RuntimeFeatures("authorization", authorization=policy)) as runtime:
         ref = CaseRef("dataset", "case", 1)
         await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("dataset", 1), (
@@ -534,7 +534,7 @@ async def test_reused_case_keeps_earlier_expiry_in_current_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     storage = RuntimeStorage.sqlite(tmp_path / "case-expiry.sqlite")
-    async with Runtime.open("case-expiry", storage=storage, models=ModelRegistry(), context=CONTEXT) as runtime:
+    async with Runtime.open("case-expiry", storage=storage, context=CONTEXT) as runtime:
         owner = runtime.evaluations
         early = datetime.now(timezone.utc) + timedelta(hours=1)
         late = early + timedelta(hours=1)
@@ -574,7 +574,7 @@ async def test_reused_case_keeps_earlier_expiry_in_current_reads(
 @pytest.mark.asyncio
 async def test_current_state_survives_bounded_purge_of_shared_case_content(tmp_path: Path) -> None:
     storage = RuntimeStorage.sqlite(tmp_path / "bounded-purge.sqlite")
-    async with Runtime.open("bounded-purge", storage=storage, models=ModelRegistry(), context=CONTEXT) as runtime:
+    async with Runtime.open("bounded-purge", storage=storage, context=CONTEXT) as runtime:
         owner = runtime.evaluations
         early = datetime.now(timezone.utc) + timedelta(hours=1)
         late = early + timedelta(hours=1)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Declared Task cleanup and external effect certainty remain separate."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from pathlib import Path
@@ -50,7 +51,7 @@ async def test_declared_cancel_callback_runs_without_claiming_external_rollback(
     try:
         async with Runtime.open(
             "declared-cleanup",
-            models=RuntimeUsageModels(),
+            features=model_features(RuntimeUsageModels()),
             storage=storage,
         ) as runtime:
             run = await runtime.tasks.bind(task).start(graph, idempotency_key="start")

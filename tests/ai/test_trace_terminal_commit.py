@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Terminal trace joins existing authoritative transactions without delaying safety writes."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 import json
@@ -74,8 +75,7 @@ async def _run_observed(path: Path, backend: str, policy: CommitPolicy, monkeypa
     original_sql_mutation = SqlStorageContext.run_mutation
     try:
         async with Runtime.open(
-            "terminal-trace", storage=storage, features=features,
-            models=_FeatureModels(_FeatureFunctionModel(model)),
+            "terminal-trace", storage=storage, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), features),
         ) as runtime:
             session = await runtime.agents.get().create_session("session")
             during["sql_mutations"] = []

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Regression coverage for the remaining runtime audit boundaries."""
+from linktools.ai.model import create_model
 
 import json
 import os

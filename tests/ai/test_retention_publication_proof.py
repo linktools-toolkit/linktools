@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """A durable retention closure proves publication across process boundaries."""
+from ._runtime_test_helpers import model_features
 
 from dataclasses import replace
 from types import SimpleNamespace
@@ -103,7 +104,7 @@ async def test_closed_public_results_reuse_proof_across_runtime(tmp_path, monkey
         conversation=StorageRoute.sqlite(tmp_path / ("conversation.db" if split else "execution.db")),
     )
     async with Runtime.open(
-        _NAMESPACE, storage=RuntimeStorage.from_plan(plan), features=_features(), models=_models(),
+        _NAMESPACE, storage=RuntimeStorage.from_plan(plan), features=model_features(_models(), _features()),
     ) as runtime:
         session = await runtime.agents.get().create_session("s")
         result = (await session.run("retained input", timeout_seconds=5)).result
@@ -112,7 +113,7 @@ async def test_closed_public_results_reuse_proof_across_runtime(tmp_path, monkey
 
     storage = RuntimeStorage.from_plan(plan)
     async with Runtime.open(
-        _NAMESPACE, storage=storage, features=_features(), models=_models(),
+        _NAMESPACE, storage=storage, features=model_features(_models(), _features()),
     ) as runtime:
         record = await runtime._state.execution.executions.get(execution_id, tenant_id=principal.tenant_id)
         assert record.retention_closed

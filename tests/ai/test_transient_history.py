@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Transient routes expose their live facts without retaining an archive."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 
@@ -49,8 +50,8 @@ async def test_transient_execution_reads_live_owner_and_releases_after_handoff(o
     capabilities.agent("default", model="default", allow_tools=("echo",))
     storage = RuntimeStorage(RuntimeStoragePlan(execution=StorageRoute.transient()))
     async with Runtime.open(
-        "transient-history", models=_Models(_UsageFunctionModel(model)),
-        storage=storage, features=capabilities,
+        "transient-history",
+        storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), capabilities),
     ) as runtime:
         execution = await runtime.agents.get("default").start("question")
         principal = runtime.default_principal

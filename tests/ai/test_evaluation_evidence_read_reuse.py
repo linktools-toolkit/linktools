@@ -19,7 +19,7 @@ from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationSpec,
     EvidenceAttachmentRef, RescoreRequest, StartEvaluationRequest,
 )
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime import EvaluationRun, Runtime, RuntimeStorage
 from linktools.ai.runtime import _evaluation as evaluation_module
 from linktools.ai.runtime._object import RuntimeObjectKeyFactory, put_runtime_object
@@ -49,7 +49,7 @@ class Policy:
 async def completed(path: Path, *, count: int = 2) -> AsyncIterator[tuple[Runtime, RuntimeStorage, EvaluationRun, Task, Policy]]:
     storage = RuntimeStorage.sqlite(path / "state.sqlite")
     policy = Policy()
-    async with Runtime.open("evidence-read", storage=storage, models=ModelRegistry(),
+    async with Runtime.open("evidence-read", storage=storage,
                             context=CONTEXT, features=RuntimeFeatures("authorization", authorization=policy)) as runtime:
         target = Task("evidence-read.target", echo, effect_policy="none")
         scorer = Task("evidence-read.score", exact, effect_policy="none")

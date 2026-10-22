@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Evaluation reads persist only snapshots needed by durable consumers."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from dataclasses import replace
@@ -38,7 +39,7 @@ async def test_pages_save_only_resumable_snapshots(
     scorer = Task("paging.scorer", exact, effect_policy="none")
     storage = RuntimeStorage.in_memory() if backend == "memory" else RuntimeStorage.filesystem(tmp_path)
     published: list[EvaluationReport | ComparisonReport] = []
-    async with Runtime.open("paging", models=FixtureModels(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open("paging", features=model_features(FixtureModels()), storage=storage, context=CONTEXT) as runtime:
         state = runtime.evaluations._state
         publish = state.publish_report
 
@@ -126,7 +127,7 @@ async def test_pages_save_only_resumable_snapshots(
 
     # Reopening the backend must recover the original cursors even after live state changes.
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("paging", models=FixtureModels(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open("paging", features=model_features(FixtureModels()), storage=storage, context=CONTEXT) as runtime:
         run = await runtime.evaluations.get(experiment_id, principal=PRINCIPAL)
         state = runtime.evaluations._state
         publish = state.publish_report

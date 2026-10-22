@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Current SQLite history survives reopening and snapshot restoration."""
+from ._runtime_test_helpers import model_features
 
 import base64
 import hashlib
@@ -107,7 +108,7 @@ async def test_sqlite_history_retains_prior_turn_when_resumed_and_reopened(
     application.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "legacy-history", storage=RuntimeStorage.sqlite(path),
-        models=helpers.RuntimeUsageModels(), features=application,
+        features=model_features(helpers.RuntimeUsageModels(), application),
     ) as runtime:
         session = runtime.agents.get("default").session("session")
         old = await session.history()
@@ -130,7 +131,7 @@ async def test_sqlite_history_retains_prior_turn_when_resumed_and_reopened(
 
     async with Runtime.open(
         "legacy-history", storage=RuntimeStorage.sqlite(path),
-        models=helpers.RuntimeUsageModels(), features=application,
+        features=model_features(helpers.RuntimeUsageModels(), application),
     ) as reopened:
         restored = await reopened.agents.get("default").session("session").history()
         assert restored.items == appended.items
@@ -204,7 +205,7 @@ async def test_sqlite_history_survives_snapshot_restore(tmp_path: Path) -> None:
     application.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "legacy-history", storage=RuntimeStorage.from_root(restored_root),
-        models=helpers.RuntimeUsageModels(), features=application,
+        features=model_features(helpers.RuntimeUsageModels(), application),
     ) as runtime:
         assert await _execution_evidence(runtime.history, execution_id, runtime.default_principal) == evidence
         history = await runtime.agents.get("default").session("session").history()

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Unfinished model bodies stay local until a controlled completion boundary."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 import json
@@ -128,8 +129,8 @@ async def test_partial_response_is_published_only_at_request_or_shutdown_complet
     principal = None
     try:
         async with Runtime.open(
-            "completed-call-persistence", models=_Models(FunctionModel(stream_function=stream)),
-            storage=state, features=group,
+            "completed-call-persistence",
+            storage=state, features=model_features(_Models(FunctionModel(stream_function=stream)), group),
         ) as runtime:
             execution = await runtime.agents.get("default").start("Respond slowly")
             execution_id = execution.execution_id
@@ -226,8 +227,8 @@ async def test_interrupted_tool_arguments_remain_raw_without_tool_execution(
     group.agent("default", model="default", allow_tools=("work",))
     try:
         async with Runtime.open(
-            "partial-tool-arguments", models=_Models(FunctionModel(stream_function=stream)),
-            storage=_storage(backend, tmp_path), features=group,
+            "partial-tool-arguments",
+            storage=_storage(backend, tmp_path), features=model_features(_Models(FunctionModel(stream_function=stream)), group),
         ) as runtime:
             execution = await runtime.agents.get("default").start("Call work")
             execution_id = execution.execution_id

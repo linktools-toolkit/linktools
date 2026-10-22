@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Runtime status reports bound resources without opening or probing them."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from pathlib import Path
@@ -46,7 +47,7 @@ async def test_runtime_status_reports_bound_storage_without_io(
     try:
         async with Runtime.open(
             "actual-namespace", context=RuntimeContext(None, tenant_id="actual-tenant"),
-            storage=storage, models=RuntimeUsageModels(), features=features,
+            storage=storage, features=model_features(RuntimeUsageModels(), features),
         ) as runtime:
             if engine is not None:
                 event.listen(engine.sync_engine, "before_cursor_execute", forbidden)
@@ -91,7 +92,7 @@ async def test_web_config_reads_live_runtime_metrics() -> None:
 
     async with Runtime.open(
         "live-status", storage=RuntimeStorage.in_memory(),
-        models=RuntimeUsageModels(), metrics=Metrics.in_memory(),
+        features=model_features(RuntimeUsageModels()), metrics=Metrics.in_memory(),
     ) as runtime, client(create_app(runtime=runtime)) as http:
         before = (await http.get("/api/config")).json()["runtime"]
         assert before["namespace"] == "live-status"

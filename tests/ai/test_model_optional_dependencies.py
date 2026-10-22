@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Run this module in each installed wheel extra combination without source PYTHONPATH."""
+from ._runtime_test_helpers import model_features
 import importlib.util
 import os
 from dataclasses import dataclass
@@ -10,7 +11,7 @@ from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from pydantic_ai.models.test import TestModel
 
 from linktools.ai.errors import ErrorCode
-from linktools.ai.model import ModelRegistry, model_binding_error
+from linktools.ai.model import create_model, model_binding_error
 from linktools.ai.runtime import Runtime, RuntimeStorage
 import linktools.ai.web
 
@@ -19,13 +20,13 @@ def test_installed_provider_set_and_missing_extra_hints():
     expected = os.getenv("EXPECTED_PROVIDER_EXTRAS")
     if expected is not None:
         assert {name for name in ("openai", "anthropic") if importlib.util.find_spec(name)} == set(filter(None, expected.split(",")))
-    for provider, factories in (("openai", ("openai", "openai_responses")), ("anthropic", ("anthropic",))):
+    for provider, factories in (("openai", ("openai", "openai-responses")), ("anthropic", ("anthropic",))):
         for factory in factories:
             if importlib.util.find_spec(provider) is None:
                 with pytest.raises(ImportError, match=rf"linktools-ai\[{provider}\]"):
-                    getattr(ModelRegistry, factory)(model="fixture")
+                    create_model(protocol=factory, model="fixture")
             else:
-                assert getattr(ModelRegistry, factory)(model="fixture").capture().resolve("default")
+                assert create_model(protocol=factory, model="fixture")
     assert model_binding_error(ModelHTTPError(429, model_name="fixture")).code == ErrorCode.MODEL_RATE_LIMITED
     assert model_binding_error(ValueError("ordinary failure")) is None
 
@@ -42,16 +43,15 @@ class _TestBinding:
 
 @pytest.mark.asyncio
 async def test_base_runtime_can_invoke_custom_sdk_model():
-    models = ModelRegistry()
-    models.register(_TestBinding())
-    async with Runtime.open("extras", models=models, storage=RuntimeStorage.in_memory()) as runtime:
+    models = _TestBinding()
+    async with Runtime.open("extras", features=model_features(models), storage=RuntimeStorage.in_memory()) as runtime:
         execution = await runtime.agents.get().start("hello")
         result = await execution.wait()
         assert result.result.status.value == "SUCCEEDED"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider,factory", (("openai","openai"),("openai","openai_responses"),("anthropic","anthropic")))
+@pytest.mark.parametrize("provider,factory", (("openai","openai"),("openai","openai-responses"),("anthropic","anthropic")))
 async def test_installed_adapter_projects_native_transport_errors(monkeypatch, provider, factory):
     if importlib.util.find_spec(provider) is None:
         pytest.skip("Provider intentionally absent from this installation")
@@ -62,8 +62,8 @@ async def test_installed_adapter_projects_native_transport_errors(monkeypatch, p
     def fail(request): raise httpx2.ConnectError("fixture connection failure", request=request)
     monkeypatch.setattr(module, "DefaultAsyncHttpxClient", lambda **kwargs: httpx2.AsyncClient(
         transport=httpx2.MockTransport(fail), trust_env=False, **kwargs))
-    models = getattr(ModelRegistry, factory)(model="fixture", api_key="fixture-secret", max_tokens=128, max_retries=0)
-    async with models.capture().resolve("default").materialize() as model:
+    models = create_model(protocol=factory, model="fixture", api_key="fixture-secret", max_tokens=128, max_retries=0)
+    async with models.materialize() as model:
         with pytest.raises(ModelAPIError) as caught:
             await model.request([ModelRequest(parts=[UserPromptPart("hello")])], None, ModelRequestParameters())
     mapped = model_binding_error(caught.value)

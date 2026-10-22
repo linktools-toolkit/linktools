@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Durable Skill and Subagent declaration contracts."""
+from linktools.ai.model import ModelResolver, create_model
 
 import json
 from pathlib import Path
@@ -20,7 +21,7 @@ from linktools.ai.capability import (
 )
 from linktools.ai.core import Principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry, validate_model_inputs
+from linktools.ai.model import validate_model_inputs
 from pydantic_ai.messages import BinaryContent
 from pydantic_ai.models.test import TestModel
 from linktools.ai.runtime._subagent import SubagentDispatcher
@@ -43,7 +44,7 @@ def _load_json(name: str) -> dict[str, object]:
 
 def _compiler(agents: dict[str, AgentSpec]) -> AgentCompiler:
     return AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+        model_resolver=ModelResolver({"default": create_model(protocol='openai', model="gpt-test")}),
         candidates=(),
         agents=agents,
     )
@@ -77,9 +78,9 @@ def test_v1_skill_wire_and_capability_pin_round_trip() -> None:
 def test_v1_binding_restores_from_explicitly_registered_matching_contract() -> None:
     payload = _load_json("agent_binding_subagent_v1_golden.json")
     binding_contract = AgentBindingContract.from_payload(payload)
-    current_model = ModelRegistry.openai(
+    current_model = create_model(protocol='openai',
         model="gpt-test", input_types=["mime:text/plain"],
-    ).capture().resolve("default")
+    )
     assert payload["model_contract"] == dict(current_model.contract)
 
     class RegisteredBinding:
@@ -91,10 +92,9 @@ def test_v1_binding_restores_from_explicitly_registered_matching_contract() -> N
         def materialize(self) -> TestModel:
             return TestModel()
 
-    registry = ModelRegistry()
-    registry.register(RegisteredBinding())
+    registry = ModelResolver({"default": RegisteredBinding()})
     compiler = AgentCompiler(
-        model_resolver=registry.capture(), candidates=(),
+        model_resolver=registry, candidates=(),
         agents={
             "parent": AgentSpec("parent", allow_subagents=("child",)),
             "child": AgentSpec("child", allow_subagents=()),
@@ -117,8 +117,6 @@ def test_v1_binding_restores_from_explicitly_registered_matching_contract() -> N
     with pytest.raises(AIError):
         validate_model_inputs(restored.compiled_agent.model,
                               BinaryContent(b"image", media_type="image/png"))
-
-
 
 
 def test_durable_subagent_binding_does_not_fall_back_to_current_catalog() -> None:

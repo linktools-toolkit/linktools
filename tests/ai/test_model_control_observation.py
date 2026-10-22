@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Model-boundary observations share one bounded execution/head snapshot."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.runtime.state import RuntimeState
 import asyncio
@@ -414,8 +415,8 @@ async def test_volatile_task_and_descendant_keep_strong_model_boundaries(
         RuntimeStoragePlan(execution=StorageRoute.transient(cache=InMemoryCacheBackend(max_bytes=1000000))),
     )
     async with Runtime.open(
-        "transient-task-control", models=_Models(_UsageFunctionModel(model)),
-        storage=storage, features=group,
+        "transient-task-control",
+        storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), group),
     ) as runtime:
         task = runtime.tasks.from_agent("answer", runtime.agents.get())
         definition = TaskGraph("graph", (TaskNode("answer", task=task, input=AgentTaskInput("question")),))
@@ -463,10 +464,10 @@ async def test_remote_cancel_stops_model_retry_and_strong_tool_admission(
     database = tmp_path / "cancel.db"
     models = _Models(_UsageFunctionModel(model))
     async with Runtime.open(
-        "model-pair-cancel", models=models, features=group,
+        "model-pair-cancel", features=model_features(models, group),
         storage=RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000)),
     ) as owner, Runtime.open(
-        "model-pair-cancel", models=models, features=group,
+        "model-pair-cancel", features=model_features(models, group),
         storage=RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000)),
     ) as other:
         execution = await owner.agents.get().start("question", output=Answer, idempotency_key="once")

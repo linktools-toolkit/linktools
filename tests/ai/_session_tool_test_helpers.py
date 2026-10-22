@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Shared models, storage and crash boundaries for session tool contracts."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 import multiprocessing
@@ -45,27 +46,8 @@ class _ToolModelBinding:
         )
 
 
-class _ToolModels:
-    def capture(self) -> "_ToolModels":
-        return self
-
-    def resolve(self, route_id: str) -> _ToolModelBinding:
-        if route_id != "default":
-            raise AssertionError(route_id)
-        return _ToolModelBinding()
-
-    def restore(
-        self,
-        payload: Mapping[str, JsonValue],
-        *,
-        route_id: str | None = None,
-    ) -> _ToolModelBinding:
-        if (
-            route_id not in {None, "default"}
-            or dict(payload) != _ToolModelBinding.contract
-        ):
-            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
-        return _ToolModelBinding()
+class _ToolModels(_ToolModelBinding):
+    pass
 
 
 def _application(
@@ -239,9 +221,8 @@ def _crash_session_process(
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-tool-crash",
-            models=_ToolModels(),
             storage=state,
-            features=application,
+            features=model_features(_ToolModels(), application),
         ) as runtime:
             if phase != "recovered_before_terminal":
                 await runtime.agents.get("default").create_session("session")
@@ -302,9 +283,8 @@ async def _assert_tool_turn_recovers_without_replaying_effect(
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-tool-crash",
-            models=_ToolModels(),
             storage=state,
-            features=application,
+            features=model_features(_ToolModels(), application),
         ) as runtime:
             session = runtime.agents.get("default").session("session")
             before_replay = await runtime._state.execution.executions.get(

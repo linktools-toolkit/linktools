@@ -16,7 +16,7 @@ def test_custom_model_startup_defers_openai_until_provider_operations(tmp_path: 
 
         from pydantic_ai.messages import BinaryContent
         from pydantic_ai.models.test import TestModel
-        from linktools.ai.model import ModelRegistry, model_binding_error, validate_model_inputs
+        from linktools.ai.model import ModelResolver, create_model, model_binding_error, validate_model_inputs
         from linktools.ai.runtime import Runtime
 
         class OfflineBinding:
@@ -28,9 +28,8 @@ def test_custom_model_startup_defers_openai_until_provider_operations(tmp_path: 
             def materialize(self) -> TestModel:
                 return TestModel(custom_output_text="offline answer")
 
-        registry = ModelRegistry()
-        registry.register(OfflineBinding())
-        binding = registry.capture().resolve("offline")
+        resolver = ModelResolver({"offline": OfflineBinding()})
+        binding = resolver.resolve("offline")
         assert isinstance(binding.materialize(), TestModel)
         decisions = validate_model_inputs(
             binding, BinaryContent(b"offline file", media_type="application/x-offline")
@@ -39,8 +38,7 @@ def test_custom_model_startup_defers_openai_until_provider_operations(tmp_path: 
         assert not any(name == "openai" or name.startswith("openai.") for name in sys.modules)
 
         assert model_binding_error(RuntimeError("unclassified")) is None
-        registry.register_openai("selected", model="gpt-test", api_key="unused")
-        selected = registry.capture().resolve("selected")
+        selected = create_model(protocol="openai", model="gpt-test", api_key="unused")
         assert selected.model_identity == "openai:gpt-test"
         assert dict(selected.contract) == {
             "provider": "openai",

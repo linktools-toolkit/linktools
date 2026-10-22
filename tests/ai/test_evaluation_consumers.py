@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Application-facing evaluation flows through real Runtime and Task engines."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 import json
@@ -51,18 +52,6 @@ class FixtureModels:
         self.schemas: list[dict[str, JsonValue]] = []
         self.attachments: list[bytes] = []
 
-    def capture(self) -> "FixtureModels":
-        return self
-
-    def resolve(self, route_id: str) -> "FixtureModels":
-        assert route_id == self.route_id
-        return self
-
-    def restore(self, payload: Mapping[str, JsonValue], *, route_id: str | None = None) -> "FixtureModels":
-        assert route_id in (None, self.route_id)
-        assert dict(payload) == self.contract
-        return self
-
     def materialize(self) -> FunctionModel:
         async def respond(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | dict[int, DeltaToolCall]]:
             prompts = [part.content for message in messages for part in message.parts if isinstance(part, UserPromptPart)]
@@ -101,7 +90,7 @@ async def test_dataset_task_report_and_idempotency_use_one_public_case_declarati
         CaseSpec.task(CaseRef("one-input", "null", 1), input={"answer": None}, expected=None),
         CaseSpec.task(CaseRef("one-input", "text", 1), input={"answer": "yes"}, expected="yes"),
     ))
-    async with Runtime.open("consumers", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
+    async with Runtime.open("consumers", features=model_features(FixtureModels()), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(target, scorer)
         dataset = await runtime.evaluations.publish_dataset(dataset_spec, principal=PRINCIPAL, idempotency_key="publish-one-input")
         assert await runtime.evaluations.publish_dataset(dataset_spec, principal=PRINCIPAL, idempotency_key="publish-one-input") == dataset
@@ -170,7 +159,7 @@ async def test_native_graph_named_outputs_preserve_dependencies_and_successful_n
         TaskNode("finish", ("prepare",), task=answer_task, input_refs={"prepared": TaskNodeResultRef("prepare")}),
         TaskNode("empty", task=empty_task),
     ))
-    async with Runtime.open("graph-consumers", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
+    async with Runtime.open("graph-consumers", features=model_features(FixtureModels()), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("graphs", 1), cases=(
             CaseSpec.graph(CaseRef("graphs", "hello", 1), inputs={"prepare": TaskCaseInput(input={"question": " HELLO "})}, expected="hello"),
             CaseSpec.graph(CaseRef("graphs", "bye", 1), inputs={"prepare": TaskCaseInput(input={"question": " BYE "})}, expected="bye"),
@@ -203,7 +192,7 @@ async def test_model_judge_receives_fixed_scoring_data_and_structured_output(tmp
         return "Grade the data: " + json.dumps({"answer": sample.target_output, "expected": sample.expected, "rubric": sample.rubric})
 
     target = Task("consumer.judge-target", echo, effect_policy="none")
-    async with Runtime.open("judge-consumers", models=models, storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT, features=group) as runtime:
+    async with Runtime.open("judge-consumers", storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT, features=model_features(models, group)) as runtime:
         judge = runtime.tasks.from_agent("consumer.judge", runtime.agents.get(), build_input=build_input if projected else None)
         scorer = replace(rule_scorer(judge), rubric={"criterion": "semantic equality"})
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("judge", 1), cases=(
@@ -264,7 +253,7 @@ async def test_partial_rescore_preserves_targets_initial_scores_and_pair_denomin
     new = Task("consumer.candidate", candidate, effect_policy="none")
     scorer = Task("consumer.first-score", exact, effect_policy="none")
     revised_task = Task("consumer.revised-score", revised, effect_policy="none")
-    async with Runtime.open("rescore-consumers", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
+    async with Runtime.open("rescore-consumers", features=model_features(FixtureModels()), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("paired", 1), cases=tuple(
             CaseSpec.task(CaseRef("paired", name, 1), input={"answer": name}, expected=name) for name in ("first", "second")
         )), principal=PRINCIPAL, idempotency_key="publish-paired")
@@ -324,7 +313,7 @@ async def test_target_failure_invalid_score_and_na_remain_in_the_report_denomina
 
     target_task = Task("consumer.failures", target, effect_policy="none")
     scorer_task = Task("consumer.score-failures", score, effect_policy="none")
-    async with Runtime.open("failure-consumers", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
+    async with Runtime.open("failure-consumers", features=model_features(FixtureModels()), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("failures", 1), cases=tuple(
             CaseSpec.task(CaseRef("failures", name, 1), input={"answer": name}) for name in ("good", "target-error", "bad-score", "na")
         )), principal=PRINCIPAL, idempotency_key="publish-failures")
@@ -347,7 +336,7 @@ async def test_new_evaluation_actions_default_deny_and_reject_other_tenants_and_
     spec = DatasetSpec(DatasetRef("private", 1), cases=(CaseSpec.task(CaseRef("private", "one", 1), input={"answer": "private"}, expected="private"),))
     target = Task("consumer.private", echo, effect_policy="none")
     scorer = Task("consumer.private-score", exact, effect_policy="none")
-    async with Runtime.open("private-consumers", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
+    async with Runtime.open("private-consumers", features=model_features(FixtureModels()), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
         for principal in (runtime.default_principal, service_principal("other-tenant", PRINCIPAL.principal_id)):
             with pytest.raises(AIError) as raised:
                 await runtime.evaluations.publish_dataset(spec, principal=principal, idempotency_key="publish-private")
@@ -394,7 +383,7 @@ async def test_cancel_fences_unstarted_trials_and_reconcile_after_reopen_is_idem
             return RuntimeStorage.filesystem(tmp_path / "state")
         return RuntimeStorage.sqlite(tmp_path / "state.sqlite", object_store=FilesystemObjectStore(tmp_path / "objects"))
 
-    async with Runtime.open("cancel-consumers", models=FixtureModels(), storage=storage(), context=CONTEXT) as runtime:
+    async with Runtime.open("cancel-consumers", features=model_features(FixtureModels()), storage=storage(), context=CONTEXT) as runtime:
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("cancel", 1), cases=tuple(
             CaseSpec.task(CaseRef("cancel", name, 1), input={"answer": name}, expected=name) for name in ("first", "second")
         )), principal=PRINCIPAL, idempotency_key="publish-cancel")
@@ -415,7 +404,7 @@ async def test_cancel_fences_unstarted_trials_and_reconcile_after_reopen_is_idem
         experiment_id = run.experiment_id
         called_before_recovery = tuple(called)
         assert len(called_before_recovery) == 1
-    async with Runtime.open("cancel-consumers", models=FixtureModels(), storage=storage(), context=CONTEXT) as runtime:
+    async with Runtime.open("cancel-consumers", features=model_features(FixtureModels()), storage=storage(), context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(target, scorer)
         reopened = await runtime.evaluations.get(experiment_id, principal=PRINCIPAL)
         assert (await reopened.inspect()).completion == "cancelled"
@@ -438,7 +427,7 @@ async def test_human_score_waits_for_one_decision_and_rescore_keeps_prior_result
 
     task = Task("consumer.human-target", target, effect_policy="none")
     scorer = ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,))
-    async with Runtime.open("human-consumers", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
+    async with Runtime.open("human-consumers", features=model_features(FixtureModels()), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(task)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("human", 1), cases=(
             CaseSpec.task(CaseRef("human", "one", 1), input={"answer": "yes"}, expected="yes"),
@@ -499,7 +488,7 @@ async def test_volatile_evaluation_requires_explicit_opt_in_before_any_target_ru
 
     task = Task("consumer.volatile", target, effect_policy="none")
     scorer = Task("consumer.volatile-score", exact, effect_policy="none")
-    async with Runtime.open("volatile-consumers", models=FixtureModels(), storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
+    async with Runtime.open("volatile-consumers", features=model_features(FixtureModels()), storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(task, scorer)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("volatile", 1), cases=(
             CaseSpec.task(CaseRef("volatile", "one", 1), input={"answer": "yes"}, expected="yes"),
@@ -535,7 +524,7 @@ async def test_trial_deadline_cancels_slow_target_and_next_target_gets_its_own_d
 
     task = Task("consumer.deadline", target, effect_policy="none")
     scorer = Task("consumer.deadline-score", exact, effect_policy="none")
-    async with Runtime.open("deadline-consumers", models=FixtureModels(), storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
+    async with Runtime.open("deadline-consumers", features=model_features(FixtureModels()), storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("deadline", 1), cases=tuple(
             CaseSpec.task(CaseRef("deadline", name, 1), input={"answer": name}, expected=name) for name in ("slow", "fast")
         )), principal=PRINCIPAL, idempotency_key="publish-deadline")
@@ -558,7 +547,7 @@ async def test_binary_agent_input_reaches_scorer_as_authorized_retained_evidence
     body = b"A fixed original attachment\x00with bytes."
     group = RuntimeFeatures[None]("attachment-consumer")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open("attachment-consumers", models=models, storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT, features=group) as runtime:
+    async with Runtime.open("attachment-consumers", storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT, features=model_features(models, group)) as runtime:
         target = runtime.tasks.from_agent("consumer.attachment-target", runtime.agents.get())
         received: list[bytes] = []
 

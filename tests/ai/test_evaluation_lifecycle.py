@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Closed evaluation coordinators reject new work without changing durable facts."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from dataclasses import replace
@@ -30,7 +31,7 @@ async def test_closed_evaluations_reject_control_without_persisting(
     target = Task("lifecycle.target", echo, effect_policy="none")
     scorer = ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,))
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("evaluation-lifecycle", models=FixtureModels(), storage=storage,
+    async with Runtime.open("evaluation-lifecycle", features=model_features(FixtureModels()), storage=storage,
                             context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(target)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("lifecycle", 1), (

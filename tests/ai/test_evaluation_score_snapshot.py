@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Score dimensions remain business data across durable snapshot boundaries."""
+from ._runtime_test_helpers import model_features
 
 from pathlib import Path
 
@@ -58,7 +59,7 @@ async def test_evaluation_score_dimensions_survive_snapshot_export_and_restore(t
     target = Task("score-snapshot.target", echo, effect_policy="none")
     scorer = Task("score-snapshot.score", reference_named_dimensions, effect_policy="none")
     expected = ScoreBundle(dimensions={"kind": 1.0, "digest": 1.0, "size": 1.0})
-    async with Runtime.open("score-snapshot", models=FixtureModels(),
+    async with Runtime.open("score-snapshot", features=model_features(FixtureModels()),
                             storage=RuntimeStorage.filesystem(root), context=CONTEXT) as runtime:
         dataset = await runtime.evaluations.publish_dataset(
             DatasetSpec(DatasetRef("score-snapshot", 1), cases=(
@@ -89,7 +90,7 @@ async def test_evaluation_score_dimensions_survive_snapshot_export_and_restore(t
 
     restored_root = tmp_path / "restored"
     await RuntimeState.restore_snapshot(reference, object_store=archive, root=restored_root, limits=limits)
-    async with Runtime.open("score-snapshot", models=FixtureModels(),
+    async with Runtime.open("score-snapshot", features=model_features(FixtureModels()),
                             storage=RuntimeStorage.from_root(restored_root), context=CONTEXT) as restored:
         run = await restored.evaluations.get(experiment_id, principal=PRINCIPAL)
         assert (await run.inspect()).completion == "complete"

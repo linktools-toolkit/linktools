@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Runtime-scoped bounded metric dimension regressions."""
+from ._runtime_test_helpers import model_features
+from linktools.ai.model import create_model
 
 from ._runtime_test_helpers import workspace_features
 
@@ -11,7 +13,7 @@ from linktools.ai.core import CommitPolicy
 from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.observe import (
     MetricAggregation,
     MetricDefinition,
@@ -67,7 +69,7 @@ async def test_runtime_metric_dimensions_flow_into_automatic_observations_and_qu
 ) -> None:
     workspace = Workspace.load(tmp_path)
     metrics = Metrics.in_memory(namespace="runtime-context")
-    models = ModelRegistry.openai(model="gpt-test")
+    models = create_model(protocol='openai', model="gpt-test")
     context = RuntimeContext(
         None,
         metric_dimensions={"environment": "prod", "region": "us-west"},
@@ -91,9 +93,8 @@ async def test_runtime_metric_dimensions_flow_into_automatic_observations_and_qu
     async with Runtime.open(
         "default",
         metrics=metrics, context=context,
-        models=models,
         storage=RuntimeStorage.in_memory(),
-        features=features,
+        features=model_features(models, features),
     ) as runtime:
         control = runtime._metric_control  # type: ignore[attr-defined]
         assert isinstance(control, MetricsService)
@@ -184,10 +185,10 @@ async def test_runtimes_sharing_metrics_close_only_their_own_write_scopes() -> N
     metrics = Metrics.in_memory(commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)))
     features = await RuntimeFeatures("shared-metrics").capture()
     async with Runtime.open(
-        "first", metrics=metrics, models=ModelRegistry(), storage=RuntimeStorage.in_memory(), features=features,
+        "first", metrics=metrics, storage=RuntimeStorage.in_memory(), features=features,
     ) as first:
         async with Runtime.open(
-            "second", metrics=metrics, models=ModelRegistry(), storage=RuntimeStorage.in_memory(), features=features,
+            "second", metrics=metrics, storage=RuntimeStorage.in_memory(), features=features,
         ) as second:
             observation = Observation(
                 version=1, observation_id="second-pending", kind="test.metric",
@@ -246,7 +247,7 @@ async def test_runtime_cancelled_close_keeps_storage_open_until_metric_sink_sett
     monkeypatch.setattr(RuntimeState, "close", close_storage)
     features = RuntimeFeatures("close-metrics")
     async with Runtime.open(
-        "close-owner", metrics=metrics, models=ModelRegistry(), storage=storage, features=features,
+        "close-owner", metrics=metrics, storage=storage, features=features,
     ) as runtime:
         observation = Observation(
             version=1, observation_id="close-inflight", kind="test.metric",
@@ -281,18 +282,19 @@ async def test_metrics_resources_do_not_enter_captured_agent_binding_identity() 
 
     features = RuntimeFeatures("metric-resource-identity")
     features.agent("default")
+    models = create_model(protocol="openai", model="unused-offline-model")
+    features.model("default", models)
     capture = await features.capture()
-    models = ModelRegistry.openai(model="unused-offline-model")
     bindings = []
     for metrics in (None, Metrics.in_memory(), Metrics.in_memory()):
         async with Runtime.open(
-            "metric-resource-identity", models=models,
+            "metric-resource-identity",
             storage=RuntimeStorage.in_memory(), features=capture, metrics=metrics,
         ) as runtime:
             compiled = runtime.agents.get().derive(instructions=("fixed binding",)).compiled
             assert compiled is not None
             compiler = AgentCompiler(
-                model_resolver=models.capture(), candidates=(),
+                model_resolver=capture.models, candidates=(),
                 agents={compiled.spec.id: compiled.spec},
             )
             bindings.append(compiler.bind(compiled).binding_contract.to_payload())

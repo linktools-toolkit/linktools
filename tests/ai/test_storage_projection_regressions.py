@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Independent regression for accepted-context archival at effect promotion."""
+from ._runtime_test_helpers import model_features
 from pathlib import Path
 
 import pytest
@@ -39,7 +40,7 @@ async def test_promotion_archives_accepted_context(
     group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)), scope="runtime")
     group.tool(lookup, effect_policy=effect_policy)
     group.agent('default', model='default', allow_tools=('lookup',))
-    async with Runtime.open('pending-tool', storage=state, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
+    async with Runtime.open('pending-tool', storage=state, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         original = SqlStorageContext.run_mutation
         commits = []
@@ -58,7 +59,6 @@ async def test_promotion_archives_accepted_context(
         else:
             assert calls[0] is not None and calls[0].status is ExecutionStatus.STARTED
             assert len(commits) > 1
-
 
 
 @pytest.mark.asyncio
@@ -93,7 +93,7 @@ async def test_session_admission_reuses_verified_history_root(tmp_path: Path, mo
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if terminal else None))
     features.agent('default', model='default', allow_tools=())
     async with Runtime.open('review-context', storage=RuntimeStorage.sqlite(tmp_path / 'context.db'),
-                            models=_Models(_UsageFunctionModel(model)), features=features) as runtime:
+                            features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
         session = await runtime.agents.get().create_session('session')
         for value in ('first', 'second', 'third'):
             result = await session.run(value, timeout_seconds=5)
@@ -149,7 +149,7 @@ async def test_projection_boundary_read_budget(tmp_path: Path, monkeypatch: pyte
     features.tool(lookup, effect_policy='none')
     features.agent('default', model='default', allow_tools=('lookup',))
     async with Runtime.open('review-boundaries', storage=RuntimeStorage.sqlite(tmp_path / 'boundaries.db'),
-                            models=_Models(_UsageFunctionModel(model)), features=features) as runtime:
+                            features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
         result = await runtime.agents.get().run('question', timeout_seconds=10)
         assert result.result.status is ExecutionStatus.SUCCEEDED
     summary = {label: {'calls': sum(item[0] == label for item in observed),
@@ -201,7 +201,7 @@ async def test_pending_large_history_is_process_local(tmp_path: Path, monkeypatc
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)))
     features.agent('default', model='default', allow_tools=())
     async with Runtime.open('review-pending-large', storage=RuntimeStorage.sqlite(tmp_path / 'pending.db'),
-                            models=_Models(_UsageFunctionModel(model)), features=features) as runtime:
+                            features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
         session = await runtime.agents.get().create_session('session')
         assert (await session.run('first')).result.status is ExecutionStatus.SUCCEEDED
         published.clear()

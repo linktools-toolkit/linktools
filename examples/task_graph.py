@@ -3,7 +3,6 @@
 """Conditional batch expansion and aggregation using public Task APIs."""
 
 from linktools.ai.core import JsonValue
-from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.task import (
     Task, TaskExpander, TaskExpansionContext, TaskGraph, TaskNode, TaskNodeContext,
@@ -59,7 +58,7 @@ async def run(texts: list[str], *, uppercase: bool = True) -> JsonValue:
         expander=batch_expander,
     ),))
     async with Runtime.open(
-        "batch-example", models=ModelRegistry(), storage=RuntimeStorage.in_memory(),
+        "batch-example", storage=RuntimeStorage.in_memory(),
     ) as runtime:
         engine = runtime.tasks.bind(plan_task, uppercase_task, lowercase_task, collect_task, batch_expander)
         await engine.describe_submission(graph, idempotency_key="batch")

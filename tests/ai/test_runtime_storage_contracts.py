@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Runtime storage error, concurrency, and schema contracts."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 import threading
@@ -830,7 +831,6 @@ async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
         await engine.dispose()
 
 
-
 async def test_operation_compaction_keeps_one_stream_anchor() -> None:
     state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="operation-anchor", tenant_id="tenant")
@@ -908,7 +908,7 @@ async def test_shared_storage_configuration_binds_independent_runtime_lifetimes(
     async with AsyncExitStack() as stack:
         first, second = await asyncio.gather(*(
             stack.enter_async_context(Runtime.open(
-                "shared-configuration", models=RuntimeUsageModels(), storage=storage,
+                "shared-configuration", features=model_features(RuntimeUsageModels()), storage=storage,
             ))
             for _ in range(2)
         ))
@@ -926,7 +926,7 @@ async def test_shared_storage_configuration_binds_independent_runtime_lifetimes(
     assert storage.object_store is objects
 
     async with Runtime.open(
-        "shared-configuration", models=RuntimeUsageModels(), storage=storage,
+        "shared-configuration", features=model_features(RuntimeUsageModels()), storage=storage,
     ) as reopened:
         assert reopened._state is not first._state
         assert reopened._state is not second._state

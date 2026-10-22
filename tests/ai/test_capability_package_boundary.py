@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Capability authoring imports stay independent from Runtime initialization."""
+from ._runtime_test_helpers import model_features
 
 import subprocess
 import sys
@@ -66,8 +67,7 @@ async def test_invalid_module_route_is_rejected_before_storage_initialization(
         async with Runtime.open(
             "invalid-route",
             storage=RuntimeStorage.in_memory(),
-            models=_FeatureModels(),
-            features=features,
+            features=model_features(_FeatureModels(), features),
         ):
             pytest.fail("invalid declaration must not activate Runtime")
 

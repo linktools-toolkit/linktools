@@ -10,48 +10,64 @@ pip install "linktools-ai[openai,anthropic,web]"  # both adapters and Web consol
 
 The base package does not require either provider SDK. Core ModelBinding, Runtime
 and Web modules remain importable without them (serving Web additionally needs the
-`web` extra). Calling a provider factory/register without its extra fails immediately
+`web` extra). Calling `create_model` for a provider without its extra fails immediately
 with the matching install hint, before connection settings or credentials are resolved.
 
 Choose the actual API, not a vendor-looking model name:
 
 ```python
-from linktools.ai.model import ModelRegistry
+from linktools.ai.model import create_model
+from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
 
-models = ModelRegistry.openai_responses(model="gpt-5")
-models.register_anthropic("messages", model="claude-sonnet-4-5")
-models.register_openai("compatible", model="gateway-model", profile={
+features = RuntimeFeatures()
+features.model("default", create_model(protocol="openai-responses", model="gpt-5"))
+features.model("messages", create_model(protocol="anthropic", model="claude-sonnet-4-5"))
+features.model("compatible", create_model(protocol="openai", model="gateway-model", profile={
     "supports_thinking": True,
     "thinking_always_enabled": False,
-})
+}))
+
+async with Runtime.open("app", features=features, storage=RuntimeStorage.in_memory()) as runtime:
+    ...
 ```
 
-The public model types and Python entry points are:
+`create_model` returns a `ModelBinding`, not a registry. It accepts input types,
+profile, connection resolver, credentials, timeouts and retry/token limits. Missing
+provider extras fail with the matching installation hint. Unknown protocol strings
+fail with `MODEL_CONFIG_INVALID` without echoing connection values.
 
-| Type | Default-route factory | Route registration |
-| --- | --- | --- |
-| `openai` | `ModelRegistry.openai(...)` | `models.register_openai(route_id, ...)` |
-| `openai-responses` | `ModelRegistry.openai_responses(...)` | `models.register_openai_responses(route_id, ...)` |
-| `anthropic` | `ModelRegistry.anthropic(...)` | `models.register_anthropic(route_id, ...)` |
+The public type values are `openai` (Chat Completions), `openai-responses`, and
+`anthropic` (Messages). CLI `--model-api`, `MODEL_API`, workspace `model_api`,
+HTTP trace labels and input dispatch use the same values. Native HTTP endpoint
+paths are unchanged. There is no separate public registry or `Runtime.open(models=...)`.
 
-For a protocol selected at runtime, use the shared constructor instead of
-maintaining a factory dispatch in each consumer:
+For delayed configuration, register a synchronous zero-argument function returning
+an existing `ModelBinding`:
 
 ```python
-models = ModelRegistry.create(protocol="anthropic", model="claude-sonnet-4-5")
+def load_assistant():
+    return create_model(protocol="anthropic", model="configured-model",
+                        connection_resolver=resolve_current_connection)
+
+features.model("assistant", load_assistant)
 ```
 
-`create` returns a new registry with the `default` route. It accepts the same
-explicit options as the three dedicated factories, including input types, profile,
-connection resolver, credentials, timeouts and retry/token limits. It delegates to
-the selected factory, preserving missing-extra installation hints. It does not
-register a route into an existing registry; use the dedicated `register_*` methods
-or `register(binding)` for that. Unknown protocol strings fail with
-`MODEL_CONFIG_INVALID` without echoing connection values.
+The feature capture freezes route names and sources. First semantic use (for
+example, reading a model contract or thinking capability) resolves a route once;
+concurrent reads share its first successful result. An unused route is not loaded.
+A failed load can be retried; asynchronous loaders and recursive same-route loads
+are rejected. A later feature registration affects future captures only. Reusing
+one capture shares its resolved bindings. Start a new capture to change model
+semantics; a changed contract cannot silently restore a different historical model.
 
-CLI `--model-api`, `AI_MODEL_API`, workspace `model_api`, HTTP trace API labels,
-and protocol dispatch use these same type values. Python methods use underscores
-where a type contains a hyphen. Native HTTP endpoint paths are unchanged.
+Model binding resolution does not create HTTP clients. `materialize()` evaluates
+`connection_resolver` for the current run, preserving credential rotation and
+per-run connection snapshots; it must not change model/profile/input semantics.
+The caller owns the returned model's async context and releases its client when
+the run ends. Custom `ModelBinding` implementations still provide provider,
+model_identity, contract and materialize; the route name belongs only to Features.
+For diagnostics outside Runtime, use `async with binding.materialize() as model:`.
+
 The earlier pre-release `openai-chat` / `anthropic-messages` type spellings are not
 aliases; update configuration to the current spellings. A captured pre-release
 Anthropic contract with the previous discriminator is not a valid restore target

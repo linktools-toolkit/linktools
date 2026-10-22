@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """End-to-end model-facing tool signal composition regressions."""
+from ._runtime_test_helpers import model_features
 
 from ._runtime_test_helpers import workspace_features
 
@@ -28,7 +29,6 @@ from linktools.ai.workspace import (
 )
 
 
-
 class _CompositionModelBinding:
     route_id = "default"
     provider = "test"
@@ -45,27 +45,8 @@ class _CompositionModelBinding:
         )
 
 
-class _CompositionModels:
-    def capture(self) -> "_CompositionModels":
-        return self
-
-    def resolve(self, route_id: str) -> _CompositionModelBinding:
-        if route_id != "default":
-            raise AssertionError(route_id)
-        return _CompositionModelBinding()
-
-    def restore(
-        self,
-        payload: Mapping[str, JsonValue],
-        *,
-        route_id: str | None = None,
-    ) -> _CompositionModelBinding:
-        if (
-            route_id not in {None, "default"}
-            or dict(payload) != _CompositionModelBinding.contract
-        ):
-            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
-        return _CompositionModelBinding()
+class _CompositionModels(_CompositionModelBinding):
+    pass
 
 
 async def _business_tool(_ctx: RunContext[AgentContext[None]]) -> str:
@@ -116,9 +97,9 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
 
     async with Runtime.open(
         "default",
-        metrics=metrics, models=_CompositionModels(),  # type: ignore[arg-type]
+        metrics=metrics,   # type: ignore[arg-type]
         storage=state,
-        features=application,
+        features=model_features(_CompositionModels(), application),
     ) as runtime:
         result = (await runtime.agents.get("default").run(
             "prompt",

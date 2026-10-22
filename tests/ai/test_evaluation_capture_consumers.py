@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Historical child and graph captures run through the public evaluation API."""
+from ._runtime_test_helpers import model_features
 
 from ._runtime_test_helpers import workspace_features
 
@@ -73,8 +74,8 @@ async def test_tool_created_child_capture_runs_independently_in_evaluation(tmp_p
     instructions = work / "AGENTS.md"
     instructions.write_text("Historical child repository context", encoding="utf-8")
     state = tmp_path / "state"
-    async with Runtime.open("child-capture-consumer", models=models, storage=RuntimeStorage.filesystem(state),
-            context=CONTEXT, features=child_capabilities(1, "Historical child behavior", workspace=Workspace.load(work))) as runtime:
+    async with Runtime.open("child-capture-consumer", storage=RuntimeStorage.filesystem(state),
+            context=CONTEXT, features=model_features(models, child_capabilities(1, "Historical child behavior", workspace=Workspace.load(work)))) as runtime:
         parent = await runtime.agents.get().start("delegate this work", principal=PRINCIPAL,
                                                 idempotency_key="create-real-child")
         assert (await parent.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
@@ -96,8 +97,8 @@ async def test_tool_created_child_capture_runs_independently_in_evaluation(tmp_p
 
     instructions.write_text("Changed live repository context", encoding="utf-8")
     scorer = Task("consumer.captured-child-score", exact, effect_policy="none")
-    async with Runtime.open("child-capture-consumer", models=models, storage=RuntimeStorage.filesystem(state),
-            context=CONTEXT, features=child_capabilities(2, "Changed current child behavior", workspace=Workspace.load(work))) as runtime:
+    async with Runtime.open("child-capture-consumer", storage=RuntimeStorage.filesystem(state),
+            context=CONTEXT, features=model_features(models, child_capabilities(2, "Changed current child behavior", workspace=Workspace.load(work)))) as runtime:
         historical = await runtime.tasks.from_agent_capture("consumer.tool-child", capture, principal=PRINCIPAL)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("tool-child", 1), cases=(
             CaseSpec.from_capture(CaseRef("tool-child", "original", 1), capture=capture, expected=source_result.output),
@@ -155,7 +156,7 @@ async def test_graph_capture_ref_evaluates_new_inputs_after_reopen(tmp_path: Pat
     producer = Task("consumer.capture-prepare", prepare, effect_policy="none")
     consumer = Task("consumer.capture-answer", answer, effect_policy="none")
     scorer = Task("consumer.capture-graph-score", score, effect_policy="none")
-    async with Runtime.open("graph-capture-ref", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path),
+    async with Runtime.open("graph-capture-ref", features=model_features(FixtureModels()), storage=RuntimeStorage.filesystem(tmp_path),
                             context=CONTEXT) as runtime:
         original = await runtime.tasks.bind(producer, consumer).start(TaskGraph("source-captured-graph", nodes=(
             TaskNode("prepare", task=producer, input={"fallback_question": "old source input"}),
@@ -167,7 +168,7 @@ async def test_graph_capture_ref_evaluates_new_inputs_after_reopen(tmp_path: Pat
         original_ids = tuple([(await original.execution(node)).execution_id for node in ("prepare", "answer")])
         capture = await runtime.tasks.capture_graph(original.graph_id, CaptureGraphRequest(PRINCIPAL, "capture-whole-graph"))
 
-    async with Runtime.open("graph-capture-ref", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path),
+    async with Runtime.open("graph-capture-ref", features=model_features(FixtureModels()), storage=RuntimeStorage.filesystem(tmp_path),
                             context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(producer, consumer, scorer)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("captured-graph-ref", 1), cases=(

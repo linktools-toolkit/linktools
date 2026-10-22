@@ -30,11 +30,11 @@ ResultT = TypeVar("ResultT")
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
-    from linktools.ai.model import ModelRegistry
+    from linktools.ai.model import ModelBinding, create_model
     from linktools.ai.runtime import Runtime, RuntimeStorage
 
 MODEL_APIS = ("openai", "openai-responses", "anthropic")
-MODEL_API = ConfigField(name="AI_MODEL_API", cast=str, default=None)
+MODEL_API = ConfigField(name="MODEL_API", cast=str, default=None)
 
 
 def _add_local_runtime_arguments(parser: "CommandParser") -> None:
@@ -116,7 +116,7 @@ def _local_input_config(
 
 
 def _local_model_options(workspace: Workspace, args: Namespace) -> dict[str, str | None]:
-    api = args.model_api or workspace.config.get("model_api") or os.getenv("AI_MODEL_API") or "openai"
+    api = args.model_api or workspace.config.get("model_api") or os.getenv("MODEL_API") or "openai"
     if api not in MODEL_APIS:
         raise AIError(ErrorCode.MODEL_CONFIG_INVALID, "model_api must be one of: " + ", ".join(MODEL_APIS))
     prefix = "ANTHROPIC" if api == "anthropic" else "OPENAI"
@@ -134,17 +134,17 @@ def _local_model_options(workspace: Workspace, args: Namespace) -> dict[str, str
     return options
 
 
-def _local_models(
+def _local_model(
     workspace: Workspace,
     *,
     model: "str | None" = None,
     api: "str | None" = None,
     base_url: "str | None" = None,
     api_key: "str | None" = None,
-) -> "ModelRegistry":
-    from linktools.ai.model import ModelRegistry
+) -> "ModelBinding":
+    from linktools.ai.model import ModelBinding, create_model
 
-    api = api or workspace.config.get("model_api") or os.getenv("AI_MODEL_API") or "openai"
+    api = api or workspace.config.get("model_api") or os.getenv("MODEL_API") or "openai"
     if not isinstance(api, str) or api not in MODEL_APIS:
         raise AIError(ErrorCode.MODEL_CONFIG_INVALID, "unsupported model_api")
     prefix = "ANTHROPIC" if api == "anthropic" else "OPENAI"
@@ -161,7 +161,7 @@ def _local_models(
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "model is required")
 
     try:
-        return ModelRegistry.create(
+        return create_model(
             protocol=api,
             model=selected_model,
             input_types=input_types,
@@ -185,15 +185,15 @@ def _local_models(
         ) from error
 
 
-def _local_runtime_models(workspace: Workspace, args: Namespace) -> "ModelRegistry":
-    return _local_models(workspace, **_local_model_options(workspace, args))
+def _local_runtime_model(workspace: Workspace, args: Namespace) -> "ModelBinding":
+    return _local_model(workspace, **_local_model_options(workspace, args))
 
 
 @asynccontextmanager
 async def _open_local_runtime(
     workspace: Workspace,
     *,
-    models: "ModelRegistry | None" = None,
+    model: "ModelBinding | None" = None,
 ) -> "AsyncIterator[Runtime]":
     from linktools.ai.capability import AssetCapability, WorkspaceCapability
     from linktools.ai.runtime import RuntimeFeatures
@@ -204,6 +204,7 @@ async def _open_local_runtime(
     await assets.initialize()
     try:
         features = RuntimeFeatures("workspace")
+        features.model("default", _local_model(workspace) if model is None else model)
         features.capability(AssetCapability(assets))
         features.capability(WorkspaceCapability(workspace))
         features.capability(ExecutionCapability(retain_history=True))
@@ -212,7 +213,6 @@ async def _open_local_runtime(
         async with Runtime.open(
             "default",
             storage=_local_runtime_storage(workspace),
-            models=_local_models(workspace) if models is None else models,
             features=features,
             metrics=await _local_metrics(workspace),
         ) as runtime:

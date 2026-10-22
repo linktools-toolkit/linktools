@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Terminal metadata observations preserve owner CAS and immutable publication."""
+from ._runtime_test_helpers import model_features
 
 from contextvars import ContextVar
 from dataclasses import replace
@@ -37,8 +38,8 @@ async def test_terminal_observations_keep_physical_guards_and_rollback(
     rejected = False
 
     async with Runtime.open(
-        "terminal-observations", models=_ToolModels(), storage=_storage("sqlite", tmp_path),
-        features=application,
+        "terminal-observations", storage=_storage("sqlite", tmp_path),
+        features=model_features(_ToolModels(), application),
     ) as runtime:
         async def snapshot():
             async def read(tx):

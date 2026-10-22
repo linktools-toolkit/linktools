@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Regression tests for workspace RuntimeStorage composition."""
+from ._runtime_test_helpers import model_features
+from linktools.ai.model import create_model
 
 from ._runtime_test_helpers import workspace_features
 
@@ -13,7 +15,7 @@ from linktools.ai.asset import (
 )
 from linktools.ai.capability import AssetCapability
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime._context import RuntimeContext
 from linktools.ai.runtime._harness_memory import build_harness_memory
@@ -215,16 +217,15 @@ def _workspace_runtime_storage(workspace: Workspace) -> RuntimeStorage:
 @pytest.mark.asyncio
 async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
     workspace = Workspace.load(tmp_path)
-    models = ModelRegistry.openai(model="gpt-test")
+    models = create_model(protocol='openai', model="gpt-test")
     from linktools.ai.capability import ExecutionCapability
 
     features = workspace_features("workspace", workspace=workspace)
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open(
         "default",
-        models=models,
         storage=_workspace_runtime_storage(workspace),
-        features=features,
+        features=model_features(models, features),
     ) as runtime:
         assert runtime.tenant_id == "default"
         assert runtime.default_principal.tenant_id == "default"
@@ -240,9 +241,8 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
     async with Runtime.open(
         "default",
         context=RuntimeContext(None, tenant_id="tenant-a"),
-        models=models,
         storage=_workspace_runtime_storage(workspace),
-        features=features,
+        features=model_features(models, features),
     ) as runtime:
         assert runtime.tenant_id == "tenant-a"
         assert runtime.default_principal.tenant_id == "tenant-a"
@@ -250,9 +250,8 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
 
     async with Runtime.open(
         "default",
-        models=models,
         storage=_workspace_runtime_storage(workspace),
-        features=features,
+        features=model_features(models, features),
     ) as runtime:
         loaded = await runtime.sessions.get(
             created.session_id,

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Tool execution errors remain observable without inventing SDK returns."""
+from ._runtime_test_helpers import model_features
 
 from ._runtime_test_helpers import workspace_features
 
@@ -41,8 +42,8 @@ async def test_tool_failure_trace_is_durable_and_does_not_fabricate_a_return(fai
     group.tool(broken, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("broken",))
     async with Runtime.open(
-        "tool-failure-trace", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), features=group,
+        "tool-failure-trace",
+        storage=RuntimeStorage.in_memory(), features=model_features(_Models(_UsageFunctionModel(model)), group),
     ) as runtime:
         execution = await runtime.agents.get("default").start("Call the tool")
         if failure == "fatal":
@@ -94,8 +95,8 @@ async def test_terminal_seal_and_retention_release_outlast_pending_observation_f
     group.agent("default", model="default", allow_tools=())
     storage = RuntimeStorage.in_memory()
     async with Runtime.open(
-        "observation-terminal-drain", models=_Models(_UsageFunctionModel(model)),
-        storage=storage, features=group,
+        "observation-terminal-drain",
+        storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), group),
     ) as runtime:
         execution = await runtime.agents.get("default").start("finish")
         try:
@@ -171,8 +172,8 @@ async def test_pause_handoff_drains_only_its_execution_while_another_run_is_live
     group.agent("default", model="default", allow_tools=("read_file", "broken"))
     storage = RuntimeStorage.in_memory()
     async with Runtime.open(
-        "parallel-handoff", models=_Models(_UsageFunctionModel(model)), storage=storage,
-        features=group,
+        "parallel-handoff", storage=storage,
+        features=model_features(_Models(_UsageFunctionModel(model)), group),
     ) as runtime:
         held = await runtime.agents.get("default").start("hold this run")
         try:

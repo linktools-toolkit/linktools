@@ -8,7 +8,7 @@ separate candidate or judge runtime.
 ## An offline evaluation, end to end
 
 This complete example needs no model credentials or network calls. It uses an
-empty `ModelRegistry`, durable filesystem storage, two cases, and a rule scorer.
+no model declarations, durable filesystem storage, two cases, and a rule scorer.
 Run it in an environment with `linktools-ai` installed. The state directory is
 retained so the same requests can be reopened or retried.
 
@@ -24,7 +24,6 @@ from linktools.ai.evaluation import (
     DimensionContract, EvaluationSpec, ScorerSpec, ScoringInput,
     ScoreBundle, StartEvaluationRequest, export_report,
 )
-from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeStorage
 from linktools.ai.task import Task, TaskNodeContext
 
@@ -51,8 +50,7 @@ async def main() -> None:
 
     async with Runtime.open(
         "evaluation-guide",
-        models=ModelRegistry(),
-        storage=RuntimeStorage.filesystem(Path("evaluation-state")),
+            storage=RuntimeStorage.filesystem(Path("evaluation-state")),
         context=RuntimeContext(None, tenant_id="example"),
     ) as runtime:
         engine = runtime.tasks.bind(target, judge)
@@ -464,7 +462,7 @@ select results. A successful null is `{"status": "succeeded", "value": None,
 
 ## Agent candidates and model judges
 
-Open the Runtime with your application's `ModelRegistry` and `RuntimeFeatures`.
+Register model bindings with your application's `RuntimeFeatures` before opening the Runtime.
 An existing Agent becomes a candidate or scorer through the same Task adapter:
 
 ```python
@@ -487,7 +485,7 @@ and its full semantic contract must be listed explicitly:
 policy = EvaluationPolicy(model_fixtures=(fixture_binding.contract,))
 ```
 
-Register that binding with the ModelRegistry used to open the Runtime. For
+Register that binding using `features.model(name, fixture_binding)`. For
 intended real provider calls, explicitly choose
 `EvaluationPolicy(model_mode="live_model")` and supply an appropriate route.
 This permits live model calls and their costs; it does not enable external tool

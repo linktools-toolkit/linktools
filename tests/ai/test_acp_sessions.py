@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """ACP session listings preserve Runtime authorization and pagination."""
+from ._runtime_test_helpers import model_features
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -108,7 +110,7 @@ async def test_acp_workspace_uses_explicit_execution_coordination(
         )
     )
     application = ACPApplication.for_workspace(
-        Workspace.load(tmp_path), models=_Models(TestModel(call_tools=[])),
+        Workspace.load(tmp_path), features=model_features(_Models(TestModel(call_tools=[]))),
         storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache),
         execution=declaration,
     )
@@ -135,3 +137,58 @@ async def test_acp_workspace_uses_explicit_execution_coordination(
     assert bool(streams.open_keys) is (coordination == "stream")
     assert bool(cache.open_keys) is (coordination == "combined")
     assert not cache.closed
+
+
+@pytest.mark.asyncio
+async def test_acp_application_can_serve_again_after_transport_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from collections.abc import AsyncIterator
+    from contextlib import asynccontextmanager
+
+    import linktools.ai.acp as acp_module
+    from linktools.ai.core import service_principal
+    from linktools.ai.runtime import RuntimeFeatures, RuntimeStorage
+    from linktools.ai.workspace import Workspace
+
+    from ._runtime_test_helpers import RuntimeUsageModels
+
+    features = RuntimeFeatures()
+    binding = RuntimeUsageModels()
+    features.model("default", binding)
+    application = acp_module.ACPApplication.for_workspace(
+        Workspace.load(tmp_path), features=features,
+        storage=RuntimeStorage.in_memory(),
+    )
+    captures = []
+    closed = []
+    transport_failed = False
+
+    @asynccontextmanager
+    async def open_runtime(
+        namespace: str, *, storage: RuntimeStorage, features: RuntimeFeatures,
+    ) -> AsyncIterator[SimpleNamespace]:
+        assert namespace == "default"
+        assert storage is application.storage
+        captures.append(await features.capture())
+        try:
+            yield SimpleNamespace(default_principal=service_principal("default", "acp"))
+        finally:
+            closed.append(True)
+
+    async def serve(agent: ACPAgent) -> None:
+        nonlocal transport_failed
+        if not transport_failed:
+            transport_failed = True
+            raise RuntimeError("transport disconnected")
+
+    monkeypatch.setattr(acp_module.Runtime, "open", open_runtime)
+    monkeypatch.setattr(acp_module, "serve_stdio", serve)
+    with pytest.raises(RuntimeError, match="transport disconnected"):
+        await application.serve(memory_scope="memory")
+    await application.serve(memory_scope="memory")
+
+    assert len(captures) == len(closed) == 2
+    assert captures[0].contributions == captures[1].contributions
+    assert all(capture.models.resolve("default") is binding for capture in captures)
+    assert all(capture.workspace is application.workspace for capture in captures)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Captured graph replay preserves the native node's structured output contract."""
+from ._runtime_test_helpers import model_features
 
 import json
 from collections.abc import AsyncIterator
@@ -49,7 +50,7 @@ async def test_captured_graph_keeps_node_output_contract_after_reopen(tmp_path: 
     group = RuntimeFeatures("structured-graph")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     scorer = Task("graph.score", score, effect_policy="none")
-    async with Runtime.open("structured-graph", models=models, context=CONTEXT, features=group,
+    async with Runtime.open("structured-graph", context=CONTEXT, features=model_features(models, group),
                             storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         target = runtime.tasks.from_agent("graph.target", runtime.agents.get())
         source = await runtime.tasks.bind(target).start(TaskGraph("source", (
@@ -59,7 +60,7 @@ async def test_captured_graph_keeps_node_output_contract_after_reopen(tmp_path: 
         source_output = await source.result("answer")
         source_contract = (await source.state(include_content=True)).nodes[0].output_contract
         capture = await runtime.tasks.capture_graph(source.graph_id, CaptureGraphRequest(PRINCIPAL, "capture"))
-    async with Runtime.open("structured-graph", models=models, context=CONTEXT, features=group,
+    async with Runtime.open("structured-graph", context=CONTEXT, features=model_features(models, group),
                             storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         target = runtime.tasks.from_agent("graph.target", runtime.agents.get())
         engine = runtime.tasks.bind(target, scorer)
@@ -88,7 +89,7 @@ async def test_resolved_output_contract_must_match_named_task_schema(tmp_path: P
 
     declared = Task("schema.answer", answer, output_type=Answer, effect_policy="none")
     different = Task("schema.different", answer, output_type=DifferentAnswer, effect_policy="none")
-    async with Runtime.open("schema-contract", models=FixtureModels(), context=CONTEXT,
+    async with Runtime.open("schema-contract", features=model_features(FixtureModels()), context=CONTEXT,
                             storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         engine = runtime.tasks.bind(declared)
         for task in (declared, different):

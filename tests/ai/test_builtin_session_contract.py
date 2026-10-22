@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Built-in sessions keep authority independent of optional context retention."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from copy import deepcopy
@@ -43,8 +44,7 @@ def _storage(path, backend='sqlite', cache=None):
 
 def _open(path, model, *, retain=False, backend='sqlite', cache=None):
     return Runtime.open('builtin-session', storage=_storage(path, backend, cache),
-                        models=_Models(_UsageFunctionModel(model)),
-                        features=_features(retain=retain),
+                        features=model_features(_Models(_UsageFunctionModel(model)), _features(retain=retain)),
                         context=RuntimeContext(None, tenant_id='tenant'))
 
 
@@ -170,8 +170,7 @@ async def test_coordination_does_not_opt_default_execution_into_terminal_admissi
         return ModelResponse(parts=[TextPart('answer')])
 
     async with Runtime.open('builtin-session', storage=storage,
-                            models=_Models(_UsageFunctionModel(model)),
-                            features=features,
+                            features=model_features(_Models(_UsageFunctionModel(model)), features),
                             context=RuntimeContext(None, tenant_id='tenant')) as runtime:
         session = await runtime.agents.get().create_session('session', principal=_OWNER)
         execution = await session.start('question')
@@ -184,7 +183,6 @@ async def test_coordination_does_not_opt_default_execution_into_terminal_admissi
         assert (await execution.wait(timeout_seconds=5)).result.status.value == 'SUCCEEDED'
         assert (await session.history()).items
     assert cache.claims >= 1
-
 
 
 @pytest.mark.asyncio
@@ -242,7 +240,7 @@ async def test_unavailable_guard_does_not_depend_on_retained_execution_header(tm
 
     storage = _storage(tmp_path)
     async with Runtime.open('builtin-session', storage=storage,
-                            models=_Models(_UsageFunctionModel(model)), features=_features(retain=True),
+                            features=model_features(_Models(_UsageFunctionModel(model)), _features(retain=True)),
                             context=RuntimeContext(None, tenant_id='tenant')) as runtime:
         session = await runtime.sessions.get('session', principal=_OWNER)
 
@@ -293,7 +291,7 @@ async def test_reconcile_terminal_before_split_session_release_preserves_unavail
 
     storage = _storage(tmp_path, 'split_sqlite')
     async with Runtime.open('builtin-session', storage=storage,
-                            models=_Models(_UsageFunctionModel(model)), features=_features(),
+                            features=model_features(_Models(_UsageFunctionModel(model)), _features()),
                             context=RuntimeContext(None, tenant_id='tenant')) as runtime:
         session = await runtime.agents.get().create_session('session', principal=_OWNER)
         mutate = runtime._state.conversation.sessions.state_store.mutate
@@ -363,10 +361,10 @@ async def test_sync_peer_coordinates_with_terminal_owner_before_pending_publicat
     sync.capability(ExecutionCapability(retain_history=True, coordination=cache), scope="runtime")
     models = _Models(_UsageFunctionModel(model))
     storage = _storage(tmp_path, cache=cache)
-    async with Runtime.open('builtin-session', storage=storage, models=models,
-                            features=terminal) as owner, Runtime.open(
-            'builtin-session', storage=_storage(tmp_path, cache=cache), models=models,
-            features=sync) as peer:
+    async with Runtime.open('builtin-session', storage=storage,
+                            features=model_features(models, terminal)) as owner, Runtime.open(
+            'builtin-session', storage=_storage(tmp_path, cache=cache),
+            features=model_features(models, sync)) as peer:
         session = await owner.agents.get().create_session('session')
         remote = peer.agents.get().session('session')
         first = asyncio.create_task(session.start('question', idempotency_key='request'))

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Public Runtime recovery coverage for durable TaskGraph state."""
+from ._runtime_test_helpers import model_features
+from linktools.ai.model import create_model
 
 from linktools.ai.runtime.state import RuntimeState
 import asyncio
@@ -21,7 +23,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.task import (
@@ -160,9 +162,8 @@ async def test_sqlite_runtime_recovery_preserves_execution_principal_after_expir
     )
     async with Runtime.open(
         "default",
-        models=ModelRegistry.openai(model="gpt-test"),
         storage=reopened,
-        features=RuntimeFeatures("authorization", authorization=authorization),
+        features=model_features(create_model(protocol='openai', model="gpt-test"), RuntimeFeatures("authorization", authorization=authorization)),
     ) as runtime:
         engine = runtime.tasks.bind(handler)
         recovery = await engine.get(graph.graph_id, principal=actor)
@@ -214,7 +215,7 @@ async def test_runtime_batch_recovery_keeps_run_only_actor_at_safe_service_bound
 
     async with Runtime.open(
         "recovery-actor",
-        models=ModelRegistry.openai(model="gpt-test"),
+        features=model_features(create_model(protocol='openai', model="gpt-test")),
         storage=RuntimeStorage.filesystem(storage_root),
     ) as runtime:
         await runtime.tasks.bind(handler).start(
@@ -243,9 +244,8 @@ async def test_runtime_batch_recovery_keeps_run_only_actor_at_safe_service_bound
     authorization = RecoveryAuthorization()
     async with Runtime.open(
         "recovery-actor",
-        models=ModelRegistry.openai(model="gpt-test"),
         storage=RuntimeStorage.filesystem(storage_root),
-        features=RuntimeFeatures("authorization", authorization=authorization),
+        features=model_features(create_model(protocol='openai', model="gpt-test"), RuntimeFeatures("authorization", authorization=authorization)),
     ) as runtime:
         with pytest.raises(AIError) as read_denied:
             await runtime._graph_service.state(graph.graph_id, principal=actor)

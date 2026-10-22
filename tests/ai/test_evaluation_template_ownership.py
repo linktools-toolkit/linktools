@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Evaluation admission owns its private inputs before any capture materialization."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.runtime.state import RuntimeState
 import asyncio
@@ -20,7 +21,7 @@ from linktools.ai.evaluation import (
     EvaluationPolicy, EvaluationSpec, GraphTargetSpec, ScorerSpec, ScoreBundle,
     StartEvaluationRequest, TaskCaseInput,
 )
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime import CaptureGraphRequest, CaptureInputRequest, Runtime, RuntimeContext, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.task import Task, TaskGraph, TaskGraphTemplate, TaskNode, TaskNodeResultRef, TaskRef, TaskNodeContext
@@ -55,7 +56,7 @@ async def test_failed_admission_does_not_persist_private_templates(tmp_path: Pat
     async def target(context: TaskNodeContext[None]) -> JsonValue:
         return dict(context.input)
 
-    async with Runtime.open("admission", models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open("admission", storage=storage, context=CONTEXT) as runtime:
         task, scorer = Task("owner.target", target, effect_policy="none"), Task("owner.score", score, effect_policy="none")
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("data", 1), cases=(
             CaseSpec.graph(CaseRef("data", "one", 1), inputs={"unknown" if failure == "case" else "target": TaskCaseInput(input={})}),
@@ -84,7 +85,7 @@ async def test_graph_case_merges_preserve_captured_parameters_and_dependencies()
     async def consume(context: TaskNodeContext[None]) -> JsonValue:
         return [await context.read_dependency("frozen"), dict(context.input)]
 
-    async with Runtime.open("merge", models=ModelRegistry(), storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
+    async with Runtime.open("merge", storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
         producer, consumer = Task("merge.source", source, effect_policy="none"), Task("merge.consume", consume, effect_policy="none")
         scorer = Task("merge.score", score, effect_policy="none")
         engine = runtime.tasks.bind(producer, consumer, scorer)
@@ -128,7 +129,7 @@ async def test_reserved_capture_is_owned_across_cancel_and_purge(tmp_path: Path,
         return dict(context.input)
 
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("capture-owner", models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open("capture-owner", storage=storage, context=CONTEXT) as runtime:
         task, scorer = Task("owner.target", target, effect_policy="none"), Task("owner.score", score, effect_policy="none")
         engine = runtime.tasks.bind(task, scorer)
         source = await engine.start(TaskGraph("source", (TaskNode("target", task=task, input={"secret": "retained"}),)),
@@ -188,7 +189,7 @@ async def test_unmaterialized_capture_reservation_survives_snapshot_and_reconcil
     root = tmp_path / "source"
     storage = RuntimeStorage.filesystem(root)
     task, scorer = Task("snapshot.target", target, effect_policy="none"), Task("snapshot.score", score, effect_policy="none")
-    async with Runtime.open("snapshot", models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open("snapshot", storage=storage, context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(task, scorer)
         source = await engine.start(TaskGraph("source", (TaskNode("target", task=task, input={"kept": 1}),)),
             principal=PRINCIPAL, idempotency_key="source")
@@ -220,7 +221,7 @@ async def test_unmaterialized_capture_reservation_survives_snapshot_and_reconcil
     restored = tmp_path / "restored"
     await RuntimeState.restore_snapshot(reference, object_store=snapshot, root=restored, limits=limits)
     restored_storage = RuntimeStorage.from_root(restored)
-    async with Runtime.open("snapshot", models=ModelRegistry(), storage=restored_storage, context=CONTEXT) as runtime:
+    async with Runtime.open("snapshot", storage=restored_storage, context=CONTEXT) as runtime:
         run = await runtime.evaluations.reconcile(experiment_id, engine=runtime.tasks.bind(task, scorer),
             principal=PRINCIPAL, idempotency_key="resume")
         assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
@@ -239,7 +240,7 @@ async def test_content_purge_redacts_inline_template_and_keeps_admission_identit
         return dict(context.input)
 
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("redaction", models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open("redaction", storage=storage, context=CONTEXT) as runtime:
         task, scorer = Task("redaction.target", target, effect_policy="none"), Task("redaction.score", score, effect_policy="none")
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("data", 1), cases=(
             CaseSpec.graph(CaseRef("data", "one", 1), inputs={}),
@@ -278,7 +279,7 @@ async def test_evaluation_purge_preserves_native_owners_of_derived_captures(tmp_
         return dict(context.input)
 
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("native-owner", models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open("native-owner", storage=storage, context=CONTEXT) as runtime:
         task, scorer = Task("native.target", target, effect_policy="none"), Task("native.score", score, effect_policy="none")
         engine = runtime.tasks.bind(task, scorer)
         source = await engine.start(TaskGraph("source", (TaskNode("target", task=task, input={"kept": 1}),)),
@@ -322,7 +323,7 @@ async def test_function_task_capture_keeps_agent_shaped_business_json(route: str
     async def target(context: TaskNodeContext[None]) -> JsonValue:
         return dict(context.input)
 
-    async with Runtime.open("business-json", models=ModelRegistry(), storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
+    async with Runtime.open("business-json", storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
         task, scorer = Task("business.target", target, effect_policy="none"), Task("business.score", score, effect_policy="none")
         engine = runtime.tasks.bind(task, scorer)
         source = await engine.start(TaskGraph("source", (TaskNode("target", task=task, input=payload),)),
@@ -366,7 +367,7 @@ async def test_captured_inputs_preserve_merged_fields_and_original_parameters(
     target = Task("merge.capture", echo, normalize=normalize, effect_policy="none")
     judge = Task("merge.score", score, effect_policy="none")
     scorer = ScorerSpec("score", judge.ref, (DIMENSION,))
-    async with Runtime.open("captured-case", models=ModelRegistry(), storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
+    async with Runtime.open("captured-case", storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(target, judge)
         source = await engine.start(TaskGraph("source", (TaskNode("target", task=target, input={"number": 1}),)),
             principal=PRINCIPAL, idempotency_key="source")
@@ -421,7 +422,7 @@ async def test_graph_input_capture_has_one_owner(tmp_path: Path) -> None:
         return dict(context.input)
 
     target, judge = Task("capture.echo", echo, effect_policy="none"), Task("capture.score", score, effect_policy="none")
-    async with Runtime.open("capture-owner", models=ModelRegistry(), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
+    async with Runtime.open("capture-owner", storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(target, judge)
         captures = []
         for identity in ("first", "second"):
@@ -461,8 +462,8 @@ async def test_agent_graph_case_preserves_template_options_and_checks_prompt_own
     models = FixtureModels()
     group = RuntimeFeatures("case-agent")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open("agent-case", models=models, storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT,
-                            features=group) as runtime:
+    async with Runtime.open("agent-case", storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT,
+                            features=model_features(models, group)) as runtime:
         target = runtime.tasks.from_agent("case.agent", runtime.agents.get(), build_input=project)
         judge = Task("case.score", score, effect_policy="none")
         engine = runtime.tasks.bind(target, judge)

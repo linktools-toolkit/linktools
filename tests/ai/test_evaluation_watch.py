@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+from ._runtime_test_helpers import model_features
 import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -225,7 +226,7 @@ async def test_evaluation_real_task_graphs_watch_and_wait_share_resumable_events
     storage = RuntimeStorage.in_memory() if backend == "memory" else RuntimeStorage.filesystem(tmp_path)
     target = Task("watch.echo", echo, effect_policy="none")
     scorer = Task("watch.exact", exact, effect_policy="none")
-    async with Runtime.open("evaluation-watch-real", models=FixtureModels(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open("evaluation-watch-real", features=model_features(FixtureModels()), storage=storage, context=CONTEXT) as runtime:
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(
             DatasetRef("watch-cases", 1), cases=(CaseSpec.task(
                 CaseRef("watch-cases", "one", 1), input={"answer": "yes"}, expected="yes",

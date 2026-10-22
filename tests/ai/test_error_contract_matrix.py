@@ -24,7 +24,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionManager
-from linktools.ai.model import ModelRegistry
+from linktools.ai.model import ModelResolver
 from linktools.ai.runtime import (
     ExecutionResult,
     WaitResult,
@@ -128,7 +128,7 @@ def test_non_ai_redaction_error_is_internal_without_message_leak() -> None:
 
 def test_unknown_model_route_has_stable_connection_error() -> None:
     with pytest.raises(AIError) as error:
-        ModelRegistry().capture().resolve("missing")
+        ModelResolver({}).resolve("missing")
     assert error.value.code is ErrorCode.MODEL_CONNECTION_NOT_FOUND
 
 

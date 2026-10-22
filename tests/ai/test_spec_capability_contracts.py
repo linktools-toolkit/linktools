@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Declaration, capability contract, and runtime-leaf contracts."""
+from linktools.ai.model import ModelResolver, create_model
 
 import asyncio
 import hashlib
@@ -43,7 +44,7 @@ from linktools.ai.asset import (
 )
 from linktools.ai.core import canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime._harness_memory import select_harness_memory_tools
 from linktools.ai.runtime._mcp import (
     _MCPModelToolset,
@@ -364,7 +365,7 @@ def test_mcp_server_token_collision_fails_at_compiler_boundary(
     )
     with pytest.raises(AIError) as error:
         AgentCompiler(
-            model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+            model_resolver=ModelResolver({"default": create_model(protocol='openai', model="gpt-test")}),
             candidates=candidates,
             agents={"agent": AgentSpec("agent")},
         )

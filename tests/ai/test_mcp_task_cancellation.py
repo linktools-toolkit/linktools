@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """TaskGraph cancellation closes remote MCP resources without replaying effects."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from pathlib import Path
@@ -42,9 +43,8 @@ async def test_graph_cancel_closes_remote_client_and_preserves_unknown_effect_on
         try:
             async with Runtime.open(
                 "remote-task-cancellation",
-                models=_RemoteModels(),
                 storage=storage,
-                features=_group(_spec(remote)),
+                features=model_features(_RemoteModels(), _group(_spec(remote))),
             ) as runtime:
                 task = runtime.tasks.from_agent(
                     "remote.echo", runtime.agents.get("default")
@@ -94,9 +94,8 @@ async def test_graph_cancel_closes_remote_client_and_preserves_unknown_effect_on
         try:
             async with Runtime.open(
                 "remote-task-cancellation",
-                models=_RemoteModels(),
                 storage=restored,
-                features=_group(_spec(remote)),
+                features=model_features(_RemoteModels(), _group(_spec(remote))),
             ) as runtime:
                 task = runtime.tasks.from_agent(
                     "remote.echo", runtime.agents.get("default")

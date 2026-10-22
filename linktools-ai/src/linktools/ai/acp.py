@@ -28,7 +28,6 @@ from .core import (
     validate_memory_scope,
 )
 from .errors import AIError, ErrorCode
-from .model import ModelRegistry
 from .runtime import (
     CancelExecutionRequest,
     ExecutionTreeEvent,
@@ -226,7 +225,7 @@ class ACPAgent:
 @dataclass(frozen=True, slots=True)
 class ACPApplication:
     workspace: Workspace
-    models: ModelRegistry
+    features: RuntimeFeatures
     storage: RuntimeStorage
     execution: ExecutionCapability | None = None
 
@@ -235,23 +234,25 @@ class ACPApplication:
         cls,
         workspace: Workspace,
         *,
-        models: ModelRegistry,
+        features: RuntimeFeatures,
         storage: RuntimeStorage,
         execution: ExecutionCapability | None = None,
     ) -> "ACPApplication":
-        return cls(workspace, models, storage, execution)
+        """Assemble workspace and execution capabilities into the given features."""
+        return cls(workspace, features, storage, execution)
 
-    async def serve(self, *, memory_scope: str) -> None:
-        features = RuntimeFeatures("workspace")
-        features.capability(WorkspaceCapability(self.workspace))
-        features.capability(
+    def __post_init__(self) -> None:
+        """Complete this application's feature declarations once, before serving."""
+        self.features.capability(WorkspaceCapability(self.workspace))
+        self.features.capability(
             ExecutionCapability(retain_history=True) if self.execution is None else self.execution
         )
+
+    async def serve(self, *, memory_scope: str) -> None:
         async with Runtime.open(
             "default",
-            models=self.models,
             storage=self.storage,
-            features=features,
+            features=self.features,
         ) as runtime:
             await serve_stdio(
                 ACPAgent(

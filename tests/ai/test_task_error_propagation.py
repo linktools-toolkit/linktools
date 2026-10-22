@@ -46,7 +46,7 @@ def test_openai_materialization_normalizes_provider_config_error(
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
 
     with pytest.raises(AIError) as raised:
-        _OpenAIModelBinding("route", "gpt-4o-mini").materialize()
+        _OpenAIModelBinding("gpt-4o-mini").materialize()
 
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
     assert raised.value.retryable is False

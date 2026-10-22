@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Direct capability registration is global unless Agent scope is explicit."""
+from ._runtime_test_helpers import model_features
 
 import pytest
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, PrefixTools
@@ -47,10 +48,11 @@ async def test_default_global_runs_with_empty_agent_selection_and_rejecting_filt
         features.agent(name, allow_capabilities=(), allow_tools=(), allow_skills=(), allow_subagents=())
     features.capability(global_policy)
     features.capability(_AgentOnly(), scope='agent')
+    features.model("default", _Models(FunctionModel(_immediate)))
     capture = await features.capture()
     assert next(item for item in capture.contributions if item.id == 'policy.agent').scope == 'agent'
     assert next(item for item in capture.contributions if item.id == global_policy.id).scope == 'runtime'
-    async with Runtime.open('global-default', models=_Models(FunctionModel(_immediate)),
+    async with Runtime.open('global-default',
                             storage=RuntimeStorage.in_memory(), features=capture) as runtime:
         for name in ('default', 'worker'):
             execution = await runtime.agents.get(name).start('question')

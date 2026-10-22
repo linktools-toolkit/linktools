@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Trace cache admission is optional; source durability never is."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 
@@ -59,7 +60,7 @@ async def test_trace_rejects_partial_write_buffer():
     with pytest.raises(TypeError, match='buffer'):
         features.capability(TraceCapability(commit=CommitPolicy.batch(buffer=Partial(), batch_size=128, flush_interval=3)), scope='runtime')
         async with Runtime.open('partial-trace-cache', storage=RuntimeStorage.in_memory(),
-                                models=_FeatureModels(), features=features):
+                                features=model_features(_FeatureModels(), features)):
             pytest.fail('partial write buffers must be rejected before runtime admission')
 
 

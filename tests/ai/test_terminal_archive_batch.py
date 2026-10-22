@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Terminal archive sharing preserves owner facts and immutable caller plans."""
+from ._runtime_test_helpers import model_features
 
 import hashlib
 from contextvars import ContextVar
@@ -208,7 +209,7 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
     monkeypatch.setattr(CheckpointPersistence, "materialize_recovery_checkpoint", materialize_recovery)
     monkeypatch.setattr(RuntimeStateCommands, "commit_terminal_checkpoint", commit)
     async with Runtime.open(
-        "terminal-archive-tool", models=_ToolModels(), storage=storage, features=application,
+        "terminal-archive-tool", storage=storage, features=model_features(_ToolModels(), application),
     ) as runtime:
         await runtime.agents.get("default").create_session("session")
         session = runtime.agents.get("default").session("session")
