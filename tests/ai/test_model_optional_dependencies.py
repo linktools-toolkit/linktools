@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass
 
 import pytest
+from pydantic_ai import exceptions as sdk_errors
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from pydantic_ai.models.test import TestModel
 
@@ -52,14 +53,17 @@ async def test_base_runtime_can_invoke_custom_sdk_model():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider,factory", (("openai","openai"),("openai","openai-responses"),("anthropic","anthropic")))
-async def test_installed_adapter_projects_native_transport_errors(monkeypatch, provider, factory):
+async def test_installed_adapter_projects_native_transport_errors(
+    monkeypatch: pytest.MonkeyPatch, provider: str, factory: str,
+) -> None:
     if importlib.util.find_spec(provider) is None:
         pytest.skip("Provider intentionally absent from this installation")
     import httpx2
     from pydantic_ai.messages import ModelRequest, UserPromptPart
     from pydantic_ai.models import ModelRequestParameters
     module = importlib.import_module(f"linktools.ai.model._{provider}")
-    def fail(request): raise httpx2.ConnectError("fixture connection failure", request=request)
+    def fail(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("fixture connection failure", request=request)
     monkeypatch.setattr(module, "DefaultAsyncHttpxClient", lambda **kwargs: httpx2.AsyncClient(
         transport=httpx2.MockTransport(fail), trust_env=False, **kwargs))
     models = create_model(protocol=factory, model="fixture", api_key="fixture-secret", max_tokens=128, max_retries=0)
@@ -67,7 +71,16 @@ async def test_installed_adapter_projects_native_transport_errors(monkeypatch, p
         with pytest.raises(ModelAPIError) as caught:
             await model.request([ModelRequest(parts=[UserPromptPart("hello")])], None, ModelRequestParameters())
     mapped = model_binding_error(caught.value)
-    assert mapped is not None and mapped.code == ErrorCode.MODEL_API_ERROR
+    assert mapped is not None
+    connection_error = getattr(sdk_errors, "ModelConnectionError", None)
+    if connection_error is None:
+        assert type(caught.value) is ModelAPIError
+        assert mapped.code is ErrorCode.MODEL_API_ERROR
+        assert mapped.retryable is False
+    else:
+        assert isinstance(caught.value, connection_error)
+        assert mapped.code is ErrorCode.MODEL_UNAVAILABLE
+        assert mapped.retryable is True
     sdk = importlib.import_module(provider)
     native = sdk.APIConnectionError(request=httpx2.Request("POST", "https://model.invalid"))
     assert model_binding_error(native).code == ErrorCode.MODEL_UNAVAILABLE
