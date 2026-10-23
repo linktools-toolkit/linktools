@@ -346,6 +346,8 @@ def _decode_agent_mapping(raw: Mapping[str, object]) -> AgentSpec:
         "allow_tools": raw.get("allow_tools", ["*"]),
         "allow_skills": raw.get("allow_skills", ["*"]),
         "allow_subagents": raw.get("allow_subagents", ["*"]),
+        "output_schema": raw.get("output_schema"),
+        "output_retries": raw.get("output_retries"),
     }
     if "description" in raw:
         payload["description"] = raw["description"]

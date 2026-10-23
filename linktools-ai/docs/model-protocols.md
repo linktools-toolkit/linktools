@@ -153,15 +153,101 @@ HTTP recorder or retry wrapper. Logical model interaction/usage/error observatio
 still apply; absent physical `client_requests` must not be described as captured
 HTTP attempts. In particular, native decision handoffs such as an unfillable or
 uncertain route are not transport failures to retry. Runtime does not add a fallback, replay tools, or bypass approval on its behalf.
-Native `FallbackModel` composition is not covered by this integration: its lack of
-a single model profile currently conflicts with Runtime's explicit thinking-policy
-validation. Do not assume that registering a composite model bypasses this limit.
+Declare Runtime-aware fallback explicitly with `FallbackBinding`, as below.
 
 For images, both the binding's `contract["input_mime_types"]` and the chosen
 native adapter must support the format. Recoverable reference inputs use the same
 existing authorized hydration lifecycle; a text-only decision adapter does not
 gain image support from a binding declaration. Do not infer capabilities or a
 protocol from the model's name.
+
+## Explicit fallback bindings
+
+`FallbackBinding` composes existing `ModelBinding` candidates in order. For the
+`DecisionBinding` and `Decision` defined above, a language-model fallback can be
+registered through the same synchronous route loader:
+
+```python
+from pydantic_ai.models.decision import DecisionHandOff
+from linktools.ai.model import FallbackBinding, create_model
+from linktools.ai.runtime import RuntimeFeatures
+
+decision_binding = DecisionBinding()
+language_binding = create_model(protocol="openai-responses", model="gpt-5")
+
+features = RuntimeFeatures("decision-fallback")
+features.model("decision-route", lambda: FallbackBinding(
+    decision_binding,
+    language_binding,
+    fallback_on=DecisionHandOff,
+))
+features.agent("classifier", model="decision-route", allow_tools=())
+# Inside Runtime.open(..., features=features):
+# result = await runtime.agents.get("classifier").run(prompt, output=Decision)
+```
+
+Ordinary custom bindings keep `materialize(self) -> Model` unchanged. Only
+`FallbackBinding.materialize(*, prepare=None)` accepts a candidate-preparation
+callback; Runtime supplies it internally, including for explicitly nested
+`FallbackBinding` values. Applications do not need another registry, a new
+binding protocol, or a callback argument on their own binding implementations.
+Every materialization creates a fresh native SDK `FallbackModel`; the caller
+owns its async context, and the SDK enters and exits the candidate models.
+Candidate construction and resource ownership are distinct from request dispatch:
+unused candidates can be materialized, but are not requested or input-hydrated.
+
+The original `fallback_on` value is passed to the SDK unchanged. Exception types,
+synchronous/asynchronous predicates, annotated response handlers and supported
+sequences retain their native meaning. Omitting it uses the SDK default
+`(ModelAPIError,)`, which also handles `DecisionHandOff` because it inherits
+`ModelAPIError`. The explicit `DecisionHandOff` policy above narrows fallback to
+handoffs rather than all model API errors. The SDK owns fallback selection,
+exception grouping, response rejection, stream boundaries and pinned continuations
+of suspended responses. Response
+handlers are not applied to streamed requests, including Runtime's streaming
+observation path. Supported SDK releases differ in their pre-first-event behavior;
+Runtime does not add replay after a stream has emitted its first event, turn
+cancellation into a handoff, or restart tool execution.
+
+Before an actually selected candidate is called, Runtime checks that candidate's
+thinking policy, MIME permissions and input encoding, then loads authorized
+reference inputs for that candidate. The composite MIME declaration is a union
+for initial admission, not a promise that every candidate accepts every format.
+Thinking or declared input-capability rejection happens before reference loading
+or provider IO; hydrated bytes are checked again before dispatch. Whether an
+error permits another candidate is still governed by `fallback_on`. A valid but
+incompatible thinking/MIME policy on an unused candidate does not reject an
+otherwise valid request. The composite does not invent a shared thinking profile;
+its control projection is unknown. Reference bytes retain their existing
+authorization and omission policy and are not eagerly loaded for unused models.
+
+The route loader still resolves one binding per agent run. Its ordered candidate
+identities and non-secret contracts describe the captured configuration; handler
+implementations are neither serialized nor hashed. Callers must freeze the
+configuration and handler behavior they intend to reuse, and own consistency of
+their existing named declarations under the same `id` and `revision`. A callable
+closure is not an immutable execution snapshot. `FallbackBinding` introduces no
+model revision/identity system and does not change route-based recovery semantics.
+It is the explicit composition boundary for candidate-aware Runtime preparation:
+do not assume an arbitrary custom binding returning a bare or wrapped SDK
+`FallbackModel` receives the same adaptation.
+
+Fallback attempts remain distinct from logical model requests and physical HTTP
+`client_requests`. When the SDK exposes failed-attempt facts, Runtime retains their
+order, available timing, diagnostics and usage through the existing model-history
+and interaction projection, subject to the existing redaction and content-omission
+policy. If all candidates fail, available facts are also exposed through the
+execution result's `safe_error_details["failed_attempts"]`. Older SDKs without those
+facts do not acquire synthetic attempts, timestamps or zero-valued usage. Reported attempt usage is an
+observed subtotal only: missing usage remains unknown, so even a recorded subtotal
+is not proof of the complete token usage or cost of a failed fallback chain.
+Non-streaming requests retain the SDK's usage accounting. A streamed exhausted
+fallback group bypasses that SDK error-recovery path, so Runtime adds its known
+attempt-usage subtotal once to run usage and checks the existing usage limits;
+the SDK still accounts for any separately produced partial response. History and
+interaction projections do not add those amounts again. A custom candidate binding still does not automatically gain the
+built-in HTTP recorder or transport retries; absent physical requests are not
+evidence that no provider call occurred.
 
 ## Explicit profiles
 

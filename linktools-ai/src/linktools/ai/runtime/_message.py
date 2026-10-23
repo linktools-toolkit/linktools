@@ -7,13 +7,15 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
+from linktools.core import environ
 from pydantic import TypeAdapter
 from pydantic_core import ErrorDetails
 from pydantic_ai import RequestUsage
+from pydantic_ai import messages as sdk_messages
 from pydantic_ai.messages import (
     BinaryContent,
     CompactionPart,
@@ -48,6 +50,9 @@ from ._user_content_codec import decode_user_content_item, encode_user_content_i
 from ._json_snapshot import stable_json_snapshot
 from ._tool_return_codec import decode_tool_return_content, encode_tool_return_content
 
+if TYPE_CHECKING:
+    from pydantic_ai.messages import ModelRequestAttempt
+
 _MESSAGE_VERSION = 1
 _TOOL_KINDS = frozenset({"tool-search", "capability-load"})
 _REQUEST_STATES = frozenset({"complete", "interrupted"})
@@ -57,6 +62,7 @@ _TOOL_OUTCOMES = frozenset({"success", "failed", "denied", "interrupted", "retri
 _TOOL_RETRY_CAUSES = frozenset({"validation_error", "model_retry", "unknown_tool", "unavailable_tool"})
 _FEEDBACK_RETRY_CAUSES = frozenset({"validation_error", "model_retry", "no_output"})
 _ERROR_DETAILS_ADAPTER = TypeAdapter(list[ErrorDetails])
+_MODEL_REQUEST_ATTEMPT = getattr(sdk_messages, "ModelRequestAttempt", None)
 
 
 @dataclass
@@ -206,6 +212,81 @@ def encode_model_messages(messages: Sequence[ModelMessage]) -> bytes:
     return canonical_json_bytes([_encode_message(message) for message in messages])
 
 
+def project_model_response_attempts(
+    response: ModelResponse, *, content_omission_reason: str | None = None,
+) -> ModelResponse:
+    """Apply request retention to attempt diagnostics without changing SDK values.
+
+    The request owner supplies omission before history or public projection is
+    captured. A standalone history codec cannot infer the originating request's
+    retention policy. Ordinary diagnostics retain their redacted message.
+    """
+    if content_omission_reason is not None and (
+        not isinstance(content_omission_reason, str) or not content_omission_reason.strip()
+    ):
+        raise ValueError("content omission reason must be nonempty")
+    attempts = getattr(response, "failed_attempts", None)
+    if attempts is None:
+        return response
+    projected = _project_model_attempts(attempts, content_omission_reason=content_omission_reason)
+    return replace(response, failed_attempts=projected) if projected != attempts else response
+
+
+def _project_model_attempts(
+    attempts: Sequence[object], *, content_omission_reason: str | None,
+) -> list[object]:
+    projected = []
+    for value in attempts:
+        attempt = _model_request_attempt(value)
+        error = None if content_omission_reason is not None else (
+            environ.logging.redact(attempt.error) if attempt.error is not None else None
+        )
+        projected.append(replace(attempt, error=error) if error != attempt.error else attempt)
+    return projected
+
+
+def model_attempts_details(
+    attempts: Sequence[object], *, content_omission_reason: str | None = None,
+) -> JsonValue:
+    """Reuse the durable attempt shape for terminal failure diagnostics."""
+    return _encode_model_attempts(_project_model_attempts(
+        attempts, content_omission_reason=content_omission_reason,
+    ))
+
+
+def model_attempts_usage(attempts: Sequence[object] | None) -> RequestUsage | None:
+    """Sum only usage the SDK reported; an entirely unmeasured set stays unknown.
+
+    This subtotal is not another provider request and must not be repriced.
+    Non-streaming SDK accounting already consumes it; only the streaming
+    failure boundary bridges the SDK's otherwise unaccounted exception group.
+    """
+    result = None
+    for value in attempts or ():
+        attempt = _model_request_attempt(value)
+        if attempt.usage is not None:
+            if result is None:
+                result = RequestUsage()
+            result.incr(attempt.usage)
+    return result
+
+
+def model_response_usage(response: ModelResponse) -> RequestUsage:
+    """Project known billed usage without mutating or recounting SDK run usage."""
+    result = RequestUsage()
+    result.incr(response.usage)
+    attempts = model_attempts_usage(getattr(response, "failed_attempts", None))
+    if attempts is not None:
+        result.incr(attempts)
+    return result
+
+
+def _model_request_attempt(attempt: object) -> "ModelRequestAttempt":
+    if _MODEL_REQUEST_ATTEMPT is None or not isinstance(attempt, _MODEL_REQUEST_ATTEMPT):
+        raise TypeError("model request attempt is invalid")
+    return cast("ModelRequestAttempt", attempt)
+
+
 def freeze_model_messages(
     messages: Sequence[ModelMessage],
 ) -> tuple[ModelMessage, ...]:
@@ -246,7 +327,8 @@ def _encode_message(message: ModelMessage) -> dict[str, JsonValue]:
             "state": message.state,
         }
     if isinstance(message, ModelResponse):
-        return {
+        message = project_model_response_attempts(message)
+        result: dict[str, JsonValue] = {
             "version": _MESSAGE_VERSION,
             "kind": "response",
             "parts": [_encode_response_part(part) for part in message.parts],
@@ -263,6 +345,10 @@ def _encode_message(message: ModelMessage) -> dict[str, JsonValue]:
             "metadata": _encode_optional_mapping(message.metadata),
             "state": message.state,
         }
+        attempts = getattr(message, "failed_attempts", None)
+        if attempts is not None:
+            result["failed_attempts"] = _encode_model_attempts(attempts)
+        return result
     raise TypeError(f"unsupported model message type: {type(message).__name__}")
 
 
@@ -306,6 +392,7 @@ def _decode_message(value: object) -> ModelMessage:
             state=cast(object, state),
         )
     if kind == "response":
+        has_attempts = "failed_attempts" in value
         _require_keys(
             value,
             {
@@ -324,7 +411,7 @@ def _decode_message(value: object) -> ModelMessage:
                 "agent_conversation_id",
                 "metadata",
                 "state",
-            },
+            } | ({"failed_attempts"} if has_attempts else set()),
         )
         parts = value["parts"]
         if not isinstance(parts, list):
@@ -338,6 +425,9 @@ def _decode_message(value: object) -> ModelMessage:
         timestamp = _decode_optional_datetime(value["timestamp"])
         if timestamp is None:
             raise ValueError("model response timestamp is required")
+        attempt_fields: dict[str, object] = {}
+        if has_attempts:
+            attempt_fields["failed_attempts"] = _decode_model_attempts(value["failed_attempts"])
         return ModelResponse(
             parts=[_decode_response_part(item) for item in parts],
             usage=_decode_usage(value["usage"]),
@@ -352,6 +442,7 @@ def _decode_message(value: object) -> ModelMessage:
             conversation_id=_optional_string(value["agent_conversation_id"]),
             metadata=_decode_optional_mapping(value["metadata"]),
             state=cast(object, state),
+            **attempt_fields,
         )
     raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
@@ -823,6 +914,67 @@ def _decode_speech_part(part: Mapping[str, object]) -> SpeechPart:
     )
 
 
+def _encode_model_attempts(attempts: Sequence[object]) -> JsonValue:
+    values: list[JsonValue] = []
+    for value in attempts:
+        attempt = _model_request_attempt(value)
+        duration = attempt.duration
+        if not isinstance(duration, timedelta) or duration < timedelta():
+            raise ValueError("model request attempt duration is invalid")
+        if not isinstance(attempt.timestamp, datetime) or attempt.timestamp.tzinfo is None:
+            raise ValueError("model request attempt timestamp must include a timezone")
+        if attempt.outcome not in {"error", "rejected"}:
+            raise ValueError("model request attempt outcome is invalid")
+        values.append({
+            "model_name": attempt.model_name,
+            "provider_name": attempt.provider_name,
+            "outcome": attempt.outcome,
+            "error": attempt.error,
+            "timestamp": _encode_datetime(attempt.timestamp),
+            "duration_us": ((duration.days * 86400 + duration.seconds) * 1000000
+                            + duration.microseconds),
+            "usage": None if attempt.usage is None else _encode_usage(attempt.usage),
+        })
+    return values
+
+
+def _decode_model_attempts(value: object) -> list[object]:
+    if not isinstance(value, list):
+        raise ValueError("model request attempts must be a list")
+    if _MODEL_REQUEST_ATTEMPT is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    attempts: list[object] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise ValueError("model request attempt must be an object")
+        _require_keys(item, {
+            "model_name", "provider_name", "outcome", "error", "timestamp", "duration_us", "usage",
+        })
+        outcome = _required_string(item["outcome"])
+        if outcome not in {"error", "rejected"}:
+            raise ValueError("model request attempt outcome is invalid")
+        duration = item["duration_us"]
+        if type(duration) is not int or duration < 0:
+            raise ValueError("model request attempt duration is invalid")
+        try:
+            elapsed = timedelta(microseconds=duration)
+        except OverflowError as error:
+            raise ValueError("model request attempt duration is invalid") from error
+        timestamp = _required_datetime(item["timestamp"])
+        if timestamp.tzinfo is None:
+            raise ValueError("model request attempt timestamp must include a timezone")
+        attempts.append(_MODEL_REQUEST_ATTEMPT(
+            model_name=_required_string(item["model_name"]),
+            provider_name=_optional_string(item["provider_name"]),
+            outcome=outcome,
+            error=_optional_string(item["error"]),
+            timestamp=timestamp,
+            duration=elapsed,
+            usage=None if item["usage"] is None else _decode_usage(item["usage"]),
+        ))
+    return attempts
+
+
 def _encode_usage(usage: RequestUsage) -> dict[str, JsonValue]:
     known = {
         "input_tokens": usage.input_tokens,
@@ -1002,4 +1154,8 @@ __all__ = [
     "encode_model_messages",
     "freeze_model_messages",
     "project_transient_binary_content",
+    "project_model_response_attempts",
+    "model_response_usage",
+    "model_attempts_usage",
+    "model_attempts_details",
 ]

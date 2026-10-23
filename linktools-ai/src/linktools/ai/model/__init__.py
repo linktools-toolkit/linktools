@@ -8,6 +8,7 @@ from ._contract import ModelBinding, model_thinking_control
 from ._client_request import ModelClientRequest, ModelClientRequestRecorder, ModelClientResponse
 from ._errors import model_binding_error
 from ._factory import create_model
+from ._fallback import FallbackBinding
 from ._input import validate_model_input, validate_model_inputs
 from ._referenced_content import ReferencedContent
 
@@ -26,7 +27,7 @@ __all__ = [
 
     "AudioMediaType", "DocumentMediaType", "ImageMediaType", "VideoMediaType",
     "model_thinking_control",
-    "ModelBinding", "create_model", "model_binding_error",
+    "ModelBinding", "FallbackBinding", "create_model", "model_binding_error",
     "ModelClientRequest", "ModelClientRequestRecorder", "ModelClientResponse",
     "validate_model_input", "validate_model_inputs",
 ]

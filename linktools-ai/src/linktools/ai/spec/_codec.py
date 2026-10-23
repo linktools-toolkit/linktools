@@ -58,6 +58,7 @@ class AgentSpecCodec:
             "thinking": value.thinking,
             "tool_retries": value.tool_retries,
             "output_retries": value.output_retries,
+            "output_schema": None if value.output_schema is None else dict(value.output_schema),
         }
         return payload
 
@@ -136,6 +137,7 @@ class AgentSpecCodec:
                 thinking=normalized_thinking,
                 tool_retries=tool_retries,
                 output_retries=output_retries,
+                output_schema=raw.get("output_schema"),
                 description=description,
                 metadata=metadata,
                 revision=revision,

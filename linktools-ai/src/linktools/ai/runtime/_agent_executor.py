@@ -97,7 +97,7 @@ from ..core import (
     normalize_json_value,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..model import model_binding_error, validate_model_inputs
+from ..model import FallbackBinding, ModelBinding, model_binding_error, validate_model_inputs
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ..spec import CapabilityRef, MCPServerSpecCodec, RepositoryInstructions
 from ..workspace import (
@@ -116,9 +116,12 @@ from ._compaction import CompactionPolicy
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
 from ._memory import MemoryStore
-from ._metric_capability import ModelObservationCapability
+from ._metric_capability import ModelObservationCapability, PreparedRequestModel
 from ._plan import RuntimePlanStore
-from ._harness import ReinjectRuntimeSystemPrompt, SummaryProviderModel
+from ._harness import (
+    ReinjectRuntimeSystemPrompt, SummaryProviderModel, CandidateProviderModel,
+    FallbackProviderModel, validate_thinking_model,
+)
 from ._message import without_history_system_prompts
 from ._pydantic_tool_control import PydanticToolControlCapability
 from ._repository_instructions import _RepositoryInstructionCapability
@@ -339,7 +342,9 @@ class AgentExecutor:
                 primary_error = error
                 raise
             except AIError as error:
-                mapped = _with_cleanup_diagnostic(error, error)
+                mapped = _with_cleanup_diagnostic(
+                    _failed_fallback_error(error, usage_limits=usage_limits, run_usage=run_usage), error,
+                )
                 primary_error = mapped
                 if mapped is error:
                     raise
@@ -600,12 +605,25 @@ class AgentExecutor:
         ]
         if len(input_sources) > 1:
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        model = SummaryProviderModel(
-            compiled_agent.model.materialize(), context=scope.context,
-            referenced_inputs=input_sources[0][0] if input_sources else None,
-            input_source=input_sources[0][1] if input_sources else None,
-            binding=compiled_agent.model,
-        )
+        def prepare_candidate(candidate: ModelBinding) -> Model:
+            if isinstance(candidate, FallbackBinding):
+                return FallbackProviderModel(candidate.materialize(prepare=prepare_candidate))
+            return CandidateProviderModel(
+                candidate.materialize(), context=scope.context,
+                referenced_inputs=input_sources[0][0] if input_sources else None,
+                input_source=input_sources[0][1] if input_sources else None,
+                binding=candidate, preserve_errors=True,
+            )
+
+        if isinstance(compiled_agent.model, FallbackBinding):
+            model = prepare_candidate(compiled_agent.model)
+        else:
+            model = SummaryProviderModel(
+                compiled_agent.model.materialize(), context=scope.context,
+                referenced_inputs=input_sources[0][0] if input_sources else None,
+                input_source=input_sources[0][1] if input_sources else None,
+                binding=compiled_agent.model,
+            )
         # Model cleanup must not replace cancellation or an established run failure.
         execution_error: BaseException | None = None
         try:
@@ -1324,7 +1342,11 @@ class _RuntimeThinking(Thinking):
         handler: WrapModelRequestHandler,
     ) -> ModelResponse:
         del ctx
-        _validate_thinking_model(request_context.model, self.effort)
+        effective = request_context.model
+        while isinstance(effective, PreparedRequestModel):
+            effective = effective.wrapped
+        if not isinstance(effective, FallbackProviderModel):
+            _validate_thinking_model(effective, self.effort)
         return await handler(request_context)
 
 
@@ -1333,21 +1355,7 @@ def _thinking_capability(thinking: ThinkingValue) -> Thinking:
 
 
 def _validate_thinking_model(model: Model, thinking: ThinkingValue) -> None:
-    profile = model.profile
-    supports = bool(profile.get("supports_thinking", False))
-    always = bool(profile.get("thinking_always_enabled", False))
-    if thinking is False:
-        if always:
-            raise AIError(
-                ErrorCode.REQUEST_FIELD_INVALID,
-                safe_details={"field": "thinking", "reason": "model_always_enabled"},
-            )
-        return
-    if not (supports or always):
-        raise AIError(
-            ErrorCode.REQUEST_FIELD_INVALID,
-            safe_details={"field": "thinking", "reason": "model_not_supported"},
-        )
+    validate_thinking_model(model, thinking)
 
 
 def _map_event(event: object) -> "AgentEmission | None":
@@ -1474,6 +1482,29 @@ def _with_cleanup_diagnostic(error: AIError, source: BaseException) -> AIError:
         safe_details=details,
         diagnostics=error.diagnostics,
     )
+
+
+def _failed_fallback_error(
+    error: AIError, *, usage_limits: UsageLimits, run_usage: RunUsage,
+) -> AIError:
+    # The SDK commits an interrupted continuation only after the streaming
+    # failure escapes. Its earlier attempt subtotal can miss this final limit.
+    if "failed_attempts" not in error.safe_details:
+        return error
+    try:
+        usage_limits.check_tokens(run_usage)
+        usage_limits.check_cost(run_usage, warn_if_cost_unavailable=False)
+    except UsageLimitExceeded:
+        return AIError(
+            ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED, retryable=False,
+            safe_details={
+                **error.safe_details,
+                "limits": _limit_details(usage_limits),
+                "usage": _usage_details(run_usage),
+            },
+            diagnostics=error.diagnostics,
+        )
+    return error
 
 
 def _execution_error(

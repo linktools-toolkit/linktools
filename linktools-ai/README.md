@@ -780,7 +780,41 @@ Subagents are root Agent definitions selected from the same captured catalog. A 
 
 ## 5. Output contracts
 
-Output belongs to an execution, not to `AgentSpec` or Session identity:
+The resolved output contract belongs to an execution, not to Session identity.
+An Agent may declare a default JSON Schema through `AgentSpec.output_schema`,
+`RuntimeFeatures.agent(..., output_schema=...)`, or the `output_schema` field in
+its Asset declaration:
+
+```python
+from pydantic import BaseModel
+
+class ReviewResult(BaseModel):
+    approved: bool
+    findings: list[str]
+
+application.agent(
+    "reviewer",
+    model="decision-route",
+    output_schema=ReviewResult.model_json_schema(),
+    output_retries=2,
+)
+```
+
+Root runs, delegated children, and Agent-backed Tasks use that same default.
+Omitting `output`, or passing `output=None`, inherits the declaration; an Agent
+without a declared schema produces text. An explicit run output type overrides
+the default, and `output=AssistantTextOutput` from `linktools.ai.agent` explicitly
+selects text even for a structured Agent. Task nodes can similarly override the
+default with `output_type`.
+
+The schema is validated through the existing `OutputBinding` structured-output
+path, including native Pydantic AI correction retries controlled by
+`output_retries`. Only JSON Schema constraints are declared; Python-only model
+validators are not persisted. Each execution freezes the resolved output mode
+and schema in its `AgentBindingContract`; recovery uses those stored values,
+not a later Agent declaration.
+
+An explicit per-run contract can be selected as follows:
 
 ```python
 from pydantic import BaseModel

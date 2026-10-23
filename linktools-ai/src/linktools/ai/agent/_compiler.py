@@ -234,10 +234,16 @@ class AgentCompiler:
         subagents: Sequence[SubagentRef],
     ) -> AgentBinding:
         # A current admission owns one binding, shared by contract and execution.
-        compiled_agent = replace(compiled_agent, model=self._models.resolve(compiled_agent.spec.model))
-        output_binding = (
-            output if isinstance(output, OutputBinding) else bind_output(output)
+        compiled_agent = replace(
+            compiled_agent,
+            model=self._models.capture(self._models.resolve(compiled_agent.spec.model)),
         )
+        if isinstance(output, OutputBinding):
+            output_binding = output
+        elif output is None and compiled_agent.spec.output_schema is not None:
+            output_binding = OutputBinding.create("structured", compiled_agent.spec.output_schema)
+        else:
+            output_binding = bind_output(output)
         binding_contract = AgentBindingContract(
             agent_spec=AgentSpecCodec().from_payload(
                 AgentSpecCodec().to_contract_payload(compiled_agent.spec)
@@ -263,6 +269,7 @@ class AgentCompiler:
         try:
             if model is None:
                 model = self._models.resolve(binding_contract.agent_spec.model)
+            model = self._models.capture(model)
             selected = self._restore_selected(binding_contract.selected)
             tool_policy, mcp_policy = self._restore_policies(
                 binding_contract.agent_spec,

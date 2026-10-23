@@ -11,6 +11,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Protocol, cast
 
+from pydantic_ai.usage import RequestUsage, RunUsage
 from pydantic_ai.messages import (
     SYNTHESIZED_TOOL_RETURN_METADATA_KEY,
     ModelMessage,
@@ -41,7 +42,7 @@ from ._journal import (
     ModelRequestFact,
     await_request_handoff,
 )
-from ._message import freeze_model_messages
+from ._message import freeze_model_messages, model_response_usage
 from ._run_context import RunContextProjection
 from ._trace_capture import ModelInteractionCapture, TraceStagingPort
 from .state._contracts import LoadedModelContext
@@ -636,6 +637,7 @@ class AgentRunRecorder:
         phase: str,
         response: ModelResponse | None = None,
         error_code: str | None = None,
+        usage: RequestUsage | RunUsage | None = None,
         include_observation: bool,
     ) -> None:
         run = self._run
@@ -664,8 +666,9 @@ class AgentRunRecorder:
             metadata[MESSAGE_SEQ_METADATA_KEY] = str(message_index + 1)
         if not include_observation:
             metadata.pop(DURATION_NS_METADATA_KEY, None)
-        if response is not None:
-            usage = response.usage
+        if usage is None and response is not None:
+            usage = model_response_usage(response)
+        if usage is not None:
             metadata.update(
                 {
                     MODEL_USAGE_INPUT_METADATA_KEY: str(usage.input_tokens),

@@ -305,6 +305,7 @@ class RuntimeFeatures(Generic[AppT]):
         thinking: ThinkingValue = False,
         tool_retries: int | None = None,
         output_retries: int | None = None,
+        output_schema: "Mapping[str, JsonValue] | None" = None,
         description: "str | None" = None,
         metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> AgentSpec:
@@ -325,6 +326,7 @@ class RuntimeFeatures(Generic[AppT]):
             thinking=thinking,
             tool_retries=tool_retries,
             output_retries=output_retries,
+            output_schema=output_schema,
             description=description,
             metadata={} if metadata is None else metadata,
             revision=revision,

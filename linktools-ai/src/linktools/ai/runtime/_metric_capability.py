@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
+from copy import copy
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
@@ -14,11 +15,15 @@ from linktools.core import environ
 from pydantic import ValidationError
 from pydantic_ai.capabilities import (
     AbstractCapability,
+    AgentNode,
+    NodeResult,
+    WrapNodeRunHandler,
     CapabilityOrdering,
     WrapModelRequestHandler,
 )
 from pydantic_ai.exceptions import (
     ConcurrencyLimitExceeded,
+    FallbackExceptionGroup,
     ContentFilterError,
     RunCancelled,
     UnexpectedModelBehavior,
@@ -30,7 +35,7 @@ from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext as PydanticRunContext
-from pydantic_ai.usage import RequestUsage, UsageLimitExceeded
+from pydantic_ai.usage import RequestUsage, RunUsage, UsageLimitExceeded
 
 from ..capability import AgentContext
 from ._trace_capture import record_http_bodies_enabled
@@ -40,6 +45,9 @@ from ..model import ModelClientRequest, ModelClientRequestRecorder, model_bindin
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ._budget import RunBudgetContext
 from ._journal import ModelRequestFact, ModelRequestJournal, await_request_handoff
+from ._message import (
+    project_model_response_attempts, model_response_usage, model_attempts_usage, model_attempts_details,
+)
 from ._metrics_service import (
     _bind_metric_execution_context,
     _metric_correlation,
@@ -98,6 +106,7 @@ class ModelInteractionRecorder(Protocol):
         phase: str,
         response: ModelResponse | None = None,
         error_code: str | None = None,
+        usage: RequestUsage | RunUsage | None = None,
         include_observation: bool,
     ) -> None: ...
 
@@ -107,8 +116,10 @@ class _ProviderStreamedResponse(StreamedResponse):
 
     def __init__(
         self, response: StreamedResponse, failed: Callable[[Exception], None], observed: _StreamObserver,
+        project_response: Callable[[ModelResponse], ModelResponse] | None = None,
     ) -> None:
         self._response = response
+        self._project_response = project_response or (lambda response: response)
         self._failed = failed
         self._observed = observed
         self._iterator: AsyncIterator[ModelResponseStreamEvent] | None = None
@@ -146,7 +157,7 @@ class _ProviderStreamedResponse(StreamedResponse):
 
     def get(self) -> ModelResponse:
         try:
-            return self._response.get()
+            return self._project_response(self._response.get())
         except Exception as error:
             self._failed(error)
             raise
@@ -250,7 +261,7 @@ class _ProviderStreamedResponse(StreamedResponse):
         return self._response.time_to_first_chunk(request_start)
 
 
-class _PreparedRequestModel(WrapperModel):
+class PreparedRequestModel(WrapperModel):
     """Freeze SDK input after preparation and before provider execution."""
 
     def __init__(
@@ -262,11 +273,26 @@ class _PreparedRequestModel(WrapperModel):
         ],
         failed: Callable[[Exception], None],
         observed: _StreamObserver | None = None,
+        project_response: Callable[[ModelResponse], ModelResponse] | None = None,
     ) -> None:
         super().__init__(wrapped)
         self._prepare = prepare
         self._failed = failed
         self._observed = observed or (lambda event, error: None)
+        self._project_response = project_response or (lambda response: response)
+        self._response_observed = False
+
+    @property
+    def response_observed(self) -> bool:
+        return self._response_observed
+
+    def reset_response_observation(self) -> None:
+        self._response_observed = False
+
+    def project_response(self, response: ModelResponse) -> ModelResponse:
+        self._response_observed = True
+        return self._project_response(response)
+
 
     async def request(
         self,
@@ -275,7 +301,7 @@ class _PreparedRequestModel(WrapperModel):
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
         model = await self._prepare(messages, model_settings, model_request_parameters, False)
-        return await model.request(messages, model_settings, model_request_parameters)
+        return self.project_response(await model.request(messages, model_settings, model_request_parameters))
 
     @asynccontextmanager
     async def request_stream(
@@ -300,7 +326,7 @@ class _PreparedRequestModel(WrapperModel):
             raise
         self._observed("entered", None)
         try:
-            yield _ProviderStreamedResponse(response, self._failed, self._observed)
+            yield _ProviderStreamedResponse(response, self._failed, self._observed, self.project_response)
         except BaseException as error:
             # Context managers receive consumer failures too. Forward their
             # suppression semantics without treating those failures as provider errors.
@@ -366,12 +392,37 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         self._interaction_recorder = interaction_recorder
         self._event_sink = event_sink
         self._budget = budget
-        self._prepared_models: dict[int, Model] = {}
+        self._prepared_models: dict[int, PreparedRequestModel] = {}
         self._client_recorders: dict[int, ModelClientRequestRecorder] = {}
         self._provider_errors: dict[int, Exception] = {}
+        self._pending_model_failure: Callable[[Sequence[ModelMessage]], Awaitable[None]] | None = None
 
     def get_ordering(self) -> CapabilityOrdering:
         return CapabilityOrdering(position="innermost")
+
+    async def wrap_node_run(
+        self, ctx: PydanticRunContext[AgentContext[object]], *,
+        node: AgentNode[AgentContext[object]], handler: WrapNodeRunHandler[AgentContext[object]],
+    ) -> NodeResult[AgentContext[object]]:
+        try:
+            return await handler(node)
+        finally:
+            await self._finish_pending_model_failure(ctx.messages)
+
+    async def on_node_run_error(
+        self, ctx: PydanticRunContext[AgentContext[object]], *,
+        node: AgentNode[AgentContext[object]], error: Exception,
+    ) -> NodeResult[AgentContext[object]]:
+        del node
+        # Finalize before an outer recovery hook starts another shared-usage run.
+        await self._finish_pending_model_failure(ctx.messages)
+        raise error
+
+    async def _finish_pending_model_failure(self, messages: Sequence[ModelMessage]) -> None:
+        finish = self._pending_model_failure
+        self._pending_model_failure = None
+        if finish is not None:
+            await finish(messages)
 
     async def before_run(
         self,
@@ -422,7 +473,9 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 model_id=request_context.model_id,
                 prepared=True,
             )
-            self._prepared_models[fact.model_request_seq] = model
+            # A summary may have reused this wrapper before the logical request.
+            prepared_model.reset_response_observation()
+            self._prepared_models[fact.model_request_seq] = prepared_model
             if self._interaction_recorder is not None:
                 await self._interaction_recorder.commit_history_boundary()
             return self._client_recorders[fact.model_request_seq].wrap_model(model)
@@ -431,8 +484,27 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             if request_sequence is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             recorder = self._client_recorders.get(request_sequence)
+            # SDK streaming failures surface in the consumer, bypassing its
+            # non-stream error-recovery ledger. Consume only this native group
+            # here, then hide its type so SDK cannot count it a second time.
+            if isinstance(error, FallbackExceptionGroup):
+                if request_sequence not in self._provider_errors:
+                    usage = _failed_attempt_usage(error)
+                    if usage is not None:
+                        ctx.usage.incr(usage)
+                    if ctx.usage_limits is not None:
+                        try:
+                            ctx.usage_limits.check_tokens(ctx.usage)
+                            ctx.usage_limits.check_cost(ctx.usage, warn_if_cost_unavailable=False)
+                        except UsageLimitExceeded as exceeded:
+                            exceeded.__cause__ = error
+                            error = exceeded
+                    self._provider_errors[request_sequence] = error
+                else:
+                    error = self._provider_errors[request_sequence]
             safe_error = model_request_error(
                 error, content_omission_reason=recorder.body_omission_reason if recorder else None,
+                fact=self._journal.latest_for_step(ctx.run_step),
             )
             self._provider_errors.setdefault(request_sequence, safe_error)
             if safe_error is not error:
@@ -448,7 +520,16 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             if stream_attempt_index is not None:
                 recorder.observe_stream(event, attempt_index=stream_attempt_index, error=error)
 
-        request_context.model = _PreparedRequestModel(model, prepare, provider_failed, stream_observed)
+        def project_response(response: ModelResponse) -> ModelResponse:
+            recorder = self._client_recorders.get(request_sequence) if request_sequence is not None else None
+            return project_model_response_attempts(
+                response, content_omission_reason=recorder.body_omission_reason if recorder else None,
+            )
+
+        prepared_model = PreparedRequestModel(
+            model, prepare, provider_failed, stream_observed, project_response,
+        )
+        request_context.model = prepared_model
         return request_context
 
     async def wrap_model_request(
@@ -460,6 +541,10 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
     ) -> ModelResponse:
         selected_model = request_context.model
         run_context = ctx.deps
+        history = ctx.messages
+        history_identities = {id(message) for message in history}
+        usage_before = copy(ctx.usage)
+        deferred_failure = False
         fact = self._journal.begin(
             ctx.run_step,
             purpose="agent",
@@ -531,6 +616,54 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 except asyncio.CancelledError:
                     provider_error = self._provider_errors.get(model_request_seq)
                     failed = provider_error is not None and not isinstance(provider_error, RunCancelled)
+                    if provider_error is not None and _fallback_error(provider_error) is not None:
+                        # SDK commits the interrupted continuation after cancelling
+                        # this wrapper. Finish this same fact at its public node boundary.
+                        async def finish_failed_request(messages: Sequence[ModelMessage]) -> None:
+                            try:
+                                prepared_model = self._prepared_models.get(model_request_seq)
+                                observed_response = prepared_model is not None and prepared_model.response_observed
+                                partial = messages[-1] if observed_response and messages is history and messages else None
+                                if (not isinstance(partial, ModelResponse) or id(partial) in history_identities
+                                    or partial.state != "interrupted" or partial.run_id != ctx.run_id
+                                    or partial.conversation_id != ctx.conversation_id):
+                                    partial = None
+                                elif (not partial.parts and not partial.model_name and partial.usage == RequestUsage()
+                                      and not getattr(partial, "failed_attempts", None)):
+                                    # SDK creates an empty history placeholder even
+                                    # when no candidate ever produced a response.
+                                    partial = None
+                                usage = _failed_attempt_usage(provider_error)
+                                if partial is not None:
+                                    partial = project_model_response_attempts(
+                                        partial, content_omission_reason=client_recorder.body_omission_reason,
+                                    )
+                                if partial is not None or usage is not None:
+                                    # Use this SDK's native counter/cost and resumed-seed
+                                    # semantics without re-merging stream segments.
+                                    usage = ctx.usage - usage_before
+                                observed_error = provider_error
+                                if ctx.usage_limits is not None:
+                                    try:
+                                        ctx.usage_limits.check_tokens(ctx.usage)
+                                        ctx.usage_limits.check_cost(ctx.usage, warn_if_cost_unavailable=False)
+                                    except UsageLimitExceeded as exceeded:
+                                        observed_error = exceeded
+                                interrupted = await self._complete_request(
+                                    fact, run_context, selected_model, status="FAILED", response=partial,
+                                    error_code=_model_error_code(observed_error), usage=usage, phase="failed",
+                                )
+                                if interrupted:
+                                    raise asyncio.CancelledError
+                            finally:
+                                self._client_recorders.pop(model_request_seq, None)
+                                self._prepared_models.pop(model_request_seq, None)
+                                self._provider_errors.pop(model_request_seq, None)
+                                self._journal.consume(model_request_seq)
+
+                        self._pending_model_failure = finish_failed_request
+                        deferred_failure = True
+                        raise
                     await self._complete_request(
                         fact,
                         run_context,
@@ -538,7 +671,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                         status="FAILED" if failed else "CANCELLED",
                         response=None,
                         error_code=None if provider_error is None else _model_error_code(provider_error),
-                        usage=None,
+                        usage=_failed_attempt_usage(provider_error),
                         phase="failed" if failed else "cancelled",
                     )
                     raise
@@ -557,18 +690,23 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                         raise asyncio.CancelledError from error
                     raise
                 except Exception as error:
+                    safe_error = model_request_error(
+                        error, content_omission_reason=client_recorder.body_omission_reason, fact=fact,
+                    )
                     interrupted = await self._complete_request(
                         fact,
                         run_context,
                         selected_model,
                         status="FAILED",
                         response=None,
-                        error_code=_model_error_code(error),
-                        usage=None,
+                        error_code=_model_error_code(safe_error),
+                        usage=_failed_attempt_usage(error),
                         phase="failed",
                     )
                     if interrupted:
                         raise asyncio.CancelledError from error
+                    if safe_error is not error:
+                        raise safe_error from None
                     raise
 
                 # Freeze the resolved SDK identity before publishing the completed request.
@@ -581,17 +719,18 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                     status="SUCCEEDED",
                     response=response,
                     error_code=None,
-                    usage=response.usage,
+                    usage=model_response_usage(response),
                     phase="completed",
                 )
                 if interrupted:
                     raise asyncio.CancelledError
                 return response
             finally:
-                self._client_recorders.pop(model_request_seq, None)
-                self._prepared_models.pop(model_request_seq, None)
-                self._provider_errors.pop(model_request_seq, None)
-                self._journal.consume(model_request_seq)
+                if not deferred_failure:
+                    self._client_recorders.pop(model_request_seq, None)
+                    self._prepared_models.pop(model_request_seq, None)
+                    self._provider_errors.pop(model_request_seq, None)
+                    self._journal.consume(model_request_seq)
 
     async def after_model_request(
         self,
@@ -600,8 +739,12 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         request_context: ModelRequestContext,
         response: ModelResponse,
     ) -> ModelResponse:
-        del ctx, request_context
-        return response
+        del request_context
+        fact = self._journal.latest_for_step(ctx.run_step)
+        recorder = None if fact is None else self._client_recorders.get(fact.model_request_seq)
+        return project_model_response_attempts(
+            response, content_omission_reason=recorder.body_omission_reason if recorder else None,
+        )
 
     async def on_model_request_error(
         self,
@@ -713,14 +856,14 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             status = "SUCCEEDED"
             error_code = None
-            usage = response.usage
+            usage = model_response_usage(response)
             measurements = _provider_usage_measurements(response)
         else:
             exception = error if isinstance(error, Exception) else None
             error_code = None if exception is None else _model_error_code(exception)
             status = "CANCELLED" if phase == "cancelled" else "FAILED"
-            usage = None
-            measurements = ()
+            usage = _failed_attempt_usage(error)
+            measurements = _usage_measurements(usage) if usage is not None else ()
         self._finish_request(
             fact,
             model,
@@ -746,12 +889,14 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 phase=phase,
                 response=response if phase == "completed" else None,
                 error_code=error_code,
+                usage=usage,
             )
             await self._publish_request_event(
                 fact,
                 phase=phase,
                 response=response if phase == "completed" else None,
                 error_code=error_code,
+                usage=usage,
             )
 
         interrupted = await await_request_handoff(handoff())
@@ -766,6 +911,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         phase: str,
         response: ModelResponse | None = None,
         error_code: str | None = None,
+        usage: RequestUsage | RunUsage | None = None,
     ) -> None:
         recorder = self._interaction_recorder
         if recorder is None:
@@ -775,6 +921,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             phase=phase,
             response=response,
             error_code=error_code,
+            usage=usage,
             include_observation=self._recorder is not None,
         )
 
@@ -785,6 +932,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         phase: str,
         response: ModelResponse | None = None,
         error_code: str | None = None,
+        usage: RequestUsage | RunUsage | None = None,
     ) -> None:
         if self._event_sink is None:
             return
@@ -810,7 +958,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             ),
             "duration_ns": fact.duration_ns,
             "error_code": error_code,
-            "usage": _event_usage(response),
+            "usage": _event_usage(response, usage=usage),
         }
         try:
             await self._event_sink(event_type, payload)
@@ -831,7 +979,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         status: str,
         response: ModelResponse | None,
         error_code: str | None,
-        usage: object | None,
+        usage: RequestUsage | RunUsage | None,
         phase: str,
         client_requests: tuple[ModelClientRequest, ...] | None = None,
     ) -> bool:
@@ -847,9 +995,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             client_requests=client_requests,
         )
         measurements = (
-            _provider_usage_measurements(response)
-            if status == "SUCCEEDED" and response is not None
-            else ()
+            _usage_measurements(usage) if usage is not None else ()
         )
         observation = self._capture_model(
             run_context,
@@ -867,12 +1013,14 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 phase=phase,
                 response=response,
                 error_code=error_code,
+                usage=usage,
             )
             await self._publish_request_event(
                 finished,
                 phase=phase,
                 response=response,
                 error_code=error_code,
+                usage=usage,
             )
 
         interrupted = await await_request_handoff(handoff())
@@ -927,7 +1075,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         response: ModelResponse | None,
         status: str,
         error_code: str | None,
-        usage: object | None,
+        usage: RequestUsage | RunUsage | None,
         *,
         client_requests: tuple[ModelClientRequest, ...] | None = None,
     ) -> None:
@@ -1020,10 +1168,13 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             _logger.exception("model metric observation rejected")
 
 
-def _event_usage(response: ModelResponse | None) -> JsonValue | None:
-    if response is None:
-        return None
-    usage = response.usage
+def _event_usage(
+    response: ModelResponse | None, *, usage: RequestUsage | RunUsage | None = None,
+) -> JsonValue | None:
+    if usage is None:
+        if response is None:
+            return None
+        usage = model_response_usage(response)
     return {
         "model_requests": 1,
         "tool_calls": 0,
@@ -1037,7 +1188,10 @@ def _event_usage(response: ModelResponse | None) -> JsonValue | None:
 def _provider_usage_measurements(
     response: ModelResponse,
 ) -> tuple[MetricMeasurement, ...]:
-    usage = response.usage
+    return _usage_measurements(model_response_usage(response))
+
+
+def _usage_measurements(usage: RequestUsage | RunUsage) -> tuple[MetricMeasurement, ...]:
     values = [
         ("input_tokens", usage.input_tokens),
         ("output_tokens", usage.output_tokens),
@@ -1061,11 +1215,32 @@ def _provider_usage_measurements(
     return tuple(measurements)
 
 
+def _fallback_error(error: BaseException) -> FallbackExceptionGroup | None:
+    """Find native attempts retained by an explicit SDK exception cause."""
+    seen: set[int] = set()
+    while id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, FallbackExceptionGroup):
+            return error
+        if error.__cause__ is None:
+            return None
+        error = error.__cause__
+    return None
+
+
+def _failed_attempt_usage(error: BaseException | None) -> RequestUsage | None:
+    group = _fallback_error(error) if error is not None else None
+    return model_attempts_usage(getattr(group, "attempts", None)) if group is not None else None
+
+
 def model_request_error(
-    error: Exception, *, content_omission_reason: str | None,
+    error: Exception, *, content_omission_reason: str | None, fact: ModelRequestFact | None = None,
 ) -> Exception:
     """Apply request retention without attributing consumer errors to transport."""
-    if content_omission_reason is None or isinstance(error, RunCancelled):
+    if isinstance(error, RunCancelled):
+        return error
+    group = _fallback_error(error)
+    if content_omission_reason is None and group is None:
         return error
     diagnostics = (
         error.diagnostics
@@ -1075,7 +1250,17 @@ def model_request_error(
     )
     provider = model_binding_error(error, diagnostics=diagnostics)
     classified = provider if provider is not None else error
-    details: dict[str, JsonValue] = {"content_omission_reason": content_omission_reason}
+    details: dict[str, JsonValue] = {}
+    if content_omission_reason is not None:
+        details["content_omission_reason"] = content_omission_reason
+    attempts = getattr(group, "attempts", None)
+    if attempts is not None:
+        details["failed_attempts"] = model_attempts_details(
+            attempts, content_omission_reason=content_omission_reason,
+        )
+        if fact is not None:
+            details["model_request_seq"] = fact.model_request_seq
+            details["purpose"] = fact.purpose
     if isinstance(classified, AIError):
         status = classified.safe_details.get("status_code")
         if type(status) is int:
@@ -1087,9 +1272,19 @@ def model_request_error(
     )
 
 
+def _fallback_provider_only(error: BaseException) -> bool:
+    if isinstance(error, FallbackExceptionGroup):
+        return all(_fallback_provider_only(child) for child in error.exceptions)
+    return isinstance(error, Exception) and model_binding_error(
+        error, diagnostics=ErrorDiagnostics.from_exception(error, content_omission_reason="classification_only"),
+    ) is not None
+
+
 def _model_error_code(error: Exception) -> str:
     if isinstance(error, AIError):
         return error.code.value
+    if isinstance(error, FallbackExceptionGroup) and _fallback_provider_only(error):
+        return ErrorCode.MODEL_API_ERROR.value
     if isinstance(error, UsageLimitExceeded):
         return ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED.value
     if isinstance(error, RunCancelled):
@@ -1098,7 +1293,9 @@ def _model_error_code(error: Exception) -> str:
         return ErrorCode.EXECUTION_CONCURRENCY_LIMIT_EXCEEDED.value
     if isinstance(error, ContentFilterError):
         return ErrorCode.MODEL_CONTENT_FILTERED.value
-    provider_error = model_binding_error(error)
+    provider_error = model_binding_error(
+        error, diagnostics=ErrorDiagnostics.from_exception(error, content_omission_reason="classification_only"),
+    )
     if provider_error is not None:
         return provider_error.code.value
     if isinstance(error, UnexpectedModelBehavior):
@@ -1110,4 +1307,7 @@ def _model_error_code(error: Exception) -> str:
     return ErrorCode.INTERNAL_ERROR.value
 
 
-__all__ = ["ModelInteractionRecorder", "ModelObservationCapability", "ModelRequestEventSink", "model_request_error"]
+__all__ = [
+    "PreparedRequestModel", "ModelInteractionRecorder", "ModelObservationCapability",
+    "ModelRequestEventSink", "model_request_error",
+]

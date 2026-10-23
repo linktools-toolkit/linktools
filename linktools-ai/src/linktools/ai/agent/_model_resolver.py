@@ -62,6 +62,10 @@ class _ModelResolver:
         finally:
             self._loading.routes.remove(route)
 
+    def capture(self, binding: ModelBinding) -> ModelBinding:
+        """Keep the resolved binding once admission captures its contract."""
+        return binding._resolve() if isinstance(binding, _LazyModelBinding) else binding
+
 
 
 class _LazyModelBinding:

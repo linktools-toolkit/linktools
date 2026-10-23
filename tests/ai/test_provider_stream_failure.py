@@ -19,7 +19,7 @@ from linktools.ai.core import ExecutionStatus
 from linktools.ai.model import ModelClientRequestRecorder
 from linktools.ai.model._http import capture_request
 from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime._metric_capability import _PreparedRequestModel
+from linktools.ai.runtime._metric_capability import PreparedRequestModel
 from linktools.ai.capability import TraceCapability
 
 from ._runtime_test_helpers import _UsageFunctionModel
@@ -109,7 +109,7 @@ async def test_provider_observation_preserves_consumer_error_and_context_suppres
 
     recorder = ModelClientRequestRecorder(record_http_bodies=True)
     consumer_model = ConsumerModel(lambda messages, info: response)
-    model = _PreparedRequestModel(
+    model = PreparedRequestModel(
         recorder.wrap_model(consumer_model) if client_capture else consumer_model, prepare, provider_errors.append,
     )
     error = ConsumerFailure("consumer output failed")
@@ -149,7 +149,7 @@ async def test_provider_cleanup_error_is_observed_without_reclassifying_consumer
     async def prepare(messages, settings, parameters, streaming):
         return model.wrapped
 
-    model = _PreparedRequestModel(
+    model = PreparedRequestModel(
         CleanupModel(lambda messages, info: ModelResponse(parts=[TextPart("answer")])),
         prepare, provider_errors.append, lambda event, error: observations.append((event, error)),
     )
@@ -198,7 +198,7 @@ async def test_task_cancellation_is_observed_at_sdk_boundary_without_provider_fa
     def observe(event: str, error: BaseException | None) -> None:
         recorder.observe_stream(event, attempt_index=len(recorder.requests) - 1, error=error)
 
-    model = _PreparedRequestModel(
+    model = PreparedRequestModel(
         SDKModel(lambda messages, info: ModelResponse(parts=[])), prepare, provider_errors.append, observe,
     )
 
