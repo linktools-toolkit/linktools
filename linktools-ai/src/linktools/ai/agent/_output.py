@@ -241,8 +241,10 @@ class _OutputSchemaDiagnostic:
         ]
         # Rejected values may occur in SDK messages and even source literals.
         # Preserve the original frames, not an unraised replacement's stack.
-        for path, current in _output_exception_tree(source):
+        for path, current, repeated in _output_exception_tree(source):
             stack.append(f"{path}: {type(current).__name__}\n")
+            if repeated:
+                continue
             stack.extend(traceback.format_list([
                 (frame.f_code.co_filename, lineno, frame.f_code.co_name, "")
                 for frame, lineno in traceback.walk_tb(current.__traceback__)
@@ -264,8 +266,8 @@ class _OutputSchemaDiagnostic:
 
 def output_validation_error(error: BaseException, *, code: ErrorCode) -> "AIError | None":
     """Project durable schema failures without SDK input values or exception text."""
-    for _path, current in _output_exception_tree(error):
-        if isinstance(current, ValidationError):
+    for _path, current, repeated in _output_exception_tree(error):
+        if not repeated and isinstance(current, ValidationError):
             for detail in current.errors(include_input=False, include_url=False):
                 diagnostic = detail.get("ctx", {}).get("diagnostic")
                 if isinstance(diagnostic, _OutputSchemaDiagnostic):
@@ -273,16 +275,16 @@ def output_validation_error(error: BaseException, *, code: ErrorCode) -> "AIErro
     return None
 
 
-def _output_exception_tree(error: BaseException) -> Iterator[tuple[str, BaseException]]:
+def _output_exception_tree(error: BaseException) -> Iterator[tuple[str, BaseException, bool]]:
     seen: dict[int, str] = {}
     pending = [("root", error)]
     while pending:
         path, current = pending.pop()
         if id(current) in seen:
-            yield f"{path} (same exception as {seen[id(current)]})", current
+            yield f"{path} (same exception as {seen[id(current)]})", current, True
             continue
         seen[id(current)] = path
-        yield path, current
+        yield path, current, False
         if isinstance(current, BaseExceptionGroup):
             pending.extend(
                 (f"{path}.branch[{index}]", child)

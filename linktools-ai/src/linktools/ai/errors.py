@@ -247,8 +247,9 @@ class ErrorDiagnostics:
     """Failure detail captured before wrapping, without frame locals.
 
     The original three fields remain the bounded summary. ``exception_chain``
-    retains full messages along the visible cause/context chain, outermost
-    first; ``traceback`` also includes exception-group branches and notes.
+    retains full messages along the visible cause/context and group graph,
+    outermost first; repeated objects reference their first path instead of
+    duplicating content. ``traceback`` also includes exception notes.
     Missing optional values mean they were not collected, not an empty failure.
     With ``content_omission_reason``, messages and notes are never inspected;
     the chain retains exception types, relationships and group paths while the
@@ -331,70 +332,28 @@ class ErrorDiagnostics:
         if content_omission_reason is not None:
             if not isinstance(content_omission_reason, str) or not content_omission_reason.strip():
                 raise ValueError("diagnostic content omission reason must be a nonempty string or null")
-            return cls._from_exception_omitting_content(error, content_omission_reason)
-        exception_type = type(error).__name__
+            content_omission_reason = environ.logging.redact(content_omission_reason)
+        omitted = f"[content omitted: {content_omission_reason}]"
         chain: list[Mapping[str, str]] = []
-        current: BaseException | None = error
-        seen: set[int] = set()
-        relation = "root"
-        while current is not None and id(current) not in seen:
-            seen.add(id(current))
-            try:
-                message = str(current)
-            except BaseException:
-                message = ""
-            chain.append({
-                "exception_type": type(current).__name__,
-                "exception_message": message,
-                "relation": relation,
-            })
-            if current.__cause__ is not None:
-                current, relation = current.__cause__, "cause"
-            elif not current.__suppress_context__:
-                current, relation = current.__context__, "context"
-            else:
-                current = None
-        exception_message = chain[0]["exception_message"]
-        # Python's default group formatting and sys.tracebacklimit are display
-        # limits, not bounds for a durable failure diagnostic.
-        group_options = (
-            {"max_group_width": sys.maxsize, "max_group_depth": sys.maxsize}
-            if sys.version_info >= (3, 11) else {}
+        stack: list[str] = (
+            ["Exception traceback (original messages, notes and source lines omitted):\n"]
+            if content_omission_reason is not None else []
         )
-        try:
-            formatted = traceback.TracebackException(
-                type(error), error, error.__traceback__, limit=sys.maxsize,
-                capture_locals=False, **group_options,
-            )
-            stack = "".join(formatted.format(chain=True))
-        except BaseException:
-            # Diagnostic formatting must not replace the failure being handled.
-            stack = None
-        return cls(
-            environ.logging.redact(exception_type)[:_DIAGNOSTIC_EXCEPTION_TYPE_MAX_LENGTH],
-            environ.logging.redact(exception_message)[:_DIAGNOSTIC_EXCEPTION_MESSAGE_MAX_LENGTH],
-            _cause_digest(
-                {
-                    "exception_message": exception_message,
-                    "exception_type": exception_type,
-                }
-            ),
-            exception_chain=tuple(chain),
-            traceback=stack,
-        )
-
-    @classmethod
-    def _from_exception_omitting_content(cls, error: BaseException, reason: str) -> "ErrorDiagnostics":
-        reason = environ.logging.redact(reason)
-        message = f"[content omitted: {reason}]"
-        chain: list[Mapping[str, str]] = []
-        stack = ["Exception traceback (original messages, notes and source lines omitted):\n"]
         seen: dict[int, str] = {}
         pending = [("root", "root", error)]
         while pending:
             path, relation, current = pending.pop()
             exception_type = type(current).__name__
             previous = seen.get(id(current))
+            if content_omission_reason is not None:
+                message = omitted
+            elif previous is not None:
+                message = f"[same exception as {previous}]"
+            else:
+                try:
+                    message = str(current)
+                except BaseException:
+                    message = ""
             entry = {
                 "exception_type": exception_type,
                 "exception_message": message,
@@ -405,15 +364,42 @@ class ErrorDiagnostics:
                 entry["same_exception_as"] = previous
             chain.append(entry)
             alias = f" (same exception as {previous})" if previous is not None else ""
-            stack.append(f"{path}{alias}: {exception_type}: {message}\n")
-            # Reading code locations directly avoids traceback formatters that
-            # stringify exceptions, inspect notes or load source text.
-            for frame, lineno in traceback.walk_tb(current.__traceback__):
-                code = frame.f_code
-                stack.append(f'  File "{code.co_filename}", line {lineno}, in {code.co_name}\n')
+            if content_omission_reason is not None or previous is not None:
+                stack.append(f"{path}{alias}: {exception_type}: {message}\n")
+            else:
+                relationship = "direct cause" if relation == "cause" else relation
+                stack.append(f"{path} ({relationship}):\n")
             if previous is not None:
                 continue
             seen[id(current)] = path
+            if content_omission_reason is not None:
+                # Do not inspect messages, notes, locals or source lines for
+                # ephemeral input failures, even through standard formatters.
+                for frame, lineno in traceback.walk_tb(current.__traceback__):
+                    code = frame.f_code
+                    stack.append(f'  File "{code.co_filename}", line {lineno}, in {code.co_name}\n')
+            else:
+                try:
+                    # A detached value prevents the standard formatter from
+                    # expanding causes or shared group branches a second time.
+                    value = Exception(message)
+                    if isinstance(current, SyntaxError):
+                        value = SyntaxError(current.msg, (
+                            current.filename, current.lineno, current.offset,
+                            current.text, current.end_lineno, current.end_offset,
+                        ))
+                    notes = getattr(current, "__notes__", None)
+                    if notes is not None:
+                        value.__notes__ = notes
+                    formatted = traceback.TracebackException(
+                        type(current), value, current.__traceback__, limit=sys.maxsize,
+                        capture_locals=False,
+                    )
+                    stack.extend(formatted.format(chain=False))
+                except BaseException as formatting_error:
+                    # One unreadable node must not erase other collected failures.
+                    stack.append(f"{exception_type}: [traceback formatting unavailable: "
+                                 f"{type(formatting_error).__name__}]\n")
             if isinstance(current, BaseExceptionGroup):
                 pending.extend(
                     (f"{path}.branch[{index}]", "branch", child)
@@ -423,18 +409,23 @@ class ErrorDiagnostics:
                 pending.append(("cause" if path == "root" else f"{path}.cause", "cause", current.__cause__))
             elif not current.__suppress_context__ and current.__context__ is not None:
                 pending.append(("context" if path == "root" else f"{path}.context", "context", current.__context__))
+        exception_type = type(error).__name__
+        exception_message = chain[0]["exception_message"]
         stack_text = environ.logging.redact("".join(stack))
+        digest_fields = {
+            "exception_type": exception_type,
+            "exception_message": exception_message,
+        }
+        if content_omission_reason is not None:
+            digest_fields["exception_type"] = environ.logging.redact(exception_type)
+            digest_fields["traceback"] = stack_text
         return cls(
-            environ.logging.redact(type(error).__name__)[:_DIAGNOSTIC_EXCEPTION_TYPE_MAX_LENGTH],
-            message[:_DIAGNOSTIC_EXCEPTION_MESSAGE_MAX_LENGTH],
-            _cause_digest({
-                "exception_type": environ.logging.redact(type(error).__name__),
-                "exception_message": message,
-                "traceback": stack_text,
-            }),
+            environ.logging.redact(exception_type)[:_DIAGNOSTIC_EXCEPTION_TYPE_MAX_LENGTH],
+            environ.logging.redact(exception_message)[:_DIAGNOSTIC_EXCEPTION_MESSAGE_MAX_LENGTH],
+            _cause_digest(digest_fields),
             exception_chain=tuple(chain),
             traceback=stack_text,
-            content_omission_reason=reason,
+            content_omission_reason=content_omission_reason,
         )
 
 

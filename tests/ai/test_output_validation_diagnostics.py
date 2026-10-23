@@ -336,3 +336,19 @@ async def test_task_group_schema_failure_keeps_branch_frames_without_private_val
     ) as history:
         restored = await history.result(result.execution_id, principal=principal)
         assert restored.error_diagnostics == diagnostics
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="native exception groups require Python 3.11")
+def test_schema_failure_shared_aliases_do_not_repeat_original_frames() -> None:
+    import builtins
+
+    adapter = TypeAdapter(_binding({"count": {"type": "integer"}}).runtime_output_type)
+    with pytest.raises(ValidationError) as failed:
+        adapter.validate_python({"count": _SECRET})
+    original = failed.value.__traceback__
+    error = builtins.ExceptionGroup("shared validation", [failed.value] * 41)
+    diagnostics = _map(error).diagnostics
+    assert diagnostics.traceback.count('File "') == len(list(traceback.walk_tb(original)))
+    assert diagnostics.traceback.count("same exception as root.branch[0]") == 40
+    assert _SECRET not in diagnostics.traceback
+    assert failed.value.__traceback__ is original

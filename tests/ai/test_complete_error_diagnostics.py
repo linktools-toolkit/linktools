@@ -58,7 +58,9 @@ def test_deep_chain_cycles_and_suppressed_context_have_truthful_boundaries() -> 
     assert len(diagnostics.exception_chain) == 16
     assert diagnostics.exception_chain[-1]["exception_message"] == "leaf"
     error.__cause__.__cause__ = error
-    assert len(ErrorDiagnostics.from_exception(error).exception_chain) == 2
+    cyclic = ErrorDiagnostics.from_exception(error).exception_chain
+    assert len(cyclic) == 3
+    assert cyclic[-1]["same_exception_as"] == "root"
     suppressed = RuntimeError("visible")
     suppressed.__context__ = RuntimeError("hidden-context")
     suppressed.__suppress_context__ = True
