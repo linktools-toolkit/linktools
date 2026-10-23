@@ -547,10 +547,17 @@ candidate = CandidateSpec("original", task=historical.ref)
 
 Alternatively, use that case with an explicitly chosen current Agent-backed
 Task to test changed behavior. Input capture and behavior selection are separate.
-`from_agent_capture` restores the original binding, including structured output;
-it does not fetch the latest Agent or make the sample input part of its Task
-definition. Required historical model/capability contracts must still be
-available and compatible. Mixed original bindings need explicit grouping.
+`from_agent_capture` restores the original binding, including structured output
+and captured child Agent revisions, instructions, output contracts and selected
+dependencies. Execution does not substitute current child declarations after
+Runtime is reopened. An explicit Task node output override changes only the root
+output contract, not its children.
+
+Restoration does not fetch the latest Agent or make the sample input part of its
+Task definition. Required historical model/capability contracts must still be
+available and compatible; unavailable dependencies fail closed rather than
+selecting their current replacements. Mixed original bindings need explicit
+grouping.
 
 - `context_policy="captured"` is the default. New Agent executions retain their
   actual pre-input framework context: session history/metadata, memory content
