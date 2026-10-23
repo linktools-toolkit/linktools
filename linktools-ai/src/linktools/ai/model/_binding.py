@@ -40,6 +40,8 @@ class _ProviderModelBinding:
     timeout: "int | float | None" = None
     max_retries: int = 2
     retry_delay: "int | float" = 1.0
+    retry_max_delay: "int | float" = 60.0
+    retry_backoff_factor: "int | float" = 2.0
     max_tokens: "int | None" = None
 
     profile: InitVar[Mapping[str, JsonValue] | None] = None
@@ -64,6 +66,8 @@ class _ProviderModelBinding:
         _validate_positive_number("timeout", self.timeout)
         _validate_non_negative_integer("max_retries", self.max_retries)
         _validate_non_negative_number("retry_delay", self.retry_delay)
+        _validate_finite_number_at_least("retry_max_delay", self.retry_max_delay, 0)
+        _validate_finite_number_at_least("retry_backoff_factor", self.retry_backoff_factor, 1)
         _validate_positive_integer("max_tokens", self.max_tokens)
 
     @property
@@ -126,6 +130,8 @@ class _ProviderModelBinding:
             model,
             self.max_retries,
             self.retry_delay,
+            retry_max_delay=self.retry_max_delay,
+            retry_backoff_factor=self.retry_backoff_factor,
             input_binding=self,
         )
 
@@ -177,12 +183,26 @@ def _validate_non_negative_number(name: str, value: "int | float") -> None:
         raise ValueError(f"{name} must be a finite non-negative number")
 
 
+def _validate_finite_number_at_least(name: str, value: "int | float", minimum: int) -> None:
+    try:
+        valid = (
+            not isinstance(value, bool) and isinstance(value, (int, float))
+            and math.isfinite(value) and value >= minimum
+        )
+    except OverflowError:
+        valid = False
+    if not valid:
+        requirement = "non-negative number" if minimum == 0 else f"number at least {minimum}"
+        raise ValueError(f"{name} must be a finite {requirement}")
+
+
 class _RetryingModel(WrapperModel):
     """Finite transport retries with increasing waits at the public Model boundary.
 
-    ``retry_delay`` is the initial backoff base. Local exponential waits are
-    capped at sixty seconds, or that base if larger, with up to 25% additive
-    jitter. A provider's Retry-After remains a lower bound, not a local cap.
+    ``retry_delay`` is the initial base, multiplied by ``retry_backoff_factor``
+    after each wait. Local waits are capped at ``retry_max_delay``, or that base
+    if larger, with up to 25% additive jitter. A provider's Retry-After remains
+    a lower bound, not a local cap.
     Caller cancellation and the SDK's request_timeout own the overall deadline.
     """
 
@@ -192,17 +212,21 @@ class _RetryingModel(WrapperModel):
         max_retries: int,
         retry_delay: "int | float",
         *,
+        retry_max_delay: "int | float" = 60.0,
+        retry_backoff_factor: "int | float" = 2.0,
         input_binding: ModelBinding | None = None,
     ) -> None:
         super().__init__(wrapped)
         self._max_retries = max_retries
         self._retry_delay = retry_delay
+        self._retry_max_delay = retry_max_delay
+        self._retry_backoff_factor = retry_backoff_factor
         self._input_binding = input_binding
 
     async def _wait_for_retry(
         self, error: ModelAPIError, backoff: float,
     ) -> float:
-        cap = max(60.0, self._retry_delay)
+        cap = max(self._retry_max_delay, self._retry_delay)
         wait = min(cap, backoff + random.uniform(0, backoff * 0.25))
         # Older supported SDKs expose this only on ModelHTTPError. Read its
         # public normalized value rather than interpreting provider bodies.
@@ -215,8 +239,10 @@ class _RetryingModel(WrapperModel):
         ):
             wait = max(wait, retry_after)
         await asyncio.sleep(wait)
-        # Cap before doubling so arbitrarily many attempts cannot overflow.
-        next_backoff = cap if backoff >= cap / 2 else backoff * 2
+        if backoff == 0:
+            return 0
+        # Cap before multiplying so arbitrarily many attempts cannot overflow.
+        next_backoff = cap if self._retry_backoff_factor >= cap / backoff else backoff * self._retry_backoff_factor
         return next_backoff
 
     async def request(

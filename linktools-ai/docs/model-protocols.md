@@ -278,9 +278,19 @@ without a `thinking_control()` projection report unknown control.
 The model binding owns transport retries; native provider SDK retries remain
 zero. `max_retries` counts additional attempts (default `2`), and `retry_delay`
 is the initial backoff base (default `1.0` seconds), not a fixed wait. The local
-base doubles per retry, with up to 25% additive jitter, capped at 60 seconds or
-the configured initial base if larger. Explicit zero retains immediate retries;
-`max_retries=0` disables them.
+base is multiplied by `retry_backoff_factor` (default `2.0`) after each retry
+wait, with up to 25% additive jitter. The factor must be finite and at least
+`1`: `1` keeps the base unchanged while retaining jitter; larger values grow
+the base until capped. `retry_max_delay` (default `60.0` seconds) caps the local
+wait, including jitter; the effective
+cap is `max(retry_max_delay, retry_delay)`, so it never shortens the initial
+base. Both delay parameters accept finite non-negative numbers. Explicit
+`retry_delay=0` keeps the local wait at zero; `max_retries=0` disables retries.
+
+For example, `create_model(..., max_retries=3, retry_delay=5,
+retry_max_delay=120, retry_backoff_factor=4)` allows three additional attempts
+with local waits of 5–6.25, 20–25, and 80–100 seconds. These transport settings
+do not change the model's semantic identity or contract.
 
 The SDK's public normalized `retry_after` is a lower bound for the current
 response only, even when it exceeds the local cap. A later response without
