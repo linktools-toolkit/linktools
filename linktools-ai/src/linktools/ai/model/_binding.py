@@ -44,15 +44,21 @@ class _ProviderModelBinding:
     retry_backoff_factor: "int | float" = 2.0
     max_tokens: "int | None" = None
 
+    context_window: InitVar[int | None] = None
     profile: InitVar[Mapping[str, JsonValue] | None] = None
     _profile_overrides: ImmutableJsonMapping = field(init=False)
     input_types: InitVar[Sequence[str]] = ()
     _input_mime_types: tuple[str, ...] = field(init=False)
 
-    def __post_init__(self, profile: Mapping[str, JsonValue] | None, input_types: Sequence[str]) -> None:
+    def __post_init__(self, context_window: int | None, profile: Mapping[str, JsonValue] | None,
+                      input_types: Sequence[str]) -> None:
         if profile is not None and not isinstance(profile, Mapping):
             raise TypeError("profile must be a JSON mapping")
-        declared = normalize_json_value(dict(profile) if profile is not None else {})
+        declared = dict(profile) if profile is not None else {}
+        if context_window is not None:
+            _validate_positive_integer("context_window", context_window)
+            declared["context_window"] = context_window
+        declared = normalize_json_value(declared)
         object.__setattr__(self, "_profile_overrides", ImmutableJsonMapping(declared))
         self._sdk_profile()
         model = self.model.strip().removeprefix(f"{self.provider}:")

@@ -164,6 +164,7 @@ Useful options:
 - Install `linktools-ai[anthropic]` for Anthropic Messages, or `linktools-ai[openai]` for either OpenAI API; add `web` for `ai-web`, for example `linktools-ai[anthropic,web]`. Missing provider extras produce an installation hint before a Runtime is opened.
 - Endpoint paths retain native SDK semantics: OpenAI normally uses a base ending in `/v1`; Anthropic normally uses the server root and appends `/v1/messages` itself. Configure a gateway according to its supported API, not by copying an OpenAI endpoint.
 - Custom headers and arbitrary SDK profile overrides are not CLI configuration options. Thinking control remains governed by the effective native SDK model profile, independently of whether the response contains thinking parts; selecting Anthropic does not declare arbitrary models thinking-capable.
+- Generic limits use `--context-window`, `--max-tokens`, `--timeout`, `--max-retries`, `--retry-delay`, `--retry-max-delay`, and `--retry-backoff-factor`. Workspace keys use the same words with underscores; environment configuration uses `LINKTOOLS_MODEL_CONTEXT_WINDOW`, etc. Context/output limits are tokens; timeout/delays are seconds. Explicit CLI values override LinkTools configuration/environment, then workspace values, then library defaults. See the [model configuration guide](docs/model-protocols.md#generic-limits-and-configuration-names).
 - `--planning` enables planning for the execution.
 - `--thinking` requests model thinking when supported.
 - `--json` emits one terminal JSON result.

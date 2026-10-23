@@ -381,7 +381,7 @@ def test_generic_factory_forwards_all_options(monkeypatch, kind, api, model_name
     monkeypatch.setattr(module, name, construct)
     options = dict(model=model_name, input_types=("image",), profile={"supports_thinking": True},
                    base_url="https://model.invalid/v1", api_key="fixture-secret", timeout=9,
-                   max_retries=3, retry_delay=0.2, retry_max_delay=120, retry_backoff_factor=4, max_tokens=99)
+                   max_retries=3, retry_delay=0.2, retry_max_delay=120, retry_backoff_factor=4, max_tokens=99, context_window=131072)
     assert create_model(protocol=api, **options) is sentinel
     assert received == options
 

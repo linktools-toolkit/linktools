@@ -41,6 +41,58 @@ The public type values are `openai` (Chat Completions), `openai-responses`, and
 HTTP trace labels and input dispatch use the same values. Native HTTP endpoint
 paths are unchanged. There is no separate public registry or `Runtime.open(models=...)`.
 
+## Generic limits and configuration names
+
+Use explicit generic options rather than placing ordinary limits in an SDK
+profile. For example:
+
+```python
+features.model("default", lambda: create_model(
+    protocol="openai", model="gateway-model",
+    context_window=131072, max_tokens=8192, timeout=45,
+    max_retries=3, retry_delay=5, retry_max_delay=120,
+    retry_backoff_factor=4,
+))
+```
+
+`context_window` is the total context capacity in tokens, not the maximum output
+length or a provider capacity upgrade. A non-null explicit value overrides
+`profile["context_window"]`; otherwise the profile override and then native SDK
+model defaults apply. The effective value is recorded only in the existing model
+contract's profile, not in a second competing field. `None` means no explicit
+override. The explicit value must be a positive integer, not a boolean.
+Other native capability overrides remain available through `profile`; there is no
+new public copy of the SDK capability table or provider-key allowlist.
+
+`max_tokens` reserves output tokens. Compaction uses a known context window minus
+the effective output reserve and current instruction/tool/output-schema overhead.
+If the SDK has no known window and no explicit compaction target exists, Runtime
+does not invent one. Native fallback uses the smallest **known** candidate window;
+unknown candidates do not constrain that value. This is context budgeting, not
+up-front thinking/MIME validation of an unused candidate, and estimates do not
+replace the provider's actual input limit.
+
+The same seven numeric names are accepted in workspace `.linktools/config.yaml`:
+`context_window`, `max_tokens`, `timeout`, `max_retries`, `retry_delay`,
+`retry_max_delay`, `retry_backoff_factor`. Python and workspace use snake_case;
+all three local commands use corresponding kebab-case flags such as
+`--context-window` and `--retry-max-delay`. Existing LinkTools configuration uses
+`MODEL_CONTEXT_WINDOW`, `MODEL_MAX_TOKENS`, `MODEL_TIMEOUT`, `MODEL_MAX_RETRIES`,
+`MODEL_RETRY_DELAY`, `MODEL_RETRY_MAX_DELAY`, `MODEL_RETRY_BACKOFF_FACTOR`; the
+standard environment prefix gives `LINKTOOLS_MODEL_CONTEXT_WINDOW`, etc.
+Explicit CLI values win, followed by existing LinkTools configuration/environment,
+workspace values and unchanged constructor defaults. Zero retries/delay remain
+valid and are not mistaken for missing configuration.
+
+Timeout and both delay values are seconds. Timeout is the provider HTTP timeout,
+not the entire retry/run deadline; existing request/run deadline and cancellation
+ownership remain unchanged. Retry count means additional attempts. Library defaults
+remain timeout/output/context unspecified, two retries, initial delay 1, maximum
+delay 60, and factor 2. The protocol value `openai-responses`, existing
+`LINKTOOLS_MODEL_API`, and provider-native `OPENAI_*` / `ANTHROPIC_*` connection
+variables retain their meanings. These generic options do not expose arbitrary
+headers or profile JSON through the CLI.
+
 For delayed configuration, register a synchronous zero-argument function returning
 an existing `ModelBinding`:
 

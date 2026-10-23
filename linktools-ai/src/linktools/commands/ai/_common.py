@@ -35,6 +35,15 @@ if TYPE_CHECKING:
 
 MODEL_APIS = ("openai", "openai-responses", "anthropic")
 MODEL_API = ConfigField(name="MODEL_API", cast=str, default=None)
+_MODEL_NUMERIC_OPTIONS = (
+    ("context_window", int, "context window in tokens"),
+    ("max_tokens", int, "maximum output tokens"),
+    ("timeout", float, "provider HTTP timeout in seconds (not a run deadline)"),
+    ("max_retries", int, "maximum additional transport retries"),
+    ("retry_delay", float, "initial retry delay in seconds"),
+    ("retry_max_delay", float, "local retry delay cap in seconds"),
+    ("retry_backoff_factor", float, "retry delay multiplier (at least 1)"),
+)
 
 
 def _add_local_runtime_arguments(parser: "CommandParser") -> None:
@@ -44,6 +53,8 @@ def _add_local_runtime_arguments(parser: "CommandParser") -> None:
     parser.add_argument("--base-url", default=None, help="selected protocol endpoint")
     parser.add_argument("--model", default=None, help="selected protocol model name")
     parser.add_argument("--api-key", default=None, help="one-shot selected protocol credential")
+    for name, value_type, description in _MODEL_NUMERIC_OPTIONS:
+        parser.add_argument("--" + name.replace("_", "-"), type=value_type, default=None, help=description)
     parser.add_argument(
         "--memory",
         default=None,
@@ -115,7 +126,7 @@ def _local_input_config(
         ) from error
 
 
-def _local_model_options(workspace: Workspace, args: Namespace) -> dict[str, str | None]:
+def _local_model_options(workspace: Workspace, args: Namespace) -> dict[str, str | int | float | None]:
     api = args.model_api or workspace.config.get("model_api") or os.getenv("MODEL_API") or "openai"
     if api not in MODEL_APIS:
         raise AIError(ErrorCode.MODEL_CONFIG_INVALID, "model_api must be one of: " + ", ".join(MODEL_APIS))
@@ -131,6 +142,10 @@ def _local_model_options(workspace: Workspace, args: Namespace) -> dict[str, str
         if name != "model" and (value is None or not value.strip()):
             value = os.getenv(field.name) or None
         options[name] = value.strip() if name == "model" and isinstance(value, str) else value
+    for name, _value_type, _description in _MODEL_NUMERIC_OPTIONS:
+        value = vars(args).get(name)
+        if value is not None:
+            options[name] = value
     return options
 
 
@@ -141,6 +156,13 @@ def _local_model(
     api: "str | None" = None,
     base_url: "str | None" = None,
     api_key: "str | None" = None,
+    context_window: "int | None" = None,
+    max_tokens: "int | None" = None,
+    timeout: "int | float | None" = None,
+    max_retries: "int | None" = None,
+    retry_delay: "int | float | None" = None,
+    retry_max_delay: "int | float | None" = None,
+    retry_backoff_factor: "int | float | None" = None,
 ) -> "ModelBinding":
     from linktools.ai.model import ModelBinding, create_model
 
@@ -160,11 +182,23 @@ def _local_model(
     if not selected_model:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "model is required")
 
+    numeric_options = {
+        "context_window": context_window, "max_tokens": max_tokens, "timeout": timeout,
+        "max_retries": max_retries, "retry_delay": retry_delay,
+        "retry_max_delay": retry_max_delay, "retry_backoff_factor": retry_backoff_factor,
+    }
     try:
+        for name, value_type, _description in _MODEL_NUMERIC_OPTIONS:
+            if numeric_options[name] is None:
+                configured = environ.config.get(ConfigField(name="MODEL_" + name.upper(), cast=None, default=None))
+                if isinstance(configured, str):
+                    configured = value_type(configured)
+                numeric_options[name] = workspace.config.get(name) if configured is None else configured
         return create_model(
             protocol=api,
             model=selected_model,
             input_types=input_types,
+            **{name: value for name, value in numeric_options.items() if value is not None},
             base_url=(
                 base_url
                 if base_url is not None
@@ -179,7 +213,7 @@ def _local_model(
     except (TypeError, ValueError) as error:
         raise AIError(
             ErrorCode.MODEL_CONFIG_INVALID,
-            "Invalid local model configuration; check input_types and connection settings",
+            "Invalid local model configuration; check input_types, model limits and connection settings",
             retryable=False,
             safe_details={"reason": "model_configuration_invalid"},
         ) from error
