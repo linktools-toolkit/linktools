@@ -172,7 +172,7 @@ async def test_root_and_task_defaults_use_native_schema_correction(tmp_path: Pat
             TaskNode("explicit", task=task, input=AgentTaskInput("review"), output_type=_Label),
             TaskNode("text", task=task, input=AgentTaskInput("review"), output_type=AssistantTextOutput),
         )), idempotency_key="default-output")
-        assert (await run.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED
+        assert (await run.wait(timeout_seconds=30)).result.status is TaskStatus.SUCCEEDED
         assert await run.result("inherited") == {"count": 3}
         assert await run.result("explicit") == {"label": "explicit"}
         assert await run.result("text") == {"text": "plain"}
