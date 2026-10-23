@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Captured tool declarations own execution semantics, not authoring SDK objects."""
+from ._runtime_test_helpers import model_features
 
 import pytest
 from pydantic_ai import Agent, DeferredToolRequests, RunContext, Tool
@@ -14,7 +15,6 @@ from pydantic_ai.tools import ToolDefinition
 from linktools.ai.agent import AgentCompiler
 from linktools.ai.capability import CapabilityContribution, tool_metadata
 from linktools.ai.core import ExecutionStatus, JsonValue
-from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
 from linktools.ai.spec import AgentSpec
 
@@ -48,17 +48,16 @@ async def test_runtime_uses_registered_tool_semantics_after_authoring_mutation()
         "default", allow_tools=("lookup",), allow_skills=(),
         allow_subagents=(), allow_capabilities=(),
     )
+    model = _ModelBinding()
+    features.model("default", model)
     capture = await features.capture()
     candidate = next(item for item in capture.contributions if item.kind == "tool")
     original = candidate.contract
     source.function_schema.json_schema["properties"]["key"]["description"] = "Changed schema"
     candidate.value.description = "Changed through captured value"
     candidate.value.timeout = 0.000001
-    models = ModelRegistry()
-    model = _ModelBinding()
-    models.register(model)
     compiler = AgentCompiler(
-        model_resolver=models.capture(), candidates=capture.contributions,
+        models=capture.models, candidates=capture.contributions,
         agents={spec.id: spec},
     )
     binding = compiler.bind(compiler.compile(spec))
@@ -66,7 +65,7 @@ async def test_runtime_uses_registered_tool_semantics_after_authoring_mutation()
     assert restored.binding_contract == binding.binding_contract
 
     async with Runtime.open(
-        "capture", models=models, storage=RuntimeStorage.in_memory(), features=capture,
+        "capture", storage=RuntimeStorage.in_memory(), features=capture,
     ) as runtime:
         result = (await runtime.agents.get().run("Call lookup", timeout_seconds=5)).result
         assert result.status is ExecutionStatus.SUCCEEDED
@@ -163,10 +162,9 @@ async def test_restored_tool_preserves_validator_callable_and_prepare_hook() -> 
     )
     candidate = CapabilityContribution.from_opaque("tool", "checked", source)
     spec = AgentSpec("default", allow_tools=("checked",))
-    models = ModelRegistry()
-    models.register(_ModelBinding())
+    models = {"default": _ModelBinding()}
     compiler = AgentCompiler(
-        model_resolver=models.capture(), candidates=(candidate,), agents={spec.id: spec},
+        models=models, candidates=(candidate,), agents={spec.id: spec},
     )
     original_binding = compiler.bind(compiler.compile(spec))
 

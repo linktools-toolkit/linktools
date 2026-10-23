@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Executions without a shared run budget retain their accepted Agent limits."""
+from ._runtime_test_helpers import model_features
 
 import base64
 import hashlib
@@ -86,7 +87,7 @@ async def test_sqlite_retry_preserves_accepted_agent_usage_limit(
     application.agent("default", revision=2, model="default", allow_tools=())
     async with Runtime.open(
         "older-history", storage=RuntimeStorage.sqlite(path),
-        models=helpers.RuntimeUsageModels(), features=application,
+        features=model_features(helpers.RuntimeUsageModels(), application),
     ) as runtime:
         original = await runtime.executions.get(execution_id)
         assert await original.budget_usage() is None

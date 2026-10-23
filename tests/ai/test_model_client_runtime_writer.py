@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Actual SDK client attempts follow existing Runtime request boundaries."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 import json
@@ -26,7 +27,7 @@ from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
 from linktools.ai.capability import TraceCapability
 
-from .test_model_client_request_capture import _agents, _model, _registry, _response
+from .test_model_client_request_capture import _agents, _model, _binding, _response
 from .test_model_client_response_capture import _DONE, _EVENT, _Stream, _invoke
 
 
@@ -99,7 +100,7 @@ async def test_runtime_records_compaction_and_agent_dispatches_separately(
         received.append(response.content)
         return response
 
-    models, _clients = _registry(monkeypatch, handler)
+    models, _clients = _binding(monkeypatch, handler)
     chat_model = _openai.OpenAIChatModel
 
     def small_model(*args: Any, **kwargs: Any) -> Any:
@@ -115,7 +116,7 @@ async def test_runtime_records_compaction_and_agent_dispatches_separately(
     storage = RuntimeStorage.in_memory()
     features = _agents()
     features.capability(TraceCapability(record_http_bodies=True), scope="runtime")
-    async with Runtime.open("default", models=models, storage=storage, features=features) as runtime:
+    async with Runtime.open("default", storage=storage, features=model_features(models, features)) as runtime:
         execution = await runtime.agents.get("default").start(
             "continue", input_context=ExecutionInputContext.from_messages(history),
             budget=RunBudget(model_requests=2) if budgeted else None,
@@ -166,11 +167,11 @@ async def test_runtime_flushes_original_attempts_only_at_request_completion(
             return httpx2.Response(429, headers={"content-type": "application/json"}, content=failure)
         return httpx2.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
 
-    models, _clients = _registry(monkeypatch, handler, retries=int(outcome == "retry"))
+    models, _clients = _binding(monkeypatch, handler, retries=int(outcome == "retry"))
     storage = RuntimeStorage.in_memory() if backend == "memory" else RuntimeStorage.sqlite(tmp_path / "state.db")
     features = _agents()
     features.capability(TraceCapability(record_http_bodies=True), scope="runtime")
-    async with Runtime.open("default", models=models, storage=storage, features=features) as runtime:
+    async with Runtime.open("default", storage=storage, features=model_features(models, features)) as runtime:
         execution = await runtime.agents.get("default").start("original prompt")
         if outcome == "cancel":
             await asyncio.wait_for(stream.blocked.wait(), 5)
@@ -237,14 +238,14 @@ async def test_concurrent_subagents_keep_original_attempts_with_their_own_execut
         }).encode() + b"\n\n" + _DONE
         return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=body)
 
-    models, _clients = _registry(monkeypatch, handler)
+    models, _clients = _binding(monkeypatch, handler)
     group = RuntimeFeatures("application")
     group.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_subagents=("child",))
     group.agent("child", model="default", allow_tools=(), allow_subagents=())
     storage = RuntimeStorage.in_memory()
     principal = Principal("owner", "default")
-    async with Runtime.open("default", models=models, storage=storage, features=group) as runtime:
+    async with Runtime.open("default", storage=storage, features=model_features(models, group)) as runtime:
         parents = await asyncio.gather(*(runtime.agents.get("default").start(f"root-{i}", principal=principal) for i in range(2)))
         results = await asyncio.gather(*(execution.wait(timeout_seconds=15) for execution in parents))
         assert all(value.result.status == "SUCCEEDED" for value in results)

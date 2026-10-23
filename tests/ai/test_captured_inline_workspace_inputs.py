@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Captured input reprojection retains inline workspace attachment occurrences."""
+from ._runtime_test_helpers import model_features
 
 from ._runtime_test_helpers import workspace_features
 
@@ -54,9 +55,9 @@ async def test_capture_reprojects_inline_and_file_attachments_without_live_reads
         assert not isinstance(context.prompt, str)
         return (f"Prepared in {context.graph_id}: ", *context.prompt)
 
-    async with Runtime.open("inline-capture", models=models, context=CONTEXT,
+    async with Runtime.open("inline-capture", context=CONTEXT,
             storage=RuntimeStorage.in_memory(),
-            features=group) as runtime:
+            features=model_features(models, group)) as runtime:
         target = runtime.tasks.from_agent("inline.agent", runtime.agents.get(),
                                           build_input=project if projected else None)
         scorer = Task("inline.score", _score_graph, effect_policy="none")
@@ -129,9 +130,9 @@ async def test_irreversible_projection_keeps_fixed_capture_and_rejects_reproject
     async def discard(context: AgentTaskInputContext) -> str:
         return "Projected without the original attachment"
 
-    async with Runtime.open("irreversible-capture", models=models, context=CONTEXT,
+    async with Runtime.open("irreversible-capture", context=CONTEXT,
             storage=RuntimeStorage.filesystem(tmp_path / "state"),
-            features=group) as runtime:
+            features=model_features(models, group)) as runtime:
         target = runtime.tasks.from_agent("irreversible.agent", runtime.agents.get(), build_input=discard)
         scorer = Task("irreversible.score", _score_graph, effect_policy="none")
         engine = runtime.tasks.bind(target, scorer)

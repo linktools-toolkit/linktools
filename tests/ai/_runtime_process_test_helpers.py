@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Independent Runtime processes for live ownership and crash recovery tests."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 import multiprocessing
@@ -74,8 +75,8 @@ def _runtime_process(
 
         state = _storage(Path(database), phase)
         async with Runtime.open(
-            _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=state, features=_capabilities(conversation=mode == "session"),
+            _NAMESPACE,
+            storage=state, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(conversation=mode == "session")),
             auto_recover=auto_recover,
         ) as runtime:
             async def snapshot() -> dict[str, object]:
@@ -147,7 +148,18 @@ def _runtime_process(
                 backend._commit_reconciled_terminal = ordered_terminal
             if execution_id is None:
                 backend = runtime._execution_service.runtime_backend()
-                if phase == "admitted":
+                if phase == "reserved":
+                    original_prepare = backend.prepare_start
+
+                    async def pause_prepare(request, execution, identity):
+                        nonlocal execution_id
+                        execution_id = execution.execution_id
+                        admitted.set()
+                        await release_admission.wait()
+                        return await original_prepare(request, execution, identity)
+
+                    backend.prepare_start = pause_prepare
+                elif phase == "admitted":
                     original_launch = backend.launch
 
                     async def pause_launch(request, execution, **kwargs):

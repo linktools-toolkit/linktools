@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Durable and public execution error diagnostic evidence."""
+from ._runtime_test_helpers import model_features
 
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -57,26 +58,8 @@ class _DiagnosticModelBinding:
         return TestModel()
 
 
-class _DiagnosticModels:
-    def capture(self) -> "_DiagnosticModels":
-        return self
-
-    def resolve(self, route_id: str) -> _DiagnosticModelBinding:
-        if route_id != "default":
-            raise AssertionError(f"unexpected model route: {route_id}")
-        return _DiagnosticModelBinding()
-
-    def restore(
-        self,
-        payload: dict[str, JsonValue],
-        *,
-        route_id: "str | None" = None,
-    ) -> _DiagnosticModelBinding:
-        if route_id not in {None, "default"}:
-            raise AssertionError(f"unexpected model route: {route_id}")
-        if dict(payload) != _DiagnosticModelBinding.contract:
-            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
-        return _DiagnosticModelBinding()
+class _DiagnosticModels(_DiagnosticModelBinding):
+    pass
 
 
 def _binding_contract() -> AgentBindingContract:
@@ -232,7 +215,7 @@ async def test_terminal_results_survive_restart_through_live_and_read_only_apis(
     )
     async with Runtime.open(
         "default",
-        models=_DiagnosticModels(),  # type: ignore[arg-type]
+        features=model_features(_DiagnosticModels()),  # type: ignore[arg-type]
         storage=reopened,
     ) as runtime:
         result = await runtime.executions.result(

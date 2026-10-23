@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Invocation capture retains callable execution ownership on interrupted writes."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from collections.abc import Mapping
@@ -34,7 +35,7 @@ async def test_invocation_capture_interruption_retains_terminal_execution(
         calls.append("cancel")
 
     task = Task("capture.work", handler, cancel=cancel, effect_policy="none")
-    async with Runtime.open("capture", models=_TaskTestModels(), storage=storage) as runtime:
+    async with Runtime.open("capture", features=model_features(_TaskTestModels()), storage=storage) as runtime:
         objects = runtime._state.object_store(RuntimeDomain.TASK)
         original_put = objects.put
         entered = asyncio.Event()
@@ -76,7 +77,7 @@ async def test_invocation_capture_interruption_retains_terminal_execution(
         same = await engine.start(graph, principal=principal, idempotency_key="capture")
         assert (await same.state()).node_states[0].execution_id == state.execution_id
         assert calls == []
-    async with Runtime.open("capture", models=_TaskTestModels(), storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
+    async with Runtime.open("capture", features=model_features(_TaskTestModels()), storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         with pytest.raises(AIError) as missing:
             await runtime.executions.capture_input(state.execution_id, CaptureInputRequest(principal, "failed-input"))
         assert missing.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
@@ -99,7 +100,7 @@ async def test_invocation_capture_failed_cleanup_retains_recoverable_execution(
         calls.append("cancel")
 
     task = Task("capture.work", handler, cancel=cancel, effect_policy="none")
-    async with Runtime.open("capture", models=_TaskTestModels(), storage=storage) as runtime:
+    async with Runtime.open("capture", features=model_features(_TaskTestModels()), storage=storage) as runtime:
         objects = runtime._state.object_store(RuntimeDomain.TASK)
         original_put = objects.put
         original_cancel = runtime._execution_service.cancel_task
@@ -176,7 +177,7 @@ async def test_invocation_capture_repeated_cancellation_waits_for_cleanup(
         calls.append("cancel")
 
     task = Task("capture.work", handler, cancel=cancel, effect_policy="none")
-    async with Runtime.open("capture", models=_TaskTestModels(), storage=storage) as runtime:
+    async with Runtime.open("capture", features=model_features(_TaskTestModels()), storage=storage) as runtime:
         objects = runtime._state.object_store(RuntimeDomain.TASK)
         original_put = objects.put
         original_cancel = runtime._execution_service.cancel_task
@@ -252,7 +253,7 @@ async def test_callable_capture_waits_for_original_input_and_dependencies(
     producer = Task("capture.producer", produce, effect_policy="none")
     consumer = Task("capture.consumer", consume, normalize=normalize, effect_policy="none")
     candidate = Task("capture.candidate", consume, normalize=reproject, effect_policy="none")
-    async with Runtime.open("callable-ready", models=_TaskTestModels(), storage=storage) as runtime:
+    async with Runtime.open("callable-ready", features=model_features(_TaskTestModels()), storage=storage) as runtime:
         objects = runtime._state.object_store(RuntimeDomain.TASK)
         original_put = objects.put
         entered, release = asyncio.Event(), asyncio.Event()
@@ -310,7 +311,7 @@ async def test_standalone_callable_input_capture_does_not_require_invocation(tmp
     from linktools.ai.task import TaskBindingContract
 
     principal = service_principal("default", "owner")
-    async with Runtime.open("standalone-callable", models=_TaskTestModels(),
+    async with Runtime.open("standalone-callable", features=model_features(_TaskTestModels()),
                             storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         binding = TaskBindingContract("standalone.task", 1, "none", {"kind": "json"}, None, 1, 0)
         execution = await runtime._execution_service.start_task(binding, principal=principal,

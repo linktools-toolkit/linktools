@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Captured Runtime policies and offline response declarations have one owner."""
+from ._runtime_test_helpers import model_features
 
 from dataclasses import FrozenInstanceError, replace
 import inspect
@@ -12,7 +13,7 @@ from linktools.ai.capability import ToolResponsesCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import AuthorizationAction, PromptLimits, ResourceKind, ResourceRef, service_principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeHistory, RuntimeStorage
 
 from .test_tool_response_fixture import _manifest, _store
@@ -56,7 +57,7 @@ def test_removed_open_keywords_have_no_aliases():
     for name in ('authorization', 'limits', 'tool_responses'):
         assert name not in inspect.signature(Runtime.open).parameters
         with pytest.raises(TypeError):
-            Runtime.open('test', models=ModelRegistry(), storage=RuntimeStorage.in_memory(), **{name: None})
+            Runtime.open('test', storage=RuntimeStorage.in_memory(), **{name: None})
     assert 'authorization' not in inspect.signature(RuntimeHistory.open).parameters
     with pytest.raises(TypeError):
         RuntimeHistory.open('test', storage=RuntimeStorage.in_memory(), authorization=None)
@@ -69,7 +70,7 @@ async def test_runtime_uses_captured_policy_and_limits_even_when_filter_rejects_
     policy = Policy()
     limits = PromptLimits(max_binary_input_parts=1)
     features = RuntimeFeatures('policy', authorization=policy, limits=limits, filter=lambda *_: False)
-    async with Runtime.open('test', models=ModelRegistry(), storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Runtime.open('test', storage=RuntimeStorage.in_memory(), features=features) as runtime:
         assert runtime._execution_service._authorization is policy
         assert runtime._session_service._authorization is policy
         assert runtime._graph_service._authorization is policy
@@ -80,7 +81,7 @@ async def test_runtime_uses_captured_policy_and_limits_even_when_filter_rejects_
 @pytest.mark.parametrize('tenant', ('one', 'two'))
 async def test_default_policy_resolves_per_open_tenant(tenant):
     capture = await RuntimeFeatures('reused').capture()
-    async with Runtime.open('test', models=ModelRegistry(), storage=RuntimeStorage.in_memory(),
+    async with Runtime.open('test', storage=RuntimeStorage.in_memory(),
                             context=RuntimeContext(None, tenant_id=tenant), features=capture) as runtime:
         policy = runtime._execution_service._authorization
         ref = ResourceRef(ResourceKind.EXECUTION, 'execution', tenant)
@@ -94,7 +95,7 @@ async def test_default_policy_resolves_per_open_tenant(tenant):
 @pytest.mark.asyncio
 async def test_history_uses_current_capture_policy(tmp_path):
     storage = RuntimeStorage.from_root(tmp_path)
-    async with Runtime.open('test', models=ModelRegistry(), storage=storage):
+    async with Runtime.open('test', storage=storage):
         pass
     policy = Policy()
     capture = await RuntimeFeatures('history', authorization=policy).capture()
@@ -119,11 +120,11 @@ async def test_response_capability_scope_uniqueness_and_bootstrap_consumption():
         with pytest.raises(AIError) as caught:
             features.capability(ToolResponsesCapability(fixture), scope='runtime')
         assert caught.value.code is ErrorCode.CAPABILITY_CONFLICT
-        async with Runtime.open('test', models=ModelRegistry(), storage=RuntimeStorage.in_memory(), features=features) as runtime:
+        async with Runtime.open('test', storage=RuntimeStorage.in_memory(), features=features) as runtime:
             assert runtime._execution_service._tool_responses is fixture
         wrapped = RuntimeFeatures('wrapped')
         wrapped.capability(PrefixTools(CombinedCapability([ToolResponsesCapability(fixture)]), prefix='test'), id='wrapped.responses', scope='runtime')
-        async with Runtime.open('wrapped', models=ModelRegistry(), storage=RuntimeStorage.in_memory(), features=wrapped) as runtime:
+        async with Runtime.open('wrapped', storage=RuntimeStorage.in_memory(), features=wrapped) as runtime:
             assert runtime._execution_service._tool_responses is fixture
     finally:
         await store.close()
@@ -134,7 +135,7 @@ async def test_captured_limits_reject_oversized_input_before_execution():
     from pydantic_ai import BinaryContent
 
     features = RuntimeFeatures('limits', limits=PromptLimits(max_binary_input_parts=1))
-    async with Runtime.open('test', models=ModelRegistry(), storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Runtime.open('test', storage=RuntimeStorage.in_memory(), features=features) as runtime:
         with pytest.raises(AIError) as caught:
             await runtime._execution_service._input_materializer.materialize(
                 (BinaryContent(b'one', media_type='text/plain'), BinaryContent(b'two', media_type='text/plain')), (),
@@ -190,8 +191,9 @@ async def test_restored_history_ignores_source_routes_and_cache(tmp_path, monkey
                       TraceCapability(storage=routes[RuntimeDomain.TRACE]))
     policy = Policy()
     group._authorization = policy
+    group.model("default", _FeatureModels())
     capture = await group.capture()
-    async with Runtime.open('restore-policy', models=_FeatureModels(), storage=source_storage(),
+    async with Runtime.open('restore-policy', storage=source_storage(),
                             features=capture) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question')

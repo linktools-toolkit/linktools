@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Regression coverage for execution-owned Asset version bindings."""
+from linktools.ai.model import create_model
 
 import asyncio
 from collections.abc import Mapping
@@ -36,7 +37,7 @@ from linktools.ai.core import (
     canonical_sha256,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime._agent_binding_resolver import _AgentBindingResolver
 from linktools.ai.runtime._context import RuntimeContext
@@ -91,6 +92,7 @@ class _RecordingExecution:
         self.binding_digest: str | None = None
         self.binding_contract: AgentBindingContract | None = None
         self.requires_task_invocation_capture: bool | None = None
+        self.resolved_binding: AgentBinding | None = None
 
     async def start(
         self,
@@ -100,11 +102,13 @@ class _RecordingExecution:
         dependency_hold_id: str | None = None,
         budget_scope_id: str | None = None,
         binding_contract: AgentBindingContract | None = None,
+        resolved_binding: AgentBinding | None = None,
         requires_task_invocation_capture: bool = False,
     ) -> ExecutionHandle:
         del request, dependency_hold_id, budget_scope_id
         self.binding_digest = binding_digest
         self.binding_contract = binding_contract
+        self.resolved_binding = resolved_binding
         self.requires_task_invocation_capture = requires_task_invocation_capture
         return ExecutionHandle("execution")
 
@@ -155,7 +159,7 @@ async def _fixture() -> _BindingFixture:
         ),
     }
     compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+        models={"default": create_model(protocol='openai', model="gpt-test")},
         candidates=candidates,
         agents=specs,
     )
@@ -410,6 +414,8 @@ async def test_runtime_start_admits_resolved_binding() -> None:
         assert started.execution_id == "execution"
         assert execution.binding_contract is not None
         assert execution.binding_digest == execution.binding_contract.binding_digest
+        assert execution.resolved_binding is not None
+        assert execution.resolved_binding.binding_contract == execution.binding_contract
         assert execution.requires_task_invocation_capture is False
         assert _skill_ref(_resolved_child(execution.binding_contract)).resources
     finally:
@@ -443,7 +449,7 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
         allow_capabilities=(),
     )
     compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+        models={"default": create_model(protocol='openai', model="gpt-test")},
         candidates=(CapabilityContribution.from_declaration(server),),
         agents={specification.id: specification},
     )
@@ -498,7 +504,7 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
         allow_capabilities=(),
     )
     compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+        models={"default": create_model(protocol='openai', model="gpt-test")},
         candidates=(CapabilityContribution.from_declaration(server),),
         agents={specification.id: specification},
     )
@@ -583,7 +589,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
             ),
         }
         compiler = AgentCompiler(
-            model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+            models={"default": create_model(protocol='openai', model="gpt-test")},
             candidates=(contribution,),
             agents=specs,
         )

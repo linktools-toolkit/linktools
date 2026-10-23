@@ -63,7 +63,7 @@ class GlobalRateLimit(AbstractCapability[object]):
     """One application quota bucket shared across runs in one event loop.
 
     State is deliberately local to this example, with no LinkTools backend or
-    ModelRegistry contract. Keep the instance and its configuration unchanged
+    model-binding contract. Keep the instance and its configuration unchanged
     while runs are active; never copy it per run or reuse it across event loops.
     """
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Captured conversation input uses the selected candidate's Agent behavior."""
+from ._runtime_test_helpers import model_features
 
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, SystemPromptPart, TextPart, UserPromptPart
@@ -43,8 +44,8 @@ async def test_capture_uses_selected_candidate_prompt_and_preserves_history(
     for name, prompt in (("default", original_prompt), ("candidate", candidate_prompt)):
         group.agent(name, model="default", system_prompt=prompt,
                     allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open("fork-candidate", models=models, context=CONTEXT,
-                            storage=RuntimeStorage.in_memory(), features=group) as runtime:
+    async with Runtime.open("fork-candidate", context=CONTEXT,
+                            storage=RuntimeStorage.in_memory(), features=model_features(models, group)) as runtime:
         if source_kind == "fork":
             first = await runtime.agents.get().start("historical question", principal=PRINCIPAL)
             assert (await first.wait()).result.status is ExecutionStatus.SUCCEEDED

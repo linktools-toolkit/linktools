@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Live event locators read the same transcript before and after archival."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.capability import TraceCapability
 import asyncio
@@ -102,8 +103,8 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
                 system_prompt="Coordinate system prompt", instructions=("Coordinate instructions",))
     group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
-        "live-history", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), features=group,
+        "live-history",
+        storage=RuntimeStorage.in_memory(), features=model_features(_Models(_UsageFunctionModel(model)), group),
     ) as runtime:
         execution = await runtime.agents.get("default").start("run both tools")
         principal = runtime.default_principal
@@ -244,8 +245,6 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
         assert response.payload["message_seq"] == final.message_seq
 
 
-
-
 @pytest.mark.asyncio
 async def test_child_event_locator_does_not_mix_same_call_id_in_parent_history() -> None:
     child_read = asyncio.Event()
@@ -272,8 +271,8 @@ async def test_child_event_locator_does_not_mix_same_call_id_in_parent_history()
     group.agent("child", model="default", allow_tools=("echo",), allow_subagents=())
     group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
-        "child-history", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), features=group,
+        "child-history",
+        storage=RuntimeStorage.in_memory(), features=model_features(_Models(_UsageFunctionModel(model)), group),
     ) as runtime:
         execution = await runtime.agents.get("default").start("delegate")
         principal = runtime.default_principal
@@ -332,8 +331,8 @@ async def test_request_raw_part_coordinates_survive_readonly_archive_reopen(tmp_
     group.agent("default", model="default", system_prompt="Coordinate system prompt",
                 instructions=("Coordinate instructions",))
     group.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open("raw-parts", models=_Models(_UsageFunctionModel(model)),
-                            storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
+    async with Runtime.open("raw-parts",
+                            storage=RuntimeStorage.filesystem(tmp_path), features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         principal = runtime.default_principal
         execution = await runtime.agents.get("default").start("run both tools")
         try:

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+from linktools.ai.model import create_model
 from ._runtime_test_helpers import workspace_features
 
 import json
@@ -25,7 +26,7 @@ from linktools.ai.evaluation import (
     EvaluationPolicy, ScorerContract, TrialPlan,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime._message import decode_model_messages, encode_model_messages
 from linktools.ai.runtime.state import _codec as runtime_codec
 from linktools.ai.runtime.state._contracts import (
@@ -82,8 +83,6 @@ def test_agent_binding_preserves_unknown_fields() -> None:
 
     assert decoded == _binding_fixture_value()
     assert decoded.to_payload()["future_metadata"] == {"future": True}
-
-
 
 
 def test_agent_binding_future_version_is_rejected() -> None:
@@ -290,9 +289,9 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
         allow_skills=(),
         allow_subagents=(),
     )
-    models = ModelRegistry.openai(model="gpt-test").capture()
+    models = {"default": create_model(protocol='openai', model="gpt-test")}
     compiler = AgentCompiler(
-        model_resolver=models,
+        models=models,
         candidates=candidates,
         agents={spec.id: spec},
     )
@@ -308,7 +307,7 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
     assert dict(pin.contract) == baseline["read_file"]
 
     restored = AgentCompiler(
-        model_resolver=models,
+        models=models,
         candidates=candidates,
         agents={spec.id: spec},
     ).restore(binding.binding_contract)

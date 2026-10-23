@@ -8,7 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.agent import AgentBindingContract
+from linktools.ai.agent import AgentBindingContract, CapabilityPin
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.service_api import ExecutionRequest
@@ -101,6 +102,30 @@ def test_local_binding_lookup_uses_binding_digest() -> None:
 
     assert binding.binding_digest == execution.binding_digest
     assert binding.binding_contract == equivalent
+
+
+@pytest.mark.parametrize("change", ("diagnostics", "route", "agent_revision", "tools", "output"))
+def test_local_binding_snapshot_keeps_semantic_identity_guards(change) -> None:
+    execution = _execution(correlation={})
+    original = execution.binding
+    if change == "diagnostics":
+        current = replace(original, model_contract={"api": "anthropic", "model": "fresh"})
+    elif change == "route":
+        current = replace(original, agent_spec=replace(original.agent_spec, model="other-route"))
+    elif change == "agent_revision":
+        current = replace(original, agent_spec=replace(original.agent_spec, revision=original.agent_spec.revision + 1))
+    elif change == "tools":
+        current = replace(original, selected=(CapabilityPin("tool", "different", {"version": 1, "revision": 1}),))
+    else:
+        current = replace(original, output_mode="structured", output_schema={"type": "object"})
+    snapshot = SimpleNamespace(binding_contract=current, binding_digest=current.binding_digest)
+    backend = _backend(execution)
+    if change == "diagnostics":
+        assert backend._execution_binding(execution, snapshot) is snapshot
+    else:
+        with pytest.raises(AIError) as error:
+            backend._execution_binding(execution, snapshot)
+        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 @pytest.mark.asyncio

@@ -558,7 +558,7 @@ async def test_runtime_close_cancels_all_sessions_before_draining_resistant_call
 @pytest.mark.asyncio
 @pytest.mark.parametrize("authority", ["pending", "success", "failure", "timeout"])
 @pytest.mark.parametrize("cancel_callback", [False, True])
-async def test_observer_failure_starts_bounded_cleanup_before_stream_closes(authority, cancel_callback):
+async def test_observer_failure_starts_bounded_cleanup_before_stream_closes(authority, cancel_callback, monkeypatch):
     graph = Graph()
     graph.release.clear()
     if authority == "failure":
@@ -566,6 +566,15 @@ async def test_observer_failure_starts_bounded_cleanup_before_stream_closes(auth
     close_release = asyncio.Event()
     failed = asyncio.Event()
     close_started = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    monotonic = loop.time
+    clock_start = monotonic()
+    deadline_released_at = None
+    if authority == "timeout":
+        # Expire the wait deadline only once the competing callback error exists.
+        # Startup scheduling must not cancel that callback before it can fail.
+        monkeypatch.setattr(loop, "time", lambda: clock_start if deadline_released_at is None
+                            else clock_start + 0.02 + monotonic() - deadline_released_at)
     async def events(*args, **kwargs):
         try:
             for sequence in (1, 2):
@@ -579,6 +588,7 @@ async def test_observer_failure_starts_bounded_cleanup_before_stream_closes(auth
     cause = asyncio.CancelledError("callback cancelled") if cancel_callback else ValueError("callback failed")
     acknowledged = []
     async def callback(event):
+        nonlocal deadline_released_at
         if not isinstance(event.event, TaskEvent):
             return
         if not acknowledged:
@@ -586,6 +596,7 @@ async def test_observer_failure_starts_bounded_cleanup_before_stream_closes(auth
             return
         if authority in {"success", "failure"}:
             graph.release.set()
+        deadline_released_at = monotonic()
         failed.set()
         raise cause
     async def outcome():

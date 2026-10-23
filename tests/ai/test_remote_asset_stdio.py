@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Pinned non-file Asset packages execute as isolated, run-owned stdio trees."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.capability import TraceCapability
 
@@ -168,25 +169,14 @@ class _ProbeBinding:
         return _UsageFunctionModel(request)
 
 
-class _ProbeModels(RuntimeUsageModels):
+class _ProbeModels:
     def __init__(
         self,
         on_result: Callable[[dict[str, JsonValue]], Awaitable[None]] | None = None,
     ) -> None:
         self.binding = _ProbeBinding(on_result)
 
-    def resolve(self, route_id: str) -> _ProbeBinding:
-        assert route_id == "default"
-        return self.binding
-
-    def restore(
-        self,
-        payload: Mapping[str, JsonValue],
-        *,
-        route_id: str | None = None,
-    ) -> _ProbeBinding:
-        assert route_id in (None, "default")
-        assert dict(payload) == self.binding.contract
+    def __call__(self) -> _ProbeBinding:
         return self.binding
 
 
@@ -342,8 +332,8 @@ async def test_plain_filename_uses_pinned_asset_package_and_preserves_history(
         features = _group(store, sandbox)
         features.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
-            "asset-stdio", models=_ProbeModels(), storage=RuntimeStorage.in_memory(),
-            features=features,
+            "asset-stdio", storage=RuntimeStorage.in_memory(),
+            features=model_features(_ProbeModels(), features),
         ) as runtime:
             await store.put(AssetKey("mcp", "probe/data/value.txt"), b"new-head-data")
             await store.put(AssetKey("mcp", "probe/sibling.py"), b'IMPORTED = "new-head-module"\n')
@@ -383,8 +373,8 @@ async def test_resource_arguments_use_the_package_working_directory(
     async with _store("memory", tmp_path) as store:
         await _put_package(store, _package(command=command, argument=argument))
         async with Runtime.open(
-            "asset-resource-argument", models=_ProbeModels(), storage=RuntimeStorage.in_memory(),
-            features=_group(store, sandbox),
+            "asset-resource-argument", storage=RuntimeStorage.in_memory(),
+            features=model_features(_ProbeModels(), _group(store, sandbox)),
         ) as runtime:
             result = (await runtime.agents.get("default").run("probe", timeout_seconds=15)).result
             assert result.status is ExecutionStatus.SUCCEEDED, result
@@ -416,8 +406,8 @@ async def test_concurrent_runs_own_independent_trees_until_their_processes_close
     async with _store("memory", tmp_path) as store:
         await _put_package(store, _package(command=sys.executable, log=log))
         async with Runtime.open(
-            "asset-concurrency", models=_ProbeModels(hold), storage=RuntimeStorage.in_memory(),
-            features=_group(store, sandbox),
+            "asset-concurrency", storage=RuntimeStorage.in_memory(),
+            features=model_features(_ProbeModels(hold), _group(store, sandbox)),
         ) as runtime:
             first = asyncio.create_task(runtime.agents.get("default").run("first", timeout_seconds=15))
             second = None
@@ -474,8 +464,8 @@ async def test_startup_outcomes_keep_process_and_resource_lifetimes_ordered(
     async with _store("memory", tmp_path) as store:
         await _put_package(store, _package(command=sys.executable, log=log, mode=mode))
         async with Runtime.open(
-            "asset-init-failure", models=_ProbeModels(), storage=RuntimeStorage.in_memory(),
-            features=_group(store, sandbox),
+            "asset-init-failure", storage=RuntimeStorage.in_memory(),
+            features=model_features(_ProbeModels(), _group(store, sandbox)),
         ) as runtime:
             execution = await runtime.agents.get("default").start("probe")
             if mode == "hang-init":
@@ -516,8 +506,8 @@ async def test_native_directory_package_keeps_original_files(
     sandbox = LocalSandbox()
     try:
         async with Runtime.open(
-            "native-asset-stdio", models=_ProbeModels(), storage=RuntimeStorage.in_memory(),
-            features=_group(store, sandbox),
+            "native-asset-stdio", storage=RuntimeStorage.in_memory(),
+            features=model_features(_ProbeModels(), _group(store, sandbox)),
         ) as runtime:
             result = (await runtime.agents.get("default").run("probe", timeout_seconds=15)).result
             assert result.status is ExecutionStatus.SUCCEEDED, result

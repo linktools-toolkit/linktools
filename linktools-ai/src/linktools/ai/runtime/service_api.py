@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
-from ..agent import AgentBindingContract
+from ..agent import AgentBinding, AgentBindingContract
 from ..asset import AssetVersionRef
 from ..core import (
     BudgetUsage,
@@ -99,6 +99,8 @@ class ExecutionRequest:
     input_context: ExecutionInputContext | None = None
     budget: RunBudget | None = None
     tool_response_ref: AssetVersionRef | None = None
+    # Ephemeral admission state; never included in durable request projections.
+    resolved_binding: AgentBinding | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.tool_response_ref is not None and not isinstance(self.tool_response_ref, AssetVersionRef):
@@ -1023,6 +1025,7 @@ class ExecutionService(Protocol):
         *,
         dependency_hold_id: "str | None" = None,
         binding_contract: "AgentBindingContract | None" = None,
+        resolved_binding: "AgentBinding | None" = None,
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
     ) -> ExecutionHandle: ...
@@ -1291,6 +1294,7 @@ class SessionService(Protocol):
         request: ResumeSessionRequest,
         *,
         binding_contract: "AgentBindingContract | None" = None,
+        resolved_binding: "AgentBinding | None" = None,
         dependency_hold_id: "str | None" = None,
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,

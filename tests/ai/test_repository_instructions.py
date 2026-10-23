@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+from ._runtime_test_helpers import model_features
 from ._runtime_test_helpers import workspace_features
 
 import asyncio
@@ -347,9 +348,8 @@ async def test_runtime_reads_rules_from_asset_store_not_workspace_storage(
     try:
         async with Runtime.open(
             "rule-assets",
-            models=runtime_test_helpers.RuntimeUsageModels(),  # type: ignore[arg-type]
             storage=RuntimeStorage.in_memory(),
-            features=workspace_features("rules", assets=store, workspace=Workspace.load(tmp_path)),
+            features=model_features(runtime_test_helpers.RuntimeUsageModels(), workspace_features("rules", assets=store, workspace=Workspace.load(tmp_path))),
         ) as runtime:
             result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED

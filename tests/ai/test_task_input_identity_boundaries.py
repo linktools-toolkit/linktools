@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Task input identity follows the resolved owner, never business JSON shape."""
+from ._runtime_test_helpers import model_features
 
 from collections.abc import Mapping
 from dataclasses import replace
@@ -89,7 +90,7 @@ def test_business_input_projection_preserves_normalized_and_template_semantics(r
 
 @pytest.mark.asyncio
 async def test_function_normalization_cannot_hide_changed_business_input() -> None:
-    from linktools.ai.model import ModelRegistry
+
     from linktools.ai.runtime import Runtime
     from linktools.ai.task import Task, TaskNodeContext
 
@@ -98,7 +99,7 @@ async def test_function_normalization_cannot_hide_changed_business_input() -> No
 
     body = _business_input("first")
     task = Task("business.normalized", echo, effect_policy="none", normalize=lambda _: body)
-    async with Runtime.open("normalized", models=ModelRegistry(), storage=RuntimeStorage.in_memory()) as runtime:
+    async with Runtime.open("normalized", storage=RuntimeStorage.in_memory()) as runtime:
         engine = runtime.tasks.bind(task)
         graph = TaskGraph("normalized", (TaskNode("worker", task=task, input={"request": "unchanged"}),))
         first = await engine.prepare_submission(graph, idempotency_key="submit")
@@ -114,7 +115,7 @@ async def test_function_normalization_cannot_hide_changed_business_input() -> No
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ("function", "runner"))
 async def test_graph_capture_keeps_agent_shaped_function_and_runner_inputs(kind: str) -> None:
-    from linktools.ai.model import ModelRegistry
+
     from linktools.ai.runtime import CaptureGraphRequest, Runtime
     from linktools.ai.task import Task, TaskNodeContext
     from .test_task_mixed_node_reliability import _ExecutionBackedContractRunner
@@ -123,7 +124,7 @@ async def test_graph_capture_keeps_agent_shaped_function_and_runner_inputs(kind:
     async def echo(context: TaskNodeContext[None]) -> JsonValue:
         return dict(context.input)
 
-    async with Runtime.open("capture-json", models=ModelRegistry(), storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
+    async with Runtime.open("capture-json", storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
         task = Task("business.worker", echo, effect_policy="none") if kind == "function" else Task.from_runner(
             "business.worker", _ExecutionBackedContractRunner(runtime._execution_service),
             contract={"version": 1, "type": "runner", "effect_policy": "none",
@@ -154,7 +155,7 @@ async def test_agent_submission_identity_survives_materialization_and_reopen(tmp
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     input = AgentTaskInput(("inspect", BinaryContent(b"accepted bytes", media_type="text/plain")))
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("agent-identity", models=FixtureModels(), storage=storage, features=features) as runtime:
+    async with Runtime.open("agent-identity", storage=storage, features=model_features(FixtureModels(), features)) as runtime:
         task = runtime.tasks.from_agent("user.named.worker", runtime.agents.get())
         graph = TaskGraph("agent", (TaskNode("worker", task=task, input=input),))
         engine = runtime.tasks.bind(task)
@@ -184,8 +185,8 @@ async def test_agent_submission_identity_survives_materialization_and_reopen(tmp
         prepared.admission.validate_graph(TaskGraph("agent", (relocated_node,)))
         identity = prepared.ref
 
-    async with Runtime.open("agent-identity", models=FixtureModels(),
-                            storage=RuntimeStorage.filesystem(tmp_path), features=features) as runtime:
+    async with Runtime.open("agent-identity",
+                            storage=RuntimeStorage.filesystem(tmp_path), features=model_features(FixtureModels(), features)) as runtime:
         task = runtime.tasks.from_agent("user.named.worker", runtime.agents.get())
         graph = TaskGraph("agent", (TaskNode("worker", task=task, input=input),))
         reopened = await runtime.tasks.bind(task).prepare_submission(graph, idempotency_key="submit")
@@ -212,7 +213,7 @@ def test_task_wire_requires_supported_and_valid_explicit_input_semantics(semanti
 @pytest.mark.asyncio
 @pytest.mark.parametrize("boundary", ("describe", "prepared"))
 async def test_explicit_agent_node_cannot_override_a_function_input_owner(boundary: str) -> None:
-    from linktools.ai.model import ModelRegistry
+
     from linktools.ai.runtime import AgentTaskInput, Runtime
     from linktools.ai.runtime.state._codec import decode_domain, encode_domain
     from linktools.ai.task import Task, TaskGraphSubmission, TaskNodeContext
@@ -228,7 +229,7 @@ async def test_explicit_agent_node_cannot_override_a_function_input_owner(bounda
     with pytest.raises(AIError) as wrong_type:
         decode_domain(encode_domain(TaskNode("worker", task=task, input=input)), type(node))
     assert wrong_type.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    async with Runtime.open("owner-check", models=ModelRegistry(), storage=RuntimeStorage.in_memory()) as runtime:
+    async with Runtime.open("owner-check", storage=RuntimeStorage.in_memory()) as runtime:
         engine = runtime.tasks.bind(task)
         graph = TaskGraph("owner", (node,))
         principal = runtime._resolve_principal(None)
@@ -252,8 +253,8 @@ async def test_agent_capture_identity_is_bound_to_the_retained_input_digest() ->
     features = RuntimeFeatures("capture-identity")
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     models = FixtureModels()
-    async with Runtime.open("capture-identity", models=models, context=CONTEXT,
-                            storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Runtime.open("capture-identity", context=CONTEXT,
+                            storage=RuntimeStorage.in_memory(), features=model_features(models, features)) as runtime:
         task = runtime.tasks.from_agent("user.named.worker", runtime.agents.get())
         engine = runtime.tasks.bind(task)
         source = await engine.start(TaskGraph("source", (TaskNode("worker", task=task, input=AgentTaskInput("accepted")),)),

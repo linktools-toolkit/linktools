@@ -4,7 +4,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -86,6 +86,7 @@ class _DeferredResume:
     history: tuple[ModelMessage, ...]
     results: DeferredToolResults
     producer_generation: int
+    binding: AgentBinding = field(repr=False, compare=False)
 
 
 class _RecoveryCoordinatorPort(Protocol):
@@ -222,9 +223,9 @@ class _RecoveryCoordinatorPort(Protocol):
         execution: ExecutionRecord,
     ) -> tuple[ExecutionRecord, RecoveryCheckpoint]: ...
 
-    def validate_binding(self, execution: ExecutionRecord) -> None: ...
+    def validate_binding(self, execution: ExecutionRecord, *, binding: AgentBinding | None = None) -> AgentBinding: ...
 
-    async def validate_recovery_inputs(self, execution: ExecutionRecord) -> None: ...
+    async def validate_recovery_inputs(self, execution: ExecutionRecord, *, binding: AgentBinding | None = None) -> AgentBinding: ...
 
     async def _commit_recovery_required(
         self,
@@ -744,6 +745,7 @@ class _RecoveryCoordinator:
         expected_revision: int | None = None,
         recovery_operation: OperationLedgerInput | None = None,
         admitted_execution: ExecutionRecord | None = None,
+        resolved_binding: AgentBinding | None = None,
     ) -> bool:
         if admitted_execution is not None:
             if (producer_generation is None
@@ -881,7 +883,7 @@ class _RecoveryCoordinator:
                 and self._relaunch_guard is not None and not await self._relaunch_guard(execution)):
             _logger.info("recovery relaunch deferred by task deadline: execution=%s", execution.execution_id)
             return False
-        self._port.validate_binding(execution)
+        resolved_binding = self._port.validate_binding(execution, binding=resolved_binding)
         if checkpoint.state in {
             RecoveryCheckpointState.ADMITTED,
             RecoveryCheckpointState.ACTIVE,
@@ -895,7 +897,7 @@ class _RecoveryCoordinator:
             and checkpoint.state in {RecoveryCheckpointState.ADMITTED, RecoveryCheckpointState.ACTIVE}
             and execution.status in {ExecutionStatus.PENDING_START, ExecutionStatus.STARTED}
         ):
-            await self._port.validate_recovery_inputs(execution)
+            await self._port.validate_recovery_inputs(execution, binding=resolved_binding)
         identity = await self._port._recovery_idempotency(execution)
         if (
             checkpoint.state is RecoveryCheckpointState.ADMITTED
@@ -930,6 +932,7 @@ class _RecoveryCoordinator:
             resume = await self.reconcile_waiting_deferred(
                 checkpoint,
                 execution,
+                binding=resolved_binding,
             )
             if resume is None:
                 return False
@@ -958,6 +961,7 @@ class _RecoveryCoordinator:
             thinking=execution.thinking,
             correlation=execution.correlation,
             tool_response_ref=execution.tool_response_ref,
+            resolved_binding=resolved_binding,
         )
         if not self._port._prepare_recovery_relaunch(execution.execution_id):
             if recovery_operation is not None:
@@ -1103,7 +1107,7 @@ class _RecoveryCoordinator:
             ):
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             return latest, launched
-        await self._port.validate_recovery_inputs(current)
+        resolved_binding = await self._port.validate_recovery_inputs(current)
         resumed, _ = await self._port._commit_recovery_resume(
             current, recovery_operation=recovery_operation,
         )
@@ -1116,6 +1120,7 @@ class _RecoveryCoordinator:
             expected_revision=resumed.revision,
             recovery_operation=recovery_operation,
             admitted_execution=resumed,
+            resolved_binding=resolved_binding,
         )
         latest = await self._port.load_execution(
             execution_id,
@@ -1134,6 +1139,8 @@ class _RecoveryCoordinator:
         self,
         checkpoint: RecoveryCheckpoint,
         execution: ExecutionRecord,
+        *,
+        binding: AgentBinding | None = None,
     ) -> _DeferredResume | None:
         current = await self._port.load_execution(
             execution.execution_id,
@@ -1231,7 +1238,7 @@ class _RecoveryCoordinator:
         history = await self._port.load_interrupted_messages(
             recovery.pending_tools.source_agent_run_id
         )
-        await self._port.validate_recovery_inputs(current)
+        binding = await self._port.validate_recovery_inputs(current, binding=binding)
         try:
             resumed_execution, resumed_checkpoint = (
                 await self._port.claim_deferred_resume(checkpoint, current)
@@ -1257,6 +1264,7 @@ class _RecoveryCoordinator:
             history,
             deferred_results,
             current.revision + 1,
+            binding,
         )
 
     def _deferred_attempt_advanced(

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Runtime shutdown joins admitted work even after its caller is cancelled."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from pathlib import Path
@@ -60,7 +61,7 @@ async def test_runtime_close_joins_pending_publication_after_start_cancellation(
     monkeypatch.setattr(RuntimeState, "close", close_storage)
     async with Runtime.open(
         "pending-admission-close", storage=storage,
-        models=_Models(_UsageFunctionModel(model)), features=_group(coordination=cache),
+        features=model_features(_Models(_UsageFunctionModel(model)), _group(coordination=cache)),
     ) as runtime:
         session = await runtime.agents.get().create_session("session")
         starting = asyncio.create_task(session.start("question", idempotency_key="request"))

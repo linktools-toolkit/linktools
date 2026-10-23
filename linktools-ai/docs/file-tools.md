@@ -21,10 +21,10 @@ write permission. Broad `*` selectors and the implicit default Agent
 remain broad (the full 14-tool catalog), not a minimal profile. The minimal writer
 example explicitly selects the four modern file tools.
 
-The currently implemented provider adapter is OpenAI Chat (including compatible
-endpoints). These explicit declarations describe that adapter; they do not claim
-that other providers have been implemented. A future provider owns its own
-encoding decisions at the model-binding boundary, not in file or business tools.
+The OpenAI Chat, OpenAI Responses and Anthropic Messages adapters own their
+protocol-specific input encoding. Declaring a MIME type does not make an adapter
+support an otherwise unsupported wire format. File and business tools do not
+encode provider-specific requests.
 
 ## What read_file can read
 
@@ -74,9 +74,9 @@ cannot substitute its empty allowlist for that contract.
 ### Minimal model declaration
 
 ```python
-from linktools.ai.model import ModelRegistry
+from linktools.ai.model import create_model
 
-models = ModelRegistry.openai(
+binding = create_model(protocol="openai",
     model="your-model",
     input_types=["image", "document", "mime:audio/*", "mime:text/csv"],
 )

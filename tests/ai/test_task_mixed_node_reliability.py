@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Focused regression coverage for reliable mixed TaskGraph nodes."""
+from ._runtime_test_helpers import model_features
+from linktools.ai.model import create_model
 
 from linktools.ai.runtime.state import RuntimeState
 from ._runtime_test_helpers import workspace_features
@@ -46,7 +48,7 @@ from linktools.ai.core import (
     idempotency_key_digest,
 )
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime import (
     AgentTaskInput,
     AgentTaskInputContext,
@@ -217,9 +219,8 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
     state = RuntimeStorage.filesystem(storage_root)
     async with Runtime.open(
         "attachment-test",
-        models=_TaskTestModels(),
         storage=state,
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         node = agent_task_node(runtime,
             "consumer",
@@ -321,10 +322,10 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
 
 
 class _TaskTestModelBinding:
-    _input_binding = ModelRegistry.openai(
+    _input_binding = create_model(protocol='openai',
         model="gpt-task-test", input_types=("mime:text/plain",),
-    ).capture().resolve("default")
-    route_id = _input_binding.route_id
+    )
+    route_id = "default"
     provider = _input_binding.provider
     model_identity = _input_binding.model_identity
     model_digest = "a" * 64
@@ -334,26 +335,8 @@ class _TaskTestModelBinding:
         return TestModel()
 
 
-class _TaskTestModels:
-    def capture(self) -> "_TaskTestModels":
-        return self
-
-    def resolve(self, route_id: str) -> _TaskTestModelBinding:
-        if route_id != "default":
-            raise AssertionError(f"unexpected model route: {route_id}")
-        return _TaskTestModelBinding()
-
-    def restore(
-        self,
-        payload: dict[str, JsonValue],
-        *,
-        route_id: "str | None" = None,
-    ) -> _TaskTestModelBinding:
-        if route_id not in {None, "default"}:
-            raise AssertionError(f"unexpected model route: {route_id}")
-        if dict(payload) != _TaskTestModelBinding.contract:
-            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
-        return _TaskTestModelBinding()
+class _TaskTestModels(_TaskTestModelBinding):
+    pass
 
 
 class _ThinkingTaskTestModelBinding(_TaskTestModelBinding):
@@ -366,23 +349,8 @@ class _ThinkingTaskTestModelBinding(_TaskTestModelBinding):
         )
 
 
-class _ThinkingTaskTestModels(_TaskTestModels):
-    def resolve(self, route_id: str) -> _ThinkingTaskTestModelBinding:
-        if route_id != "default":
-            raise AssertionError(f"unexpected model route: {route_id}")
-        return _ThinkingTaskTestModelBinding()
-
-    def restore(
-        self,
-        payload: dict[str, JsonValue],
-        *,
-        route_id: str | None = None,
-    ) -> _ThinkingTaskTestModelBinding:
-        if route_id not in {None, "default"}:
-            raise AssertionError(f"unexpected model route: {route_id}")
-        if dict(payload) != _TaskTestModelBinding.contract:
-            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
-        return _ThinkingTaskTestModelBinding()
+class _ThinkingTaskTestModels(_ThinkingTaskTestModelBinding):
+    pass
 
 
 class _StructuredTaskTestModelBinding(_TaskTestModelBinding):
@@ -393,20 +361,8 @@ class _StructuredTaskTestModelBinding(_TaskTestModelBinding):
         )
 
 
-class _StructuredTaskTestModels(_TaskTestModels):
-    def resolve(self, route_id: str) -> _StructuredTaskTestModelBinding:
-        if route_id != "default":
-            raise AssertionError(f"unexpected model route: {route_id}")
-        return _StructuredTaskTestModelBinding()
-
-    def restore(
-        self,
-        payload: dict[str, JsonValue],
-        *,
-        route_id: "str | None" = None,
-    ) -> _StructuredTaskTestModelBinding:
-        super().restore(payload, route_id=route_id)
-        return _StructuredTaskTestModelBinding()
+class _StructuredTaskTestModels(_StructuredTaskTestModelBinding):
+    pass
 
 
 class _ContractTaskRunner:
@@ -571,7 +527,7 @@ async def test_execution_cancel_winning_during_output_store_projects_cancelled_n
     release_store = asyncio.Event()
     async with Runtime.open(
         "execution-task-output-race",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=state,
     ) as runtime:
         class _OutputRaceRunner:
@@ -735,7 +691,7 @@ async def test_function_task_cancel_winning_during_output_store_projects_cancell
     )
     async with Runtime.open(
         "function-task-output-race",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=state,
     ) as runtime:
         original_store = runtime._execution_service._store_task_output
@@ -827,7 +783,7 @@ async def test_pending_node_cancel_recovery_keeps_running_sibling_alive(
     )
     async with Runtime.open(
         "node-cancel-recovery-runtime",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=storage,
     ) as runtime:
         graph_run = await runtime.tasks.bind(target, sibling).start(
@@ -946,7 +902,7 @@ async def test_terminal_node_cancel_recovery_settles_and_replays_same_receipt(
     )
     async with Runtime.open(
         "terminal-node-cancel-recovery-runtime",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=storage,
     ) as runtime:
         graph_run = await runtime.tasks.bind(task).start(
@@ -1067,7 +1023,7 @@ async def test_task_observer_exception_is_visible_without_changing_graph_state()
     )
     async with Runtime.open(
         "task-observer-failure",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
     ) as runtime:
         graph_run = await runtime.tasks.bind(task).start(
@@ -1124,7 +1080,7 @@ async def test_task_execution_cancel_invokes_cancel_callback_once() -> None:
     )
     async with Runtime.open(
         "cancel-callback-once-runtime",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
     ) as runtime:
         graph_run = await runtime.tasks.bind(task).start(
@@ -1167,7 +1123,7 @@ async def test_cancel_recovery_required_execution_preserves_recovery_boundary() 
     )
     async with Runtime.open(
         "cancel-recovery-required-runtime",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
     ) as runtime:
         graph_run = await runtime.tasks.bind(task).start(
@@ -1197,7 +1153,7 @@ async def test_task_execution_cancel_persists_node_intent_before_execution_io(
     state = RuntimeStorage.in_memory()
     async with Runtime.open(
         "task-execution-cancel-order",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=state,
     ) as runtime:
         class _WaitingExecutionRunner:
@@ -1406,7 +1362,7 @@ async def test_cancel_and_reopen_preserve_accepted_execution_before_task_binding
 
     async with Runtime.open(
         "default",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=RuntimeStorage.filesystem(storage_root),
     ) as runtime:
         runner.runtime = runtime
@@ -1450,7 +1406,7 @@ async def test_cancel_and_reopen_preserve_accepted_execution_before_task_binding
 
     async with Runtime.open(
         "default",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=RuntimeStorage.filesystem(storage_root),
     ) as reopened_runtime:
         runner.runtime = reopened_runtime
@@ -1484,7 +1440,7 @@ async def test_reconciled_attempt_rejects_late_callback_from_same_execution() ->
     state = RuntimeStorage.in_memory()
     async with Runtime.open(
         "task-attempt-fence-race",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=state,
     ) as runtime:
         principal = runtime.default_principal
@@ -1588,7 +1544,6 @@ async def test_reconciled_attempt_rejects_late_callback_from_same_execution() ->
         assert current.task_attempt == 2
 
 
-
 def test_task_node_separates_authoring_from_resolved_contract() -> None:
     with pytest.raises(TypeError):
         TaskNode("node", effect_policy="replay_safe")  # type: ignore[call-arg]
@@ -1664,7 +1619,7 @@ async def test_runtime_runner_cannot_commit_unreadable_success() -> None:
     state = RuntimeStorage.in_memory()
     async with Runtime.open(
         "unreadable-runner",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=state,
     ) as runtime:
         run = await runtime.tasks.bind(task).start(
@@ -1807,9 +1762,8 @@ async def test_recovery_preflight_preserves_unknown_agent_input_version(
 
     async with Runtime.open(
         "recovery-version",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         agent_task = runtime.tasks.from_agent(
             "test.recovery-version-agent",
@@ -1925,15 +1879,13 @@ async def test_runtime_agent_task_binding_is_owned_by_its_runtime() -> None:
     )
     async with Runtime.open(
         "runtime-owner-first",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=first_capabilities,
+        features=model_features(_TaskTestModels(), first_capabilities),
     ) as first_runtime:
         async with Runtime.open(
             "runtime-owner-second",
-            models=_TaskTestModels(),  # type: ignore[arg-type]
             storage=RuntimeStorage.in_memory(),
-            features=second_capabilities,
+            features=model_features(_TaskTestModels(), second_capabilities),
         ) as second_runtime:
             agent = first_runtime.agents.get("default")
             first_task = first_runtime.tasks.from_agent("example.agent.first", agent)
@@ -2019,7 +1971,7 @@ async def test_task_results_page_reads_only_page_states_and_preserves_null(
     state = RuntimeStorage.in_memory()
     async with Runtime.open(
         "bounded-task-results",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=state,
     ) as runtime:
         run = await runtime.tasks.bind(*tasks).start(
@@ -2083,9 +2035,8 @@ async def test_agent_task_thinking_false_and_none_resolve_before_model_calls() -
     state = RuntimeStorage.in_memory()
     async with Runtime.open(
         "agent-task-thinking",
-        models=_ThinkingTaskTestModels(),  # type: ignore[arg-type]
         storage=state,
-        features=application,
+        features=model_features(_ThinkingTaskTestModels(), application),
     ) as runtime:
         task = runtime.tasks.from_agent("example.thinking-worker", runtime.agents.get())
         graph = TaskGraph(
@@ -2138,7 +2089,7 @@ async def test_task_view_rejects_duplicate_exact_definitions() -> None:
     definition = Task("example.echo", _echo_task)
     async with Runtime.open(
         "duplicate-task-view",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
     ) as runtime:
         with pytest.raises(AIError) as duplicate:
@@ -2169,7 +2120,6 @@ def test_task_dependency_state_exposes_only_terminal_semantics() -> None:
         "error_digest": "a" * 64,
     }
     assert "execution_id" not in failed.to_payload()
-
 
 
 @pytest.mark.parametrize(
@@ -2490,8 +2440,7 @@ async def test_all_terminal_tasks_run_after_failed_and_blocked_dependencies() ->
     )
     async with Runtime.open(
         "terminal-dependencies",
-        models=_TaskTestModels(),
-        features=group,
+        features=model_features(_TaskTestModels(), group),
         storage=RuntimeStorage.in_memory(),
     ) as runtime:
         run = await start_task_graph(runtime,
@@ -2598,9 +2547,8 @@ async def test_any_succeeded_waits_for_all_terminal_dependencies_and_filters_res
 
     async with Runtime.open(
         "any-succeeded-runtime",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         run = await runtime.tasks.bind(failure, success, mixed, blocked).start(
             graph,
@@ -2699,9 +2647,8 @@ async def test_task_policy_matrix_persists_in_each_runtime_backend(
 
     async with Runtime.open(
         f"persist-policy-{backend}",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=storage,
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         run = await runtime.tasks.bind(task).start(
             graph,
@@ -2714,9 +2661,8 @@ async def test_task_policy_matrix_persists_in_each_runtime_backend(
     if reopen_storage is not None:
         async with Runtime.open(
             f"persist-policy-{backend}",
-            models=_TaskTestModels(),  # type: ignore[arg-type]
             storage=reopen_storage,
-            features=application,
+            features=model_features(_TaskTestModels(), application),
         ) as runtime:
             restored_run = await runtime.tasks.bind(task).get(graph.graph_id)
             restored_result = (await restored_run.wait(timeout_seconds=10)).result
@@ -2894,9 +2840,8 @@ async def test_expansion_applies_dependency_policies_to_each_new_node() -> None:
 
     async with Runtime.open(
         "expansion-dependency-policies",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         run = await runtime.tasks.bind(handler, failure, expander).start(
             graph,
@@ -3010,9 +2955,8 @@ async def test_expanded_join_failure_propagates_after_isolated_candidate_failure
 
     async with Runtime.open(
         "expanded-join-failure",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         run = await runtime.tasks.bind(source_task, candidate_task, expander).start(
             graph,
@@ -3080,9 +3024,8 @@ async def test_nested_expander_source_does_not_implicitly_wait_for_its_child() -
 
     async with Runtime.open(
         "nested-expansion-boundary",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         run_handle = await runtime.tasks.bind(task, expander).start(
             graph,
@@ -3189,7 +3132,7 @@ async def test_task_handler_revisions_are_exact_and_reserved_namespace_is_closed
     v2 = TaskFunction[None]("example.echo", 2, _echo_task)
     async with Runtime.open(
         "task-revision-view",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
     ) as runtime:
         view = runtime.tasks.bind(v1, v2)
@@ -3212,7 +3155,7 @@ async def test_graph_nodes_store_only_the_exact_task_reference() -> None:
     assert node.task == handler.ref
     async with Runtime.open(
         "frozen-task-identity",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
     ) as runtime:
         run = await start_task_graph(
@@ -3239,9 +3182,8 @@ async def test_runtime_accepts_multiple_task_handler_revisions() -> None:
 
     async with Runtime.open(
         "task-revisions",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=state,
-        features=group,
+        features=model_features(_TaskTestModels(), group),
     ) as runtime:
         run = await start_task_graph(runtime,
             TaskGraph(
@@ -3325,9 +3267,8 @@ async def test_runtime_executes_custom_agent_custom_graph_and_persists_each_resu
 
     async with Runtime.open(
         "default",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=state,
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         first = handler.node("custom-first", input={"value": "seed"})
         agent = agent_task_node(runtime,
@@ -3385,9 +3326,8 @@ async def test_projected_agent_input_persists_only_declared_source_and_final_inp
     state = RuntimeStorage.in_memory()
     async with Runtime.open(
         "projected-input",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=state,
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         agent_task = runtime.tasks.from_agent(
             "example.projected-agent",
@@ -3473,7 +3413,7 @@ async def test_invalid_graph_request_does_not_reserve_task_definitions() -> None
     )
     async with Runtime.open(
         "task-admission-owner",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
     ) as runtime:
         invalid_graph = TaskGraph(
@@ -3527,7 +3467,7 @@ async def test_duplicate_graph_start_keeps_the_original_task_definition_owner() 
     )
     async with Runtime.open(
         "concurrent-task-owner",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
     ) as runtime:
         first_run = await runtime.tasks.bind(first).start(
@@ -3572,9 +3512,8 @@ async def test_projected_agent_input_reads_json_null_dependency() -> None:
     state = RuntimeStorage.in_memory()
     async with Runtime.open(
         "projected-null-input",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=state,
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         consumer = runtime.tasks.from_agent(
             "example.projected-null-consumer",
@@ -3628,7 +3567,7 @@ async def test_runner_task_contract_is_persisted_and_validated_after_reopen(
     state = RuntimeStorage.filesystem(storage_root)
     async with Runtime.open(
         "runner-contract",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=state,
     ) as runtime:
         runner = _ExecutionBackedContractRunner(runtime._execution_service)
@@ -3680,7 +3619,7 @@ async def test_runner_task_contract_is_persisted_and_validated_after_reopen(
     recovered_storage = RuntimeStorage.filesystem(storage_root)
     async with Runtime.open(
         "runner-contract",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=recovered_storage,
     ) as runtime:
         runner = _ExecutionBackedContractRunner(runtime._execution_service)
@@ -3776,9 +3715,8 @@ async def test_projected_workers_issue_distinct_requests_and_persist_history(
 
     async with Runtime.open(
         "dual-projected-workers",
-        models=models,  # type: ignore[arg-type]
         storage=state,
-        features=application,
+        features=model_features(models, application),
     ) as runtime:
         left = runtime.tasks.from_agent(
             "example.dual-worker-left",
@@ -3919,9 +3857,8 @@ async def test_projected_agent_file_is_reused_from_prepared_input_on_recovery(
 
     async with Runtime.open(
         "projected-file-recovery",
-        models=models,  # type: ignore[arg-type]
         storage=state,
-        features=application,
+        features=model_features(models, application),
     ) as runtime:
         worker = runtime.tasks.from_agent(
             "example.projected-file-worker",
@@ -3977,9 +3914,8 @@ async def test_projected_agent_file_is_reused_from_prepared_input_on_recovery(
     recovered_storage = RuntimeStorage.filesystem(storage_root)
     async with Runtime.open(
         "projected-file-recovery",
-        models=models,  # type: ignore[arg-type]
         storage=recovered_storage,
-        features=application,
+        features=model_features(models, application),
     ) as runtime:
         worker = runtime.tasks.from_agent(
             "example.projected-file-worker",
@@ -4053,9 +3989,8 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
 
     async with Runtime.open(
         "default",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=state,
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         worker_task = agent_task_definition(runtime, "worker", "test.agent.worker")
         application.task_expander(_AgentGraphExpander(worker_task))
@@ -4233,9 +4168,8 @@ async def test_reopened_expansion_uses_captured_candidates_and_supports_nesting(
     initial_application.task_expander(expander)
     async with Runtime.open(
         "reopened-expansion",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.filesystem(storage_root),
-        features=initial_application,
+        features=model_features(_TaskTestModels(), initial_application),
     ) as runtime:
         await start_task_graph(runtime,
             graph,
@@ -4249,9 +4183,8 @@ async def test_reopened_expansion_uses_captured_candidates_and_supports_nesting(
     application.task_expander(expander)
     async with Runtime.open(
         "reopened-expansion",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.filesystem(storage_root),
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         principal = runtime.default_principal
         await task_graph_resume(runtime,
@@ -4306,7 +4239,7 @@ async def test_reopened_expansion_rejects_a_new_runtime_task_candidate(
     storage_root = tmp_path / "state"
     async with Runtime.open(
         "reopened-added-candidate",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=RuntimeStorage.filesystem(storage_root),
     ) as runtime:
         await runtime.tasks.bind(required, expander).start(
@@ -4317,7 +4250,7 @@ async def test_reopened_expansion_rejects_a_new_runtime_task_candidate(
 
     async with Runtime.open(
         "reopened-added-candidate",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=RuntimeStorage.filesystem(storage_root),
     ) as runtime:
         principal = runtime.default_principal
@@ -4340,7 +4273,6 @@ async def test_reopened_expansion_rejects_a_new_runtime_task_candidate(
     assert result.wait_status is TaskStatus.FAILED
     assert root.error_code == ErrorCode.BINDING_NOT_REGISTERED.value
     assert all(node.node_id != "added" for node in result.node_states)
-
 
 
 class _EffectOutput(BaseModel):
@@ -4375,9 +4307,8 @@ async def test_public_graph_start_canonicalizes_registered_task_semantics() -> N
 
     async with Runtime.open(
         "task-public-start",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=state,
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         request = TaskGraphRequest(
             TaskGraph("task-public-start", (handler.node("node"),)),
@@ -4424,9 +4355,8 @@ async def test_persisted_node_output_contracts_survive_runtime_reopen(
     state = RuntimeStorage.filesystem(storage_root)
     async with Runtime.open(
         "typed-contract-reopen",
-        models=_StructuredTaskTestModels(),  # type: ignore[arg-type]
         storage=state,
-        features=application,
+        features=model_features(_StructuredTaskTestModels(), application),
     ) as runtime:
         graph = TaskGraph(
             "typed-contract-reopen",
@@ -4475,9 +4405,8 @@ async def test_persisted_node_output_contracts_survive_runtime_reopen(
     state = RuntimeStorage.filesystem(storage_root)
     async with Runtime.open(
         "typed-contract-reopen",
-        models=_StructuredTaskTestModels(),  # type: ignore[arg-type]
         storage=state,
-        features=application,
+        features=model_features(_StructuredTaskTestModels(), application),
     ) as runtime:
         recovered = await task_graph_state(runtime,
             "typed-contract-reopen",
@@ -4588,9 +4517,8 @@ async def test_non_replay_safe_applied_resolution_is_owned_by_execution(
 
     async with Runtime.open(
         "default",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=state,
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         run = await start_task_graph(runtime,
             TaskGraph("effect-applied", (handler.node("node"),)),
@@ -4657,9 +4585,8 @@ async def test_non_replay_safe_invalid_applied_value_preserves_effect_fact(
 
     async with Runtime.open(
         "default",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         run = await start_task_graph(runtime,
             TaskGraph("effect-invalid", (handler.node("node"),)),
@@ -4723,9 +4650,8 @@ async def test_not_applied_retries_same_execution_once(
 
     async with Runtime.open(
         "default",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         run = await start_task_graph(runtime,
             TaskGraph(
@@ -4805,7 +4731,7 @@ async def test_runtime_reconcile_unknown_exception_and_invalid_stay_recoverable(
     )
     async with Runtime.open(
         f"runtime-reconcile-{reconcile_case}",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
+        features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
     ) as runtime:
         graph_run = await runtime.tasks.bind(task).start(
@@ -4895,9 +4821,8 @@ async def test_not_applied_after_attempt_budget_exhaustion_fails_execution_and_n
 
     async with Runtime.open(
         "effect-attempt-budget",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         run = await start_task_graph(
             runtime,
@@ -4971,9 +4896,8 @@ async def test_not_applied_after_deadline_expires_fails_execution_and_node(
 
     async with Runtime.open(
         "effect-deadline-budget",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         run = await start_task_graph(
             runtime,
@@ -5051,9 +4975,8 @@ async def test_retry_beyond_task_deadline_fails_execution_instead_of_leaving_sta
 
     async with Runtime.open(
         "retry-after-deadline",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         original_schedule = runtime._execution_service.schedule_task_retry
 
@@ -5121,9 +5044,8 @@ async def test_deferred_input_is_committed_by_execution_and_allows_json_null(
 
     async with Runtime.open(
         "default",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         run = await start_task_graph(runtime,
             TaskGraph(
@@ -5537,9 +5459,8 @@ async def test_runtime_recovery_rejects_same_revision_task_semantic_drift(
 
     async with Runtime.open(
         "semantic-drift",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=state,
-        features=first,
+        features=model_features(_TaskTestModels(), first),
     ) as runtime:
         await start_task_graph(runtime,
             graph,
@@ -5556,9 +5477,8 @@ async def test_runtime_recovery_rejects_same_revision_task_semantic_drift(
     with pytest.raises(AIError) as reconcile_error:
         async with Runtime.open(
             "semantic-drift",
-            models=_TaskTestModels(),  # type: ignore[arg-type]
             storage=RuntimeStorage.filesystem(storage_root),
-            features=reconcile_removed,
+            features=model_features(_TaskTestModels(), reconcile_removed),
         ) as runtime:
             await task_engine(runtime).recover_pending()
     assert reconcile_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -5578,9 +5498,8 @@ async def test_runtime_recovery_rejects_same_revision_task_semantic_drift(
     with pytest.raises(AIError) as cancel_error:
         async with Runtime.open(
             "semantic-drift",
-            models=_TaskTestModels(),  # type: ignore[arg-type]
             storage=RuntimeStorage.filesystem(storage_root),
-            features=cancel_added,
+            features=model_features(_TaskTestModels(), cancel_added),
         ) as runtime:
             await task_engine(runtime).recover_pending()
     assert cancel_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -5596,9 +5515,8 @@ async def test_runtime_recovery_rejects_same_revision_task_semantic_drift(
     with pytest.raises(AIError) as output_error:
         async with Runtime.open(
             "semantic-drift",
-            models=_TaskTestModels(),  # type: ignore[arg-type]
             storage=RuntimeStorage.filesystem(storage_root),
-            features=output_changed,
+            features=model_features(_TaskTestModels(), output_changed),
         ) as runtime:
             await task_engine(runtime).recover_pending()
     assert output_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -5613,9 +5531,8 @@ async def test_runtime_recovery_rejects_same_revision_task_semantic_drift(
     with pytest.raises(AIError) as removed_output_error:
         async with Runtime.open(
             "semantic-drift",
-            models=_TaskTestModels(),  # type: ignore[arg-type]
             storage=RuntimeStorage.filesystem(storage_root),
-            features=output_removed,
+            features=model_features(_TaskTestModels(), output_removed),
         ) as runtime:
             await task_engine(runtime).recover_pending()
     assert removed_output_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -5634,9 +5551,8 @@ async def test_runtime_recovery_rejects_same_revision_task_semantic_drift(
     with pytest.raises(AIError) as effect_error:
         async with Runtime.open(
             "semantic-drift",
-            models=_TaskTestModels(),  # type: ignore[arg-type]
             storage=RuntimeStorage.filesystem(storage_root),
-            features=effect_changed,
+            features=model_features(_TaskTestModels(), effect_changed),
         ) as runtime:
             await task_engine(runtime).recover_pending()
     assert effect_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -5678,9 +5594,8 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
 
     async with Runtime.open(
         "default",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=state,
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         await start_task_graph(runtime,
             graph,
@@ -5775,9 +5690,8 @@ async def test_any_succeeded_barrier_survives_runtime_restart(
 
     async with Runtime.open(
         "any-succeeded-restart",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.filesystem(storage_root),
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         first_run = await runtime.tasks.bind(success, held, joiner).start(
             graph,
@@ -5817,9 +5731,8 @@ async def test_any_succeeded_barrier_survives_runtime_restart(
 
     async with Runtime.open(
         "any-succeeded-restart",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.filesystem(storage_root),
-        features=application,
+        features=model_features(_TaskTestModels(), application),
     ) as runtime:
         bound_tasks = runtime.tasks.bind(success, held, joiner)
         await bound_tasks.recover_pending()

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Remote terminal ownership releases the previous producer's local tail."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from pathlib import Path
@@ -66,11 +67,11 @@ async def test_remote_cancel_releases_revoked_producer_staging(
     remote_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     try:
         async with Runtime.open(
-            "remote-cancel-release", models=_Models(FunctionModel(stream_function=model)),
-            storage=owner_storage, features=group,
+            "remote-cancel-release",
+            storage=owner_storage, features=model_features(_Models(FunctionModel(stream_function=model)), group),
         ) as owner, Runtime.open(
-            "remote-cancel-release", models=_Models(FunctionModel(stream_function=model)),
-            storage=remote_storage, features=group,
+            "remote-cancel-release",
+            storage=remote_storage, features=model_features(_Models(FunctionModel(stream_function=model)), group),
         ) as remote:
             await owner.agents.get("default").create_session("session")
             session = owner.agents.get("default").session("session")
@@ -245,11 +246,11 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
     group.agent("default", model="default", allow_tools=("fast", "slow"))
     owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     async with Runtime.open(
-        "individual-tool-cancel", models=_Models(_UsageFunctionModel(model)),
-        storage=owner_storage, features=group,
+        "individual-tool-cancel",
+        storage=owner_storage, features=model_features(_Models(_UsageFunctionModel(model)), group),
     ) as owner, Runtime.open(
-        "individual-tool-cancel", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), features=group,
+        "individual-tool-cancel",
+        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), features=model_features(_Models(_UsageFunctionModel(model)), group),
     ) as remote:
         execution = await owner.agents.get("default").start("run both")
         try:
@@ -333,11 +334,11 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
 
     monkeypatch.setattr(_SqlTransaction, "replace_record", project_before_cancel_replace)
     async with Runtime.open(
-        "projection-cancel-conflict", models=_Models(_UsageFunctionModel(model)),
-        storage=owner_storage, features=group,
+        "projection-cancel-conflict",
+        storage=owner_storage, features=model_features(_Models(_UsageFunctionModel(model)), group),
     ) as owner, Runtime.open(
-        "projection-cancel-conflict", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), features=group,
+        "projection-cancel-conflict",
+        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), features=model_features(_Models(_UsageFunctionModel(model)), group),
     ) as remote:
         execution = await owner.agents.get("default").start("run tool")
         try:

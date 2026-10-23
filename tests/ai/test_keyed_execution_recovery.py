@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Native keyed recovery preserves one producer through uncertain outcomes."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -51,11 +52,11 @@ async def _recoverable(
     other_state = RuntimeStorage.sqlite(database)
     try:
         async with Runtime.open(
-            _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=state, features=_capabilities(),
+            _NAMESPACE,
+            storage=state, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities()),
         ) as runtime, Runtime.open(
-            _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=other_state, features=_capabilities(),
+            _NAMESPACE,
+            storage=other_state, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities()),
         ) as other:
             try:
                 yield runtime, other, runtime._state, execution_id, calls, release

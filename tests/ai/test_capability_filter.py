@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Application capability filters narrow one captured candidate universe."""
+from ._runtime_test_helpers import model_features
+from linktools.ai.model import create_model
 
 from dataclasses import dataclass, replace
 
@@ -14,7 +16,7 @@ from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import AssetCapability, CapabilityContribution, SkillCapability, SkillDefinition, SkillSourceRegistry
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.spec import AgentSpec, AgentSpecCodec, MCPServerSpec, SkillSpec, SkillSpecCodec
 from linktools.ai.storage import StorageOverlay
@@ -42,7 +44,7 @@ async def contributions():
 
 def _compiler(contributions, capability_filter=None):
     return AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="test").capture(),
+        models={"default": create_model(protocol='openai', model="test")},
         candidates=contributions,
         agents={item.id: item.value for item in contributions if item.kind == "agent"},
         capability_filter=capability_filter,
@@ -145,10 +147,11 @@ async def test_restore_keeps_pins_and_does_not_execute_current_filter(contributi
 async def test_runtime_wires_filter_into_roots_and_derived_agents(tmp_path):
     group = RuntimeFeatures("application", filter=lambda agent, item: item.kind != "skill")
     group.agent("root")
+    group.model("default", create_model(protocol='openai', model='test'))
     capture = await group.capture()
     capture = replace(capture, contributions=(*capture.contributions, CapabilityContribution.from_declaration(SkillDefinition(SkillSpec("guide", "Instructions")))))
     async with Runtime.open(
-        "capability-filter-test", models=ModelRegistry.openai(model="test"),
+        "capability-filter-test",
         storage=RuntimeStorage.from_root(tmp_path), features=capture,
     ) as runtime:
         root = runtime.agents.get("root")
@@ -296,11 +299,11 @@ async def test_filter_configuration_rejects_invalid_values_and_old_runtime_param
         with pytest.raises(TypeError, match="filter must be callable"):
             replace(capture, filter=invalid)
     with pytest.raises(TypeError, match="capability_filter"):
-        Runtime.open("old", models=ModelRegistry.openai(model="test"),
+        Runtime.open("old", features=model_features(create_model(protocol='openai', model="test")),
                      storage=RuntimeStorage.in_memory(), capability_filter=lambda *_: True)
 
 
 def test_runtime_rejects_removed_runtime_features_keyword():
     with pytest.raises(TypeError, match="runtime_features"):
-        Runtime.open("old", models=ModelRegistry.openai(model="test"),
+        Runtime.open("old", features=model_features(create_model(protocol='openai', model="test")),
                      storage=RuntimeStorage.in_memory(), runtime_features=RuntimeFeatures("old"))

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Terminal ownership preserves concurrent dependency retention metadata."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.capability import ExecutionCapability, TraceCapability
@@ -144,10 +145,9 @@ async def test_terminal_preserves_concurrent_hold_metadata(
         group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open(
         "terminal-metadata",
-        models=FixtureModels(),
         storage=state,
         context=CONTEXT,
-        features=group,
+        features=model_features(FixtureModels(), group),
     ) as runtime:
         agent = runtime.agents.get()
         if split_session:
@@ -300,7 +300,8 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
                     else replace(
                         value.execution,
                         binding=replace(
-                            value.execution.binding, model_contract={"model": "changed"}
+                            value.execution.binding,
+                            agent_spec=replace(value.execution.binding.agent_spec, model="other-route")
                         ),
                     )
                     if post_commit_change == "binding"
@@ -440,7 +441,9 @@ async def test_terminal_rebase_rejects_semantic_changes_without_writes(
         changed = (
             replace(
                 current,
-                binding=replace(current.binding, model_contract={"model": "changed"}),
+                binding=replace(
+                    current.binding, agent_spec=replace(current.binding.agent_spec, model="other-route")
+                ),
             )
             if drift == "binding"
             else replace(current, event_seq=current.event_seq + 1)
@@ -471,7 +474,6 @@ async def test_terminal_rebase_rejects_semantic_changes_without_writes(
         assert not events.items
     finally:
         await state.close()
-
 
 
 @pytest.mark.asyncio

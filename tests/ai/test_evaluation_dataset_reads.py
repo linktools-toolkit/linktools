@@ -81,12 +81,12 @@ async def test_dataset_expiry_preserves_all_case_deadlines_and_integrity(
 async def test_case_pages_batch_only_selected_content_in_original_order(tmp_path: Path, backend: str) -> None:
     from linktools.ai.core import service_principal
     from linktools.ai.evaluation import CaseSpec, DatasetSpec
-    from linktools.ai.model import ModelRegistry
+
     from linktools.ai.runtime import Runtime, RuntimeContext
 
     principal = service_principal("tenant", "owner")
     storage = storage_for(backend, tmp_path)
-    async with Runtime.open("case-pages", models=ModelRegistry(), storage=storage,
+    async with Runtime.open("case-pages", storage=storage,
                             context=RuntimeContext(None, tenant_id="tenant")) as runtime:
         spec = DatasetSpec(DatasetRef("dataset", 1), tuple(CaseSpec.task(
             CaseRef("dataset", str(index), 1), input={"index": index}) for index in range(65)))
@@ -173,7 +173,7 @@ async def test_evaluation_consumers_bound_case_queries_and_reload_missing_conten
         CandidateSlotRef, CandidateSpec, CaseSpec, ComparisonSpec, DatasetSpec, EvaluationSpec,
         ScoreComparisonSelection, ScoreSelection, StartEvaluationRequest,
     )
-    from linktools.ai.model import ModelRegistry
+
     from linktools.ai.runtime import Runtime
     from linktools.ai.runtime._evaluation import _target_slot
     from linktools.ai.evaluation import TargetTrialRef
@@ -183,7 +183,7 @@ async def test_evaluation_consumers_bound_case_queries_and_reload_missing_conten
     storage = storage_for("sqlite", tmp_path)
     target = Task("case-reads.target", echo, effect_policy="none")
     scorer = Task("case-reads.scorer", exact, effect_policy="none")
-    async with Runtime.open("case-consumers", models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open("case-consumers", storage=storage, context=CONTEXT) as runtime:
         owner = runtime.evaluations
         spec = DatasetSpec(DatasetRef("ordered", 1), tuple(CaseSpec.task(
             CaseRef("ordered", name, 1), input={"answer": name}, expected=name,

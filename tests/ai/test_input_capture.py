@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Immutable historical inputs are executable without their source graph."""
+from ._runtime_test_helpers import model_features
 
 import json
 from collections.abc import AsyncIterator, Mapping
@@ -30,7 +31,7 @@ async def test_captured_task_dependencies_outlive_source_execution(tmp_path: Pat
     producer = Task("capture.source", source, effect_policy="none")
     consumer = Task("capture.target", target, effect_policy="none")
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("input-capture", models=_TaskTestModels(), storage=storage) as runtime:
+    async with Runtime.open("input-capture", features=model_features(_TaskTestModels()), storage=storage) as runtime:
         principal = Principal("capture", runtime.tenant_id)
         engine = runtime.tasks.bind(producer, consumer)
         source_run = await engine.start(TaskGraph("source-graph", (
@@ -69,7 +70,7 @@ async def test_captured_task_dependencies_outlive_source_execution(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_capture_permission_denied_by_default() -> None:
-    async with Runtime.open("capture-default-deny", models=_TaskTestModels(), storage=RuntimeStorage.in_memory()) as runtime:
+    async with Runtime.open("capture-default-deny", features=model_features(_TaskTestModels()), storage=RuntimeStorage.in_memory()) as runtime:
         with pytest.raises(AIError) as raised:
             await runtime.executions.capture_input("unknown", CaptureInputRequest(runtime.default_principal, "capture-denied-0001", "clean"))
         assert raised.value.code is ErrorCode.AUTHORIZATION_DENIED
@@ -88,7 +89,7 @@ async def test_agent_capture_fixed_and_reproject_inputs(tmp_path: Path) -> None:
         calls.append(context.input["name"])
         return "Hello " + context.input["name"]
 
-    async with Runtime.open("agent-capture", models=_TaskTestModels(), storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
+    async with Runtime.open("agent-capture", storage=RuntimeStorage.filesystem(tmp_path), features=model_features(_TaskTestModels(), group)) as runtime:
         principal = Principal("capture", runtime.tenant_id)
         task = runtime.tasks.from_agent("capture.agent", runtime.agents.get(), build_input=build)
         engine = runtime.tasks.bind(task)
@@ -127,7 +128,7 @@ async def test_graph_capture_keeps_frozen_results_across_restart(tmp_path: Path)
 
     producer = Task("frozen.source", source, effect_policy="none")
     consumer = Task("frozen.consumer", read, effect_policy="none")
-    async with Runtime.open("graph-capture", models=_TaskTestModels(), storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
+    async with Runtime.open("graph-capture", features=model_features(_TaskTestModels()), storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         principal = Principal("capture", runtime.tenant_id)
         engine = runtime.tasks.bind(producer, consumer)
         first = await engine.start(TaskGraph("external", (
@@ -144,7 +145,7 @@ async def test_graph_capture_keeps_frozen_results_across_restart(tmp_path: Path)
         graph_capture = await runtime.tasks.capture_graph("consumer", CaptureGraphRequest(principal, "capture-graph-0001"))
         template = await capture_service.read_graph(graph_capture, principal=principal)
         assert template.task_contracts
-    async with Runtime.open("graph-capture", models=_TaskTestModels(), storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
+    async with Runtime.open("graph-capture", features=model_features(_TaskTestModels()), storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         template = await runtime._input_captures.read_graph(graph_capture, principal=principal)
         replay = await runtime.tasks.bind(consumer).start(TaskGraph("consumer-replay", template.nodes), principal=principal, idempotency_key="capture-consumer-replay-0001")
         assert ((await replay.wait()).result).status is TaskStatus.SUCCEEDED
@@ -164,7 +165,7 @@ async def test_capture_preserves_failed_dependency_states(tmp_path: Path) -> Non
 
     failure = Task("capture.failure", fail, effect_policy="none")
     collector = Task("capture.collect", collect, effect_policy="none")
-    async with Runtime.open("failed-capture", models=_TaskTestModels(), storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
+    async with Runtime.open("failed-capture", features=model_features(_TaskTestModels()), storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         principal = Principal("capture", runtime.tenant_id)
         engine = runtime.tasks.bind(failure, collector)
         source = await engine.start(TaskGraph("failed-source", (
@@ -190,7 +191,7 @@ async def test_subagent_capture_runs_as_independent_execution(tmp_path: Path) ->
     group = RuntimeFeatures("capture-child")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     group.agent("child", model="default", system_prompt="Captured child instructions", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open("subagent-capture", models=_TaskTestModels(), storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
+    async with Runtime.open("subagent-capture", storage=RuntimeStorage.filesystem(tmp_path), features=model_features(_TaskTestModels(), group)) as runtime:
         principal = Principal("capture", runtime.tenant_id)
         parent = await runtime.agents.get().start("parent input", principal=principal)
         await parent.wait()
@@ -239,7 +240,7 @@ async def test_snapshot_copies_capture_closure_and_rejects_missing_body(tmp_path
     use = Task("snapshot.use", consumer, effect_policy="none")
     root = tmp_path / "source"
     principal = Principal("capture", "default")
-    async with Runtime.open("snapshot-capture", models=_TaskTestModels(), storage=RuntimeStorage.filesystem(root)) as runtime:
+    async with Runtime.open("snapshot-capture", features=model_features(_TaskTestModels()), storage=RuntimeStorage.filesystem(root)) as runtime:
         engine = runtime.tasks.bind(make, use)
         first = await engine.start(TaskGraph("source", (
             TaskNode("make", task=make),
@@ -261,7 +262,7 @@ async def test_snapshot_copies_capture_closure_and_rejects_missing_body(tmp_path
         await storage.close()
     restored_root = tmp_path / "restored"
     await RuntimeState.restore_snapshot(snapshot, object_store=archive, root=restored_root, limits=limits)
-    async with Runtime.open("snapshot-capture", models=_TaskTestModels(), storage=RuntimeStorage.from_root(restored_root)) as runtime:
+    async with Runtime.open("snapshot-capture", features=model_features(_TaskTestModels()), storage=RuntimeStorage.from_root(restored_root)) as runtime:
         replay = await runtime.tasks.bind(use).start(TaskGraph("fresh", (TaskNode("use", task=use, input_capture=capture),)),
             principal=principal, idempotency_key="snapshot-fresh-0001")
         assert ((await replay.wait()).result).status is TaskStatus.SUCCEEDED
@@ -299,7 +300,7 @@ async def test_task_capture_preserves_raw_input_and_projects_only_when_requested
 
     source = Task("raw.source", echo, normalize=original, effect_policy="none")
     target = Task("raw.candidate", echo, normalize=candidate, effect_policy="none")
-    async with Runtime.open("raw-capture", models=_TaskTestModels(), storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
+    async with Runtime.open("raw-capture", features=model_features(_TaskTestModels()), storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         principal = Principal("capture", runtime.tenant_id)
         engine = runtime.tasks.bind(source, target)
         run = await engine.start(TaskGraph("raw-source", (TaskNode("node", task=source, input={"value": 1}),)),
@@ -325,7 +326,7 @@ async def test_task_capture_preserves_raw_input_and_projects_only_when_requested
 
 @pytest.mark.asyncio
 async def test_capture_reads_keep_owner_and_storage_tenant_authorization() -> None:
-    async with Runtime.open("capture-owner", models=_TaskTestModels(), storage=RuntimeStorage.in_memory()) as runtime:
+    async with Runtime.open("capture-owner", features=model_features(_TaskTestModels()), storage=RuntimeStorage.in_memory()) as runtime:
         owner = Principal("owner", runtime.tenant_id)
         other = Principal("other", runtime.tenant_id)
         capture = await runtime._input_captures.create_agent_input("private prompt", principal=owner, idempotency_key="owner-input-0001")
@@ -343,7 +344,7 @@ async def test_graph_capture_authorizes_admitted_owner_before_copying_inputs() -
         return dict(context.input)
 
     task = Task("private.graph", echo, effect_policy="none")
-    async with Runtime.open("graph-capture-owner", models=_TaskTestModels(), storage=RuntimeStorage.in_memory()) as runtime:
+    async with Runtime.open("graph-capture-owner", features=model_features(_TaskTestModels()), storage=RuntimeStorage.in_memory()) as runtime:
         owner = Principal("owner", runtime.tenant_id)
         other = Principal("other", runtime.tenant_id)
         run = await runtime.tasks.bind(task).start(TaskGraph("private-source", (TaskNode("input", task=task, input={"secret": "owner input"}),)),

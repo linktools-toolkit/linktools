@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Dataset batching settings preserve delivery and Runtime ownership."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from collections.abc import Sequence
@@ -125,8 +126,8 @@ async def test_shared_metrics_custom_batching_has_independent_runtime_flush_and_
             return recorder
 
     metrics = RecordingMetrics.sqlite(tmp_path / "shared.sqlite", commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=2**20), batch_size=2, flush_interval=300))
-    async with Runtime.open("first", storage=RuntimeStorage.in_memory(), models=_FeatureModels(), metrics=metrics) as first:
-        async with Runtime.open("second", storage=RuntimeStorage.in_memory(), models=_FeatureModels(), metrics=metrics) as second:
+    async with Runtime.open("first", storage=RuntimeStorage.in_memory(), features=model_features(_FeatureModels()), metrics=metrics) as first:
+        async with Runtime.open("second", storage=RuntimeStorage.in_memory(), features=model_features(_FeatureModels()), metrics=metrics) as second:
             assert await recorders[0].try_record(_observation("first"))
             assert await recorders[1].try_record(_observation("second"))
             assert await metrics.get_observation("first") is None

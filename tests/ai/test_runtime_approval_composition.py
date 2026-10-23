@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Composed Runtime approval-wait regression."""
+from ._runtime_test_helpers import model_features
 
 from ._runtime_test_helpers import workspace_features
 
@@ -32,24 +33,8 @@ class _ToolModelBinding:
         return TestModel(call_tools=["read_file"])
 
 
-class _ToolModels:
-    def capture(self) -> "_ToolModels":
-        return self
-
-    def resolve(self, route_id: str) -> _ToolModelBinding:
-        if route_id != "default":
-            raise AssertionError(route_id)
-        return _ToolModelBinding()
-
-    def restore(
-        self,
-        payload: Mapping[str, JsonValue],
-        *,
-        route_id: str | None = None,
-    ) -> _ToolModelBinding:
-        if route_id not in {None, "default"} or dict(payload) != _ToolModelBinding.contract:
-            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
-        return _ToolModelBinding()
+class _ToolModels(_ToolModelBinding):
+    pass
 
 
 @pytest.mark.parametrize("backend", ("memory", "filesystem"))
@@ -79,9 +64,8 @@ async def test_composed_runtime_ask_enters_approval_wait(
 
     async with Runtime.open(
         "default",
-        models=_ToolModels(),  # type: ignore[arg-type]
         storage=state,
-        features=application,
+        features=model_features(_ToolModels(), application),
     ) as runtime:
         execution = await runtime.agents.get("default").start("read a file")
         record = None

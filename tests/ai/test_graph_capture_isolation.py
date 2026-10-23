@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Graph captures replay accepted attachments and the requested context policy."""
+from ._runtime_test_helpers import model_features
 
 from ._runtime_test_helpers import workspace_features
 
@@ -38,9 +39,9 @@ async def test_graph_capture_replays_each_accepted_attachment_once(
     attachment.write_text("accepted file bytes", encoding="utf-8")
     features = _agents(workspace=Workspace.load(work))
     models = FixtureModels()
-    async with Runtime.open("capture-files", models=models, context=CONTEXT,
+    async with Runtime.open("capture-files", context=CONTEXT,
                             storage=RuntimeStorage.filesystem(tmp_path / "state"),
-                            features=features) as runtime:
+                            features=model_features(models, features)) as runtime:
         task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
         run = await runtime.tasks.bind(task).start(TaskGraph("source", (
             TaskNode("agent", task=task, input=AgentTaskInput("question", files=("input.txt",))),
@@ -52,9 +53,9 @@ async def test_graph_capture_replays_each_accepted_attachment_once(
         attachment.write_text("changed live file", encoding="utf-8")
     elif file_change == "deleted":
         attachment.unlink()
-    async with Runtime.open("capture-files", models=models, context=CONTEXT,
+    async with Runtime.open("capture-files", context=CONTEXT,
                             storage=RuntimeStorage.filesystem(tmp_path / "state"),
-                            features=features) as runtime:
+                            features=model_features(models, features)) as runtime:
         task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
         template = await runtime._input_captures.read_graph(capture, principal=PRINCIPAL)
         replay = await runtime.tasks.bind(task).start(TaskGraph("replay", template.nodes),
@@ -73,8 +74,8 @@ async def test_graph_capture_applies_context_policy_to_all_agent_input_forms(
         ModelRequest(parts=[UserPromptPart("OLD HISTORICAL QUESTION")]),
         ModelResponse(parts=[TextPart("OLD HISTORICAL ANSWER")]),
     ), session_metadata={"secret": "historical value"})
-    async with Runtime.open("capture-context", models=FixtureModels(), context=CONTEXT,
-                            storage=RuntimeStorage.filesystem(tmp_path), features=_agents()) as runtime:
+    async with Runtime.open("capture-context", context=CONTEXT,
+                            storage=RuntimeStorage.filesystem(tmp_path), features=model_features(FixtureModels(), _agents())) as runtime:
         task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
         engine = runtime.tasks.bind(task)
         run = await engine.start(TaskGraph("source", (
@@ -135,8 +136,8 @@ async def test_capture_context_policy_remains_authoritative_when_reprojecting(
         ModelRequest(parts=[SystemPromptPart("PRIOR INSTRUCTIONS"), UserPromptPart("HISTORICAL INPUT TO REMOVE")]),
         ModelResponse(parts=[TextPart("prior answer")]),
     ), session_metadata={"secret": "prior metadata"})
-    async with Runtime.open("capture-reproject", models=FixtureModels(), context=CONTEXT,
-                            storage=RuntimeStorage.filesystem(tmp_path), features=_agents()) as runtime:
+    async with Runtime.open("capture-reproject", context=CONTEXT,
+                            storage=RuntimeStorage.filesystem(tmp_path), features=model_features(FixtureModels(), _agents())) as runtime:
         task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
         scorer = Task("capture.scorer", exact, effect_policy="none")
         engine = runtime.tasks.bind(task, scorer)

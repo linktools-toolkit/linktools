@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 from linktools.cli import CommandError
 from linktools.cli.argparse import ConfigAction
-from linktools.core import ConfigField
+from linktools.core import ConfigField, environ
 
 from linktools.ai.asset import (
     AssetStore,
@@ -30,19 +30,20 @@ ResultT = TypeVar("ResultT")
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
-    from linktools.ai.model import ModelRegistry
+    from linktools.ai.model import ModelBinding, create_model
     from linktools.ai.runtime import Runtime, RuntimeStorage
 
-OPENAI_BASE_URL = ConfigField(name="OPENAI_BASE_URL", cast=str, default=None)
-OPENAI_MODEL = ConfigField(name="OPENAI_MODEL", cast=str, default=None)
-OPENAI_API_KEY = ConfigField(name="OPENAI_API_KEY", cast=str, default=None, secret=True)
+MODEL_APIS = ("openai", "openai-responses", "anthropic")
+MODEL_API = ConfigField(name="MODEL_API", cast=str, default=None)
 
 
 def _add_local_runtime_arguments(parser: "CommandParser") -> None:
     parser.add_argument("--project", type=Path, default=None, help="working directory")
-    parser.add_argument("--base-url", action=ConfigAction, config=OPENAI_BASE_URL)
-    parser.add_argument("--model", action=ConfigAction, config=OPENAI_MODEL)
-    parser.add_argument("--api-key", action=ConfigAction, config=OPENAI_API_KEY)
+    parser.add_argument("--model-api", action=ConfigAction, config=MODEL_API, choices=MODEL_APIS,
+                        help="model API protocol (default: openai)")
+    parser.add_argument("--base-url", default=None, help="selected protocol endpoint")
+    parser.add_argument("--model", default=None, help="selected protocol model name")
+    parser.add_argument("--api-key", default=None, help="one-shot selected protocol credential")
     parser.add_argument(
         "--memory",
         default=None,
@@ -114,15 +115,39 @@ def _local_input_config(
         ) from error
 
 
-def _local_models(
+def _local_model_options(workspace: Workspace, args: Namespace) -> dict[str, str | None]:
+    api = args.model_api or workspace.config.get("model_api") or os.getenv("MODEL_API") or "openai"
+    if api not in MODEL_APIS:
+        raise AIError(ErrorCode.MODEL_CONFIG_INVALID, "model_api must be one of: " + ", ".join(MODEL_APIS))
+    prefix = "ANTHROPIC" if api == "anthropic" else "OPENAI"
+    options = {"api": api}
+    for name, explicit in (("model", args.model), ("base_url", args.base_url), ("api_key", args.api_key)):
+        field = ConfigField(name=f"{prefix}_{name.upper()}", cast=str, default=None, secret=name == "api_key")
+        value = explicit if explicit is not None else environ.config.get(field)
+        if name == "model" and (not isinstance(value, str) or not value.strip()):
+            value = workspace.config.get("model")
+        if value is None:
+            value = os.getenv(field.name, "").strip() or None
+        if name != "model" and (value is None or not value.strip()):
+            value = os.getenv(field.name) or None
+        options[name] = value.strip() if name == "model" and isinstance(value, str) else value
+    return options
+
+
+def _local_model(
     workspace: Workspace,
     *,
     model: "str | None" = None,
+    api: "str | None" = None,
     base_url: "str | None" = None,
     api_key: "str | None" = None,
-) -> "ModelRegistry":
-    from linktools.ai.model import ModelRegistry
+) -> "ModelBinding":
+    from linktools.ai.model import ModelBinding, create_model
 
+    api = api or workspace.config.get("model_api") or os.getenv("MODEL_API") or "openai"
+    if not isinstance(api, str) or api not in MODEL_APIS:
+        raise AIError(ErrorCode.MODEL_CONFIG_INVALID, "unsupported model_api")
+    prefix = "ANTHROPIC" if api == "anthropic" else "OPENAI"
     input_types = _local_input_config(workspace)
     configured = workspace.config.get("model")
     selected_model = (
@@ -130,24 +155,25 @@ def _local_models(
         if isinstance(model, str) and model.strip()
         else configured.strip()
         if isinstance(configured, str) and configured.strip()
-        else os.getenv("OPENAI_MODEL", "").strip()
+        else os.getenv(f"{prefix}_MODEL", "").strip()
     )
     if not selected_model:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "model is required")
 
     try:
-        return ModelRegistry.openai(
+        return create_model(
+            protocol=api,
             model=selected_model,
             input_types=input_types,
             base_url=(
                 base_url
                 if base_url is not None
-                else os.getenv("OPENAI_BASE_URL", "").strip() or None
+                else os.getenv(f"{prefix}_BASE_URL", "").strip() or None
             ),
             api_key=(
                 api_key
                 if api_key is not None
-                else os.getenv("OPENAI_API_KEY", "").strip() or None
+                else os.getenv(f"{prefix}_API_KEY", "").strip() or None
             ),
         )
     except (TypeError, ValueError) as error:
@@ -159,20 +185,15 @@ def _local_models(
         ) from error
 
 
-def _local_runtime_models(workspace: Workspace, args: Namespace) -> "ModelRegistry":
-    return _local_models(
-        workspace,
-        model=args.model,
-        base_url=args.base_url,
-        api_key=args.api_key,
-    )
+def _local_runtime_model(workspace: Workspace, args: Namespace) -> "ModelBinding":
+    return _local_model(workspace, **_local_model_options(workspace, args))
 
 
 @asynccontextmanager
 async def _open_local_runtime(
     workspace: Workspace,
     *,
-    models: "ModelRegistry | None" = None,
+    model: "ModelBinding | None" = None,
 ) -> "AsyncIterator[Runtime]":
     from linktools.ai.capability import AssetCapability, WorkspaceCapability
     from linktools.ai.runtime import RuntimeFeatures
@@ -183,6 +204,7 @@ async def _open_local_runtime(
     await assets.initialize()
     try:
         features = RuntimeFeatures("workspace")
+        features.model("default", _local_model(workspace) if model is None else model)
         features.capability(AssetCapability(assets))
         features.capability(WorkspaceCapability(workspace))
         features.capability(ExecutionCapability(retain_history=True))
@@ -191,7 +213,6 @@ async def _open_local_runtime(
         async with Runtime.open(
             "default",
             storage=_local_runtime_storage(workspace),
-            models=_local_models(workspace) if models is None else models,
             features=features,
             metrics=await _local_metrics(workspace),
         ) as runtime:
@@ -203,7 +224,7 @@ async def _open_local_runtime(
 def _run_async(coroutine: "Coroutine[object, object, ResultT]") -> ResultT:
     try:
         return asyncio.run(coroutine)
-    except (AIError, TypeError, ValueError) as error:
+    except (AIError, ImportError, TypeError, ValueError) as error:
         raise CommandError(str(error)) from error
 
 

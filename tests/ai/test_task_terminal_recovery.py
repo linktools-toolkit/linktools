@@ -14,7 +14,7 @@ from linktools.ai.core import (
     OperationStatus, TaskStatus, TenantAuthorizationPolicy, canonical_sha256, idempotency_key_digest,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.task import (
     DefaultTaskGraphService, RecoverGraphRequest, Task, TaskGraph, TaskNode, TaskNodeContext,
@@ -30,7 +30,7 @@ async def _running_graph(storage: RuntimeStorage) -> AsyncIterator[tuple]:
 
     task = Task("terminal-recovery.target", target, effect_policy="none")
     async with Runtime.open(
-        "terminal-recovery", models=ModelRegistry(), storage=storage, auto_recover=False,
+        "terminal-recovery", storage=storage, auto_recover=False,
     ) as runtime:
         principal = runtime.default_principal
         submission = await runtime.tasks.bind(task).prepare_submission(

@@ -4,7 +4,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from ..core import ImmutableJsonMapping, JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
@@ -45,7 +45,8 @@ class CapabilityPin:
 
     def __post_init__(self) -> None:
         if (
-            self.kind not in _PIN_KINDS
+            not isinstance(self.kind, str)
+            or self.kind not in _PIN_KINDS
             or not isinstance(self.id, str)
             or not self.id.strip()
         ):
@@ -68,10 +69,7 @@ class CapabilityPin:
 
     @property
     def revision(self) -> int:
-        value = capability_ref_payload(self.kind, self.id, self.contract)["revision"]
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return value
+        return cast(int, capability_ref_payload(self.kind, self.id, self.contract)["revision"])
 
     def to_payload(self) -> "dict[str, JsonValue]":
         return {
@@ -87,16 +85,10 @@ class CapabilityPin:
         kind = value["kind"]
         identity = value["id"]
         contract = value["contract"]
-        if (
-            kind not in _PIN_KINDS
-            or not isinstance(identity, str)
-            or not isinstance(contract, Mapping)
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return cls(
             kind,
             identity,
-            _normalize_mapping(contract),
+            _require_mapping(contract),
         )
 
 
@@ -105,7 +97,8 @@ class AgentBindingContract:
     """Persist identity inputs and locators required to restore one Agent binding."""
 
     agent_spec: AgentSpec
-    model_contract: Mapping[str, JsonValue]
+    # Captured diagnostic configuration is not registered-model identity.
+    model_contract: Mapping[str, JsonValue] = field(compare=False)
     selected: "tuple[CapabilityPin, ...]"
     subagents: "tuple[SubagentRef, ...]"
     output_mode: OutputMode
@@ -124,7 +117,7 @@ class AgentBindingContract:
     _binding_digest: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.agent_spec, AgentSpec) or self.output_mode not in {"text", "structured"}:
+        if not isinstance(self.agent_spec, AgentSpec) or self.output_mode not in ("text", "structured"):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if self.agent_spec.tool_retries is None or self.agent_spec.output_retries is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "agent retry limits must be resolved")
@@ -257,7 +250,6 @@ class AgentBindingContract:
         if (
             not isinstance(selected, list)
             or not isinstance(subagents, list)
-            or mode not in ("text", "structured")
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
@@ -283,11 +275,11 @@ class AgentBindingContract:
             }
             return cls(
                 agent_spec=agent_spec,
-                model_contract=_normalize_mapping(value["model_contract"]),
+                model_contract=_require_mapping(value["model_contract"]),
                 selected=tuple(CapabilityPin.from_payload(item) for item in selected),
                 subagents=tuple(SubagentRef.from_payload(item) for item in subagents),
                 output_mode=mode,
-                output_schema=_normalize_mapping(value["output_schema"]),
+                output_schema=_require_mapping(value["output_schema"]),
                 subagent_bindings=subagent_bindings,
                 _wire_extensions=wire_extensions,
                 _agent_spec_extensions=agent_spec_extensions,
@@ -313,9 +305,13 @@ class AgentBinding:
             or not isinstance(self.binding_contract, AgentBindingContract)
             or AgentSpecCodec().to_contract_payload(self.compiled_agent.spec)
             != AgentSpecCodec().to_contract_payload(self.binding_contract.agent_spec)
-            or dict(self.compiled_agent.model.contract)
-            != dict(self.binding_contract.model_contract)
-            or _compiled_agent_selected_pins(self.compiled_agent) != self.binding_contract.selected
+            or tuple(
+                (pin.kind, pin.id, pin.revision)
+                for pin in _compiled_agent_selected_pins(self.compiled_agent)
+            ) != tuple(
+                (pin.kind, pin.id, pin.revision)
+                for pin in self.binding_contract.selected
+            )
             or self.compiled_agent.selected_subagents != self.binding_contract.subagent_ids
             or self.output_binding.mode != self.binding_contract.output_mode
             or self.output_binding.schema_definition != dict(self.binding_contract.output_schema)
@@ -364,15 +360,6 @@ def _decode_subagent_bindings(
         AgentBindingContract.from_payload(item)
         for item in value
     )
-
-
-def _normalize_mapping(value: object) -> "dict[str, JsonValue]":
-    if not isinstance(value, Mapping):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    try:
-        return dict(ImmutableJsonMapping(value))
-    except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 def _require_mapping(value: object) -> "dict[str, object]":

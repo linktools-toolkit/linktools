@@ -12,6 +12,7 @@ from ..agent import (
     CapabilityPin,
 )
 from ..errors import AIError, ErrorCode
+from ..model import ModelBinding
 from ..spec import MCPServerSpecCodec
 from ..workspace import Sandbox
 
@@ -42,26 +43,29 @@ class _AgentBindingResolver:
         """Resolve one current binding before its first durable admission."""
         if not isinstance(binding, AgentBinding):
             raise TypeError("binding must be AgentBinding")
-        binding_contract = await self.resolve_contract(binding.binding_contract)
+        binding_contract = await self.resolve_contract(
+            binding.binding_contract, model=binding.compiled_agent.model,
+        )
         if binding_contract == binding.binding_contract:
             return binding
-        return self._compiler.restore(binding_contract)
+        return self._compiler.restore(binding_contract, model=binding.compiled_agent.model)
 
     async def resolve_root(self, agent_id: str) -> AgentBindingContract:
         """Resolve one Agent as a root execution target and its direct children."""
         compiled_agent = self._catalog.root_agent(agent_id)
-        return await self.resolve_contract(
-            self._compiler.bind(compiled_agent, output=None).binding_contract
-        )
+        binding = self._compiler.bind(compiled_agent, output=None)
+        return await self.resolve_contract(binding.binding_contract, model=binding.compiled_agent.model)
 
     async def resolve_contract(
         self,
         binding_contract: AgentBindingContract,
+        *,
+        model: ModelBinding | None = None,
     ) -> AgentBindingContract:
         """Resolve MCP Asset versions and direct child bindings for one contract."""
         if not isinstance(binding_contract, AgentBindingContract):
             raise TypeError("binding_contract must be AgentBindingContract")
-        resolved = await self._resolve_mcp(binding_contract)
+        resolved = await self._resolve_mcp(binding_contract, model=model)
         if resolved.subagent_bindings:
             children = tuple(
                 [await self._resolve_mcp(child) for child in resolved.subagent_bindings]
@@ -74,14 +78,18 @@ class _AgentBindingResolver:
 
     async def _resolve_child(self, agent_id: str) -> AgentBindingContract:
         compiled_agent = self._catalog.root_agent(agent_id)
-        binding_contract = self._compiler.bind_subagent(compiled_agent).binding_contract
-        return await self._resolve_mcp(binding_contract)
+        binding = self._compiler.bind_subagent(compiled_agent)
+        return await self._resolve_mcp(binding.binding_contract, model=binding.compiled_agent.model)
 
     async def _resolve_mcp(
         self,
         binding_contract: AgentBindingContract,
+        *,
+        model: ModelBinding | None = None,
     ) -> AgentBindingContract:
-        current_binding = self._compiler.restore(binding_contract)
+        if not any(pin.kind == "mcp" for pin in binding_contract.selected):
+            return binding_contract
+        current_binding = self._compiler.restore(binding_contract, model=model)
         current_servers = {
             server.id: server
             for server in current_binding.compiled_agent.mcp_servers
@@ -109,7 +117,6 @@ class _AgentBindingResolver:
             if server.resource is None:
                 if resource_versions is not None or asset_source_id is not None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                asset_source_id = None
             elif (
                 resource_versions is None
                 or not isinstance(asset_source_id, str)
@@ -120,12 +127,7 @@ class _AgentBindingResolver:
                 CapabilityPin(
                     "mcp",
                     pin.id,
-                    codec.to_binding_payload(
-                        server,
-                        resource_versions,
-                        asset_source_id=asset_source_id,
-                        execution_policy=current_policy,
-                    ),
+                    {**pin.contract, "execution_policy": current_policy},
                 )
             )
         return replace(binding_contract, selected=tuple(selected))

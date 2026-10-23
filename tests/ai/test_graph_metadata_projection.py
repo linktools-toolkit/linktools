@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Graph observers reconcile safe metadata from the real Runtime owners."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -40,8 +41,8 @@ async def _runtime(tmp_path: Path, *, backend: str = "filesystem", models=None) 
     group = RuntimeFeatures("metadata")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with Runtime.open(
-        "metadata-projection", models=FixtureModels() if models is None else models,
-        storage=storage, features=group,
+        "metadata-projection",
+        storage=storage, features=model_features(FixtureModels() if models is None else models, group),
     ) as runtime:
         yield runtime
 

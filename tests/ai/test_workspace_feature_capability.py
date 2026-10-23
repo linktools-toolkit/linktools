@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Explicit Workspace registration, per-run binding, and listing semantics."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from pathlib import Path
@@ -75,7 +76,7 @@ async def test_native_wrapped_workspace_has_one_selected_tool_per_run(tmp_path: 
     features.capability(CombinedCapability([template.prefix_tools("prefix")], id="workspace.bundle"), scope="runtime")
     features.agent("default", allow_tools=("list_files",), allow_capabilities=())
     models = _FeatureModels(TestModel(call_tools=["prefix_list_files"]))
-    async with Runtime.open("workspace-native", models=models, storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Runtime.open("workspace-native", storage=RuntimeStorage.in_memory(), features=model_features(models, features)) as runtime:
         first, second = await asyncio.gather(
             runtime.agents.get().run("list files", timeout_seconds=10),
             runtime.agents.get().run("list files", timeout_seconds=10),

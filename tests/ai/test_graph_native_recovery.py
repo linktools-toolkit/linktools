@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Native graph recovery preserves captured input and the admitted principal."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -82,8 +83,8 @@ async def test_run_only_actor_recovers_native_captured_agent_graph(
     storage = RuntimeStorage.filesystem(tmp_path / "state")
     try:
         async with Runtime.open(
-            "native-graph-recovery", models=_Models(FunctionModel(stream_function=model)),
-            storage=storage, features=group,
+            "native-graph-recovery",
+            storage=storage, features=model_features(_Models(FunctionModel(stream_function=model)), group),
         ) as runtime:
             task = runtime.tasks.from_agent("test.native-captured-agent", runtime.agents.get("default"))
             engine = runtime.tasks.bind(task)
@@ -146,8 +147,8 @@ async def test_run_only_actor_recovers_native_captured_agent_graph(
 
         storage = RuntimeStorage.filesystem(tmp_path / "state")
         async with Runtime.open(
-            "native-graph-recovery", models=_Models(FunctionModel(stream_function=model)),
-            storage=storage, features=group,
+            "native-graph-recovery",
+            storage=storage, features=model_features(_Models(FunctionModel(stream_function=model)), group),
         ) as runtime:
             task = runtime.tasks.from_agent("test.native-captured-agent", runtime.agents.get("default"))
             engine = runtime.tasks.bind(task)
@@ -211,8 +212,8 @@ async def test_graph_takeover_rejects_active_local_worker_without_child_claim(tm
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = RuntimeStorage.filesystem(tmp_path / "state")
     async with Runtime.open(
-        "local-graph-recovery", models=_Models(FunctionModel(stream_function=model)),
-        storage=storage, features=group,
+        "local-graph-recovery",
+        storage=storage, features=model_features(_Models(FunctionModel(stream_function=model)), group),
     ) as runtime:
         try:
             task = runtime.tasks.from_agent("test.local-agent", runtime.agents.get("default"))

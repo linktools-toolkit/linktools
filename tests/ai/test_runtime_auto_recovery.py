@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Startup recovery is optional; explicit recovery and owned close are not."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -13,7 +14,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus, canonical_sha256
 from linktools.ai.errors import ErrorCode
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.capability import CheckpointCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.service_api import ExecutionRequest
@@ -38,7 +39,7 @@ async def _admit_without_worker(
 ) -> ExecutionRecord:
     storage = RuntimeStorage.filesystem(path)
     async with Runtime.open(
-        _NAMESPACE, models=models, storage=storage, features=_capabilities(),
+        _NAMESPACE, storage=storage, features=model_features(models, _capabilities()),
     ) as runtime:
         async def interrupted_launch(
             request: ExecutionRequest, execution: ExecutionRecord, **kwargs: object,
@@ -72,7 +73,7 @@ async def test_startup_recovery_defaults_to_enabled(
     storage = RuntimeStorage.filesystem(tmp_path / "state")
     options = {"auto_recover": True} if explicit_default else {}
     async with Runtime.open(
-        _NAMESPACE, models=models, storage=storage, features=_capabilities(), **options,
+        _NAMESPACE, storage=storage, features=model_features(models, _capabilities()), **options,
     ) as runtime:
         result = (await runtime.executions.wait(
             before.execution_id, principal=runtime.default_principal, timeout_seconds=10,
@@ -98,7 +99,7 @@ async def test_disabled_startup_preserves_admission_until_explicit_execution_rec
     before = await _admit_without_worker(tmp_path / "state", models, monkeypatch)
     storage = RuntimeStorage.filesystem(tmp_path / "state")
     async with Runtime.open(
-        _NAMESPACE, models=models, storage=storage, features=_capabilities(), auto_recover=False,
+        _NAMESPACE, storage=storage, features=model_features(models, _capabilities()), auto_recover=False,
     ) as runtime:
         assert await runtime._state.execution.executions.get(
             before.execution_id, tenant_id=runtime.tenant_id,
@@ -156,8 +157,8 @@ async def test_disabled_startup_and_close_preserve_other_runtime_owned_execution
     other_storage = RuntimeStorage.sqlite(path)
     assert owner_storage is not other_storage
     async with Runtime.open(
-        _NAMESPACE, models=_Models(FunctionModel(stream_function=owner_model)),
-        storage=owner_storage, features=_capabilities(),
+        _NAMESPACE,
+        storage=owner_storage, features=model_features(_Models(FunctionModel(stream_function=owner_model)), _capabilities()),
     ) as owner:
         try:
             owner_run = await owner.agents.get().start("keep running", idempotency_key="owner")
@@ -170,8 +171,8 @@ async def test_disabled_startup_and_close_preserve_other_runtime_owned_execution
                 owner_run.execution_id, tenant_id=owner.tenant_id,
             )
             async with Runtime.open(
-                _NAMESPACE, models=_Models(FunctionModel(stream_function=owned_model)),
-                storage=other_storage, features=_capabilities(), auto_recover=False,
+                _NAMESPACE,
+                storage=other_storage, features=model_features(_Models(FunctionModel(stream_function=owned_model)), _capabilities()), auto_recover=False,
             ) as other:
                 assert other.namespace == owner.namespace
                 assert owned_calls == []
@@ -224,7 +225,7 @@ async def test_explicit_graph_recovery_remains_available_when_startup_disabled(t
     task = Task("test.startup-recovery", execute, effect_policy="none")
     graph = TaskGraph("recover-graph", (TaskNode("node", task=task),))
     storage = RuntimeStorage.filesystem(tmp_path / "state")
-    async with Runtime.open(_NAMESPACE, models=ModelRegistry(), storage=storage) as runtime:
+    async with Runtime.open(_NAMESPACE, storage=storage) as runtime:
         submission = await runtime.tasks.bind(task).prepare_submission(graph, idempotency_key="graph-admission")
         await runtime._state.task.admissions.admit_prepared(submission)
         lease = await runtime._state.task.tasks.claim(
@@ -236,7 +237,7 @@ async def test_explicit_graph_recovery_remains_available_when_startup_disabled(t
         )
     storage = RuntimeStorage.filesystem(tmp_path / "state")
     async with Runtime.open(
-        _NAMESPACE, models=ModelRegistry(), storage=storage, auto_recover=False,
+        _NAMESPACE, storage=storage, auto_recover=False,
     ) as runtime:
         run = await runtime.tasks.bind(task).get(graph.graph_id)
         assert (await run.state()).status is TaskStatus.RECOVERY_REQUIRED
@@ -249,4 +250,4 @@ async def test_explicit_graph_recovery_remains_available_when_startup_disabled(t
 
 def test_startup_recovery_option_requires_a_boolean() -> None:
     with pytest.raises(TypeError, match="auto_recover must be bool"):
-        Runtime.open(_NAMESPACE, models=ModelRegistry(), storage=RuntimeStorage.in_memory(), auto_recover="false")
+        Runtime.open(_NAMESPACE, storage=RuntimeStorage.in_memory(), auto_recover="false")

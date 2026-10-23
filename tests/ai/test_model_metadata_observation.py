@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Bounded History metadata reads and recorder-local invalidations."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.runtime.state import RuntimeState
 import asyncio
@@ -301,8 +302,8 @@ async def test_model_metadata_live_and_archived_backend_contract(backend: str, t
     group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     async with Runtime.open(
-        "metadata-live", models=_Models(_UsageFunctionModel(model)),
-        storage=storage(), features=group,
+        "metadata-live",
+        storage=storage(), features=model_features(_Models(_UsageFunctionModel(model)), group),
     ) as runtime:
         execution = await runtime.agents.get("default").start("private prompt")
         principal = runtime.default_principal
@@ -389,8 +390,8 @@ async def test_live_request_progress_precedes_scheduled_canonical_publication(
     )), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     async with Runtime.open(
-        "scheduled-history", models=_Models(_UsageFunctionModel(model)),
-        storage=storage, features=group,
+        "scheduled-history",
+        storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), group),
     ) as runtime:
         execution = await runtime.agents.get("default").start("scheduled prompt")
         principal = runtime.default_principal

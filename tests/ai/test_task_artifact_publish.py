@@ -9,7 +9,7 @@ import pytest
 
 from linktools.ai.core import TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
@@ -64,7 +64,7 @@ async def test_task_artifact_publish_readback_and_idempotency() -> None:
 
     task = Task("artifact.publish", publish, effect_policy="none")
     graph = TaskGraph("artifact-publish", (TaskNode("publish", task=task),))
-    async with Runtime.open("artifact-publish", models=ModelRegistry(), storage=storage) as runtime:
+    async with Runtime.open("artifact-publish", storage=storage) as runtime:
         run = await runtime.tasks.bind(task).start(graph, idempotency_key="artifact-publish")
         assert (await run.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED
         assert isinstance(await run.result("publish"), str)

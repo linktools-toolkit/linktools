@@ -3,6 +3,7 @@
 """Executable host example proves logical RPM/TPM accounting without a service."""
 
 from __future__ import annotations
+from ._runtime_test_helpers import model_features
 
 import asyncio
 import importlib.util
@@ -181,9 +182,10 @@ async def test_runtime_token_estimator_reads_native_metadata_and_observes_respon
     group.agent("default", instructions="Be brief", allow_tools=("ping",), allow_capabilities=())
     group.capability(limiter, id="host.rate-limit", scope="runtime")
     model = FunctionModel(stream_function=chunks) if streaming else _UsageFunctionModel(answer)
+    group.model("default", _Models(model))
     app = {"quota": "project-a"}
     async with Runtime.open(
-        "quota-metadata", models=_Models(model), context=RuntimeContext(app),
+        "quota-metadata", context=RuntimeContext(app),
         storage=RuntimeStorage.in_memory(), features=await group.capture(),
     ) as runtime:
         execution = await runtime.agents.get().start("question", correlation={"request": "one"})

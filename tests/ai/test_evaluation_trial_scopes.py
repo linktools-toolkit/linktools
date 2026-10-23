@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Evaluation launch intents own local, application-provided Runtime scopes."""
+from ._runtime_test_helpers import model_features
 
 from ._runtime_test_helpers import workspace_features
 
@@ -35,7 +36,7 @@ from linktools.ai.evaluation import (
     ScoringInput, StartEvaluationRequest, TargetTrialRef,
 )
 from linktools.ai.migrate import provision_database
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.capability import CheckpointCapability
 from linktools.ai.runtime import (
     EvaluationTrialScope, Runtime, RuntimeContext, RuntimeStorage, TaskEngine, TaskGraphRun,
@@ -203,7 +204,7 @@ class Scopes:
         token = _SCOPE_CONTEXT.set(scope)
         try:
             async with Runtime.open(
-                self.namespace, models=ModelRegistry(), storage=child_storage,
+                self.namespace, storage=child_storage,
                 context=RuntimeContext(workspace, tenant_id=self.tenant_id),
                 features=workspace_features("workspace", workspace=Workspace.load(workspace)),
                 auto_recover=False,
@@ -252,7 +253,7 @@ async def test_scoped_targets_and_rescores_share_durable_facts_but_own_local_wor
 
     storage = make_storage()
     try:
-        async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
+        async with Runtime.open(NAMESPACE, storage=storage, context=CONTEXT) as runtime:
             scopes = Scopes(tmp_path / "workspaces", runtime._state, make_storage, tasks)
             request = await _request(runtime, tasks)
             run = await runtime.evaluations.start(request, engine=runtime.tasks.bind(*tasks), trial_scope=scopes)
@@ -310,8 +311,8 @@ async def test_child_agent_reads_captured_input_with_its_own_model_and_runtime_b
 
     scorer = Task("scopes.agent-score", score, effect_policy="none")
     storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
-    async with Runtime.open(NAMESPACE, models=planning_models, storage=storage, context=CONTEXT,
-                            features=group) as runtime:
+    async with Runtime.open(NAMESPACE, storage=storage, context=CONTEXT,
+                            features=model_features(planning_models, group)) as runtime:
         target = runtime.tasks.from_agent("scopes.agent", runtime.agents.get())
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("agent-input", 1), (
             CaseSpec.agent(CaseRef("agent-input", "one", 1),
@@ -328,8 +329,8 @@ async def test_child_agent_reads_captured_input_with_its_own_model_and_runtime_b
             models = FixtureModels()
             child_storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
             try:
-                async with Runtime.open(NAMESPACE, models=models, storage=child_storage, context=CONTEXT,
-                                        features=group, auto_recover=False) as child:
+                async with Runtime.open(NAMESPACE, storage=child_storage, context=CONTEXT,
+                                        features=model_features(models, group), auto_recover=False) as child:
                     child_target = child.tasks.from_agent("scopes.agent", child.agents.get())
                     assert child_target.ref == target.ref
                     assert child_target.contract == target.contract
@@ -422,9 +423,9 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
         child_storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
         token = _SCOPE_CONTEXT.set(descriptor)
         try:
-            async with Runtime.open(NAMESPACE, models=models, storage=child_storage,
+            async with Runtime.open(NAMESPACE, storage=child_storage,
                 context=RuntimeContext(workspace, tenant_id=PRINCIPAL.tenant_id),
-                features=group,
+                features=model_features(models, group),
                 auto_recover=False) as child:
                 target = child.tasks.from_agent("scopes.recovery-agent", child.agents.get())
                 opened.append((descriptor, workspace))
@@ -471,8 +472,8 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
     planning_models = FixtureModels()
     storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
     try:
-        async with Runtime.open(NAMESPACE, models=planning_models, storage=storage, context=CONTEXT,
-                                features=group, auto_recover=False) as runtime:
+        async with Runtime.open(NAMESPACE, storage=storage, context=CONTEXT,
+                                features=model_features(planning_models, group), auto_recover=False) as runtime:
             target = runtime.tasks.from_agent("scopes.recovery-agent", runtime.agents.get())
             dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("recoverable-agent", 1), (
                 CaseSpec.agent(CaseRef("recoverable-agent", "one", 1), prompt="immutable recovery prompt",
@@ -514,8 +515,8 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
         interrupted = False
         reopened_models = FixtureModels()
         reopened = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
-        async with Runtime.open(NAMESPACE, models=reopened_models, storage=reopened, context=CONTEXT,
-                                features=group, auto_recover=False) as runtime:
+        async with Runtime.open(NAMESPACE, storage=reopened, context=CONTEXT,
+                                features=model_features(reopened_models, group), auto_recover=False) as runtime:
             target = runtime.tasks.from_agent("scopes.recovery-agent", runtime.agents.get())
             engine = runtime.tasks.bind(target, scorer)
             resumed = await runtime.evaluations.reconcile(experiment_id, engine=engine, principal=PRINCIPAL,
@@ -575,7 +576,7 @@ async def test_human_score_resumes_only_in_the_coordinator_that_owns_its_scope(
         return RuntimeStorage.sqlite(tmp_path / "state.sqlite")
 
     storage = make_storage()
-    async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open(NAMESPACE, storage=storage, context=CONTEXT) as runtime:
         scopes = Scopes(tmp_path / "owner", runtime._state, make_storage, (task,))
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("human", 1), (
             CaseSpec.task(CaseRef("human", "one", 1), input={"answer": "private case input"}),
@@ -604,7 +605,7 @@ async def test_human_score_resumes_only_in_the_coordinator_that_owns_its_scope(
             await run.submit_human_score(decision)
         else:
             foreign_storage = make_storage()
-            async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=foreign_storage,
+            async with Runtime.open(NAMESPACE, storage=foreign_storage,
                                     context=CONTEXT, auto_recover=False) as foreign:
                 foreign_scopes = Scopes(tmp_path / "foreign", foreign._state, make_storage, (task,))
                 observed = await foreign.evaluations.start(request,
@@ -647,7 +648,7 @@ async def test_local_scope_is_closed_on_target_error_cancellation_and_coordinato
         return RuntimeStorage.sqlite(tmp_path / "state.sqlite")
 
     storage = make_storage()
-    async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open(NAMESPACE, storage=storage, context=CONTEXT) as runtime:
         scopes = Scopes(tmp_path / "workspaces", runtime._state, make_storage, tasks)
         engine = runtime.tasks.bind(*tasks)
         policy = (EvaluationPolicy(content_retention_seconds=60, metadata_retention_seconds=60)
@@ -787,7 +788,7 @@ async def test_scope_cleanup_failure_is_observable_without_repeating_context_exi
         return RuntimeStorage.sqlite(tmp_path / "state.sqlite")
 
     storage = make_storage()
-    manager = Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT)
+    manager = Runtime.open(NAMESPACE, storage=storage, context=CONTEXT)
     runtime = await manager.__aenter__()
     scopes = Scopes(tmp_path / "workspaces", runtime._state, make_storage, tasks)
 
@@ -863,7 +864,7 @@ async def test_reconcile_attempts_every_owned_scope_cleanup_when_one_exit_fails(
         return RuntimeStorage.sqlite(tmp_path / "state.sqlite")
 
     storage = make_storage()
-    manager = Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT)
+    manager = Runtime.open(NAMESPACE, storage=storage, context=CONTEXT)
     runtime = await manager.__aenter__()
     scopes = Scopes(tmp_path / "workspaces", runtime._state, make_storage, tasks)
 
@@ -942,7 +943,7 @@ async def test_cancel_before_admission_never_opens_a_trial_scope(
         pytest.fail("a cancelled admission must not acquire application resources")
         yield
 
-    async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage,
+    async with Runtime.open(NAMESPACE, storage=storage,
         context=RuntimeContext(tmp_path if shared_live else None, tenant_id=PRINCIPAL.tenant_id),
         features=workspace_features("workspace", workspace=Workspace.load(tmp_path))
                      if shared_live else None) as runtime:
@@ -993,7 +994,7 @@ async def test_explicit_live_effects_run_in_each_trial_runtime_environment(
     async def scope(descriptor: EvaluationTrialScope) -> AsyncIterator[TaskEngine[Path]]:
         child_storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
         try:
-            async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=child_storage,
+            async with Runtime.open(NAMESPACE, storage=child_storage,
                 context=RuntimeContext(tmp_path if child_environment in {"app", "both"} else None,
                                        tenant_id=PRINCIPAL.tenant_id),
                 features=workspace if child_environment in {"workspace", "both"} else None,
@@ -1004,7 +1005,7 @@ async def test_explicit_live_effects_run_in_each_trial_runtime_environment(
         finally:
             closed.append(descriptor)
 
-    async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage,
+    async with Runtime.open(NAMESPACE, storage=storage,
         context=RuntimeContext(tmp_path if child_environment == "bare" else None,
                                tenant_id=PRINCIPAL.tenant_id),
         features=workspace if child_environment == "bare" else None) as runtime:
@@ -1042,7 +1043,7 @@ async def test_reconcile_preserves_unscoped_live_submission_with_app_and_workspa
     tasks = (Task("scopes.target", target, effect_policy="none"),
              Task("scopes.score", score, effect_policy="none"))
     storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
-    async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open(NAMESPACE, storage=storage, context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(*tasks)
         request = await _request(runtime, tasks, policy=EvaluationPolicy(external_effects="live"))
         with monkeypatch.context() as paused:
@@ -1065,7 +1066,7 @@ async def test_reconcile_preserves_unscoped_live_submission_with_app_and_workspa
         assert await runtime._state.task.admissions.submission_status(submission.ref) is None
 
     reopened = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
-    async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=reopened,
+    async with Runtime.open(NAMESPACE, storage=reopened,
         context=RuntimeContext(tmp_path, tenant_id=PRINCIPAL.tenant_id),
         features=workspace_features("workspace", workspace=Workspace.load(tmp_path)),
         auto_recover=False) as runtime:
@@ -1111,7 +1112,7 @@ async def test_cancellation_seals_pending_entry_before_awaiting_the_native_fence
         return RuntimeStorage.sqlite(tmp_path / "state.sqlite")
 
     storage = make_storage()
-    async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open(NAMESPACE, storage=storage, context=CONTEXT) as runtime:
         scopes = Scopes(tmp_path / "workspaces", runtime._state, make_storage, tasks)
 
         @asynccontextmanager
@@ -1194,7 +1195,7 @@ async def test_scope_creation_permission_is_local_once_and_failure_remains_cance
         yield  # pragma: no cover
 
     storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
-    async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage,
+    async with Runtime.open(NAMESPACE, storage=storage,
                             context=CONTEXT, auto_recover=False) as runtime:
         engine = runtime.tasks.bind(*tasks)
         run = await runtime.evaluations.start(await _request(runtime, tasks),
@@ -1257,7 +1258,7 @@ async def test_interrupted_scope_entry_closes_local_resources_and_reconciles_the
         return RuntimeStorage.sqlite(tmp_path / "state.sqlite")
 
     storage = make_storage()
-    async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open(NAMESPACE, storage=storage, context=CONTEXT) as runtime:
         scopes = Scopes(tmp_path / "workspaces", runtime._state, make_storage, tasks)
 
         @asynccontextmanager
@@ -1283,7 +1284,7 @@ async def test_interrupted_scope_entry_closes_local_resources_and_reconciles_the
         experiment_id = run.experiment_id
 
     reopened = make_storage()
-    async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=reopened, context=CONTEXT,
+    async with Runtime.open(NAMESPACE, storage=reopened, context=CONTEXT,
                             auto_recover=False) as runtime:
         resumed_scopes = Scopes(tmp_path / "workspaces", runtime._state, make_storage, tasks)
         with pytest.raises(AIError) as missing_scope:
@@ -1361,7 +1362,7 @@ async def test_incompatible_scope_engine_is_closed_before_target_execution(
         return RuntimeStorage.sqlite(tmp_path / ("other-state.sqlite" if mismatch == "backing_store" else "state.sqlite"))
 
     storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
-    async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open(NAMESPACE, storage=storage, context=CONTEXT) as runtime:
         scopes = Scopes(tmp_path / "workspaces", runtime._state, make_child_storage, child_tasks,
             namespace="wrong-namespace" if mismatch == "namespace" else NAMESPACE,
             tenant_id="wrong-tenant" if mismatch == "tenant" else PRINCIPAL.tenant_id)
@@ -1408,8 +1409,8 @@ async def test_closing_one_coordinator_does_not_stop_another_experiments_child(
 
     storage_a, storage_b = make_storage(), make_storage()
     async with (
-        Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage_a, context=CONTEXT) as first,
-        Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage_b, context=CONTEXT,
+        Runtime.open(NAMESPACE, storage=storage_a, context=CONTEXT) as first,
+        Runtime.open(NAMESPACE, storage=storage_b, context=CONTEXT,
                      auto_recover=False) as second,
     ):
         scopes_a = Scopes(tmp_path / "a", first._state, make_storage, tasks)
@@ -1460,8 +1461,8 @@ async def test_remote_logical_release_does_not_claim_another_coordinators_scope_
 
     storage_a, storage_b = make_storage(), make_storage()
     async with (
-        Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage_a, context=CONTEXT) as first,
-        Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage_b, context=CONTEXT,
+        Runtime.open(NAMESPACE, storage=storage_a, context=CONTEXT) as first,
+        Runtime.open(NAMESPACE, storage=storage_b, context=CONTEXT,
                      auto_recover=False) as second,
     ):
         scopes_a = Scopes(tmp_path / "a", first._state, make_storage, tasks)
@@ -1529,7 +1530,7 @@ async def test_retention_never_deletes_application_owned_trial_workspaces(tmp_pa
             yield
 
     storage = make_storage()
-    async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open(NAMESPACE, storage=storage, context=CONTEXT) as runtime:
         scopes = Scopes(tmp_path / "workspaces", runtime._state, make_storage, tasks)
         policy = EvaluationPolicy(content_retention_seconds=60, metadata_retention_seconds=60)
         run = await runtime.evaluations.start(await _request(runtime, tasks, policy=policy),

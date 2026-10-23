@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """OpenAI Chat and Responses model assembly."""
 
-from collections.abc import Mapping
 from types import TracebackType
 
 from httpx2 import AsyncClient, Limits
@@ -50,9 +49,9 @@ class _OpenAIModelBinding(_ProviderModelBinding):
     __slots__ = ()
     _provider_type = OpenAIProvider
     _profile_type = OpenAIModelProfile
-    def _build_model(self, connection: Mapping[str, object], settings: ModelSettings) -> Model:
-        provider = _CapturedOpenAIProvider(base_url=connection["base_url"], api_key=connection["api_key"])
-        model_type = OpenAIChatModel if self.api == "openai-chat" else OpenAIResponsesModel
+    def _build_model(self, settings: ModelSettings) -> Model:
+        provider = _CapturedOpenAIProvider(base_url=self.base_url, api_key=self.api_key)
+        model_type = OpenAIChatModel if self.api == "openai" else OpenAIResponsesModel
         return model_type(self.model, provider=provider, settings=settings or None,
                           **({"profile": self._sdk_profile()} if self._profile_overrides else {}))
 

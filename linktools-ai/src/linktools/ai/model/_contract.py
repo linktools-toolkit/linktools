@@ -10,10 +10,8 @@ from pydantic_ai.models import Model
 from ..core import JsonValue
 
 
+@runtime_checkable
 class ModelBinding(Protocol):
-    @property
-    def route_id(self) -> str: ...
-
     @property
     def provider(self) -> str: ...
 
@@ -32,17 +30,6 @@ class ModelBinding(Protocol):
         ...
 
 
-class ModelResolver(Protocol):
-    def resolve(self, route_id: str) -> ModelBinding: ...
-
-    def restore(
-        self,
-        payload: Mapping[str, JsonValue],
-        *,
-        route_id: "str | None" = None,
-    ) -> ModelBinding: ...
-
-
 @runtime_checkable
 class _ThinkingControlSource(Protocol):
     def thinking_control(self) -> Mapping[str, JsonValue]: ...
@@ -59,4 +46,4 @@ def model_thinking_control(binding: ModelBinding) -> Mapping[str, JsonValue]:
     return {"mode": "unknown", "enabled_by_default": None}
 
 
-__all__ = ["ModelBinding", "ModelResolver", "model_thinking_control"]
+__all__ = ["ModelBinding", "model_thinking_control"]

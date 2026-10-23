@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Agent node deadlines cancel execution trees and survive durable recovery."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 import multiprocessing
@@ -86,8 +87,8 @@ async def test_agent_node_deadline_cancels_work_and_preserves_unknown_effects(
                 allow_skills=(), allow_subagents=("child",) if phase == "subagent" else ())
     group.agent("child", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with Runtime.open(
-        "deadline", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), features=group,
+        "deadline",
+        storage=RuntimeStorage.in_memory(), features=model_features(_Models(_UsageFunctionModel(model)), group),
     ) as runtime:
         task = runtime.tasks.from_agent("deadline.agent", runtime.agents.get())
         run = await runtime.tasks.bind(task).start(
@@ -158,8 +159,8 @@ async def test_agent_node_deadline_uses_tighter_limit_without_replacing_shared_b
     group = RuntimeFeatures("deadline-budget")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with Runtime.open(
-        "deadline-budget", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), features=group,
+        "deadline-budget",
+        storage=RuntimeStorage.in_memory(), features=model_features(_Models(_UsageFunctionModel(model)), group),
     ) as runtime:
         task = runtime.tasks.from_agent("deadline.agent", runtime.agents.get())
         budget = RunBudget(model_requests=4, deadline_at=(
@@ -227,8 +228,8 @@ def _start_interrupted_graph(
 
         group = _recovery_group(subagent)
         async with Runtime.open(
-            "deadline-recovery", models=_Models(_UsageFunctionModel(model)),
-            storage=(RuntimeStorage.sqlite(Path(path)) if backend == "sqlite" else RuntimeStorage.filesystem(Path(path))), features=group,
+            "deadline-recovery",
+            storage=(RuntimeStorage.sqlite(Path(path)) if backend == "sqlite" else RuntimeStorage.filesystem(Path(path))), features=model_features(_Models(_UsageFunctionModel(model)), group),
         ) as runtime:
             task = runtime.tasks.from_agent("deadline.agent", runtime.agents.get())
             run = await runtime.tasks.bind(task).start(
@@ -308,8 +309,8 @@ async def test_agent_node_recovery_keeps_first_start_deadline(
 
     group = _recovery_group(subagent, change)
     runtime_context = Runtime.open(
-        "deadline-recovery", models=_Models(_UsageFunctionModel(model)),
-        storage=(RuntimeStorage.sqlite(path) if backend == "sqlite" else RuntimeStorage.filesystem(path)), features=group,
+        "deadline-recovery",
+        storage=(RuntimeStorage.sqlite(path) if backend == "sqlite" else RuntimeStorage.filesystem(path)), features=model_features(_Models(_UsageFunctionModel(model)), group),
     )
     runtime = await runtime_context.__aenter__()
     try:
@@ -377,8 +378,8 @@ async def test_agent_recovery_relaunches_with_original_binding(tmp_path: Path, s
     group = _recovery_group(subagent)
     storage = RuntimeStorage.sqlite(path) if subagent else RuntimeStorage.filesystem(path)
     async with Runtime.open(
-        "deadline-recovery", models=_Models(_UsageFunctionModel(model)),
-        storage=storage, features=group,
+        "deadline-recovery",
+        storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), group),
     ) as runtime:
         original_binding = (await runtime._state.execution.executions.get(
             execution_id, tenant_id=runtime.default_principal.tenant_id,

@@ -98,10 +98,7 @@ class CapabilityContribution(Generic[AppT]):
 
     @property
     def revision(self) -> int:
-        value = capability_ref_payload(self.kind, self.id, self.contract)["revision"]
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        return value
+        return cast(int, capability_ref_payload(self.kind, self.id, self.contract)["revision"])
 
     @classmethod
     def validate_revision(cls, value: int) -> None:

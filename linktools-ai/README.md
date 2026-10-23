@@ -4,7 +4,6 @@
 
 ```text
 namespace
-    + ModelRegistry
     + RuntimeStorage
     + one RuntimeFeatures or RuntimeFeaturesCapture
         -> optional, independent Workspace and Sandbox via RuntimeFeatures(...)
@@ -49,7 +48,7 @@ def available(agent, contribution):
 
 group = RuntimeFeatures("application", filter=available)
 async with Runtime.open(
-    "application", models=models, storage=storage, features=group,
+    "application", storage=storage, features=group,
 ) as runtime:
     ...
 ```
@@ -117,7 +116,7 @@ independently of `allow_capabilities` and `RuntimeFeatures.filter`. Use explicit
 ```python
 group.capability(global_rate_limit, id="host.rate-limit")
 async with Runtime.open(
-    "application", models=models, storage=storage, features=group,
+    "application", storage=storage, features=group,
 ) as runtime:
     ...
 ```
@@ -158,10 +157,66 @@ python3 -m linktools ai run "review this change" --project /workspace/project --
 
 Useful options:
 
-- `--base-url`, `--api-key`, and `--model` also read `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and `OPENAI_MODEL`.
+- `--model-api` selects `openai` (default), `openai-responses`, or `anthropic`. This is the wire protocol, not a vendor/model-name guess. The same option works for `ai-run`, `ai-acp`, and `ai-web`.
+- Persist the selection in `.linktools/config.yaml` as `model_api: anthropic`, alongside `model: your-model`. `MODEL_API` / the existing `LINKTOOLS_MODEL_API` configuration can also select the protocol; an explicit CLI option wins.
+- `--base-url`, `--api-key`, and `--model` are one-shot overrides. With Anthropic Messages, the corresponding configuration/environment fields are `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, and `ANTHROPIC_MODEL`; both OpenAI protocols use the existing `OPENAI_*` fields. The selected protocol's existing LinkTools config resolver still supports `LINKTOOLS_`-prefixed configuration and its non-secret cache. Anthropic never falls back to OpenAI credentials or endpoints.
+- Model selection order is explicit nonempty CLI value, selected-protocol LinkTools configuration, workspace `model`, then the selected-protocol native fallback. Standard LinkTools configuration itself reads both native and `LINKTOOLS_`-prefixed environment variables. Connection settings use explicit CLI value, selected-protocol LinkTools configuration, then the native fallback. Empty connection values retain the native SDK fallback to the selected protocol's environment; they do not disable environment credentials. Credentials are secret fields and are not persisted by configuration resolution.
+- Install `linktools-ai[anthropic]` for Anthropic Messages, or `linktools-ai[openai]` for either OpenAI API; add `web` for `ai-web`, for example `linktools-ai[anthropic,web]`. Missing provider extras produce an installation hint before a Runtime is opened.
+- Endpoint paths retain native SDK semantics: OpenAI normally uses a base ending in `/v1`; Anthropic normally uses the server root and appends `/v1/messages` itself. Configure a gateway according to its supported API, not by copying an OpenAI endpoint.
+- Custom headers and arbitrary SDK profile overrides are not CLI configuration options. Thinking control remains governed by the effective native SDK model profile, independently of whether the response contains thinking parts; selecting Anthropic does not declare arbitrary models thinking-capable.
 - `--planning` enables planning for the execution.
 - `--thinking` requests model thinking when supported.
 - `--json` emits one terminal JSON result.
+
+### Model configuration sources
+
+The CLI retains the standard `ConfigField` resolution path. Protocol-specific fields
+are selected after resolving the API, so configuring Anthropic does not require
+passing connection options on every invocation:
+
+```bash
+export LINKTOOLS_MODEL_API=anthropic
+export LINKTOOLS_ANTHROPIC_MODEL=claude-sonnet-4-5
+export LINKTOOLS_ANTHROPIC_BASE_URL=https://api.anthropic.com
+# Supply LINKTOOLS_ANTHROPIC_API_KEY through your environment/secret manager.
+ai-run "review this change"
+```
+
+For either OpenAI API, use `OPENAI_MODEL`, `OPENAI_BASE_URL`, and `OPENAI_API_KEY`
+with the same `LINKTOOLS_` prefix, and select `openai` or `openai-responses`.
+Unprefixed native variables are also accepted by the standard config resolver. API selection is a
+protocol choice, not a provider-name or model-name guess.
+
+The standard project profile is `.linktools.json` in the process working directory;
+the user profile is `~/.linktools/linktools.json`. For example:
+
+```json
+{
+  "config": {
+    "MODEL_API": "anthropic",
+    "ANTHROPIC_MODEL": "claude-sonnet-4-5",
+    "ANTHROPIC_BASE_URL": "https://api.anthropic.com"
+  }
+}
+```
+
+These files are distinct from the workspace's `.linktools/config.yaml`.
+`--project` selects the workspace; it does not relocate the process's standard
+profile. The local profile overrides the user profile. Inside standard config,
+profile `config` fields take precedence over profile `env` fields and process
+environment variables, followed by runtime overrides and persisted config. Within
+an environment layer, an unprefixed field takes precedence over its `LINKTOOLS_`
+form when both are set.
+The CLI uses that existing precedence unchanged; explicit CLI model/connection
+values override it for one invocation. Workspace `model` and native environment
+fallbacks apply only when higher-priority values are absent, as described above.
+
+Both protocols use `secret=True` for their API-key field. Reading configuration
+or passing a CLI override does not save keys to the configuration cache or print
+keys in web status. A key deliberately placed in a profile remains plaintext in
+that user-authored file; prefer environment injection and never commit it. Existing
+non-secret configuration cache values remain readable and are not overwritten by
+CLI arguments.
 
 ### Local Web console
 
@@ -183,18 +238,18 @@ security, persisted history and explicit recovery of stopped executors.
 ```python
 from linktools.ai import RuntimeFeatures, Runtime, Workspace
 from linktools.ai.capability import WorkspaceCapability
-from linktools.ai.model import ModelRegistry
+from linktools.ai.model import create_model
 from linktools.ai.runtime import RuntimeStorage
 
 workspace = Workspace.initialize("/workspace/project")
-models = ModelRegistry.openai(model="gpt-4o-mini")
+binding = create_model(protocol="openai", model="gpt-4o-mini")
 storage = RuntimeStorage.in_memory()
 features = RuntimeFeatures("workspace")
+features.model("default", binding)
 features.capability(WorkspaceCapability(workspace))
 
 async with Runtime.open(
     "default",
-    models=models,
     storage=storage,
     features=features,
 ) as runtime:
@@ -213,19 +268,17 @@ startup budget, and report readiness only after the context opens successfully.
 `Runtime.open()` imposes no fixed startup deadline. Reuse the opened Runtime for
 its service lifetime; execution deadlines do not replace a startup budget.
 
-Connection settings can be resolved lazily for a route. The resolver runs only
-when that route is materialized, and each materialization resolves independently;
-there is no process-global first-use client cache or initialization lock. Concurrent
-first use may therefore create independent provider instances. An alias keeps the
-concrete binding that was registered as its target:
+A feature loader reads model configuration for each agent run. Its resolved
+binding is reused within that run; the next run reads updated configuration.
+To give multiple routes the same static binding, register that object under each name:
 
 ```python
-models.register_openai(
-    "production",
-    model="gpt-4o-mini",
-    connection_resolver=lambda: {"api_key": get_api_key()},
+binding = create_model(
+    protocol="openai", model="gpt-4o-mini",
+    api_key=get_api_key(),
 )
-models.register_alias("default", "production")
+features.model("production", binding)
+features.model("default", binding)
 ```
 
 ### Protocols and thinking profiles
@@ -234,11 +287,27 @@ Install `linktools-ai[openai]` for Chat Completions and Responses, or
 `linktools-ai[anthropic]` for Messages; combine extras when using both.
 The base package does not install either provider SDK.
 
-`ModelRegistry.openai` / `register_openai` retain Chat Completions behavior.
-Use `openai_responses` / `register_openai_responses` for Responses, or
-`anthropic` / `register_anthropic` for Messages. They accept the same connection,
-retry, input-type and optional `profile` arguments. See [model protocols](docs/model-protocols.md)
-for explicit compatible-model profiles, restore boundaries and trace semantics.
+`create_model(protocol="anthropic", model="claude-sonnet-4-5")` returns a
+model binding without a route name. Protocols are `openai` (Chat Completions),
+`openai-responses`, and `anthropic`. Register bindings in the same feature
+container as tools and capabilities:
+
+```python
+from linktools.ai.model import create_model
+from linktools.ai.runtime import RuntimeFeatures
+
+features = RuntimeFeatures()
+features.model("assistant", create_model(protocol="anthropic", model="claude-sonnet-4-5"))
+# Or load one fresh binding for each agent run. The function is synchronous.
+features.model("deferred", lambda: create_model(protocol="openai", model="gpt-4o"))
+```
+
+Runtime captures the route mapping at opening without evaluating every loader.
+A callable is evaluated once per agent run. That run uses the same binding for
+contract capture, model validation, tool rounds and retries; the next run reloads
+it. Concurrent runs do not share mutable loader results. Client resources are
+created and released per run. See [model protocols](docs/model-protocols.md) for
+custom bindings, profiles, restore boundaries and trace semantics.
 
 ## 2. Define application capabilities and Agents
 
@@ -249,6 +318,7 @@ from linktools.ai import AgentContext, RuntimeFeatures, Runtime
 from linktools.ai.capability import WorkspaceCapability
 
 application = RuntimeFeatures[None]("application")
+application.model("default", binding)
 application.capability(WorkspaceCapability(workspace))
 
 @application.tool
@@ -266,14 +336,13 @@ application.agent(
 
 async with Runtime.open(
     "default",
-    models=models,
     storage=storage,
     features=application,
 ) as runtime:
     result = (await runtime.agents.get("audit").run("inspect ticket SEC-123")).result
 ```
 
-Named behavior identity is exactly `(kind, id, revision)`. Agent, Tool, Skill, MCP, Capability, Task, and TaskExpander do not maintain a second hash/digest identity. Full declarations and execution-bound contracts are still persisted for exact restore and same-revision drift validation. `RuntimeFeatures.tool()` and `RuntimeFeatures.capability()` default to revision `1`; Agent/Skill/MCP declarations also carry revision `1` unless explicitly changed. Generic Pydantic capabilities retain their native Pydantic AI behavior, and LinkTools revalidates final output against the durable `OutputBinding`.
+Named behavior identity is exactly `(kind, id, revision)`. Agent, Tool, Skill, MCP, Capability, Task, and TaskExpander do not maintain a second hash/digest identity. Full declarations and execution-bound contracts are still persisted for restoration and integrity checks. Tool, Skill, MCP and generic Capability identity checks use only their ID and revision within the kind namespace; configuration equality is the caller’s responsibility, not a second identity check. Agent/Task declaration validation and resource access, sandbox policy and output validation remain separate boundaries. `RuntimeFeatures.tool()` and `RuntimeFeatures.capability()` default to revision `1`; Agent/Skill/MCP declarations also carry revision `1` unless explicitly changed. Generic Pydantic capabilities retain their native Pydantic AI behavior, and LinkTools revalidates final output against the durable `OutputBinding`.
 
 Generic capabilities are trusted host-Python extensions. LinkTools preserves their native hooks and does not sandbox or deny their file, network, or process access; only LinkTools-owned workspace, opaque-effect, and deferred-resolution boundaries provide those controls.
 
@@ -438,8 +507,10 @@ identity. The execution pin keeps the server id/revision, canonical transport,
 semantic args, resource refs and execution policy, but excludes
 `command`, remote `url`, `env`, `headers`, `init_timeout` and `read_timeout`. Recovery therefore requires
 the host to supply the current declaration with the same MCP id/revision;
-connection values may change under that identity, while transport, semantic
-args or resource semantics require a revision change.
+configuration values may change under that identity without a full-configuration
+equality check. Callers own same-revision consistency. Stored resource references,
+source authorization and the effective sandbox execution policy are still validated;
+identity equality does not authorize access to different resources.
 
 ### MCP files, Python registration, and shared configuration
 
@@ -596,9 +667,11 @@ creates a new Client from the currently supplied same-ID/revision declaration;
 network session IDs, SSE cursors, and Client objects are not persisted.
 
 Changing an address or credential under the same ID/revision must still reach
-the same logical service, data domain, and behavior. Changing tenant, scope,
-tool behavior, transport, or other semantic meaning requires a new ID or
-revision. Asset capture does not freeze a remote server's implementation.
+the same logical service, data domain, and behavior. Callers must use a new ID
+or revision when changing logical behavior; LinkTools does not infer a revision
+change by comparing configuration dictionaries. Tenant access, resource isolation
+and execution policy are enforced independently. Asset capture does not freeze
+a remote server's implementation.
 Resources/prompts APIs, OAuth, dynamic end-user credentials, mTLS, server
 publishing, and arbitrary third-party configuration import are out of scope.
 
@@ -726,7 +799,7 @@ result = (await agent.run(
 The exact durable binding stores:
 
 - the v1 `AgentSpec` contract;
-- the resolved model contract;
+- the resolved model configuration as diagnostic metadata (identity is the registered model ID);
 - the selected capability pins, including bound Skill Asset version references when Execution state is durable;
 - selected Subagent ids and their direct execution bindings;
 - `output_mode`;
@@ -783,9 +856,9 @@ MIME Literal values. Use a `mime:` prefix for an explicit MIME type or `type/*`
 family. Attachments that do not match the resulting MIME allowlist are rejected:
 
 ```python
-from linktools.ai.model import ModelRegistry
+from linktools.ai.model import create_model
 
-models = ModelRegistry.openai(
+binding = create_model(protocol="openai",
     model="your-model",
     input_types=["audio", "document", "mime:audio/*", "mime:application/pdf"],
 )
@@ -814,11 +887,12 @@ still need concrete MIME types. Text files can be selected explicitly, for
 example with `mime:text/plain`, without changing ordinary prompt text handling.
 
 Capture expands categories, normalizes, deduplicates, and sorts the MIME values.
-The model contract stores only that resolved `input_mime_types` list, which
-contributes to its digest. Restore uses the stored list without expanding it
-again against a potentially different SDK. `input_mime_types` is the captured
-contract/display field, not the Python or YAML authoring argument. Web settings
-show the actual captured MIME values rather than the authoring category labels.
+Model diagnostic metadata stores the resolved `input_mime_types` list, not
+model identity. Restore resolves the current binding by registered ID and validates
+new inputs against its current permissions and SDK support. Callers own consistency
+when changing configuration. `input_mime_types` is the diagnostic/display field,
+not the Python or YAML authoring argument. Web settings show the current resolved
+MIME values rather than authoring category labels.
 
 The allowlist declares application permission, not guaranteed provider support.
 SDK encoding restrictions and existing resource limits still apply. Transport
@@ -827,7 +901,8 @@ byte-limit configuration is needed.
 
 Configure attachment permissions with `input_types`. Captured model contracts
 must contain the resolved `input_mime_types` list; missing permissions do not
-implicitly allow attachments. Restored bindings must match their captured contract.
+implicitly allow attachments. Configuration changes under the same registered ID
+do not change model identity or block restoration; current attachment checks still apply.
 
 Execution file input uses the same durable boundary:
 
@@ -918,8 +993,8 @@ from linktools.ai.runtime import RuntimeContext
 context = RuntimeContext(app, tenant_id="tenant-a")
 async with Runtime.open(
     "web-chat",
-    models=models,
     storage=storage,
+    features=features,
     context=context,
 ) as runtime:
     ...
@@ -988,7 +1063,7 @@ page = await runtime.executions.list(
 ```
 
 `RuntimeHistory.open()` provides the same read-only execution metadata and
-history projections without loading a ModelRegistry or compiling Agents. Pass the
+history projections without loading model bindings or compiling Agents. Pass the
 same `features=` declaration or capture when capabilities configure custom storage
 routes or caches; read-only opening does not activate hooks or metrics recording.
 Use `list_sessions(principal=..., cursor=..., limit=...)` for a paginated session
@@ -1146,8 +1221,8 @@ storage = RuntimeStorage.sqlite(runtime_root / "runtime.db")
 
 async with Runtime.open(
     "service-runtime",
-    models=models,
     storage=storage,
+    features=features,
 ) as runtime:
     ...
 ```

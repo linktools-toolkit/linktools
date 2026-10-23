@@ -355,7 +355,7 @@ class MCPServerSpecCodec:
         declaration: MCPServerSpec,
     ) -> "tuple[AssetVersionRef, ...] | None":
         semantic, resource_versions = _decode_mcp_binding_contract(raw)
-        if semantic != self.to_contract_payload(declaration):
+        if semantic["id"] != declaration.id or semantic["revision"] != declaration.revision:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return resource_versions
 

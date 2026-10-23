@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Dynamic evaluation targets admit and recover their complete bound scope."""
+from ._runtime_test_helpers import model_features
 
 from pathlib import Path
 
@@ -43,8 +44,8 @@ async def test_dynamic_target_rejects_unsafe_bound_definition_before_callbacks(
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     initial = Task("expansion.seed", seed, effect_policy="none")
     scorer = Task("expansion.score", exact, effect_policy="none")
-    async with Runtime.open("unsafe-expansion", models=models, context=CONTEXT,
-                            storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
+    async with Runtime.open("unsafe-expansion", context=CONTEXT,
+                            storage=RuntimeStorage.filesystem(tmp_path), features=model_features(models, group)) as runtime:
         unsafe = (Task("expansion.effect", effect, effect_policy=unsafe_kind) if unsafe_kind != "model"
                   else runtime.tasks.from_agent("expansion.model", runtime.agents.get()))
         expander = TaskExpander("expansion.expand", lambda context: (TaskNode("child", task=unsafe),))
@@ -85,7 +86,7 @@ async def test_safe_nested_expansion_recovers_only_its_pinned_definition_scope(t
     outer = TaskExpander("expansion.outer", lambda context: (
         TaskNode("child", ("seed",), task=child, input={"answer": "middle"}, expander=nested.ref),))
     definitions = (seed, child, unused, scorer, outer, nested)
-    async with Runtime.open("safe-expansion", models=FixtureModels(), context=CONTEXT,
+    async with Runtime.open("safe-expansion", features=model_features(FixtureModels()), context=CONTEXT,
                             storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("expansion", 1), cases=(
             CaseSpec.graph(CaseRef("expansion", "one", 1), inputs={}, expected="yes"),
@@ -103,7 +104,7 @@ async def test_safe_nested_expansion_recovers_only_its_pinned_definition_scope(t
         assert evidence.target.node_statuses == {"seed": "succeeded", "child": "succeeded", "leaf": "succeeded"}
         assert evidence.target.outputs["leaf"].value.value == "yes"
         experiment_id = run.experiment_id
-    async with Runtime.open("safe-expansion", models=FixtureModels(), context=CONTEXT,
+    async with Runtime.open("safe-expansion", features=model_features(FixtureModels()), context=CONTEXT,
                             storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         changed_task = Task(unused.id, answer, effect_policy="none", cancel=cancel)
         changed_expander = TaskExpander(nested.id, nested.expand, revision=2)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Asset loading is owned by one explicit Runtime-scoped capability."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from dataclasses import replace
@@ -216,13 +217,13 @@ async def test_asset_bootstrap_is_consumed_before_native_agent_hooks():
             Bootstrap(store).prefix_tools("asset"), Native(),
         ], id="assets.and.native").prefix_tools("outer")
         features, _ = _features(store, capability=capability)
-        capture = await features.capture()
 
         async def answer(messages, info):
             return ModelResponse(parts=[TextPart("answer")])
 
+        features.model("default", _Models(_UsageFunctionModel(answer)))
+        capture = await features.capture()
         async with Runtime.open("asset-bootstrap", features=capture,
-                                models=_Models(_UsageFunctionModel(answer)),
                                 storage=RuntimeStorage.in_memory()) as runtime:
             assert (await runtime.agents.get().run("question")).result.output == {"text": "answer"}
             assert native_calls

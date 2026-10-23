@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Captured file support is shared across admission, replay and SDK requests."""
+from linktools.ai.agent._model_resolver import _ModelResolver
+from linktools.ai.model import create_model
 
 import json
 
@@ -15,16 +17,13 @@ from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.test import TestModel
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import (
-    ModelBinding, ModelRegistry,
-    validate_model_input, validate_model_inputs,
-)
+from linktools.ai.model import ModelBinding, validate_model_input, validate_model_inputs
 from linktools.ai.model import _openai
 from linktools.ai.model._binding import _RetryingModel
 
 
 def _binding(*mime_types: str, **kwargs: object) -> ModelBinding:
-    return ModelRegistry.openai(model="gpt-file-test", input_types=tuple("mime:" + item for item in mime_types), **kwargs).capture().resolve("default")
+    return create_model(protocol='openai', model="gpt-file-test", input_types=tuple("mime:" + item for item in mime_types), **kwargs)
 
 
 @pytest.mark.parametrize("mime", ("application/pdf", "text/plain", "image/png", "audio/wav"))
@@ -46,21 +45,21 @@ def test_family_allowlist_matches_only_its_mime_family(pattern: str, mime: str) 
 @pytest.mark.parametrize("values", (None, "image/png", [None], ["mime:*/*"], ["mime:image/p*"], ["text"], ["mime:image/png;foo=bar"]))
 def test_invalid_mime_declarations_fail_at_capture(values: object) -> None:
     with pytest.raises((TypeError, ValueError)):
-        ModelRegistry.openai(model="test", input_types=values)
+        create_model(protocol='openai', model="test", input_types=values)
 
 
-def test_captured_allowlist_is_normalized_immutable_and_restores_strictly() -> None:
+def test_captured_allowlist_is_normalized_immutable_and_restore_uses_current_route() -> None:
     values = ["mime: IMAGE/PNG ", "mime:image/png", "mime:text/*"]
-    resolver = ModelRegistry.openai(model="test", input_types=values).capture()
+    resolver = _ModelResolver({"default": create_model(protocol='openai', model="test", input_types=values)})
     values.append("mime:application/pdf")
     original = resolver.resolve("default")
     assert original.contract["input_mime_types"] == ["image/png", "text/*"]
     stored = json.loads(json.dumps(original.contract))
-    assert resolver.restore(stored, route_id="default").contract == original.contract
+    assert resolver.resolve("default").contract == original.contract
     stored["input_mime_types"].append("application/pdf")
-    with pytest.raises(AIError) as raised:
-        resolver.restore(stored, route_id="default")
-    assert raised.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
+    restored = resolver.resolve("default")
+    assert restored.contract == original.contract
+    assert restored.contract != stored
 
 
 @pytest.mark.parametrize("content", (
@@ -188,7 +187,6 @@ async def test_openai_request_uses_reported_text_file_image_and_audio_transports
     assert parts[4]["file"]["file_id"] == "file-csv"
 
 
-
 def test_custom_mime_allowlist_can_use_provider_uploaded_file_encoding() -> None:
     binding = _binding("application/x-private")
     assert validate_model_inputs(binding, UploadedFile("file-id", "openai", media_type="application/x-private")) is None
@@ -205,9 +203,8 @@ def test_registered_old_contract_cannot_grant_file_permissions(vision: bool) -> 
         def materialize(self) -> TestModel:
             return TestModel()
 
-    registry = ModelRegistry()
-    registry.register(HostBinding())
-    restored = registry.capture().restore(dict(HostBinding.contract), route_id="default")
+    registry = _ModelResolver({"default": HostBinding()})
+    restored = registry.resolve("default")
     for mime_type in ("application/pdf", "image/png"):
         with pytest.raises(AIError) as raised:
             validate_model_input(restored, mime_type)
@@ -223,7 +220,7 @@ def test_input_categories_capture_the_official_sdk_mime_set(category: str, alias
     from typing import get_args
     import pydantic_ai.messages as messages
 
-    binding = ModelRegistry.openai(model="test", input_types=[category]).capture().resolve("default")
+    binding = create_model(protocol='openai', model="test", input_types=[category])
     assert binding.contract["input_mime_types"] == sorted(set(get_args(getattr(messages, alias_name))))
 
 
@@ -231,16 +228,16 @@ def test_categories_explicit_mime_and_duplicates_share_canonical_contract() -> N
     from typing import get_args
     from pydantic_ai.messages import ImageMediaType, DocumentMediaType
 
-    registry = ModelRegistry.openai(model="test", input_types=[
+    registry = create_model(protocol='openai', model="test", input_types=[
         "image", "document", "mime:audio/*", "mime:image/png", "image", "mime:application/x-private",
     ])
-    resolver = registry.capture()
+    resolver = _ModelResolver({"default": registry})
     expected = sorted(set((*get_args(ImageMediaType), *get_args(DocumentMediaType), "audio/*", "application/x-private")))
-    explicit = ModelRegistry.openai(model="test", input_types=["mime:" + mime for mime in expected]).capture()
+    explicit = _ModelResolver({"default": create_model(protocol='openai', model="test", input_types=["mime:" + mime for mime in expected])})
     binding = resolver.resolve("default")
     assert binding.contract["input_mime_types"] == expected
     assert binding.contract == explicit.resolve("default").contract
-    assert resolver.restore(json.loads(json.dumps(binding.contract)), route_id="default").contract == binding.contract
+    assert resolver.resolve("default").contract == binding.contract
     assert validate_model_input(binding, "audio/wav") is None
     assert validate_model_input(binding, "application/x-private", input_kind="uploaded") is None
 
@@ -248,7 +245,7 @@ def test_categories_explicit_mime_and_duplicates_share_canonical_contract() -> N
 @pytest.mark.parametrize("value", ("ImageMediaType", "image/png", "text", "IMAGE", "mime:", "mime:mime:audio/*", 1, None))
 def test_authoring_rejects_unknown_tokens_without_coercion(value: object) -> None:
     with pytest.raises(ValueError):
-        ModelRegistry.openai(model="test", input_types=[value])
+        create_model(protocol='openai', model="test", input_types=[value])
 
 
 def test_authoring_rejects_literal_type_objects() -> None:
@@ -257,7 +254,7 @@ def test_authoring_rejects_literal_type_objects() -> None:
 
     for value in (ImageMediaType, Literal["application/x-private"]):
         with pytest.raises(ValueError):
-            ModelRegistry.openai(model="test", input_types=[value])
+            create_model(protocol='openai', model="test", input_types=[value])
 
 
 @pytest.mark.parametrize("value", ("image", "ImageMediaType", "mime:audio/*", "mime:application/pdf"))
@@ -276,15 +273,15 @@ def test_captured_mime_list_is_not_reexpanded_after_sdk_category_changes(monkeyp
     from typing import Literal
     from linktools.ai.model import _input
 
-    original = ModelRegistry.openai(model="test", input_types=["image"]).capture().resolve("default")
+    original = create_model(protocol='openai', model="test", input_types=["image"])
     stored = json.loads(json.dumps(original.contract))
     monkeypatch.setattr(_input, "ImageMediaType", Literal["image/png", "image/x-future"])
     assert original.contract == stored
     assert validate_model_input(original, "image/jpeg") is None
-    current = ModelRegistry.openai(model="test", input_types=["image"]).capture()
-    with pytest.raises(AIError) as raised:
-        current.restore(stored, route_id="default")
-    assert raised.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
+    current = _ModelResolver({"default": create_model(protocol='openai', model="test", input_types=["image"])})
+    restored = current.resolve("default")
+    assert restored.contract != stored
+    assert validate_model_input(restored, "image/x-future") is None
 
 
 def test_captured_contract_rejects_sdk_literal_objects() -> None:

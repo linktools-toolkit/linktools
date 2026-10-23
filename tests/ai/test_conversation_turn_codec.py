@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Current conversation envelopes and portable snapshots preserve terminal meaning."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.runtime.state import RuntimeState
 import json
@@ -109,7 +110,7 @@ async def test_snapshot_roundtrips_retained_turn_payloads_after_execution_prune(
     attachment = b"input attachment" * 8192
     _canonical_output(monkeypatch, output)
     storage = _storage(tmp_path, backend)
-    async with Runtime.open(_NAMESPACE, storage=storage, features=_features(), models=_models()) as runtime:
+    async with Runtime.open(_NAMESPACE, storage=storage, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         await session.run(("original input", BinaryContent(attachment, media_type="text/plain")), timeout_seconds=5)

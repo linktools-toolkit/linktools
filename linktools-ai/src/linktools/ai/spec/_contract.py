@@ -338,8 +338,6 @@ class SubagentRef:
         identity = value.get("id")
         description = value.get("description")
         revision = value.get("revision", 1)
-        if description is not None and not isinstance(description, str):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             return cls(
                 "agent",

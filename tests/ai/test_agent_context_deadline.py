@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Public admission deadlines retain their durable scope without hot-path reads."""
+from ._runtime_test_helpers import model_features
 
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
@@ -55,8 +56,8 @@ def test_deadline_is_optional_readonly_and_timezone_aware() -> None:
 async def test_deadline_inherits_across_retry_fork_and_graph_without_worker_reads(monkeypatch) -> None:
     contexts: list[AgentContext[None]] = []
     storage = RuntimeStorage.in_memory()
-    async with Runtime.open("context-deadline", models=RuntimeUsageModels(), storage=storage,
-                            features=_group(contexts)) as runtime:
+    async with Runtime.open("context-deadline", storage=storage,
+                            features=model_features(RuntimeUsageModels(), _group(contexts))) as runtime:
         reads: list[str] = []
         read = runtime._state.execution.budgets.read
 
@@ -110,9 +111,9 @@ async def test_cold_recovery_restores_absolute_deadline_once(tmp_path: Path, mon
     contexts: list[AgentContext[None]] = []
     features = _group(contexts)
     features.capability(CheckpointCapability(), scope="runtime")
-    async with Runtime.open("deadline-recovery", models=RuntimeUsageModels(),
+    async with Runtime.open("deadline-recovery",
                             storage=RuntimeStorage.filesystem(tmp_path),
-                            features=features) as runtime:
+                            features=model_features(RuntimeUsageModels(), features)) as runtime:
         async def interrupted_launch(*args, **kwargs):
             pass
         with monkeypatch.context() as fault:
@@ -121,8 +122,8 @@ async def test_cold_recovery_restores_absolute_deadline_once(tmp_path: Path, mon
         execution_id = run.execution_id
     assert not contexts
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("deadline-recovery", models=RuntimeUsageModels(), storage=storage,
-                            features=features,
+    async with Runtime.open("deadline-recovery", storage=storage,
+                            features=model_features(RuntimeUsageModels(), features),
                             auto_recover=False) as runtime:
         reads: list[str] = []
         read = runtime._state.execution.budgets.read

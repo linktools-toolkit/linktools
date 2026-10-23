@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Runtime storage-operation Metrics integration regressions."""
+from ._runtime_test_helpers import model_features
 
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
@@ -27,27 +28,8 @@ class _ModelBinding:
         return TestModel(custom_output_text="ok")
 
 
-class _Models:
-    def capture(self) -> "_Models":
-        return self
-
-    def resolve(self, route_id: str) -> _ModelBinding:
-        if route_id != "default":
-            raise AssertionError(route_id)
-        return _ModelBinding()
-
-    def restore(
-        self,
-        payload: Mapping[str, JsonValue],
-        *,
-        route_id: str | None = None,
-    ) -> _ModelBinding:
-        if (
-            route_id not in {None, "default"}
-            or dict(payload) != _ModelBinding.contract
-        ):
-            raise AssertionError(payload)
-        return _ModelBinding()
+class _Models(_ModelBinding):
+    pass
 
 
 def _agent_group() -> RuntimeFeatures[object]:
@@ -64,9 +46,9 @@ async def test_runtime_projects_storage_operation_metrics(tmp_path: Path) -> Non
 
     async with Runtime.open(
         "default",
-        metrics=metrics, models=_Models(),  # type: ignore[arg-type]
+        metrics=metrics,   # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=_agent_group(),
+        features=model_features(_Models(), _agent_group()),
     ) as runtime:
         result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED

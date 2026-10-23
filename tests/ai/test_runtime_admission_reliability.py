@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Invalid admission and closed Runtime requests fail before side effects."""
+from ._runtime_test_helpers import model_features
 
 import ast
 import inspect
@@ -39,7 +40,7 @@ async def test_invalid_convenience_keys_never_activate_or_write(
     key: object, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     storage = RuntimeStorage.in_memory()
-    async with Runtime.open("admission-validation", models=RuntimeUsageModels(), storage=storage) as runtime:
+    async with Runtime.open("admission-validation", features=model_features(RuntimeUsageModels()), storage=storage) as runtime:
         agent = runtime.agents.get()
         session = agent.session("session")
         principal = runtime.default_principal
@@ -88,7 +89,7 @@ async def test_invalid_convenience_keys_never_activate_or_write(
 
 @pytest.mark.asyncio
 async def test_omitted_keys_generate_independent_admissions_and_explicit_keys_replay() -> None:
-    async with Runtime.open("generated-keys", models=RuntimeUsageModels(),
+    async with Runtime.open("generated-keys", features=model_features(RuntimeUsageModels()),
                             storage=RuntimeStorage.in_memory()) as runtime:
         agent = runtime.agents.get()
         first = await agent.start("prompt")

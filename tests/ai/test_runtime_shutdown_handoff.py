@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Graceful shutdown preserves checkpointed conversation execution identity."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 import getpass
@@ -68,8 +69,7 @@ async def test_handoff_recovers_same_execution_and_next_session_turn(handoff_sto
         yield "unreachable"
 
     async with Runtime.open("shutdown-handoff", storage=storage(),
-                            models=_Models(FunctionModel(stream_function=blocked)),
-                            features=_group(False)) as owner:
+                            features=model_features(_Models(FunctionModel(stream_function=blocked)), _group(False))) as owner:
         session = await owner.agents.get().create_session("session")
         execution = await session.start("Remember blue", idempotency_key="first")
         await asyncio.wait_for(entered.wait(), 10)
@@ -84,8 +84,7 @@ async def test_handoff_recovers_same_execution_and_next_session_turn(handoff_sto
         yield "blue"
 
     async with Runtime.open("shutdown-handoff", storage=storage(),
-                            models=_Models(FunctionModel(stream_function=answer)),
-                            features=_group(False), auto_recover=False) as successor:
+                            features=model_features(_Models(FunctionModel(stream_function=answer)), _group(False)), auto_recover=False) as successor:
         principal = successor.default_principal
         before = await successor.executions.inspect(execution.execution_id, principal=principal)
         assert before.status is ExecutionStatus.STARTED
@@ -117,8 +116,7 @@ async def test_handoff_requires_checkpoint_capability_without_closing_runtime(tm
         yield "ready"
 
     async with Runtime.open("handoff-required", storage=RuntimeStorage.sqlite(tmp_path / "state.db"),
-                            models=_Models(FunctionModel(stream_function=answer)),
-                            features=_group(True)) as runtime:
+                            features=model_features(_Models(FunctionModel(stream_function=answer)), _group(True))) as runtime:
         with pytest.raises(AIError) as error:
             await runtime.handoff()
         assert error.value.code is ErrorCode.CAPABILITY_REQUIRED_MISSING
@@ -154,7 +152,7 @@ async def test_handoff_settles_tool_effect_once_before_recovery(handoff_storage,
         return group
 
     async with Runtime.open("handoff-tool", storage=handoff_storage(),
-                            models=_TaskTestModels(), features=features()) as owner:
+                            features=model_features(_TaskTestModels(), features())) as owner:
         execution = await owner.agents.get().start("Write once", idempotency_key="write")
         await asyncio.wait_for(entered.wait(), 10)
         handoff = asyncio.create_task(owner.handoff())
@@ -165,7 +163,7 @@ async def test_handoff_settles_tool_effect_once_before_recovery(handoff_storage,
         await asyncio.wait_for(handoff, 10)
         assert effects == ["written"]
     async with Runtime.open("handoff-tool", storage=handoff_storage(),
-                            models=_TaskTestModels(), features=features(), auto_recover=False) as successor:
+                            features=model_features(_TaskTestModels(), features()), auto_recover=False) as successor:
         if unknown:
             view = await successor.executions.inspect(execution.execution_id,
                 principal=successor.default_principal)
@@ -232,8 +230,7 @@ async def test_handoff_waiter_cancellation_keeps_owned_cleanup(tmp_path: Path, m
         yield "answer"
 
     async with Runtime.open("handoff-waiter", storage=RuntimeStorage.sqlite(tmp_path / "waiter.db"),
-                            models=_Models(FunctionModel(stream_function=answer)),
-                            features=_group(False)) as runtime:
+                            features=model_features(_Models(FunctionModel(stream_function=answer)), _group(False))) as runtime:
         waiter = asyncio.create_task(runtime.handoff())
         await asyncio.wait_for(entered.wait(), 5)
         waiter.cancel()
@@ -257,16 +254,16 @@ async def test_handoff_does_not_claim_success_after_default_close(handoff_storag
         yield "unreachable"
 
     models = _Models(FunctionModel(stream_function=blocked))
-    async with Runtime.open("handoff-close", storage=handoff_storage(), models=models,
-                            features=_group(False)) as runtime:
+    async with Runtime.open("handoff-close", storage=handoff_storage(),
+                            features=model_features(models, _group(False))) as runtime:
         execution = await runtime.agents.get().start("Cancel normally", idempotency_key="close")
         await asyncio.wait_for(entered.wait(), 10)
         await runtime.close()
         with pytest.raises(AIError) as error:
             await runtime.handoff()
         assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
-    async with Runtime.open("handoff-close", storage=handoff_storage(), models=models,
-                            features=_group(False), auto_recover=False) as reader:
+    async with Runtime.open("handoff-close", storage=handoff_storage(),
+                            features=model_features(models, _group(False)), auto_recover=False) as reader:
         view = await reader.executions.inspect(execution.execution_id, principal=reader.default_principal)
         assert view.status is ExecutionStatus.CANCELLED
 
@@ -332,7 +329,7 @@ async def test_pending_user_cancel_interrupts_tool_during_handoff(tmp_path: Path
     group.tool(write, effect_policy="non_replay_safe")
     group.agent("default", allow_tools=("write",))
     async with Runtime.open("cancel-handoff", storage=RuntimeStorage.sqlite(tmp_path / "cancel.db"),
-                            models=_TaskTestModels(), features=group) as runtime:
+                            features=model_features(_TaskTestModels(), group)) as runtime:
         execution = await runtime.agents.get().start("Write", idempotency_key="write")
         await asyncio.wait_for(tool_entered.wait(), 10)
         cancellation = asyncio.create_task(execution.cancel(idempotency_key="cancel"))
@@ -344,7 +341,7 @@ async def test_pending_user_cancel_interrupts_tool_during_handoff(tmp_path: Path
         await asyncio.wait_for(cancellation, 10)
         await asyncio.wait_for(handoff, 10)
     async with Runtime.open("cancel-handoff", storage=RuntimeStorage.sqlite(tmp_path / "cancel.db"),
-                            models=_TaskTestModels(), features=group, auto_recover=False) as successor:
+                            features=model_features(_TaskTestModels(), group), auto_recover=False) as successor:
         view = await successor.executions.inspect(execution.execution_id,
             principal=successor.default_principal)
         assert view.status in {ExecutionStatus.CANCELLED, ExecutionStatus.RECOVERY_REQUIRED}
@@ -372,8 +369,7 @@ async def test_handoff_joins_admission_before_relinquishing_storage(tmp_path: Pa
 
     database = tmp_path / "admission.db"
     async with Runtime.open("handoff-admission", storage=RuntimeStorage.sqlite(database),
-                            models=_Models(FunctionModel(stream_function=blocked)),
-                            features=_group(False)) as owner:
+                            features=model_features(_Models(FunctionModel(stream_function=blocked)), _group(False))) as owner:
         start = asyncio.create_task(owner.agents.get().start("admitted", idempotency_key="start"))
         await asyncio.wait_for(admitted.wait(), 5)
         shutdown = asyncio.create_task(owner.handoff())
@@ -385,8 +381,7 @@ async def test_handoff_joins_admission_before_relinquishing_storage(tmp_path: Pa
     async def answer(messages, info):
         yield "recovered"
     async with Runtime.open("handoff-admission", storage=RuntimeStorage.sqlite(database),
-                            models=_Models(FunctionModel(stream_function=answer)),
-                            features=_group(False), auto_recover=False) as successor:
+                            features=model_features(_Models(FunctionModel(stream_function=answer)), _group(False)), auto_recover=False) as successor:
         await successor.executions.recover(execution.execution_id,
             principal=successor.default_principal, idempotency_key="recover-admitted")
         await successor.executions.wait(execution.execution_id,

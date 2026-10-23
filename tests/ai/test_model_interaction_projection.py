@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Contract tests for model interaction projection primitives."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.runtime.state import RuntimeState
 import sqlite3
@@ -67,27 +68,8 @@ class _TextModelBinding:
         return TestModel(custom_output_text="ok")
 
 
-class _TextModels:
-    def capture(self) -> "_TextModels":
-        return self
-
-    def resolve(self, route_id: str) -> _TextModelBinding:
-        if route_id != "default":
-            raise AssertionError(route_id)
-        return _TextModelBinding()
-
-    def restore(
-        self,
-        payload: Mapping[str, JsonValue],
-        *,
-        route_id: str | None = None,
-    ) -> _TextModelBinding:
-        if route_id not in {None, "default"} or dict(payload) != {
-            "provider": "test",
-            "model": "test",
-        }:
-            raise AssertionError("unexpected model snapshot")
-        return _TextModelBinding()
+class _TextModels(_TextModelBinding):
+    pass
 
 
 def _agent_group() -> RuntimeFeatures[object]:
@@ -109,7 +91,7 @@ async def test_session_projections_do_not_copy_previous_response_bodies(
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open(
         "response-growth", storage=RuntimeStorage.sqlite(database),
-        models=_TextModels(), features=features,
+        features=model_features(_TextModels(), features),
     ) as runtime:
         agent = runtime.agents.get("default")
         await agent.create_session("session")
@@ -829,9 +811,8 @@ async def _assert_public_interaction(runtime: Runtime[object]) -> None:
 async def test_execution_model_interactions_are_durable_and_public() -> None:
     async with Runtime.open(
         "default",
-        models=_TextModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=_agent_group(),
+        features=model_features(_TextModels(), _agent_group()),
     ) as runtime:
         await _assert_public_interaction(runtime)
 
@@ -840,9 +821,8 @@ async def test_execution_model_interactions_are_durable_and_public() -> None:
 async def test_execution_model_interactions_support_volatile_memory_state() -> None:
     async with Runtime.open(
         "default",
-        models=_TextModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=_agent_group(),
+        features=model_features(_TextModels(), _agent_group()),
     ) as runtime:
         await _assert_public_interaction(runtime)
 

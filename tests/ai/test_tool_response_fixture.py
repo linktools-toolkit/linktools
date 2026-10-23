@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Offline native MCP catalogs, version binding, and response semantics."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 import copy
@@ -426,8 +427,8 @@ async def test_native_runtime_consumes_fixture_through_durable_mcp_operation(
         group.capability(ToolResponsesCapability(fixture), scope="runtime")
         storage = RuntimeStorage.in_memory()
         async with Runtime.open(
-            "fixture-native-runtime", models=_Models(_UsageFunctionModel(model)),
-            storage=storage, features=group,
+            "fixture-native-runtime",
+            storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), group),
         ) as runtime:
             execution = await runtime.agents.get("default").start("Look up the fixture")
             result = (await execution.wait(timeout_seconds=10)).result

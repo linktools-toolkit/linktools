@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Authoritative case context and durable scoring submission boundaries."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from dataclasses import replace
@@ -47,7 +48,7 @@ async def test_program_scorer_uses_frozen_case_context_for_identical_inputs_and_
     cases = tuple(CaseSpec.task(CaseRef("context", f"case-{index}", 1), input=untrusted,
                                expected="same answer", label_provenance=label)
                   for index, label in enumerate(labels))
-    async with Runtime.open("scoring-context", models=FixtureModels(), context=CONTEXT,
+    async with Runtime.open("scoring-context", features=model_features(FixtureModels()), context=CONTEXT,
                             storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("context", 1), cases),
             principal=PRINCIPAL, idempotency_key="dataset")
@@ -116,7 +117,7 @@ async def test_scoring_intent_replays_original_input_and_rejects_changed_context
                 else RuntimeStorage.sqlite(tmp_path / "state.sqlite"))
 
     initial = storage()
-    async with Runtime.open("scoring-replay", models=FixtureModels(), context=CONTEXT,
+    async with Runtime.open("scoring-replay", features=model_features(FixtureModels()), context=CONTEXT,
                             storage=initial) as runtime:
         engine = runtime.tasks.bind(target, scorer)
         build_graph = runtime.evaluations._scoring_graph
@@ -176,7 +177,7 @@ async def test_scoring_intent_replays_original_input_and_rejects_changed_context
         assert received == [] and target_calls == ["yes"]
 
     reopened = storage()
-    async with Runtime.open("scoring-replay", models=FixtureModels(), context=CONTEXT,
+    async with Runtime.open("scoring-replay", features=model_features(FixtureModels()), context=CONTEXT,
                             storage=reopened) as runtime:
         def reject_rebuild(*args: object, **kwargs: object) -> TaskGraph:
             pytest.fail("an existing scoring intent must replay its saved submission")

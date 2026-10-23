@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Prepared TaskGraph cancellation fences survive admission races and reopen."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.runtime.state import RuntimeState
 import asyncio
@@ -340,7 +341,7 @@ async def test_submission_identity_and_fence_survive_snapshot_restore(
     graph = TaskGraph("trial", (TaskNode("target", task=definition),))
     root = tmp_path / "source"
     async with Runtime.open(
-        "submission-snapshot", models=RuntimeUsageModels(),
+        "submission-snapshot", features=model_features(RuntimeUsageModels()),
         storage=RuntimeStorage.from_root(root),
     ) as runtime:
         engine = runtime.tasks.bind(definition)
@@ -364,7 +365,7 @@ async def test_submission_identity_and_fence_survive_snapshot_restore(
     restored_root = tmp_path / "restored"
     await RuntimeState.restore_snapshot(snapshot, object_store=objects, root=restored_root, limits=limits)
     async with Runtime.open(
-        "submission-snapshot", models=RuntimeUsageModels(),
+        "submission-snapshot", features=model_features(RuntimeUsageModels()),
         storage=RuntimeStorage.from_root(restored_root),
     ) as runtime:
         engine = runtime.tasks.bind(definition)

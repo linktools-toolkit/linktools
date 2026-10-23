@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Provider stream failures retain their cause across SDK task cancellation."""
+from ._runtime_test_helpers import model_features
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -61,8 +62,8 @@ async def test_provider_stream_failure_is_not_wrapper_cancellation(boundary: str
     group.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     async with Runtime.open(
-        "provider-stream-failure", models=_Models(ExitModel(stream_function=stream)),
-        storage=RuntimeStorage.in_memory(), features=group,
+        "provider-stream-failure",
+        storage=RuntimeStorage.in_memory(), features=model_features(_Models(ExitModel(stream_function=stream)), group),
     ) as runtime:
         execution = await runtime.agents.get("default").start("respond")
         result = (await execution.wait(timeout_seconds=10)).result

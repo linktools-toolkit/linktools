@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Run-local transcript identities and terminal boundary facts."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.capability import TraceCapability
@@ -308,9 +309,8 @@ async def test_interrupted_response_preserves_confirmed_native_and_text_part_pos
     group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "partial",
-        models=_Models(Model(unused)),
         storage=RuntimeStorage.in_memory(),
-        features=group,
+        features=model_features(_Models(Model(unused)), group),
     ) as runtime:
         execution = await runtime.agents.get("default").start("prompt")
         selector = None

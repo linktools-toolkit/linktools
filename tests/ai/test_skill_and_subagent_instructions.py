@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Skill discovery and subagent instruction contracts."""
+from linktools.ai.model import create_model
 
 import pytest
 
@@ -16,7 +17,7 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.capability._skill_source import SkillSourceRegistry
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.spec import AgentSpec, AgentSpecCodec, SkillSpec, SubagentRef
 from linktools.ai.storage import StorageOverlay
 
@@ -50,7 +51,7 @@ async def test_group_agent_skill_requirements_survive_capture(
         assert isinstance(captured, AgentSpec)
         assert captured.allow_skills == declared.allow_skills == ("guide",)
         compiler = AgentCompiler(
-            model_resolver=ModelRegistry.openai(model="unused-offline-model").capture(),
+            models={"default": create_model(protocol='openai', model="unused-offline-model")},
             candidates=capture.contributions,
             agents={captured.id: captured},
         )

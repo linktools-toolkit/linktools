@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """End-to-end Session timeline coverage through the public Runtime API."""
+from ._runtime_test_helpers import model_features
 
 from collections.abc import Awaitable, Callable
 from functools import partial
@@ -25,9 +26,8 @@ async def test_in_memory_session_run_restores_timeline() -> None:
 
     async with Runtime.open(
         "default",
-        models=RuntimeUsageModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=application,
+        features=model_features(RuntimeUsageModels(), application),
     ) as runtime:
         session = await runtime.agents.get("default").create_session("session")
         first = (await session.run("hello", timeout_seconds=10)).result
@@ -85,9 +85,8 @@ async def test_session_timeline_fork_reads_match_live_and_reopened_history(
 
     async with Runtime.open(
         "default",
-        models=RuntimeUsageModels(),  # type: ignore[arg-type]
         storage=storage,
-        features=application,
+        features=model_features(RuntimeUsageModels(), application),
     ) as runtime:
         principal = runtime.default_principal
         parent = await runtime.agents.get("default").create_session("parent")

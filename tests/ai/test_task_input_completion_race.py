@@ -9,7 +9,7 @@ import pytest
 
 from linktools.ai.core import ExecutionStatus, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.task import TaskGraph, TaskNode
 
@@ -22,7 +22,7 @@ async def test_deferred_input_replays_execution_committed_before_graph_publicati
 ) -> None:
     storage = (RuntimeStorage.in_memory() if backend == "memory"
                else RuntimeStorage.sqlite(tmp_path / "state.sqlite"))
-    async with Runtime.open("input-race", models=ModelRegistry(), storage=storage) as runtime:
+    async with Runtime.open("input-race", storage=storage) as runtime:
         graph = await runtime.tasks.bind().start(
             TaskGraph("input", (TaskNode.wait("value"),)),
             principal=runtime.default_principal, idempotency_key="start",

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """HTTP body recording is opt-in at capture and remains separate from attempt metadata."""
+from ._runtime_test_helpers import model_features
 
 from pathlib import Path
 
@@ -20,7 +21,7 @@ from linktools.ai.runtime.state._codec import _CURRENT_CODEC, _decode_domain, _e
 from linktools.ai.runtime.state._contracts import ModelClientRequestRef
 from linktools.ai.runtime.state._model_client import prepare_client_requests, resolve_client_requests
 
-from .test_model_client_request_capture import _model, _registry, _response
+from .test_model_client_request_capture import _model, _binding, _response
 from .test_model_client_response_capture import _invoke
 
 
@@ -54,7 +55,7 @@ async def test_disabled_capture_does_not_read_request_body() -> None:
     request = httpx2.Request('POST', 'https://capture.invalid/chat/completions', content=iter([b'body']))
     with ModelClientRequestRecorder() as capture:
         await _http.capture_request(request)
-    assert capture.requests == (ModelClientRequest('openai-chat', None, record_http_bodies=False),)
+    assert capture.requests == (ModelClientRequest('openai', None, record_http_bodies=False),)
     with pytest.raises(httpx2.RequestNotRead):
         _ = request.content
 
@@ -66,7 +67,7 @@ async def test_attempt_policy_and_metadata_roundtrip_without_copying_bodies_to_c
     enabled: bool, domain: RuntimeDomain,
 ) -> None:
     source = ModelClientRequest(
-        'openai-chat', b'request' if enabled else None, record_http_bodies=enabled,
+        'openai', b'request' if enabled else None, record_http_bodies=enabled,
         response=ModelClientResponse(b'response' if enabled else None, 200, 'json', None, enabled),
     )
     refs = await prepare_client_requests((source,), domain)
@@ -98,14 +99,14 @@ def test_trace_policy_is_read_through_native_wrappers_without_defaulting_on() ->
 async def test_runtime_policy_survives_checkpoint_and_cold_trace_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enabled: bool,
 ) -> None:
-    models, _clients = _registry(monkeypatch, _response)
+    models, _clients = _binding(monkeypatch, _response)
     features = RuntimeFeatures('body-policy')
     features.agent('default', model='default')
     features.capability(WrapperCapability(TraceCapability(record_http_bodies=enabled), id='wrapped-trace'))
     features.capability(CheckpointCapability())
     root = tmp_path / 'state'
-    async with Runtime.open('body-policy', models=models, storage=RuntimeStorage.filesystem(root),
-                            features=features) as runtime:
+    async with Runtime.open('body-policy', storage=RuntimeStorage.filesystem(root),
+                            features=model_features(models, features)) as runtime:
         execution = await runtime.agents.get().start('question')
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
         execution_id = execution.execution_id

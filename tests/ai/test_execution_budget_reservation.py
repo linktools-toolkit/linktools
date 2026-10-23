@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Execution reservations publish their budget scope atomically."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.runtime.state import RuntimeState
 import asyncio
@@ -31,7 +32,7 @@ async def test_cancelled_reservation_snapshot_restores_and_replays(
     namespace = "cancelled-budget-reservation"
     limits = SnapshotLimits(max_entries=1000, max_bytes=1024 * 1024)
     objects = InMemoryObjectStore("snapshot")
-    async with Runtime.open(namespace, models=RuntimeUsageModels(), storage=storage) as runtime:
+    async with Runtime.open(namespace, features=model_features(RuntimeUsageModels()), storage=storage) as runtime:
         store = runtime._state.execution.budgets.state_store
         mutate = store.mutate
         committed = asyncio.Event()
@@ -98,7 +99,7 @@ async def test_cancelled_reservation_snapshot_restores_and_replays(
 
     restored = tmp_path / "restored"
     await RuntimeState.restore_snapshot(reference, object_store=objects, root=restored, limits=limits)
-    async with Runtime.open(namespace, models=RuntimeUsageModels(),
+    async with Runtime.open(namespace, features=model_features(RuntimeUsageModels()),
                             storage=RuntimeStorage.from_root(restored)) as runtime:
         run = await runtime.agents.get().start("hello", budget=budget, idempotency_key="cancelled")
         assert run.execution_id == reservation.execution.execution_id
@@ -120,7 +121,7 @@ async def test_failed_reservation_rolls_back_budget_scope(
     storage = (RuntimeStorage.in_memory() if backend == "memory" else
                RuntimeStorage.filesystem(tmp_path / "source") if backend == "filesystem" else
                RuntimeStorage.sqlite(tmp_path / "source.db"))
-    async with Runtime.open("failed-budget-reservation", models=RuntimeUsageModels(), storage=storage) as runtime:
+    async with Runtime.open("failed-budget-reservation", features=model_features(RuntimeUsageModels()), storage=storage) as runtime:
         store = runtime._state.execution.budgets.state_store
         mutate = store.mutate
 

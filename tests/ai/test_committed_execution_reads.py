@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Consumption and next-turn admission bypass unexpired observation records."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from pathlib import Path
@@ -45,8 +46,8 @@ async def test_committed_results_and_next_turn_ignore_remote_observation_cache(
     models = _Models(FunctionModel(stream_function=model))
     owner_storage = RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))
     reader_storage = RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))
-    async with Runtime.open("committed-read", models=models, storage=owner_storage, features=group) as owner, Runtime.open(
-        "committed-read", models=models, storage=reader_storage, features=group,
+    async with Runtime.open("committed-read", storage=owner_storage, features=model_features(models, group)) as owner, Runtime.open(
+        "committed-read", storage=reader_storage, features=model_features(models, group),
     ) as reader:
         principal = owner.default_principal
         await owner.agents.get().create_session("session")
@@ -93,8 +94,8 @@ async def test_terminal_consumption_reuses_confirmed_status_for_handoff(
     group.agent("default", model="default", allow_tools=())
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open(
-        "terminal-consumption", models=_Models(FunctionModel(stream_function=model)),
-        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), features=group,
+        "terminal-consumption",
+        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), features=model_features(_Models(FunctionModel(stream_function=model)), group),
     ) as runtime:
         await runtime.agents.get().create_session("session")
         execution = await runtime.agents.get().session("session").start(

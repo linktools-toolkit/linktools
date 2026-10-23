@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """A terminal transaction between replay reads must not look like corruption."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from dataclasses import replace
@@ -38,8 +39,8 @@ async def test_start_replay_refreshes_only_a_mixed_terminal_view(
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = RuntimeStorage.in_memory()
     async with Runtime.open(
-        "terminal-race", models=_Models(_UsageFunctionModel(model)),
-        storage=storage, features=group,
+        "terminal-race",
+        storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), group),
     ) as runtime:
         agent = runtime.agents.get()
         execution = await agent.start("work", idempotency_key="same")

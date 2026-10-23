@@ -88,12 +88,26 @@ def test_multi_word_secret_keys_are_masked(manager):
     assert "s3cr3t" not in manager.redact("client secret=s3cr3t")
 
 
+@pytest.mark.parametrize("prefix", ["", "prefix_", "context.part-" * 20])
+@pytest.mark.parametrize("key", ["token", "PassWord", "api key", "private-key", "ſecret"])
+@pytest.mark.parametrize("delimiter", [" = ", ": "])
+def test_redaction_preserves_prefix_and_key(manager, prefix, key, delimiter):
+    assert manager.redact(prefix + key + delimiter + "sensitive value\nnext line") == (
+        prefix + key + delimiter + "***\nnext line"
+    )
+
+
+def test_redaction_uses_first_sensitive_value_delimiter(manager):
+    assert manager.redact("token=first password=second") == "token=***"
+    assert manager.redact("token-password=second") == "token-password=***"
+
+
 def test_no_redos_on_long_input(manager):
     import time as _time
     start = _time.monotonic()
-    manager.redact("a" * 100000)
+    assert manager.redact("a" * 100000) == "a" * 100000
     elapsed = _time.monotonic() - start
-    # Bounded prefix keeps this linear; well under a second.
+    # Match sensitive keys directly without retrying arbitrary prefixes.
     assert elapsed < 1.0, "redact took %.2fs (possible ReDoS)" % elapsed
 
 

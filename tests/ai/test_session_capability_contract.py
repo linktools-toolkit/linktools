@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Default management owners remain independent of retained conversation."""
+from ._runtime_test_helpers import model_features
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
@@ -33,7 +34,7 @@ def _models():
 async def test_default_session_owner_and_explicit_replacement_work_without_conversation(tmp_path, explicit):
     declarations = (SessionCapability(), ExecutionCapability()) if explicit else ()
     async with Runtime.open('owner-contract', storage=RuntimeStorage.sqlite(tmp_path / 'state.db'),
-                            features=_features(*declarations), models=_models()) as runtime:
+                            features=model_features(_models(), _features(*declarations))) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question')
         result = (await execution.wait(timeout_seconds=5)).result
@@ -53,7 +54,7 @@ async def test_disabled_session_does_not_disable_independent_execution_or_cold_r
     models = _Models(_UsageFunctionModel(model))
     path = tmp_path / 'state.db'
     async with Runtime.open('owner-contract', storage=RuntimeStorage.sqlite(path),
-                            features=features, models=models) as runtime:
+                            features=model_features(models, features)) as runtime:
         agent = runtime.agents.get()
         with pytest.raises(AIError) as disabled:
             await agent.create_session('session')
@@ -67,7 +68,7 @@ async def test_disabled_session_does_not_disable_independent_execution_or_cold_r
         assert result.usage.model_requests > 0
         execution_id = execution.execution_id
     async with Runtime.open('owner-contract', storage=RuntimeStorage.sqlite(path),
-                            features=features, models=models) as runtime:
+                            features=model_features(models, features)) as runtime:
         restored = await runtime.executions.result(execution_id, principal=runtime.default_principal)
         assert restored.output == result.output and restored.usage == result.usage
         same = await runtime.agents.get().start('question', idempotency_key='request')
@@ -83,15 +84,16 @@ async def test_same_captured_declarations_bind_two_runtimes_without_owner_leakag
     session_policy = SessionCapability(enabled=False)
     execution_policy = ExecutionCapability(commit=CommitPolicy.sync())
     features = _features(session_policy, execution_policy)
+    models = _models()
+    features.model("default", models)
     capture = await features.capture()
     features.capability(TraceCapability(), scope='runtime')
-    models = _models()
     first_storage = RuntimeStorage.sqlite(tmp_path / 'first.db')
     second_storage = RuntimeStorage.sqlite(tmp_path / 'second.db')
     async with Runtime.open('owner-contract', storage=first_storage,
-                            features=capture, models=models) as first, Runtime.open(
+                            features=capture) as first, Runtime.open(
             'owner-contract', storage=second_storage,
-            features=capture, models=models) as second:
+            features=capture) as second:
         for runtime in (first, second):
             with pytest.raises(AIError) as disabled:
                 await runtime.agents.get().create_session('session')
@@ -106,7 +108,7 @@ async def test_same_captured_declarations_bind_two_runtimes_without_owner_leakag
     assert session_policy.enabled is False
     assert execution_policy.commit == CommitPolicy.sync()
     async with Runtime.open('owner-contract', storage=RuntimeStorage.sqlite(tmp_path / 'default.db'),
-                            features=_features(), models=models) as default:
+                            features=model_features(models, _features())) as default:
         session = await default.agents.get().create_session('session')
         assert (await default.sessions.get("session", principal=default.default_principal)).session_id == 'session'
 
@@ -115,10 +117,10 @@ async def test_same_captured_declarations_bind_two_runtimes_without_owner_leakag
 async def test_disabling_session_owner_blocks_existing_session_read_and_resume(tmp_path):
     path = tmp_path / 'state.db'
     async with Runtime.open('owner-contract', storage=RuntimeStorage.sqlite(path),
-                            features=_features(), models=_models()) as runtime:
+                            features=model_features(_models(), _features())) as runtime:
         await runtime.agents.get().create_session('existing')
     async with Runtime.open('owner-contract', storage=RuntimeStorage.sqlite(path),
-                            features=_features(SessionCapability(enabled=False)), models=_models()) as runtime:
+                            features=model_features(_models(), _features(SessionCapability(enabled=False)))) as runtime:
         with pytest.raises(AIError) as unavailable:
             await runtime.sessions.get('existing', principal=runtime.default_principal)
         assert unavailable.value.code is ErrorCode.CAPABILITY_REQUIRED_MISSING

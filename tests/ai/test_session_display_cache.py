@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Opt-in whole display snapshots retain fresh authority and bounded staleness."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.runtime.state import RuntimeState
 import asyncio
@@ -819,7 +820,7 @@ async def test_runtime_factory_borrows_display_cache_only_for_durable_domains(tm
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("agent", model="default", allow_tools=())
     async with Runtime.open(
-        "display", storage=storage, models=_Models(TestModel()), features=group,
+        "display", storage=storage, features=model_features(_Models(TestModel()), group),
         context=RuntimeContext(None, tenant_id="tenant"),
     ) as runtime:
         await runtime._state.conversation.sessions.create(_session())
@@ -927,7 +928,7 @@ async def test_runtime_close_drains_display_io_after_close_waiter_cancellation(t
         finally:
             exited.set()
     async with Runtime.open(
-        "display", storage=storage, models=_Models(TestModel()), features=group,
+        "display", storage=storage, features=model_features(_Models(TestModel()), group),
         context=RuntimeContext(None, tenant_id="tenant"),
     ) as runtime:
         await runtime._state.conversation.sessions.create(_session())

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Clean graph replay strips historical context from unstarted captured inputs."""
+from ._runtime_test_helpers import model_features
 
 from ._runtime_test_helpers import workspace_features
 
@@ -56,9 +57,9 @@ async def test_clean_unstarted_graph_preserves_captured_input_semantics(
             raise AIError(ErrorCode.TASK_NODE_FAILED)
         return "ready"
 
-    async with Runtime.open("clean-input", models=_NoToolsModels(),
+    async with Runtime.open("clean-input",
                             storage=RuntimeStorage.filesystem(tmp_path / "state"),
-                            features=group) as runtime:
+                            features=model_features(_NoToolsModels(), group)) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         agent_task = runtime.tasks.from_agent("clean.agent", runtime.agents.get(),
             build_input=project if task_mode == "projected" else None)

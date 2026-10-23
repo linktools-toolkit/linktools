@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Anthropic Messages model assembly."""
 
-from collections.abc import Mapping
 from types import TracebackType
 
 try:
@@ -50,10 +49,10 @@ class _AnthropicModelBinding(_ProviderModelBinding):
     __slots__ = ()
     _provider_type = AnthropicProvider
     _profile_type = AnthropicModelProfile
-    api = "anthropic-messages"
+    api = "anthropic"
     _provider = "anthropic"
 
-    def _build_model(self, connection: Mapping[str, object], settings: ModelSettings) -> Model:
-        provider = _CapturedAnthropicProvider(base_url=connection["base_url"], api_key=connection["api_key"])
+    def _build_model(self, settings: ModelSettings) -> Model:
+        provider = _CapturedAnthropicProvider(base_url=self.base_url, api_key=self.api_key)
         return AnthropicModel(self.model, provider=provider, settings=settings or None,
                               profile=self._sdk_profile())

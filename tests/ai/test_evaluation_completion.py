@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Evaluation completion preserves execution outcomes and graph recovery independently."""
+from ._runtime_test_helpers import model_features
 
 from dataclasses import replace
 from pathlib import Path
@@ -25,7 +26,7 @@ async def test_target_graph_recovery_does_not_hide_successful_execution(
 ) -> None:
     target = Task("completion.target", echo, effect_policy="none")
     scorer = Task("completion.score", exact, effect_policy="none")
-    async with Runtime.open("completion", models=FixtureModels(),
+    async with Runtime.open("completion", features=model_features(FixtureModels()),
                             storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("completion", 1), (
             CaseSpec.task(CaseRef("completion", "one", 1), input={"answer": "yes"}, expected="yes"),

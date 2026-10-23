@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Consumed attachment markers retain verified, portable request metadata."""
+from linktools.ai.model import create_model
 
 import hashlib
 import json
@@ -23,7 +24,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import ModelRequestParameters
 
-from linktools.ai.model import ModelRegistry, _openai
+from linktools.ai.model import _openai
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._attachment import (
     binary_attachment_text,
@@ -337,10 +338,10 @@ async def test_openai_requests_keep_unified_metadata_and_drop_only_consumed_byte
         return DefaultAsyncHttpxClient(transport=httpx2.MockTransport(respond), **kwargs)
 
     monkeypatch.setattr(_openai, "DefaultAsyncHttpxClient", client)
-    binding = ModelRegistry.openai(
+    binding = create_model(protocol='openai',
         model="gpt-file-test", input_types=("mime:image/png",),
         api_key="test-key", base_url="https://file.invalid/v1", max_retries=0,
-    ).capture().resolve("default")
+    )
     request = _bound_request(("evidence.png",))
     returned = request.parts[0].content
     returned["texts"] = [{"path": "note.txt", "input_index": 0, "content": "kept text"}]

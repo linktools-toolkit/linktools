@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Evaluation preserves historical bindings and rejects changed source contracts."""
+from ._runtime_test_helpers import model_features
 
 from pathlib import Path
 
@@ -28,8 +29,8 @@ async def test_historical_agent_capture_restores_original_structured_output_bind
     group.agent("default", model="default", system_prompt="Preserve the original behavior.",
                 allow_tools=(), allow_skills=(), allow_subagents=())
     scorer = Task("consumer.historical-score", exact, effect_policy="none")
-    async with Runtime.open("historical-consumers", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-                            context=CONTEXT, features=group) as runtime:
+    async with Runtime.open("historical-consumers", storage=RuntimeStorage.filesystem(tmp_path),
+                            context=CONTEXT, features=model_features(models, group)) as runtime:
         source = await runtime.agents.get().start("the original question", output=ScoreBundle,
             principal=PRINCIPAL, idempotency_key="historical-source")
         source_result = (await source.wait(timeout_seconds=10)).result
@@ -72,7 +73,7 @@ async def test_reconcile_rejects_same_revision_task_contract_drift_before_rerunn
     original = Task("consumer.named", target, effect_policy="none")
     changed = Task("consumer.named", target, effect_policy="none", cancel=cancel)
     scorer = Task("consumer.named-score", exact, effect_policy="none")
-    async with Runtime.open("drift-consumers", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
+    async with Runtime.open("drift-consumers", features=model_features(FixtureModels()), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("drift", 1), cases=(
             CaseSpec.task(CaseRef("drift", "one", 1), input={"answer": "yes"}, expected="yes"),
         )), principal=PRINCIPAL, idempotency_key="publish-drift")
@@ -93,7 +94,7 @@ async def test_reconcile_rejects_same_revision_task_contract_drift_before_rerunn
 async def test_strict_comparison_cannot_mix_datasets_even_when_both_scores_pass(tmp_path: Path) -> None:
     target = Task("consumer.dataset-target", echo, effect_policy="none")
     scorer = Task("consumer.dataset-score", exact, effect_policy="none")
-    async with Runtime.open("different-dataset-consumers", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
+    async with Runtime.open("different-dataset-consumers", features=model_features(FixtureModels()), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(target, scorer)
         runs = []
         for name in ("before", "after"):
@@ -131,7 +132,7 @@ async def test_two_graph_cases_keep_frozen_or_rerun_dependency_values_separate(r
     producer = Task("consumer.captured-source", source, effect_policy="none")
     consumer = Task("consumer.captured-answer", answer, effect_policy="none")
     scorer = Task("consumer.captured-graph-score", score, effect_policy="none")
-    async with Runtime.open("captured-graph-consumers", models=FixtureModels(), storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
+    async with Runtime.open("captured-graph-consumers", features=model_features(FixtureModels()), storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(producer, consumer, scorer)
         cases = []
         for name in ("first", "second"):
@@ -196,7 +197,7 @@ async def test_rerun_dependency_failure_never_falls_back_to_captured_success(tmp
     producer = Task("consumer.rerun-failure", source, effect_policy="none")
     consumer = Task("consumer.rerun-observer", answer, effect_policy="none")
     scorer = Task("consumer.rerun-score", score, effect_policy="none")
-    async with Runtime.open("rerun-failure-consumers", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
+    async with Runtime.open("rerun-failure-consumers", features=model_features(FixtureModels()), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(producer, consumer, scorer)
         original = await engine.start(TaskGraph("successful-source", nodes=(
             TaskNode("A", task=producer, input={"fail": False}),

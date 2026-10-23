@@ -15,7 +15,7 @@ from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, DimensionContract,
     EvaluationPolicy, EvaluationSpec, ScorerSpec, StartEvaluationRequest,
 )
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeStorage
 from linktools.ai.task import Task, TaskGraphSubmission
 
@@ -46,7 +46,7 @@ async def test_cancelled_preparation_releases_payload_and_survives_reopen(
     owner = service_principal("tenant", "owner")
     tasks = (Task("target", target, effect_policy="none"), Task("score", score, effect_policy="none"))
     storage = RuntimeStorage.in_memory() if backend == "memory" else RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("preparation", models=ModelRegistry(), storage=storage,
+    async with Runtime.open("preparation", storage=storage,
                             context=RuntimeContext(None, tenant_id="tenant")) as runtime:
         engine = runtime.tasks.bind(*tasks)
         entered, release = asyncio.Event(), asyncio.Event()
@@ -88,7 +88,7 @@ async def test_cancelled_preparation_releases_payload_and_survives_reopen(
         assert not (await engine.start_prepared(saved[0])).admitted
     if backend == "filesystem":
         reopened = RuntimeStorage.filesystem(tmp_path)
-        async with Runtime.open("preparation", models=ModelRegistry(), storage=reopened,
+        async with Runtime.open("preparation", storage=reopened,
                                 context=RuntimeContext(None, tenant_id="tenant")) as reader:
             assert await reader._state.task.admissions.submission_status(saved[0].ref) == "cancelled"
 
@@ -107,7 +107,7 @@ async def test_purge_discovers_capture_written_before_offline_quiescence(tmp_pat
     owner = service_principal("tenant", "owner")
     tasks = (Task("target", target, effect_policy="none"), Task("score", score, effect_policy="none"))
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("preparation", models=ModelRegistry(), storage=storage,
+    async with Runtime.open("preparation", storage=storage,
                             context=RuntimeContext(None, tenant_id="tenant")) as runtime:
         engine = runtime.tasks.bind(*tasks)
         entered, release = asyncio.Event(), asyncio.Event()
@@ -169,7 +169,7 @@ async def test_interrupted_preparation_has_recoverable_owner(
     owner = service_principal("tenant", "owner")
     tasks = (Task("target", target, effect_policy="none"), Task("score", score, effect_policy="none"))
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("preparation", models=ModelRegistry(), storage=storage,
+    async with Runtime.open("preparation", storage=storage,
                             context=RuntimeContext(None, tenant_id="tenant")) as runtime:
         engine = runtime.tasks.bind(*tasks)
         entered = asyncio.Event()
@@ -199,7 +199,7 @@ async def test_interrupted_preparation_has_recoverable_owner(
         experiment_id = run.experiment_id
         assert calls == []
     reopened = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("preparation", models=ModelRegistry(), storage=reopened,
+    async with Runtime.open("preparation", storage=reopened,
                             context=RuntimeContext(None, tenant_id="tenant")) as runtime:
         run = await runtime.evaluations.get(experiment_id, principal=owner)
         if action == "resume":

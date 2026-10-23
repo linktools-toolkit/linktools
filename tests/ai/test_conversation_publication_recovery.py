@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Retained conversation publication recovery boundaries."""
+from ._runtime_test_helpers import model_features
 
 from dataclasses import replace
 
@@ -30,7 +31,7 @@ async def test_unknown_release_must_not_report_success_without_envelope(
     )
     try:
         async with Runtime.open(
-            _NAMESPACE, storage=storage, features=_features(), models=_models()
+            _NAMESPACE, storage=storage, features=model_features(_models(), _features())
         ) as runtime:
             session = await runtime.agents.get().create_session("s")
             if prior_turn:
@@ -99,7 +100,7 @@ async def test_unknown_release_must_not_report_success_without_envelope(
         )
     )
     async with Runtime.open(
-        _NAMESPACE, storage=storage, features=_features(), models=_models()
+        _NAMESPACE, storage=storage, features=model_features(_models(), _features())
     ) as runtime:
         recovered_commits = await runtime._state.conversation.sessions.list_timeline_commits(
             "s", tenant_id=principal.tenant_id, start_turn_seq=seq, end_turn_seq=seq + 1
@@ -126,7 +127,7 @@ async def test_rejected_admitted_start_retains_input(tmp_path, monkeypatch):
         )
     )
     async with Runtime.open(
-        _NAMESPACE, storage=storage, features=_features(), models=_models()
+        _NAMESPACE, storage=storage, features=model_features(_models(), _features())
     ) as runtime:
         session = await runtime.agents.get().create_session("s")
 
@@ -168,8 +169,7 @@ async def test_closed_result_survives_receipt_corruption_but_timeline_rejects_it
     async with Runtime.open(
         _NAMESPACE,
         storage=storage,
-        features=_features(),
-        models=_models(),
+        features=model_features(_models(), _features()),
     ) as runtime:
         session = await runtime.agents.get().create_session("s")
         execution = await session.start("original input")
@@ -227,7 +227,7 @@ async def test_completed_receipt_old_handoff_after_later_turn(tmp_path, monkeypa
         return await old_complete(self, checkpoint)
 
     async with Runtime.open(
-        _NAMESPACE, storage=storage, features=_features(), models=_models()
+        _NAMESPACE, storage=storage, features=model_features(_models(), _features())
     ) as runtime:
         session = await runtime.agents.get().create_session("s")
         monkeypatch.setattr(LocalExecutionBackend, "_complete_handoff", fail_first)
@@ -241,8 +241,7 @@ async def test_completed_receipt_old_handoff_after_later_turn(tmp_path, monkeypa
     async with Runtime.open(
         _NAMESPACE,
         storage=reopened,
-        features=_features(),
-        models=_models(),
+        features=model_features(_models(), _features()),
     ) as runtime:
         page = await runtime.sessions.timeline("s", principal=principal)
         assert len(page.items) == 2

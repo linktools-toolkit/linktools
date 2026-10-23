@@ -68,7 +68,7 @@ class OutputBinding:
     def validate_payload(self, value: JsonValue) -> None:
         """Validate one final JSON payload against this durable output contract."""
         try:
-            _schema_validator(self.schema_definition).validate(value)
+            Draft202012Validator(self.schema_definition).validate(value)
         except JsonSchemaValidationError as error:
             diagnostic = _OutputSchemaDiagnostic.from_schema_error(
                 error, _declared_property_names(self.schema_definition)
@@ -297,13 +297,6 @@ def _declared_property_names(schema: Mapping[str, JsonValue]) -> frozenset[str]:
             child = node.get(keyword)
             pending.extend(child if isinstance(child, list) else [child])
     return frozenset(names)
-
-
-def _schema_validator(
-    schema: Mapping[str, JsonValue],
-) -> Draft202012Validator:
-    _validate_schema_definition(schema)
-    return Draft202012Validator(dict(schema))
 
 
 def _validate_schema_definition(schema: Mapping[str, JsonValue]) -> None:

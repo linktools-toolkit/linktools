@@ -47,7 +47,7 @@ from ..core import (
     validate_resource_id,
 )
 from ..errors import AIError, ErrorCode
-from ..model import ModelRegistry
+
 
 if TYPE_CHECKING:
     from ._evaluation import RuntimeEvaluations
@@ -390,7 +390,6 @@ class Runtime(Generic[AppT]):
         cls,
         namespace: str,
         *,
-        models: ModelRegistry,
         storage: RuntimeStorage,
         metrics: Metrics | None = None,
         context: None = None,
@@ -404,7 +403,6 @@ class Runtime(Generic[AppT]):
         cls,
         namespace: str,
         *,
-        models: ModelRegistry,
         storage: RuntimeStorage,
         metrics: Metrics | None = None,
         context: RuntimeContext[AppT],
@@ -417,7 +415,6 @@ class Runtime(Generic[AppT]):
         cls,
         namespace: str,
         *,
-        models: ModelRegistry,
         storage: RuntimeStorage,
         metrics: Metrics | None = None,
         context: "RuntimeContext[object] | None" = None,
@@ -450,7 +447,6 @@ class Runtime(Generic[AppT]):
         return _open_runtime(
             resolved_namespace,
             context=root_context,
-            models=models,
             storage=storage,
             metrics=metrics,
             features=features,
@@ -735,9 +731,8 @@ class Runtime(Generic[AppT]):
         )
         if session_id is not None and (not isinstance(session_id, str) or not session_id.strip()):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        binding = await self._resolve_agent_binding(
-            self._compiler.bind(compiled_agent, output=output)
-        )
+        binding = self._compiler.bind(compiled_agent, output=output)
+        binding = await self._resolve_agent_binding(binding)
         if session_id is None:
             handle = await self._execution_service.start(
                 binding.binding_digest,
@@ -746,6 +741,7 @@ class Runtime(Generic[AppT]):
                 budget_scope_id=budget_scope_id,
                 requires_task_invocation_capture=requires_task_invocation_capture,
                 binding_contract=binding.binding_contract,
+                resolved_binding=binding,
             )
         else:
             await self._ensure_session(compiled_agent, session_id, resolved_principal)
@@ -767,6 +763,7 @@ class Runtime(Generic[AppT]):
                 session_id,
                 resume_request,
                 binding_contract=binding.binding_contract,
+                resolved_binding=binding,
                 dependency_hold_id=dependency_hold_id,
                 budget_scope_id=budget_scope_id,
                 requires_task_invocation_capture=requires_task_invocation_capture,
@@ -1484,7 +1481,6 @@ async def _open_runtime(
     namespace: str,
     *,
     context: RuntimeContext[object],
-    models: ModelRegistry,
     storage: RuntimeStorage,
     features: "RuntimeFeatures[object] | RuntimeFeaturesCapture[object] | None",
     metrics: Metrics | None = None,
@@ -1496,7 +1492,6 @@ async def _open_runtime(
         namespace,
         app=context.app,
         tenant_id=context.tenant_id,
-        models=models,
         storage=storage,
         metrics=metrics,
         features=features,

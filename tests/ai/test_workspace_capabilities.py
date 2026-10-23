@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """Workspace capability projection and materialization contracts."""
+from linktools.ai.model import create_model
 
 from ._runtime_test_helpers import workspace_features
 
@@ -20,7 +21,7 @@ from linktools.ai.capability import (
 )
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
+
 from linktools.ai.spec import (
     AgentSpec,
     MCPServerSpec,
@@ -52,7 +53,6 @@ def _workspace_tool_contributions(workspace: Workspace):
         item for item in workspace_features("workspace", workspace=workspace)._contributions
         if item.kind == "tool"
     )
-
 
 
 class _RecordingSession:
@@ -286,7 +286,7 @@ async def test_workspace_selector_expands_registered_tool_declarations(
         allow_capabilities=(),
     )
     compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+        models={"default": create_model(protocol='openai', model="gpt-test")},
         candidates=snapshot.contributions,
         agents={"agent": spec},
     )
@@ -313,7 +313,7 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
     for selectors in (("new_tool",), ("*", "new_tool")):
         spec = AgentSpec("agent", allow_tools=selectors)
         compiler = AgentCompiler(
-            model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+            models={"default": create_model(protocol='openai', model="gpt-test")},
             candidates=snapshot.contributions,
             agents={"agent": spec},
         )
@@ -331,7 +331,7 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
         }
         spec = AgentSpec("agent", **kwargs)
         compiler = AgentCompiler(
-            model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+            models={"default": create_model(protocol='openai', model="gpt-test")},
             candidates=(),
             agents={"agent": spec},
         )
@@ -341,7 +341,7 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
 
     empty = AgentSpec("agent", allow_tools=())
     empty_compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+        models={"default": create_model(protocol='openai', model="gpt-test")},
         candidates=(),
         agents={"agent": empty},
     )
@@ -359,7 +359,7 @@ def test_global_tool_wildcard_preserves_exact_mcp_requirement() -> None:
         allow_capabilities=(),
     )
     compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+        models={"default": create_model(protocol='openai', model="gpt-test")},
         candidates=(CapabilityContribution.from_declaration(server),),
         agents={"agent": spec},
     )

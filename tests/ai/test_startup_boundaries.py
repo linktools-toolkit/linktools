@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """First attempts claim authority only after prepared input is durable."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 from pathlib import Path
@@ -31,7 +32,7 @@ async def test_first_provider_has_three_metadata_commits_and_original_authority(
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    async with Runtime.open('startup-boundaries', storage=state, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
+    async with Runtime.open('startup-boundaries', storage=state, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         original = SqlStorageContext.run_mutation
         commits = []
@@ -81,7 +82,7 @@ async def test_startup_unknown_commit_never_repeats_provider(
     state = (RuntimeStorage.in_memory() if backend == 'memory' else
              RuntimeStorage.filesystem(tmp_path / 'state') if backend == 'filesystem' else
              RuntimeStorage.sqlite(tmp_path / 'state.db'))
-    async with Runtime.open('startup-ack', storage=state, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
+    async with Runtime.open('startup-ack', storage=state, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         group_type = type(runtime._state.execution.executions.state_store.storage_group)
         original = group_type.mutate
@@ -130,8 +131,8 @@ async def test_two_runtimes_share_one_first_attempt_after_parallel_preparation(
     models = _Models(_UsageFunctionModel(model))
     first_state = RuntimeStorage.sqlite(tmp_path / 'state.db')
     second_state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    async with Runtime.open('startup-race', storage=first_state, models=models, features=group) as first, Runtime.open(
-        'startup-race', storage=second_state, models=models, features=group
+    async with Runtime.open('startup-race', storage=first_state, features=model_features(models, group)) as first, Runtime.open(
+        'startup-race', storage=second_state, features=model_features(models, group)
     ) as second:
         await first.agents.get().create_session('session')
         original = ExecutionContextArchive.prepare
@@ -173,8 +174,8 @@ async def test_busy_admission_keeps_rejected_key_after_owner_finishes(tmp_path: 
     models = _Models(_UsageFunctionModel(model))
     first_state = RuntimeStorage.sqlite(tmp_path / 'state.db')
     second_state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    async with Runtime.open('startup-busy', storage=first_state, models=models, features=group) as first, Runtime.open(
-        'startup-busy', storage=second_state, models=models, features=group
+    async with Runtime.open('startup-busy', storage=first_state, features=model_features(models, group)) as first, Runtime.open(
+        'startup-busy', storage=second_state, features=model_features(models, group)
     ) as second:
         await first.agents.get().create_session('session')
         one = await first.agents.get().session('session').start('question', idempotency_key='owner')
@@ -209,7 +210,7 @@ async def test_cancel_during_context_preparation_never_calls_provider(
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    async with Runtime.open('startup-cancel', storage=state, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
+    async with Runtime.open('startup-cancel', storage=state, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         async def prepare(archive, context, **kwargs):
             preparing.set()
@@ -244,7 +245,7 @@ async def test_preparation_failure_stays_unclaimed_and_can_be_explicitly_cancell
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    async with Runtime.open('startup-preparation-failure', storage=state, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
+    async with Runtime.open('startup-preparation-failure', storage=state, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session',
             metadata={'large': 'context' * 10_000} if fault == 'object' else None)
         observed = []
@@ -290,8 +291,8 @@ async def test_remote_cancel_during_preparation_settles_without_provider(
     models = _Models(_UsageFunctionModel(model))
     first_state = RuntimeStorage.sqlite(tmp_path / 'state.db')
     second_state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    async with Runtime.open('startup-remote-cancel', storage=first_state, models=models, features=group) as first, Runtime.open(
-        'startup-remote-cancel', storage=second_state, models=models, features=group
+    async with Runtime.open('startup-remote-cancel', storage=first_state, features=model_features(models, group)) as first, Runtime.open(
+        'startup-remote-cancel', storage=second_state, features=model_features(models, group)
     ) as second:
         await first.agents.get().create_session('session')
         original = ExecutionContextArchive.prepare
@@ -408,7 +409,7 @@ async def test_deadline_expires_during_preparation_without_dispatch(
         return reference
     monkeypatch.setattr('linktools.ai.runtime.state._budget.datetime', BudgetClock)
     monkeypatch.setattr(ExecutionContextArchive, 'prepare', prepare)
-    async with Runtime.open('startup-budget-review', storage=state, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
+    async with Runtime.open('startup-budget-review', storage=state, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question', idempotency_key='key', budget=RunBudget(deadline_at=now + timedelta(seconds=30)))
         await asyncio.wait_for(preparing.wait(), 5)
@@ -442,7 +443,7 @@ async def test_admission_readback_rejects_real_session_partial(
     capabilities.capability(ExecutionCapability(retain_history=True), scope="runtime")
     capabilities.agent('default', model='default', allow_tools=())
     state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    async with Runtime.open('partial-review', storage=state, models=_Models(_UsageFunctionModel(model)), features=capabilities) as runtime:
+    async with Runtime.open('partial-review', storage=state, features=model_features(_Models(_UsageFunctionModel(model)), capabilities)) as runtime:
         session = await runtime.agents.get().create_session('session')
         group = runtime._state.execution.executions.state_store.storage_group
         repository = runtime._state.conversation.sessions

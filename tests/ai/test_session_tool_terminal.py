@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Session terminal handoff across tool-using turns."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.runtime.state import RuntimeState
 import asyncio
@@ -111,24 +112,8 @@ class _RecoveryToolModelBinding(_ToolModelBinding):
         return _RecoveryTestModel()
 
 
-class _RecoveryToolModels(_ToolModels):
-    def resolve(self, route_id: str) -> _RecoveryToolModelBinding:
-        if route_id != "default":
-            raise AssertionError(route_id)
-        return _RecoveryToolModelBinding()
-
-    def restore(
-        self,
-        payload: Mapping[str, JsonValue],
-        *,
-        route_id: str | None = None,
-    ) -> _RecoveryToolModelBinding:
-        if (
-            route_id not in {None, "default"}
-            or dict(payload) != _ToolModelBinding.contract
-        ):
-            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
-        return _RecoveryToolModelBinding()
+class _RecoveryToolModels(_RecoveryToolModelBinding):
+    pass
 
 
 async def _state(
@@ -165,9 +150,8 @@ async def test_session_tool_turn_commits_terminal_and_history(
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-tool-terminal",
-            models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            features=application,
+            features=model_features(_ToolModels(), application),
         ) as runtime:
             await runtime.agents.get("default").create_session("session")
             session = runtime.agents.get("default").session("session")
@@ -325,9 +309,8 @@ async def test_rejected_session_start_cleans_only_its_admission(
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-admission-cleanup",
-            models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            features=application,
+            features=model_features(_ToolModels(), application),
         ) as runtime:
             try:
                 await runtime.agents.get("default").create_session("session")
@@ -470,9 +453,8 @@ async def test_split_start_cleanup_failure_remains_recoverable_after_restart(
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "start-cleanup-restart",
-            models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            features=application,
+            features=model_features(_ToolModels(), application),
         ) as runtime:
             original_mutate = runtime._state.conversation.sessions.state_store.mutate
 
@@ -557,9 +539,8 @@ async def test_split_start_cleanup_failure_remains_recoverable_after_restart(
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "start-cleanup-restart",
-            models=_ToolModels(),  # type: ignore[arg-type]
             storage=reopened,
-            features=application,
+            features=model_features(_ToolModels(), application),
         ) as runtime:
             checkpoint = await runtime._state.recovery.checkpoints.get(
                 execution_id,
@@ -611,9 +592,8 @@ async def test_session_start_cancel_before_worker_run_commits_cancelled_terminal
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-start-cancel-before-run",
-            models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            features=application,
+            features=model_features(_ToolModels(), application),
         ) as runtime:
             await runtime.agents.get("default").create_session("session")
             session = runtime.agents.get("default").session("session")
@@ -730,9 +710,8 @@ async def test_pending_start_cancel_commits_terminal_before_admission(
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             f"pending-start-cancel-{storage_mode}",
-            models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            features=application,
+            features=model_features(_ToolModels(), application),
         ) as runtime:
             await runtime.agents.get("default").create_session("session")
             session = runtime.agents.get("default").session("session")
@@ -821,9 +800,8 @@ async def test_cancel_during_unknown_tool_effect_preserves_recovery_and_cancel_i
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "cancel-unknown-tool-effect",
-            models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            features=application,
+            features=model_features(_ToolModels(), application),
         ) as runtime:
             await runtime.agents.get("default").create_session("session")
             session = runtime.agents.get("default").session("session")
@@ -924,9 +902,8 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "cancel-intent-readback",
-            models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            features=application,
+            features=model_features(_ToolModels(), application),
         ) as runtime:
             await runtime.agents.get("default").create_session("session")
             execution = await runtime.agents.get("default").session("session").start(
@@ -1226,9 +1203,8 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-tool-recovery-resolution",
-            models=_RecoveryToolModels(),  # type: ignore[arg-type]
             storage=state,
-            features=application,
+            features=model_features(_RecoveryToolModels(), application),
         ) as runtime:
             await runtime.agents.get("default").create_session("session")
             execution = await runtime.agents.get("default").session("session").start(
@@ -1296,9 +1272,8 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
         reopened_application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-tool-recovery-resolution",
-            models=_RecoveryToolModels(),  # type: ignore[arg-type]
             storage=state,
-            features=reopened_application,
+            features=model_features(_RecoveryToolModels(), reopened_application),
         ) as runtime:
             execution = await runtime.executions.get(execution_id)
 
@@ -1398,9 +1373,8 @@ async def test_no_worker_cancel_intent_survives_replay_and_recovery(
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "recovery-no-worker-cancel",
-            models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            features=application,
+            features=model_features(_ToolModels(), application),
         ) as runtime:
             await runtime.agents.get("default").create_session("session")
             execution = await runtime.agents.get("default").session("session").start(
@@ -1498,9 +1472,8 @@ async def test_cancel_at_unknown_effect_boundaries_stays_nonterminal(
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             f"cancel-unknown-boundary-{boundary}",
-            models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            features=application,
+            features=model_features(_ToolModels(), application),
         ) as runtime:
             if boundary == "unknown_write":
                 repository = runtime._state.recovery.tools
@@ -1659,9 +1632,8 @@ async def test_unverified_unknown_effect_write_does_not_terminalize_execution(
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             f"unknown-write-{readback}",
-            models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            features=application,
+            features=model_features(_ToolModels(), application),
         ) as runtime:
             repository = runtime._state.recovery.tools
             original_get = repository.get_operation
@@ -1767,9 +1739,8 @@ async def test_durable_terminal_survives_local_seal_finalization_failure(
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-tool-terminal-finalize",
-            models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            features=application,
+            features=model_features(_ToolModels(), application),
         ) as runtime:
             await runtime.agents.get("default").create_session("session")
             execution = (
@@ -1852,9 +1823,8 @@ async def test_terminal_commit_error_converges_to_failed_terminal(
     application.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "session-tool-terminal-failure",
-        models=_ToolModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=application,
+        features=model_features(_ToolModels(), application),
     ) as runtime:
         await runtime.agents.get("default").create_session("session")
         session = runtime.agents.get("default").session("session")
@@ -2010,9 +1980,8 @@ async def test_expired_tool_claim_waits_for_explicit_recovery_after_restart(
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-tool-crash",
-            models=_ToolModels(),
             storage=state,
-            features=application,
+            features=model_features(_ToolModels(), application),
         ) as runtime:
             current = await runtime._state.execution.executions.get(
                 execution_id,
@@ -2077,9 +2046,8 @@ async def test_idempotent_replay_does_not_claim_active_tool_execution(
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-tool-crash",
-            models=_ToolModels(),
             storage=state,
-            features=application,
+            features=model_features(_ToolModels(), application),
         ) as runtime:
             tools = await runtime._state.recovery.tools.list_by_execution(
                 execution_id,
@@ -2192,9 +2160,8 @@ async def test_split_storage_handoff_reconciles_prepared_checkpoint_after_restar
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-tool-crash",
-            models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            features=application,
+            features=model_features(_ToolModels(), application),
         ) as runtime:
             session = runtime.agents.get("default").session("session")
             execution = await session.start("inspect", idempotency_key="turn-1")
@@ -2258,9 +2225,8 @@ async def test_split_storage_success_handoff_wins_cancel_race(
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "split-storage-handoff-cancel-race",
-            models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            features=application,
+            features=model_features(_ToolModels(), application),
         ) as runtime:
             assert (
                 runtime._state.execution.executions.state_store.storage_group
@@ -2582,9 +2548,8 @@ async def test_recovery_preserves_bootstrap_and_effect_confirmation_boundaries(
     application.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "session-tool-crash",
-        models=_ToolModels(),
         storage=RuntimeStorage.sqlite(database),
-        features=application,
+        features=model_features(_ToolModels(), application),
     ) as runtime:
         session = runtime.agents.get("default").session("session")
         if phase == "effect_unconfirmed":
@@ -2645,9 +2610,8 @@ async def test_tool_effect_waits_for_durable_response_checkpoint(
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "pre-effect-checkpoint",
-            models=_ToolModels(),
             storage=RuntimeStorage.in_memory(),
-            features=application,
+            features=model_features(_ToolModels(), application),
         ) as runtime:
             await runtime.agents.get("default").create_session("session")
             execution = (
@@ -2694,9 +2658,8 @@ async def test_terminal_transaction_rollback_keeps_session_cursor_unchanged(
         application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-atomic-terminal",
-            models=_ToolModels(),
             storage=state,
-            features=application,
+            features=model_features(_ToolModels(), application),
         ) as runtime:
             await runtime.agents.get("default").create_session("session")
             session = runtime.agents.get("default").session("session")

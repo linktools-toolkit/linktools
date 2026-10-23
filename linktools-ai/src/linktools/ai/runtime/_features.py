@@ -7,6 +7,7 @@ import inspect
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Generic, Literal, TypeVar, get_type_hints
 
 from linktools.core import environ
@@ -17,6 +18,7 @@ from pydantic_ai.tools import RunContext as PydanticRunContext
 from ..asset import AssetStoreReader
 from ..core import AuthorizationPolicy, ImmutableJsonMapping, JsonValue, PromptLimits
 from ..errors import AIError, ErrorCode
+from ..model import ModelBinding
 from ..spec import (
     AgentSpec,
     AgentUsageLimits,
@@ -59,6 +61,9 @@ class RuntimeFeaturesCapture(Generic[AppT]):
     workspace: "Workspace | None"
     instructions: RepositoryInstructions
     _asset_reader: "AssetStoreReader | None" = field(repr=False, compare=False)
+    models: Mapping[str, ModelBinding | Callable[[], ModelBinding]] = field(
+        default_factory=lambda: MappingProxyType({}), repr=False, compare=False,
+    )
     sandbox: "Sandbox | None" = field(default=None, repr=False, compare=False)
     authorization: AuthorizationPolicy | None = field(default=None, repr=False, compare=False)
     limits: PromptLimits = field(default_factory=PromptLimits)
@@ -73,6 +78,7 @@ class RuntimeFeaturesCapture(Generic[AppT]):
         if not isinstance(self.limits, PromptLimits):
             raise TypeError("limits must be PromptLimits")
         _validate_filter(self.filter)
+        object.__setattr__(self, "models", MappingProxyType(dict(self.models)))
         object.__setattr__(self, "defaults", _freeze_defaults(self.defaults))
         contributions = tuple(self.contributions)
         if any(
@@ -111,7 +117,7 @@ class RuntimeFeatures(Generic[AppT]):
 
     def __init__(
         self,
-        group_id: str,
+        group_id: str = "default",
         *,
         sandbox: "Sandbox | None" = None,
         authorization: AuthorizationPolicy | None = None,
@@ -134,6 +140,7 @@ class RuntimeFeatures(Generic[AppT]):
         self._workspace: Workspace | None = None
         self._sandbox = sandbox
         self._contributions: list[CapabilityContribution[AppT]] = []
+        self._models: dict[str, ModelBinding | Callable[[], ModelBinding]] = {}
 
     @property
     def id(self) -> str:
@@ -156,6 +163,14 @@ class RuntimeFeatures(Generic[AppT]):
     @property
     def sandbox(self) -> "Sandbox | None":
         return self._sandbox
+
+    def model(self, name: str, binding: ModelBinding | Callable[[], ModelBinding]) -> None:
+        """Declare a route; synchronous loaders resolve one binding for each agent run."""
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("model route must be non-empty")
+        if inspect.iscoroutinefunction(binding):
+            raise TypeError("model loaders must be synchronous")
+        self._models[name] = binding
 
     def tool(
         self,
@@ -323,6 +338,7 @@ class RuntimeFeatures(Generic[AppT]):
     async def capture(self) -> "RuntimeFeaturesCapture[AppT]":
         """Capture registrations and declarations at one Asset revision."""
         authorization, limits = self._authorization, self._limits
+        models = MappingProxyType(dict(self._models))
         contributions = list(tuple(self._contributions))
         instruction_documents: list[RepositoryInstructionDocument] = []
         context: CapabilityLoadContext | None = None
@@ -345,6 +361,7 @@ class RuntimeFeatures(Generic[AppT]):
             self._workspace,
             RepositoryInstructions(tuple(instruction_documents)),
             asset_reader,
+            models=models,
             sandbox=self._sandbox,
             authorization=authorization,
             limits=limits,

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Existing budget scopes require authority over their durable owners."""
+from ._runtime_test_helpers import model_features
 
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -32,8 +33,8 @@ async def budget_runtime() -> AsyncIterator[_BudgetRuntime]:
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = RuntimeStorage.in_memory()
-    async with Runtime.open("scope-authorization", models=RuntimeUsageModels(),
-                            storage=storage, features=group) as runtime:
+    async with Runtime.open("scope-authorization",
+                            storage=storage, features=model_features(RuntimeUsageModels(), group)) as runtime:
         root = await runtime.agents.get().start("root", budget=RunBudget(model_requests=20))
         assert (await root.wait()).result.status is ExecutionStatus.SUCCEEDED
         record = await runtime._state.execution.executions.get(root.execution_id, tenant_id="default")

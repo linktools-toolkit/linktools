@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Schema corrections retain useful paths without retaining rejected values."""
+from ._runtime_test_helpers import model_features
 
 import json
 import traceback
@@ -155,18 +156,6 @@ class _InvalidOutputModels:
     model_identity = "test:invalid-output"
     contract: dict[str, JsonValue] = {"provider": "test", "model": "invalid-output"}
 
-    def capture(self) -> "_InvalidOutputModels":
-        return self
-
-    def resolve(self, route_id: str) -> "_InvalidOutputModels":
-        assert route_id == self.route_id
-        return self
-
-    def restore(self, payload: Mapping[str, JsonValue], *, route_id: str | None = None) -> "_InvalidOutputModels":
-        assert dict(payload) == self.contract
-        assert route_id in (None, self.route_id)
-        return self
-
     def materialize(self) -> FunctionModel:
         async def respond(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[dict[int, DeltaToolCall]]:
             yield {0: DeltaToolCall(name=info.output_tools[0].name, json_args=json.dumps({"count": _SECRET}))}
@@ -183,7 +172,7 @@ async def test_failed_runtime_persists_safe_diagnostic_and_logs_no_output_values
     models = _InvalidOutputModels()
     group = RuntimeFeatures("output-diagnostics")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open("output-diagnostics", models=models, features=group, storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
+    async with Runtime.open("output-diagnostics", features=model_features(models, group), storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         result = (await runtime.agents.get().run("count", output=Output, timeout_seconds=10)).result
         assert result.status is ExecutionStatus.FAILED
         assert result.error_code == ErrorCode.MODEL_RESPONSE_INVALID.value
@@ -194,7 +183,7 @@ async def test_failed_runtime_persists_safe_diagnostic_and_logs_no_output_values
         execution_id = result.execution_id
     assert "expected integer" in caplog.text
     assert _SECRET not in caplog.text
-    async with Runtime.open("output-diagnostics", models=models, features=group, storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
+    async with Runtime.open("output-diagnostics", features=model_features(models, group), storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         restored = await runtime.history.result(execution_id, principal=runtime.default_principal)
         assert restored.safe_error_details == result.safe_error_details
         assert restored.error_diagnostics == result.error_diagnostics

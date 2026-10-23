@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Execution conversation promises are explicit in the durable wire."""
+from ._runtime_test_helpers import model_features
 
 from dataclasses import replace
 
@@ -30,7 +31,7 @@ async def test_execution_writer_requires_explicit_conversation(
     storage = RuntimeStorage.in_memory()
     features = _features(*(ExecutionCapability(retain_history=True),) if conversation else ())
     async with Runtime.open(
-        "conversation-wire", storage=storage, models=_FeatureModels(), features=features,
+        "conversation-wire", storage=storage, features=model_features(_FeatureModels(), features),
     ) as runtime:
         execution = await runtime.agents.get().start("answer")
         await execution.wait(timeout_seconds=5)

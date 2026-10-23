@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Attachment acceptance survives request preparation and archive pagination."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.capability import TraceCapability
 import asyncio
@@ -249,8 +250,8 @@ async def test_attachment_cursor_from_request_started_survives_archive_reopen(
     started_items = ()
     group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
-        "attachment-pagination", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-        features=group,
+        "attachment-pagination", storage=RuntimeStorage.filesystem(tmp_path),
+        features=model_features(models, group),
     ) as runtime:
         principal = runtime.default_principal
         prompt = ["summarize", BinaryContent(b"initial", media_type="image/png")] if initial_attachment else "summarize"

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Workspace argument correction stays inside the agent's bounded tool loop."""
+from ._runtime_test_helpers import model_features
 
 from ._runtime_test_helpers import workspace_features
 
@@ -78,9 +79,9 @@ async def test_workspace_path_correction_respects_graph_and_effect_boundaries(
     group.agent("default", model="default", allow_tools=("read_file", "record_effect"),
                 tool_retries=2 if retry_limit is None else retry_limit)
     async with Runtime.open(
-        "path-correction", models=_Models(_UsageFunctionModel(model)),
+        "path-correction",
         storage=RuntimeStorage.in_memory(),
-        features=group,
+        features=model_features(_Models(_UsageFunctionModel(model)), group),
     ) as runtime:
         task = runtime.tasks.from_agent("path.agent", runtime.agents.get())
         run = await runtime.tasks.bind(task).start(TaskGraph("path-graph", (

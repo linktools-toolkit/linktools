@@ -626,7 +626,7 @@ function nativeMessages(container,projection,key,api) {
     }
     return;
   }
-  if(api==='anthropic-messages')for(const field of projection.fields.filter(field=>field.name==='system')){
+  if(api==='anthropic')for(const field of projection.fields.filter(field=>field.name==='system')){
     container.append(element('h3','','System content'));nativeContent(container,field.value);
   }
   if(projection.root.kind!=='object' || !projection.messages.length){container.append(element('p','muted','This captured body has no messages field. Its original source is shown without inventing messages.'),element('pre','native-literal',projection.source));return;}
@@ -738,7 +738,7 @@ function renderNativeTimeline(container,{conversation=false}={}) {
         else {
           if(state.readerCache?.source!==source){state.readerCache={source,projection:capturedRequest(source)};}
           nativeMessages(container,state.readerCache.projection,selected.key,attempt.api);
-          const rendered=attempt.api==='openai-responses'?['input','instructions']:attempt.api==='anthropic-messages'?['messages','system']:['messages'];
+          const rendered=attempt.api==='openai-responses'?['input','instructions']:attempt.api==='anthropic'?['messages','system']:['messages'];
           const envelope=state.readerCache.projection.fields.filter(field=>!rendered.includes(field.name));
           if(envelope.length){const detail=readerDetail(selected.key+':envelope','Request envelope fields','native-envelope');envelope.forEach(field=>detail.append(literalSource(field.raw)));container.append(detail);}
         }

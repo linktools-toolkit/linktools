@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Absent system prompts never become empty provider or history messages."""
+from ._runtime_test_helpers import model_features
 
 from linktools.ai.capability import TraceCapability
 from pathlib import Path
@@ -45,8 +46,8 @@ async def test_system_prompt_presence_matches_provider_observation_and_history(
         options["system_prompt"] = "Keep this system prompt"
     group.agent("default", **options)
     group.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open("system-prompts", models=_Models(_UsageFunctionModel(model)),
-                            storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
+    async with Runtime.open("system-prompts",
+                            storage=RuntimeStorage.filesystem(tmp_path), features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         agent = runtime.agents.get()
         if case == "derive-none":
             agent = agent.derive(system_prompt=None)
@@ -86,8 +87,8 @@ async def test_imported_system_history_respects_explicit_replacement(
         ModelResponse(parts=[TextPart("previous")]),
     ), replace_history_system_prompt=replace_system)
     group.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open("imported-system", models=_Models(_UsageFunctionModel(model)),
-                            storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
+    async with Runtime.open("imported-system",
+                            storage=RuntimeStorage.filesystem(tmp_path), features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get().start("question", input_context=imported)
         result = await execution.wait(timeout_seconds=10)
         assert result.result.status == "SUCCEEDED"
@@ -116,7 +117,7 @@ async def test_openai_http_capture_preserves_only_configured_system_content(
 
     import httpx2
 
-    from .test_model_client_request_capture import _registry, _response
+    from .test_model_client_request_capture import _binding, _response
 
     dispatched: list[bytes] = []
 
@@ -124,7 +125,7 @@ async def test_openai_http_capture_preserves_only_configured_system_content(
         dispatched.append(request.content)
         return _response(request)
 
-    registry, _clients = _registry(monkeypatch, handler)
+    registry, _clients = _binding(monkeypatch, handler)
     group = RuntimeFeatures("http-system")
     options = {"instructions": ("Preserve independent HTTP instructions",), "allow_tools": (),
                "allow_skills": (), "allow_subagents": ()}
@@ -132,8 +133,8 @@ async def test_openai_http_capture_preserves_only_configured_system_content(
         options["system_prompt"] = system_prompt
     group.agent("default", **options)
     group.capability(TraceCapability(record_http_bodies=True), scope="runtime")
-    async with Runtime.open("http-system", models=registry, storage=RuntimeStorage.filesystem(tmp_path),
-                            features=group) as runtime:
+    async with Runtime.open("http-system", storage=RuntimeStorage.filesystem(tmp_path),
+                            features=model_features(registry, group)) as runtime:
         execution = await runtime.agents.get().start("question")
         result = await execution.wait(timeout_seconds=10)
         assert result.result.status == "SUCCEEDED"

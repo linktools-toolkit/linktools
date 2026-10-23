@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Selected usage and derived evaluation lifetimes follow retained sources."""
+from ._runtime_test_helpers import model_features
 
 import asyncio
 import json
@@ -64,8 +65,8 @@ async def test_usage_gate_uses_only_selected_scoring_work(monkeypatch: pytest.Mo
     models = UsageModels(True)
     target = Task("selection.target", echo, effect_policy="none")
     rule = Task("selection.rule", score, effect_policy="none")
-    async with Runtime.open("selected-usage", models=models, storage=RuntimeStorage.in_memory(),
-                            context=CONTEXT, features=capabilities()) as runtime:
+    async with Runtime.open("selected-usage", storage=RuntimeStorage.in_memory(),
+                            context=CONTEXT, features=model_features(models, capabilities())) as runtime:
         judge = runtime.tasks.from_agent("selection.judge", runtime.agents.get())
         engine = runtime.tasks.bind(target, rule, judge)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("usage", 1), (
@@ -109,8 +110,8 @@ async def test_selected_rescore_cannot_hide_unknown_target_usage() -> None:
 
     models = FailedTarget()
     rule = Task("selection.failed-target-score", score, effect_policy="none")
-    async with Runtime.open("target-usage", models=models, storage=RuntimeStorage.in_memory(),
-                            context=CONTEXT, features=capabilities()) as runtime:
+    async with Runtime.open("target-usage", storage=RuntimeStorage.in_memory(),
+                            context=CONTEXT, features=model_features(models, capabilities())) as runtime:
         target = runtime.tasks.from_agent("selection.failed-target", runtime.agents.get())
         engine = runtime.tasks.bind(target, rule)
         scorer = replace(rule_scorer(rule), accepts_target_failure=True)
@@ -149,8 +150,8 @@ async def test_usage_gate_excludes_an_unselected_candidate() -> None:
 
     models = SelectiveJudge()
     target, unrelated = Task("selection.good", good, effect_policy="none"), Task("selection.bad", echo, effect_policy="none")
-    async with Runtime.open("candidate-usage", models=models, storage=RuntimeStorage.in_memory(),
-                            context=CONTEXT, features=capabilities()) as runtime:
+    async with Runtime.open("candidate-usage", storage=RuntimeStorage.in_memory(),
+                            context=CONTEXT, features=model_features(models, capabilities())) as runtime:
         judge = runtime.tasks.from_agent("selection.selective-judge", runtime.agents.get())
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("candidate-usage", 1), (
             CaseSpec.task(CaseRef("candidate-usage", "one", 1), input={"answer": "bad"}),
@@ -179,7 +180,7 @@ async def test_saved_rescore_reports_expire_with_the_source_and_are_purged(
     target, rule = Task("retained.target", echo, effect_policy="none"), Task("retained.score", score, effect_policy="none")
     storage = RuntimeStorage.in_memory()
     policy = EvaluationPolicy(allow_volatile=True, **{deadline + "_retention_seconds": 60})
-    async with Runtime.open("derived-retention", models=FixtureModels(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open("derived-retention", features=model_features(FixtureModels()), storage=storage, context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(target, rule)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("retained", 1), (
             CaseSpec.task(CaseRef("retained", "one", 1), input={"answer": "yes"}),
@@ -214,7 +215,7 @@ async def test_coordinator_does_not_retry_unexpired_read_failures(
 ) -> None:
     target = Task("source.target", echo, effect_policy="none")
     storage = RuntimeStorage.in_memory()
-    async with Runtime.open("unavailable-source", models=FixtureModels(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open("unavailable-source", features=model_features(FixtureModels()), storage=storage, context=CONTEXT) as runtime:
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("source", 1), (
             CaseSpec.task(CaseRef("source", "one", 1), input={"answer": "yes"}),
         )), principal=PRINCIPAL, idempotency_key="dataset")
@@ -258,7 +259,7 @@ async def test_waiting_rescore_settles_when_its_source_lifetime_ends(
     monkeypatch.setattr(evaluation_module, "_now", clock.now)
     target, rule = Task("source.target", echo, effect_policy="none"), Task("source.score", score, effect_policy="none")
     storage = RuntimeStorage.in_memory()
-    async with Runtime.open("waiting-source", models=FixtureModels(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open("waiting-source", features=model_features(FixtureModels()), storage=storage, context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(target, rule)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("source", 1), (
             CaseSpec.task(CaseRef("source", "one", 1), input={"answer": "yes"}),
@@ -338,7 +339,7 @@ async def test_expired_launched_scoring_reaches_a_terminal_disposition_without_e
 
     target, rule = Task("expiry.target", echo, effect_policy="none"), Task("expiry.score", hold, effect_policy="none")
     scorer = ScorerSpec("exact", TaskRef.deferred_input(), (DIMENSION,)) if state == "waiting" else rule_scorer(rule)
-    async with Runtime.open("launched-expiry", models=FixtureModels(), storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
+    async with Runtime.open("launched-expiry", features=model_features(FixtureModels()), storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(target, rule)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("expiry", 1), (
             CaseSpec.task(CaseRef("expiry", "one", 1), input={"answer": "yes"}),

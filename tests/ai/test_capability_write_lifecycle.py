@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Optional writer ownership is bounded by active execution producers."""
+from ._runtime_test_helpers import model_features
 
 from pathlib import Path
 
@@ -23,8 +24,7 @@ async def test_ordinary_runs_do_not_allocate_optional_writer_manager() -> None:
 
     features = RuntimeFeatures("ordinary-lifecycle")
     features.agent("default", model="default", allow_tools=())
-    async with Runtime.open("ordinary-lifecycle", storage=RuntimeStorage.in_memory(), features=features,
-                            models=_Models(_UsageFunctionModel(model))) as runtime:
+    async with Runtime.open("ordinary-lifecycle", storage=RuntimeStorage.in_memory(), features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
         for _ in range(12):
             execution = await runtime.agents.get().start("question")
             assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED

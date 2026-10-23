@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Scoring evidence, human decisions and usage gates through native execution."""
+from ._runtime_test_helpers import model_features
 
 from ._runtime_test_helpers import workspace_features
 
@@ -60,7 +61,7 @@ async def test_rescore_reuses_targets_in_each_reopened_runtime_environment(
     target = Task("semantics.environment-target", answer, effect_policy="none")
     scorer = Task("semantics.environment-score", score, effect_policy="none")
     state = tmp_path / "state"
-    async with Runtime.open("rescore-environment", models=FixtureModels(),
+    async with Runtime.open("rescore-environment", features=model_features(FixtureModels()),
                             storage=RuntimeStorage.filesystem(state), context=CONTEXT) as runtime:
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("environment", 1), (
             CaseSpec.task(CaseRef("environment", "one", 1), input={"answer": "yes"}),
@@ -81,8 +82,8 @@ async def test_rescore_reuses_targets_in_each_reopened_runtime_environment(
         features = workspace_features("workspace", workspace=Workspace.load(work))
     storage = RuntimeStorage.filesystem(state)
     context = replace(CONTEXT, app=object()) if environment in {"app", "both"} else CONTEXT
-    async with Runtime.open("rescore-environment", models=FixtureModels(), storage=storage,
-                            context=context, features=features) as runtime:
+    async with Runtime.open("rescore-environment", storage=storage,
+                            context=context, features=model_features(FixtureModels(), features)) as runtime:
         run = await runtime.evaluations.get(experiment_id, principal=PRINCIPAL)
         before = await runtime._state.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
         request = RescoreRequest((rule_scorer(scorer),), "rescore")
@@ -106,8 +107,8 @@ async def test_agent_input_evidence_reaches_rule_and_model_scorers_without_label
     rubric = "Private scoring rubric"
     body = b"Do not expose binary bodies through input evidence"
     received: list[ScoringInput] = []
-    async with Runtime.open("scoring-input", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-                            context=CONTEXT, features=capabilities()) as runtime:
+    async with Runtime.open("scoring-input", storage=RuntimeStorage.filesystem(tmp_path),
+                            context=CONTEXT, features=model_features(models, capabilities())) as runtime:
         async def score(context: TaskNodeContext[None]) -> JsonValue:
             sample = ScoringInput.from_mapping(context.input)
             received.append(sample)
@@ -164,8 +165,8 @@ async def test_agent_evidence_uses_the_accepted_projected_prompt(tmp_path: Path)
         return ScoreBundle(dimensions={"exact_match": 1.0}).to_mapping()
 
     scorer = Task("semantics.projected-score", score, effect_policy="none")
-    async with Runtime.open("projected-input", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-                            context=CONTEXT, features=capabilities()) as runtime:
+    async with Runtime.open("projected-input", storage=RuntimeStorage.filesystem(tmp_path),
+                            context=CONTEXT, features=model_features(models, capabilities())) as runtime:
         target = runtime.tasks.from_agent("semantics.projected-target", runtime.agents.get(), build_input=project)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("projected", 1), (
             CaseSpec.task(CaseRef("projected", "one", 1), input=dict(
@@ -199,7 +200,7 @@ async def test_graph_evidence_retains_merged_task_inputs_and_dependency_values(t
     scorer = Task("semantics.graph-score", score, effect_policy="none")
     template = TaskGraphTemplate((TaskNode("prepare", task=first, input={"fixed": "template data"}),
         TaskNode("finish", ("prepare",), task=second, input_refs={"prepared": TaskNodeResultRef("prepare")})))
-    async with Runtime.open("graph-input", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path),
+    async with Runtime.open("graph-input", features=model_features(FixtureModels()), storage=RuntimeStorage.filesystem(tmp_path),
                             context=CONTEXT) as runtime:
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("graph", 1), (
             CaseSpec.graph(CaseRef("graph", "one", 1), inputs={"prepare": TaskCaseInput(input={"question": "original"})}),
@@ -229,8 +230,8 @@ async def test_accepted_human_decision_is_consumed_after_deferred_input_becomes_
     entered, release = asyncio.Event(), asyncio.Event()
     context = replace(CONTEXT, app=object()) if live else CONTEXT
     features = workspace_features("workspace", workspace=Workspace.load(tmp_path)) if live else None
-    async with Runtime.open("early-human", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path),
-                            context=context, features=features) as runtime:
+    async with Runtime.open("early-human", storage=RuntimeStorage.filesystem(tmp_path),
+                            context=context, features=model_features(FixtureModels(), features)) as runtime:
         if stage == "before_waiting":
             original = runtime._execution_service.defer_task_input
 
@@ -298,7 +299,7 @@ async def test_same_human_decision_handles_concurrent_native_resume(
 ) -> None:
     target = Task("semantics.concurrent-human-target", echo, effect_policy="none")
     scorer = ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,))
-    async with Runtime.open("concurrent-human", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path),
+    async with Runtime.open("concurrent-human", features=model_features(FixtureModels()), storage=RuntimeStorage.filesystem(tmp_path),
                             context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(target)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("concurrent", 1), (
@@ -376,7 +377,7 @@ async def test_same_human_decision_handles_concurrent_native_resume(
 async def test_concurrent_deferred_inputs_do_not_accept_a_conflicting_value(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with Runtime.open("conflicting-input", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path),
+    async with Runtime.open("conflicting-input", features=model_features(FixtureModels()), storage=RuntimeStorage.filesystem(tmp_path),
                             context=CONTEXT) as runtime:
         graph = await runtime.tasks.bind().start(TaskGraph("conflicting-score", (
             TaskNode("score", task=TaskRef.deferred_input(), output_type=ScoreBundle),
@@ -427,7 +428,7 @@ async def test_concurrent_deferred_inputs_do_not_accept_a_conflicting_value(
 async def test_new_human_decision_rejects_native_cancellation_before_reconciliation(tmp_path: Path) -> None:
     target = Task("semantics.cancelled-human-target", echo, effect_policy="none")
     scorer = ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,))
-    async with Runtime.open("cancelled-human", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path),
+    async with Runtime.open("cancelled-human", features=model_features(FixtureModels()), storage=RuntimeStorage.filesystem(tmp_path),
                             context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(target)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("cancelled", 1), (
@@ -450,7 +451,7 @@ async def test_new_human_decision_rejects_native_cancellation_before_reconciliat
         experiment_id = run.experiment_id
 
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("cancelled-human", models=FixtureModels(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open("cancelled-human", features=model_features(FixtureModels()), storage=storage, context=CONTEXT) as runtime:
         run = await runtime.evaluations.get(experiment_id, principal=PRINCIPAL)
         graph = await runtime.tasks.bind(target).get(pending.scorer_graph.graph_id, principal=PRINCIPAL)
         assert (await graph.cancel(idempotency_key="native-cancel")).status is TaskStatus.CANCELLED
@@ -466,7 +467,7 @@ async def test_new_human_decision_rejects_native_cancellation_before_reconciliat
 async def test_new_human_decision_is_rejected_after_its_slot_times_out(tmp_path: Path) -> None:
     target = Task("semantics.expired-human-target", echo, effect_policy="none")
     scorer = ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,))
-    async with Runtime.open("expired-human", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path),
+    async with Runtime.open("expired-human", features=model_features(FixtureModels()), storage=RuntimeStorage.filesystem(tmp_path),
                             context=CONTEXT) as runtime:
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("expired", 1), (
             CaseSpec.task(CaseRef("expired", "one", 1), input={"answer": "yes"}),
@@ -502,8 +503,8 @@ async def test_comparison_usage_requirement_accounts_for_scorer_requests(
         return ScoreBundle(dimensions={"exact_match": 1.0}).to_mapping()
 
     rule = Task("semantics.initial-score", score, effect_policy="none")
-    async with Runtime.open("scorer-usage", models=models, storage=RuntimeStorage.in_memory(),
-                            context=CONTEXT, features=capabilities()) as runtime:
+    async with Runtime.open("scorer-usage", storage=RuntimeStorage.in_memory(),
+                            context=CONTEXT, features=model_features(models, capabilities())) as runtime:
         judge = runtime.tasks.from_agent("semantics.usage-judge", runtime.agents.get())
         engine = runtime.tasks.bind(target, rule, judge)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("usage", 1), tuple(
@@ -561,7 +562,7 @@ async def test_budget_stops_new_scoring_without_cancelling_accepted_work(
     target, rule = Task("semantics.budget-target", echo, effect_policy="none"), Task(
         "semantics.budget-score", score, effect_policy="none")
     storage = RuntimeStorage.in_memory()
-    async with Runtime.open("soft-budget", models=FixtureModels(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open("soft-budget", features=model_features(FixtureModels()), storage=storage, context=CONTEXT) as runtime:
         monkeypatch.setattr(runtime.evaluations, "_budget_exhausted", observed_budget)
         engine = runtime.tasks.bind(target, rule)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("budget", 1), tuple(
@@ -621,7 +622,7 @@ async def test_budget_allows_reserved_human_score_to_complete_and_pass_a_gate(
     target = Task("semantics.budget-human-target", echo, effect_policy="none")
     scorer = ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,))
     storage = RuntimeStorage.in_memory()
-    async with Runtime.open("budget-human", models=FixtureModels(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open("budget-human", features=model_features(FixtureModels()), storage=storage, context=CONTEXT) as runtime:
         monkeypatch.setattr(runtime.evaluations, "_budget_exhausted", observed_budget)
         engine = runtime.tasks.bind(target)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("human-budget", 1), (

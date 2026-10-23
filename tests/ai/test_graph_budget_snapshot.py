@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Graph budget owners survive portable snapshots without execution records."""
+from ._runtime_test_helpers import model_features
 
 import hashlib
 import json
@@ -35,7 +36,7 @@ async def _create_source(
 ) -> tuple[TaskGraphSubmission, BudgetUsage | None]:
     storage = RuntimeStorage.from_root(root)
     async with Runtime.open(
-        _NAMESPACE, models=RuntimeUsageModels(), storage=storage,
+        _NAMESPACE, features=model_features(RuntimeUsageModels()), storage=storage,
     ) as runtime:
         engine = runtime.tasks.bind()
         graph = TaskGraph("empty", ())
@@ -92,7 +93,7 @@ async def test_empty_graph_budget_snapshot_preserves_submission_phase(
     )
     storage = RuntimeStorage.from_root(restored)
     async with Runtime.open(
-        _NAMESPACE, models=RuntimeUsageModels(), storage=storage,
+        _NAMESPACE, features=model_features(RuntimeUsageModels()), storage=storage,
     ) as runtime:
         if phase == "described":
             with pytest.raises(AIError) as missing:

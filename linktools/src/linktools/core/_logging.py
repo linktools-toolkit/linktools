@@ -71,7 +71,7 @@ _BUILTIN_REDACTORS: "list[tuple[Pattern[str], str]]" = [
         r"secret|password|passwd|pwd)=)([^&\s#]+)"), r"\1***"),
     (re.compile(
         r"(?i)((?:authorization|set[_-]?cookie|cookie|"
-        r"[a-z0-9 _.-]{0,24}(?:token|password|passwd|pwd|secret[_\s-]?key|secret|"
+        r"(?:token|password|passwd|pwd|secret[_\s-]?key|secret|"
         r"api[_\s-]?key|apikey|access[_\s-]?key|signature|private[_\s-]?key))"
         r"\s*[:=]\s*)([^\r\n]*)"), r"\1***"),
     (re.compile(r"(?i)(sshpass\s+(?:-p\s+|--password[=\s]))(\S+)"), r"\1***"),

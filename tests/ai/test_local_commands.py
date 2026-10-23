@@ -16,7 +16,7 @@ from linktools.ai.workspace import Workspace
 from linktools.cli import CommandError
 from linktools.cli.argparse import ConfigAction
 import linktools.commands.ai.acp as acp_module
-from linktools.commands.ai._common import _local_runtime_models
+from linktools.commands.ai._common import _local_runtime_model
 from linktools.commands.ai.acp import command as acp_command
 from linktools.commands.ai.run import command as run_command
 
@@ -38,7 +38,7 @@ def test_ai_local_commands_share_runtime_arguments() -> None:
         assert "vision" not in actions
         assert all(
             isinstance(actions[name], ConfigAction)
-            for name in ("api_key", "base_url", "model")
+            for name in ("model_api",)
         )
         assert not any(
             action.dest
@@ -70,7 +70,7 @@ def test_ai_acp_uses_shared_local_runtime_composition(
     monkeypatch.setattr(acp_module, "_load_workspace", lambda _root: workspace)
     monkeypatch.setattr(
         acp_module,
-        "_local_runtime_models",
+        "_local_runtime_model",
         lambda _workspace, _args: models,
     )
 
@@ -78,9 +78,9 @@ def test_ai_acp_uses_shared_local_runtime_composition(
     async def open_local_runtime(
         runtime_workspace: Workspace,
         *,
-        models: object,
+        model: object,
     ):
-        opened.append((runtime_workspace, models))
+        opened.append((runtime_workspace, model))
         yield SimpleNamespace(default_principal=object())
 
     monkeypatch.setattr(acp_module, "_open_local_runtime", open_local_runtime)
@@ -95,11 +95,11 @@ def test_ai_acp_uses_shared_local_runtime_composition(
     assert opened == [(workspace, models)]
 
 
-def test_ai_local_runtime_models_fall_back_to_workspace_model(tmp_path: Path) -> None:
+def test_ai_local_runtime_model_fall_back_to_workspace_model(tmp_path: Path) -> None:
     workspace = Workspace(tmp_path, {"model": "workspace/model"})
-    args = Namespace(model=None, base_url=None, api_key=None)
+    args = Namespace(model_api=None, model=None, base_url=None, api_key=None)
 
-    binding = _local_runtime_models(workspace, args).capture().resolve("default")
+    binding = _local_runtime_model(workspace, args)
 
     assert binding.model_identity == "openai:workspace/model"
 
@@ -206,7 +206,7 @@ def test_local_input_types_expand_workspace_categories(tmp_path: Path) -> None:
         "model": "opaque-model",
         "input_types": ["audio", "mime:application/x-private", "mime:image/*"],
     })
-    binding = _local_runtime_models(workspace, Namespace(model=None, base_url=None, api_key=None)).capture().resolve("default")
+    binding = _local_runtime_model(workspace, Namespace(model_api=None, model=None, base_url=None, api_key=None))
     from typing import get_args
     from linktools.ai.model import AudioMediaType
 
@@ -216,7 +216,7 @@ def test_local_input_types_expand_workspace_categories(tmp_path: Path) -> None:
 
 
 def test_local_input_default_rejects_attachments(tmp_path: Path) -> None:
-    binding = _local_runtime_models(Workspace(tmp_path, {}), Namespace(model="opaque", base_url=None, api_key=None)).capture().resolve("default")
+    binding = _local_runtime_model(Workspace(tmp_path, {}), Namespace(model_api=None, model="opaque", base_url=None, api_key=None))
     assert binding.contract["input_mime_types"] == []
 
 
@@ -235,7 +235,7 @@ def test_local_input_types_ignore_unrelated_settings(monkeypatch: pytest.MonkeyP
     else:
         monkeypatch.setenv(source, value)
     workspace.config["input_types"] = ["mime:application/pdf"]
-    binding = _local_runtime_models(workspace, Namespace(model="opaque", base_url=None, api_key=None)).capture().resolve("default")
+    binding = _local_runtime_model(workspace, Namespace(model_api=None, model="opaque", base_url=None, api_key=None))
     assert binding.contract["input_mime_types"] == ["application/pdf"]
 
 
@@ -250,14 +250,14 @@ def test_local_input_invalid_configuration_fails_closed(tmp_path: Path, config: 
     from linktools.ai.errors import AIError, ErrorCode
 
     with pytest.raises(AIError) as raised:
-        _local_runtime_models(Workspace(tmp_path, config), Namespace(model="opaque", base_url=None, api_key=None))
+        _local_runtime_model(Workspace(tmp_path, config), Namespace(model_api=None, model="opaque", base_url=None, api_key=None))
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
 
 
 @pytest.mark.parametrize("key", ["input_capabilities", "unknown_inputs", "input_mime_types"])
 def test_local_model_reads_only_input_types(tmp_path: Path, key: str) -> None:
     workspace = Workspace(tmp_path, {key: ["image/png"]})
-    binding = _local_runtime_models(workspace, Namespace(model="opaque", base_url=None, api_key=None)).capture().resolve("default")
+    binding = _local_runtime_model(workspace, Namespace(model_api=None, model="opaque", base_url=None, api_key=None))
     assert binding.contract["input_mime_types"] == []
 
 
@@ -266,5 +266,5 @@ def test_local_missing_model_keeps_dependency_error(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
     with pytest.raises(AIError) as raised:
-        _local_runtime_models(Workspace(tmp_path, {}), Namespace(model=None, base_url=None, api_key=None))
+        _local_runtime_model(Workspace(tmp_path, {}), Namespace(model_api=None, model=None, base_url=None, api_key=None))
     assert raised.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY

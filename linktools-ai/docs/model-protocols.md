@@ -10,27 +10,81 @@ pip install "linktools-ai[openai,anthropic,web]"  # both adapters and Web consol
 
 The base package does not require either provider SDK. Core ModelBinding, Runtime
 and Web modules remain importable without them (serving Web additionally needs the
-`web` extra). Calling a provider factory/register without its extra fails immediately
+`web` extra). Calling `create_model` for a provider without its extra fails immediately
 with the matching install hint, before connection settings or credentials are resolved.
 
 Choose the actual API, not a vendor-looking model name:
 
 ```python
-from linktools.ai.model import ModelRegistry
+from linktools.ai.model import create_model
+from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
 
-models = ModelRegistry.openai_responses(model="gpt-5")
-models.register_anthropic("messages", model="claude-sonnet-4-5")
-models.register_openai("compatible", model="gateway-model", profile={
+features = RuntimeFeatures()
+features.model("default", create_model(protocol="openai-responses", model="gpt-5"))
+features.model("messages", create_model(protocol="anthropic", model="claude-sonnet-4-5"))
+features.model("compatible", create_model(protocol="openai", model="gateway-model", profile={
     "supports_thinking": True,
     "thinking_always_enabled": False,
-})
+}))
+
+async with Runtime.open("app", features=features, storage=RuntimeStorage.in_memory()) as runtime:
+    ...
 ```
 
-The three factory/register pairs have symmetric connection and input-type options.
-OpenAI Chat is unchanged; new binding contracts distinguish `openai-responses`
-and `anthropic-messages`. Provider/model identity remains separate from the API.
-An API switch, profile change, or different captured binding is not an interchangeable
-restore target, even if the displayed model name matches.
+`create_model` returns a `ModelBinding`, not a registry. It accepts input types,
+profile, connection resolver, credentials, timeouts and retry/token limits. Missing
+provider extras fail with the matching installation hint. Unknown protocol strings
+fail with `MODEL_CONFIG_INVALID` without echoing connection values.
+
+The public type values are `openai` (Chat Completions), `openai-responses`, and
+`anthropic` (Messages). CLI `--model-api`, `MODEL_API`, workspace `model_api`,
+HTTP trace labels and input dispatch use the same values. Native HTTP endpoint
+paths are unchanged. There is no separate public registry or `Runtime.open(models=...)`.
+
+For delayed configuration, register a synchronous zero-argument function returning
+an existing `ModelBinding`:
+
+```python
+def load_assistant():
+    config = load_configuration()
+    return create_model(protocol="anthropic", model=config["model"],
+                        base_url=config["base_url"], api_key=config["api_key"])
+
+features.model("assistant", load_assistant)
+```
+
+The feature capture freezes route names and sources, not a callable's future
+results. Each agent run resolves its own binding once and uses that same binding
+for durable contract capture, input validation, tool rounds and model retries.
+The next run calls the loader again, so updated configuration and credentials
+apply without a second connection-resolver API. Concurrent runs are isolated.
+Unused routes are not loaded; explicit metadata inspection may resolve a binding
+without creating a provider client. A failed load can be retried; asynchronous
+loaders and recursive same-route loads are rejected. A later feature registration
+affects future captures only.
+
+The registered route name is model identity. Recovery resolves the current binding
+under that same route; protocol, provider model, profile and connection changes do
+not change identity or block task execution. Callers own configuration consistency.
+Historical `model_contract` metadata describes the captured configuration for
+diagnostics, not an equality requirement. Actual requests retain their own model
+and protocol trace metadata. Agent, tool, output and execution ownership checks
+remain unchanged. Static binding declarations reuse their declared configuration.
+
+Model binding resolution does not create HTTP clients. `materialize()` creates
+the client from the resolved binding's static settings. SDK-native environment
+defaults still apply to omitted connection values.
+The caller owns the returned model's async context and releases its client when
+the run ends. Custom `ModelBinding` implementations still provide provider,
+model_identity, contract and materialize; the route name belongs only to Features.
+For diagnostics outside Runtime, use `async with binding.materialize() as model:`.
+
+The earlier pre-release `openai-chat` / `anthropic-messages` authoring values are
+not aliases; update configuration to the current spellings. Chat diagnostic
+metadata omits the API field, interpreted as `openai`; Responses and Anthropic
+include their explicit API. All three protocols share `create_model` options.
+Protocol and provider model metadata describe a request, not the registered model
+identity. A current binding may use a different protocol under the same route.
 
 ## Explicit profiles
 
