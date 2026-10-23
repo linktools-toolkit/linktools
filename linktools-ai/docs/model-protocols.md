@@ -32,7 +32,7 @@ async with Runtime.open("app", features=features, storage=RuntimeStorage.in_memo
 ```
 
 `create_model` returns a `ModelBinding`, not a registry. It accepts input types,
-profile, connection resolver, credentials, timeouts and retry/token limits. Missing
+profile, credentials, timeouts and retry/token limits. Missing
 provider extras fail with the matching installation hint. Unknown protocol strings
 fail with `MODEL_CONFIG_INVALID` without echoing connection values.
 
@@ -85,6 +85,83 @@ metadata omits the API field, interpreted as `openai`; Responses and Anthropic
 include their explicit API. All three protocols share `create_model` options.
 Protocol and provider model metadata describe a request, not the registered model
 identity. A current binding may use a different protocol under the same route.
+
+## Native decision models
+
+Decision models answer bounded questions instead of generating free-form text.
+Register an SDK-native `DecisionModel` through the existing public `ModelBinding`; no additional LinkTools registry or
+protocol selector is required. `create_model` remains a convenience constructor
+for its documented protocols, not an allowlist for Runtime models.
+
+Use a Pydantic `BaseModel` as the execution's `output=` contract. Boolean fields,
+string enums/`Literal` choices, and supported bounded numeric fields map to the
+native SDK's questions. Do not use the default text output or assume arbitrary
+free-form strings can be generated. The SDK owns supported schema/profile details
+and decides whether a route requires a fallback. A returned class probability is
+model output, not calibrated proof or action authorization.
+
+```python
+from pydantic import BaseModel, Field
+from typing import Literal
+from pydantic_ai.models import Model
+from linktools.ai.core import JsonValue
+from linktools.ai.runtime import RuntimeFeatures
+
+class Decision(BaseModel):
+    accepted: bool
+    category: Literal["accept", "reject"]
+    probability: float = Field(ge=0, le=1)
+
+class DecisionBinding:
+    provider = "application-decisions"
+    model_identity = "evidence-decision"
+    contract: dict[str, JsonValue] = {
+        "provider": provider, "model": model_identity,
+    }
+
+    def materialize(self) -> Model:
+        # Application-owned construction of the selected SDK-native adapter.
+        return build_configured_decision_model()
+
+features = RuntimeFeatures("decisions")
+features.model("decision", lambda: DecisionBinding())
+features.agent("classifier", model="decision", allow_tools=())
+# Inside Runtime.open(..., features=features):
+# result = await runtime.agents.get("classifier").run(prompt, output=Decision)
+```
+
+Install the chosen SDK adapter's own optional dependency only when needed. The
+base LinkTools package neither imports a decision vendor nor adds one as a
+mandatory dependency. Use an SDK version that provides the chosen native model;
+older supported SDKs without decision models retain their existing functionality.
+A loader is evaluated once per agent run/admission, not once per tool round or
+individual model request; all requests inside that run share the captured binding.
+
+Runtime's streaming observation works with the SDK's decision stream adapter.
+That adapter can emit a completed structured response after a decision finishes;
+this is not a promise of token-by-token transport streaming. Non-streaming SDK
+requests use the same native schema semantics. Logical request usage and the
+original response's `provider_details` (including available `confidence`,
+`probabilities`, and `scores`) survive the existing durable history codec and are
+read through `execution.model_interactions(include_content=True)` or the
+principal-authorized Runtime executions facade. Missing values remain missing;
+Runtime does not synthesize a distribution or reinterpret the SDK's confidence.
+
+A custom binding owns its adapter's connection, transport retry policy, and SDK
+fallback policy. It does not automatically acquire the built-in three-protocol
+HTTP recorder or retry wrapper. Logical model interaction/usage/error observations
+still apply; absent physical `client_requests` must not be described as captured
+HTTP attempts. In particular, native decision handoffs such as an unfillable or
+uncertain route are not transport failures to retry. Runtime does not add a fallback, replay tools, or bypass approval on its behalf.
+Native `FallbackModel` composition is not covered by this integration: its lack of
+a single model profile currently conflicts with Runtime's explicit thinking-policy
+validation. Do not assume that registering a composite model bypasses this limit.
+
+For images, both the binding's `contract["input_mime_types"]` and the chosen
+native adapter must support the format. Recoverable reference inputs use the same
+existing authorized hydration lifecycle; a text-only decision adapter does not
+gain image support from a binding declaration. Do not infer capabilities or a
+protocol from the model's name.
 
 ## Explicit profiles
 
