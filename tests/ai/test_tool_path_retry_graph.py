@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Workspace argument correction stays inside the agent's bounded tool loop."""
-from ._runtime_test_helpers import model_features
+from ._runtime_test_helpers import is_tool_retry, model_features
 
 from ._runtime_test_helpers import workspace_features
 
@@ -37,7 +37,7 @@ async def test_workspace_path_correction_respects_graph_and_effect_boundaries(
     requests = 0
     effects = 0
     downstream_requests = 0
-    retries: list[RetryPromptPart] = []
+    retries: list[RetryPromptPart | ToolReturnPart] = []
     returns: list[ToolReturnPart] = []
 
     async def record_effect(_context: AgentContext[None]) -> str:
@@ -53,8 +53,9 @@ async def test_workspace_path_correction_respects_graph_and_effect_boundaries(
             downstream_requests += 1
             return ModelResponse(parts=[TextPart("downstream complete")])
         requests += 1
-        retries.extend(part for part in messages[-1].parts if isinstance(part, RetryPromptPart))
-        returns.extend(part for part in messages[-1].parts if isinstance(part, ToolReturnPart))
+        retries.extend(part for part in messages[-1].parts if is_tool_retry(part))
+        returns.extend(part for part in messages[-1].parts
+                       if isinstance(part, ToolReturnPart) and not is_tool_retry(part))
         if requests == 1:
             return ModelResponse(parts=[
                 ToolCallPart("read_file", {"path": '["report[1].txt", "notes.txt"]'},

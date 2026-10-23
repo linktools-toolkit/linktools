@@ -41,7 +41,10 @@ Completion or a controlled abnormal end publishes the actual prepared input and
 any received response. Requesting content early does not force a write or provider completion.
 With `TraceCapability(record_http_bodies=True)`, complete outgoing raw HTTP
 input may be captured before provider completion; the deferred body rule excludes
-half-received response fragments. Raw HTTP body capture is disabled by default. Model metadata
+half-received response fragments. Requests containing `ReferencedContent` instead
+omit both raw bodies with an explicit lifecycle reason; their prepared input keeps
+the immutable descriptor. See [recoverable reference inputs](file-tools.md#recoverable-reference-inputs).
+Raw HTTP body capture is disabled by default. Model metadata
 may be refined during preparation without changing request identity or start time.
 
 With shared retained backing storage, independently opened
@@ -109,6 +112,57 @@ the same selectors and content flags when continuing a cursor; adding,
 changing, or removing them is rejected. `cutoffs` remain fixed upper bounds,
 not lower bounds or substitutes for exact request selectors.
 
+Each retained `ModelClientRequest` also exposes optional `diagnostics`, independently
+of HTTP body capture. It belongs to that exact dispatch, not another request or
+the execution as a whole. `started_at` is UTC; `*_ns` observations are monotonic
+elapsed nanoseconds from that attempt's start. The mapping can include header,
+first/last chunk and close timings, received byte/chunk counts, HTTP version and a
+sanitized protocol request ID, transport read/close errors, and separate `sdk_*`
+stream entry, exhaustion, cancellation and cleanup observations. Error observations
+contain qualified exception types, not exception text or headers. Missing keys
+mean unobserved; buffered responses do not invent stream chunk timings. See
+[protocol terminal semantics](model-protocols.md) before interpreting a response's
+`complete` flag. The mapping is retained in metadata-only archives too.
+
+## Read complete failure diagnostics
+
+Read the failed execution's authoritative `result()` to obtain its
+`error_diagnostics`; lightweight execution inspection remains a summary. Cancelled
+execution results retain their cancellation status/code, not a fabricated failure
+diagnostic; observed cancellation timing belongs to the affected client attempt.
+The public
+`ErrorDiagnostics.to_payload()` returns every collected diagnostic field. The
+original `exception_type`, bounded `exception_message` and `cause_digest` remain
+summary fields. New failures also collect an optional `exception_chain` (outermost
+first, with `root`, `cause` or visible `context` relations and full messages) and
+`traceback` (all frames and visible exception-group branches, without locals).
+Python traceback display limits do not truncate the durable diagnostic. Normal
+exception context suppression and cycle detection still apply.
+
+Durable output-schema validation has a stricter existing privacy contract: rejected
+input and schema literals must not be retained. Its diagnostic preserves original
+chained frame locations and types plus the safe validation explanation, but omits
+original messages, notes and source lines. The traceback states those omissions;
+`exception_chain=None` does not claim a fully collected message chain.
+
+Provider failures for recoverable reference inputs also omit arbitrary exception
+messages, notes and source lines, since an SDK or server can echo the temporary
+file body. Their optional `content_omission_reason` identifies that policy.
+Exception types, relationships and frame locations remain available without locals.
+This does not weaken ordinary credential-redacted diagnostics or fabricate absent
+content for older records.
+
+Collection uses the shared credential redactor before persistence, including the
+bounded summary. It does not retain arbitrary exception attributes, connection
+headers or local variables. Existing access, retention and deletion rules apply;
+complete diagnostics are not automatically safe for publication outside that scope.
+Terminal failure events, retained results and reopened history use the same
+diagnostic projection. Optional fields absent from older records remain absent or
+`None`; enabling capture cannot reconstruct prior chains, stacks or stream timing.
+These additive diagnostic fields keep the current durable format version and do not
+alter model, capability or execution identity. No automatic database migration is
+required.
+
 ## Read one tool call
 
 The default watch keeps safe locator and status metadata, including
@@ -127,10 +181,24 @@ page = await runtime.executions.history(
 
 The result has the same `ExecutionHistoryItem` shapes as unfiltered history:
 `tool_call` contains the model's arguments, `tool_result` contains the returned
-content, and `retry` contains the retry prompt. These are not effective
+content, and `retry` contains a legacy SDK retry prompt. On SDKs with native
+retry feedback, a tool retry remains a `tool_result` with a failed status, not a
+successful result; its original `ToolReturnPart` has `outcome="retried"` and
+optional `retry` information. Non-tool output feedback has item kind
+`retry-feedback`, without a fabricated tool name or call ID. Its content
+includes the feedback and retry cause, attempt and maximum retry count.
+These are not effective
 post-validation parameters or a separate external-effect ledger. A call can be
 visible before any result exists. A failed or cancelled call without a returned
 part does not acquire a fabricated result.
+
+The durable message codec preserves both the legacy retry prompt and the native
+feedback/tool-return shapes. Native retry information is retained through
+checkpoints and history, including explicit unknown (`None`) retry budgets.
+Ordinary tool returns without retry information keep their existing encoding.
+Reading native retry semantics on an older SDK that cannot represent them fails
+with `STORAGE_VERSION_UNSUPPORTED`, rather than silently translating or dropping
+the feedback. These additive message fields do not change the format version.
 
 An empty page means no matching committed fact is currently available. During
 an active run it does not prove that a live-observed request or call is absent.
@@ -211,7 +279,10 @@ retain independent response evidence. Request settings and attempt metadata
 remain available. Original HTTP request/response bodies are recorded only with
 `TraceCapability(record_http_bodies=True)`; this diagnostic option can duplicate
 full prompts and may contain sensitive content. Disabling it does not remove
-canonical model messages, tool evidence or usage facts. Archive relocation may materialize
+canonical model messages, tool evidence or usage facts. An explicit recoverable
+reference input overrides raw body capture for its logical request, recording
+`diagnostics.body_omission_reason` while preserving attempt metadata. Its canonical
+messages keep descriptors rather than file bytes. Archive relocation may materialize
 content again; Trace, Checkpoint, and Conversation retain their own lifecycle
 roots rather than depending on another capability's retained history.
 

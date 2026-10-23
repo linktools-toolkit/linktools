@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from time import monotonic_ns
 from types import TracebackType
 from typing import Any, Literal
 
@@ -16,6 +18,9 @@ from pydantic_ai.models import Model, ModelRequestParameters, StreamedResponse
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext
+from linktools.core import environ
+
+from ..core import ImmutableJsonMapping, JsonValue
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,7 +33,7 @@ class ModelClientResponse:
     ``complete`` means an observed protocol terminal SSE event or a non-SSE transport EOF,
     not SDK success. Bytes after a terminator in the same received chunk may be
     present even though the SDK did not process them. No response headers other
-    than the format/encoding hints are retained.
+    than the format/encoding hints are retained in this response view.
     A missing body may be intentionally unrecorded or omitted by a metadata-only
     archive. capture_error is set only for an actual capture failure. An empty
     captured body is retained as ``b""``.
@@ -54,13 +59,34 @@ class ModelClientResponse:
 class ModelClientRequest:
     """One client dispatch, not proof of receipt or provider-side processing.
 
-    The body is the client's original JSON bytes. No headers, URL, or credentials
-    from the connection are retained. The body is unredacted, including values
+    The body is the client's original JSON bytes. No URL, credentials or full
+    headers from the connection are retained. The body is unredacted, including values
     supplied through extra_body. A failed capture keeps its place among attempts
     without inventing a request body. ``response=None`` means no response view
     was recorded, not proof that the provider produced no response.
     record_http_bodies preserves the dispatch's capture policy. Metadata-only
     archives can omit recorded bytes without changing that policy or inventing errors.
+    An explicit recorder-level omission sets this policy to false and retains
+    its diagnostic label as ``diagnostics.body_omission_reason``.
+
+    ``diagnostics`` contains passive observations of this HTTP attempt. Missing
+    diagnostics or keys mean unobserved, including older records. ``started_at``
+    is a UTC ISO timestamp; all ``*_ns`` values are monotonic elapsed nanoseconds
+    from that attempt's start. ``headers_received_ns``, first/last chunk timing,
+    ``received_bytes`` and ``received_chunks`` describe raw transport observation,
+    not SDK events or decoded text. Buffered responses do not invent chunk facts.
+    ``read_outcome`` is eof, error or cancelled; ``read_finished_ns`` and
+    ``read_error_type`` describe that boundary. ``close_started_ns`` and
+    ``close_finished_ns`` bracket the close attempt, including failures retained
+    as ``close_error_type``. Iterator-finalization failures use
+    ``iterator_close_error_ns`` and ``iterator_close_error_type`` instead.
+    ``sdk_*`` records stream entry, exhaustion, cancellation requests and closure,
+    not provider success. ``protocol_terminal`` names an observed SSE terminal,
+    is null when recorded SSE bytes parse without a terminal, and is absent
+    when not observed or decoding failed. HTTP version and a bounded
+    protocol request ID (``http_version`` and ``request_id``) are the only
+    additional response-header observations. Exception values contain only
+    redacted qualified types, never messages or request/response data.
     """
 
     api: str
@@ -68,6 +94,7 @@ class ModelClientRequest:
     capture_error: str | None = None
     response: ModelClientResponse | None = None
     record_http_bodies: bool = True
+    diagnostics: Mapping[str, JsonValue] | None = None
 
     def __post_init__(self) -> None:
         if not self.api or not isinstance(self.record_http_bodies, bool):
@@ -78,6 +105,8 @@ class ModelClientRequest:
             self.body is not None or self.response is not None and self.response.body is not None
         ):
             raise ValueError("disabled HTTP body capture cannot contain bodies")
+        if self.diagnostics is not None:
+            object.__setattr__(self, "diagnostics", ImmutableJsonMapping(self.diagnostics))
 
 
 _current_capture: ContextVar[ModelClientRequestRecorder | None] = ContextVar(
@@ -98,14 +127,70 @@ class ModelClientRequestRecorder:
         if not isinstance(record_http_bodies, bool):
             raise ValueError("record_http_bodies must be a boolean")
         self.record_http_bodies = record_http_bodies
-        self._requests: list[ModelClientRequest] = []
+        self._body_omission_reason: str | None = None
+        self._entries: list[_ClientRequestEntry] = []
         self._token: Token[ModelClientRequestRecorder | None] | None = None
         self._entered = False
 
     @property
     def requests(self) -> tuple[ModelClientRequest, ...]:
         """Immutable views; response closure replaces values in later views."""
-        return tuple(self._requests)
+        return tuple(entry.request for entry in self._entries)
+
+    @property
+    def body_omission_reason(self) -> str | None:
+        """The explicit omission label for this logical request, if any."""
+        return self._body_omission_reason
+
+    @classmethod
+    def omit_current_http_bodies(cls, reason: str) -> None:
+        """Omit raw HTTP bodies for the active logical request and its retries.
+
+        Call before the first HTTP dispatch, for example before hydrating
+        referenced content. The reason is a nonempty diagnostic label, not
+        request content. Omission lasts for this recorder without changing its
+        configured ``record_http_bodies`` value or affecting nested recorders.
+        No active recorder is a no-op. Repeating the same reason is idempotent.
+        Changing the reason or first requesting omission after a dispatch raises
+        ``RuntimeError`` because previously observed bodies cannot be unobserved.
+        """
+        capture = _current_capture.get()
+        if capture is None or capture._token is None:
+            return
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("HTTP body omission reason must be a nonempty string")
+        if capture._body_omission_reason == reason:
+            return
+        if capture._body_omission_reason is not None:
+            raise RuntimeError("HTTP body omission reason cannot change within a logical request")
+        if capture._entries:
+            raise RuntimeError("HTTP body omission must be requested before the first dispatch")
+        capture._body_omission_reason = reason
+
+    @property
+    def _effective_record_http_bodies(self) -> bool:
+        return self.record_http_bodies and self._body_omission_reason is None
+
+    def observe_stream(
+        self, event: str, *, attempt_index: int, error: BaseException | None = None,
+    ) -> None:
+        """Observe an SDK stream against its bound zero-based HTTP attempt.
+
+        Events are entered, exhausted, cancel_requested, close_started,
+        close_finished, and entry_error/iteration_error/exit_error/close_error.
+        Each event writes ``sdk_<event>_ns``; errors also write
+        ``sdk_<event>_type``. Error observations retain only the redacted exception type. No dispatch
+        or a closed scope produces no observation, never a synthetic attempt.
+        """
+        if event not in {
+            "entered", "exhausted", "cancel_requested", "close_started", "close_finished",
+            "entry_error", "iteration_error", "exit_error", "close_error",
+        }:
+            raise ValueError("SDK stream observation event is invalid")
+        if 0 <= attempt_index < len(self._entries):
+            entry = self._entries[attempt_index]
+            entry.record_observation(**{f"sdk_{event}_ns": entry.elapsed_ns},
+                                     **({f"sdk_{event}_type": entry.error_type(error)} if error is not None else {}))
 
     def wrap_model(self, model: Model) -> Model:
         """Bind supported client dispatches to this logical request's recorder.
@@ -171,32 +256,48 @@ class _ClientRecordingModel(WrapperModel):
             yield response
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _ClientRequestEntry:
     recorder: ModelClientRequestRecorder
-    index: int
+    request: ModelClientRequest
+    started_ns: int
 
     @property
     def api(self) -> str:
-        return self.recorder._requests[self.index].api
+        return self.request.api
 
     @property
     def record_http_bodies(self) -> bool:
-        return self.recorder.record_http_bodies
+        return self.request.record_http_bodies
 
     @property
     def active(self) -> bool:
         return self.recorder._token is not None
 
+    @property
+    def elapsed_ns(self) -> int:
+        return monotonic_ns() - self.started_ns
+
+    @staticmethod
+    def error_type(error: BaseException) -> str:
+        return environ.logging.redact(f"{type(error).__module__}.{type(error).__qualname__}")
+
+    def record_observation(self, **values: JsonValue) -> None:
+        if self.active:
+            try:
+                self.request = replace(self.request, diagnostics={**(self.request.diagnostics or {}), **values})
+            except Exception:
+                # Diagnostics must not change transport or SDK outcomes.
+                pass
+
     def record_response(self, response: ModelClientResponse) -> None:
         if self.active:
-            requests = self.recorder._requests
-            requests[self.index] = replace(requests[self.index], response=response)
+            self.request = replace(self.request, response=response)
 
 
 def _record_http_bodies() -> bool:
     capture = _current_capture.get()
-    return capture is not None and capture._token is not None and capture.record_http_bodies
+    return capture is not None and capture._token is not None and capture._effective_record_http_bodies
 
 
 def _record_client_request(
@@ -204,10 +305,18 @@ def _record_client_request(
 ) -> _ClientRequestEntry | None:
     capture = _current_capture.get()
     if capture is not None and capture._token is not None:
-        capture._requests.append(ModelClientRequest(
-            api, body, capture_error, record_http_bodies=capture.record_http_bodies,
-        ))
-        return _ClientRequestEntry(capture, len(capture._requests) - 1)
+        started_ns = monotonic_ns()
+        record_http_bodies = capture._effective_record_http_bodies
+        diagnostics: dict[str, JsonValue] = {"started_at": datetime.now(timezone.utc).isoformat()}
+        if capture._body_omission_reason is not None:
+            diagnostics["body_omission_reason"] = capture._body_omission_reason
+        request = ModelClientRequest(
+            api, body if record_http_bodies else None, capture_error,
+            record_http_bodies=record_http_bodies, diagnostics=diagnostics,
+        )
+        entry = _ClientRequestEntry(capture, request, started_ns)
+        capture._entries.append(entry)
+        return entry
     return None
 
 

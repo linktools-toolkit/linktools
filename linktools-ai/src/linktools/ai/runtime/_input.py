@@ -30,6 +30,7 @@ from ._attachment import (
 )
 from .state._plan import RuntimeDomain
 from ..model import (
+    ReferencedContent,
     CanonicalUserInput,
     MaterializedUserContent,
     UserPromptInput,
@@ -311,7 +312,8 @@ class ExecutionInputMaterializer:
         direct_binary = _binary_parts(canonical)
         if len(direct_binary) + len(workspace_inputs) > self._limits.max_binary_input_parts:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        total_bytes = sum(len(item.data) for item in direct_binary)
+        total_bytes = sum(item.ref.size if isinstance(item, ReferencedContent)
+                          else len(item.data) for item in direct_binary)
         if total_bytes > self._limits.max_binary_input_bytes:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if (
@@ -573,8 +575,8 @@ def _require_canonical_files(value: Sequence[str]) -> tuple[str, ...]:
 
 def _binary_parts(
     content: Sequence[UserContent | WorkspaceFileInput],
-) -> tuple[BinaryContent, ...]:
-    return tuple(item for item in content if isinstance(item, BinaryContent))
+) -> tuple[BinaryContent | ReferencedContent, ...]:
+    return tuple(item for item in content if isinstance(item, (BinaryContent, ReferencedContent)))
 
 
 def _draft_prompt(value: _UserPromptInput) -> DraftPrompt:

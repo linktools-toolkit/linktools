@@ -44,7 +44,11 @@ from ..model import ModelClientRequest, ModelClientRequestRecorder
 from ..workspace import validate_workspace_path
 from ._budget import RunBudgetContext
 from ._journal import ModelRequestFact, ModelRequestJournal, await_request_handoff
-from ._message import SummaryPromptPart, binary_content_usage, project_transient_binary_content
+from ._harness import SummaryProviderModel, prepare_input_retention
+from ._metric_capability import model_request_error
+from ._message import (
+    SummaryPromptPart, binary_content_usage, project_transient_binary_content, project_model_response_attempts,
+)
 
 _KEEP_COMPLETED_PAIRS = 3
 _SUMMARY_TAIL_MESSAGES = 20
@@ -156,10 +160,19 @@ class RuntimeSummarizingCompaction(SummarizingCompaction):
         if start == 0:
             raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE,
                           safe_details={"reason": "unsplittable_tool_context"})
-        # The public keep_messages parameter protects tool retries as well as returns.
-        adapter = replace(self, keep_messages=len(messages) - start,
-                          preserve_first_user_message=False)
-        result = await SummarizingCompaction.compact(adapter, messages, ctx)
+        retained = len(messages) - start
+        summary_input = messages
+        suffix: list[ModelMessage] = []
+        if self.keep_tokens is None and not (
+            self.keep_user_messages or self.receipts or self.bridge_prefix
+        ):
+            # The first retained message is the real boundary. Later reuse of a
+            # call ID must not link an older completed call to a new retry.
+            summary_input = messages[:start + 1]
+            suffix = messages[start + 1:]
+            retained = 1
+        adapter = replace(self, keep_messages=retained, preserve_first_user_message=False)
+        result = [*await SummarizingCompaction.compact(adapter, summary_input, ctx), *suffix]
         if result == messages:
             return messages
         original = {id(part) for message in messages for part in message.parts}
@@ -229,6 +242,14 @@ class _ObservedCompactionModel(WrapperModel):
         self._recorder = recorder
         self._source_messages = tuple(source_messages)
         self._budget = budget
+        self._last_request_fact: ModelRequestFact | None = None
+        self._content_omission_reason = SummaryProviderModel.content_omission_reason(source_messages)
+
+    def project_error(self, error: Exception) -> Exception:
+        """Project only after the summary Agent has accounted for native failures."""
+        return model_request_error(
+            error, content_omission_reason=self._content_omission_reason, fact=self._last_request_fact,
+        )
 
     async def request(
         self,
@@ -242,6 +263,10 @@ class _ObservedCompactionModel(WrapperModel):
             record_http_bodies=record_http_bodies_enabled(self._ctx.capabilities.values()),
         ) as client_recorder:
             try:
+                # Harness formats a summary prompt from the original context;
+                # retention still follows that context's referenced inputs.
+                prepare_input_retention(list(self._source_messages))
+                prepare_input_retention(messages)
                 await self._notify(
                     fact,
                     phase="started",
@@ -297,6 +322,9 @@ class _ObservedCompactionModel(WrapperModel):
                         client_requests=client_recorder.requests,
                     )
                     raise
+                response = project_model_response_attempts(
+                    response, content_omission_reason=client_recorder.body_omission_reason,
+                )
                 finished = self._journal.finish(model_request_seq, status="SUCCEEDED")
                 await self._notify(
                     finished,
@@ -310,7 +338,8 @@ class _ObservedCompactionModel(WrapperModel):
                 )
                 return response
             finally:
-                self._journal.consume(model_request_seq)
+                self._content_omission_reason = client_recorder.body_omission_reason
+                self._last_request_fact = self._journal.consume(model_request_seq)
 
     async def _finish(
         self,
@@ -448,7 +477,7 @@ class CompactionCapability(AbstractCapability[None]):
                 projected_context,
             )
         else:
-            summary_model: Model | None = None
+            summary_model: _ObservedCompactionModel | None = None
             if self._journal is not None and (
                 self._observer is not None or self._request_recorder is not None
             ):
@@ -480,10 +509,22 @@ class CompactionCapability(AbstractCapability[None]):
                 ),
                 target_tokens=target_tokens,
             )
-            projected_context = await tiered.before_model_request(
-                projected_run_context,
-                projected_context,
-            )
+            try:
+                projected_context = await tiered.before_model_request(
+                    projected_run_context,
+                    projected_context,
+                )
+            except Exception as error:
+                # The Harness summary Agent shares parent usage and must see
+                # native fallback errors before terminal diagnostics replace them.
+                safe_error = (
+                    summary_model.project_error(error) if summary_model is not None else model_request_error(
+                        error, content_omission_reason=SummaryProviderModel.content_omission_reason(source),
+                    )
+                )
+                if safe_error is not error:
+                    raise safe_error from None
+                raise
         projected = tuple(projected_context.messages)
         if self._projection_sink is not None:
             self._projection_sink(

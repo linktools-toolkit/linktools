@@ -20,12 +20,18 @@ from pydantic_ai.messages import (
 
 from ..core import JsonValue, normalize_json_value
 from ..errors import AIError, ErrorCode
+from ..model import ReferencedContent
 
 
 def encode_user_content_item(item: UserContent) -> JsonValue:
     try:
         if isinstance(item, str):
             return {"kind": "text", "text": item}
+        if isinstance(item, ReferencedContent):
+            return {"kind": "referenced-content", "ref": item.ref.to_payload(),
+                    "source": {"kind": item.source.kind, "id": item.source.id,
+                               "revision": item.source.revision},
+                    "media_type": item.media_type}
         if isinstance(item, TextContent):
             return {
                 "kind": "text-content",
@@ -69,6 +75,16 @@ def decode_user_content_item(value: object) -> UserContent:
     if not isinstance(value, Mapping) or not isinstance(value.get("kind"), str):
         raise ValueError("user content item is invalid")
     kind = value["kind"]
+    if kind == "referenced-content":
+        from ..asset import AssetVersionRef
+        from ..spec import CapabilityRef
+        source = value.get("source")
+        if (set(value) != {"kind", "ref", "media_type", "source"}
+            or not isinstance(source, Mapping) or set(source) != {"kind", "id", "revision"}):
+            raise ValueError("referenced content is invalid")
+        return ReferencedContent(AssetVersionRef.from_payload(value["ref"]),
+                                 media_type=value["media_type"],
+                                 source=CapabilityRef(source["kind"], source["id"], source["revision"]))
     if kind == "text":
         text = value.get("text")
         if not isinstance(text, str):

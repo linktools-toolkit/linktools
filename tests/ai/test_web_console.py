@@ -434,7 +434,10 @@ async def test_exception_diagnostics_never_serialize_provider_credentials() -> N
         tenant_id = "default"
 
         async def inspect_execution(self, identity: str, **kwargs: object) -> FailedView:
-            return FailedView("MODEL_UNAVAILABLE", ErrorDiagnostics.from_exception(ValueError("api_key=secret-key-value")))
+            try:
+                raise ValueError('api_key="secret-key-value" ' + "long-diagnostic-" * 300 + " END_DIAGNOSTIC")
+            except ValueError as error:
+                return FailedView("MODEL_UNAVAILABLE", ErrorDiagnostics.from_exception(error))
 
     async with client(create_app(history=History())) as http:
         response = await http.get("/api/executions/example")
@@ -442,6 +445,11 @@ async def test_exception_diagnostics_never_serialize_provider_credentials() -> N
         assert "secret-key-value" not in response.text
         assert response.json()["error_diagnostics"]["exception_type"] == "ValueError"
         assert response.json()["error_diagnostics"]["cause_digest"]
+        diagnostics = response.json()["error_diagnostics"]
+        assert "***" in diagnostics["exception_message"]
+        assert diagnostics["exception_chain"][0]["exception_message"].endswith("END_DIAGNOSTIC")
+        assert "END_DIAGNOSTIC" in diagnostics["traceback"]
+        assert "in inspect_execution" in diagnostics["traceback"]
 
 
 @pytest.mark.asyncio
@@ -467,9 +475,30 @@ async def test_failed_execution_stream_redacts_diagnostics_without_rewriting_use
             failed = next(item["item"]["event"] for item in events if item.get("type") == "event" and item["item"]["event"]["event_type"] == "EXECUTION_FAILED")
             assert failed["payload"]["error_diagnostics"]["exception_type"] == "ValueError"
             assert failed["payload"]["error_diagnostics"]["cause_digest"]
-            assert "exception_message" not in failed["payload"]["error_diagnostics"]
+            assert "***" in failed["payload"]["error_diagnostics"]["exception_message"]
+            assert failed["payload"]["error_diagnostics"]["exception_chain"]
+            assert "in fail" in failed["payload"]["error_diagnostics"]["traceback"]
             history = await http.get(f"/api/executions/{execution.execution_id}/history?include_content=true")
             assert any(item["content"] == prompt for item in history.json()["items"])
+
+
+def test_historical_event_diagnostics_keep_full_text_after_current_redaction() -> None:
+    from linktools.ai.runtime import ExecutionStreamEvent
+    from linktools.ai.web._app import _wire
+
+    text = repr(json.dumps({"api_key": 'prefix"TAIL_SECRET', "status": 401}))
+    event = ExecutionStreamEvent("execution", 9, "EXECUTION_FAILED", {
+        "error_diagnostics": {
+            "exception_type": "ValueError", "exception_message": text, "cause_digest": "a" * 64,
+            "exception_chain": [{"relation": "root", "exception_type": "ValueError", "exception_message": text}],
+            "traceback": text + "\n" + "long-frame-" * 400 + "END_STACK",
+        },
+    })
+    value = _wire(event)["payload"]["error_diagnostics"]
+    assert "TAIL_SECRET" not in json.dumps(value)
+    assert "401" in value["exception_message"]
+    assert value["traceback"].endswith("END_STACK")
+    assert len(value["traceback"]) > 4000
 
 
 def test_web_cli_owns_one_runtime_and_closes_it_after_server_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

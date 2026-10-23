@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Any, TypeVar
 
 from pydantic_ai import Tool
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, RetryPromptPart, TextPart, ToolReturnPart
 from pydantic_ai.models import (
     CompletedStreamedResponse,
     ModelRequestParameters,
@@ -32,6 +32,13 @@ from linktools.ai.storage import StoredPayload
 
 
 _ReadT = TypeVar("_ReadT")
+
+
+def is_tool_retry(part: object) -> bool:
+    """Recognize native retry feedback on the supported SDK message shapes."""
+    return (
+        isinstance(part, RetryPromptPart) and part.tool_name is not None
+    ) or (isinstance(part, ToolReturnPart) and part.outcome == "retried")
 
 
 def model_features(

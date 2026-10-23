@@ -480,10 +480,12 @@ async def test_model_client_response_closed_scope_stops_accumulating_body(
             await asyncio.wait_for(first_consumed.wait(), 3)
             capture_stream = response.stream
             assert capture_stream._parts == [_EVENT]
+            before = recorder.requests
         resume.set()
         await asyncio.wait_for(finished.wait(), 3)
         assert capture_stream._parts is None
-        assert recorder.requests[0].response is None
+        assert recorder.requests == before
+        assert before[0].response is not None and before[0].response.body is None
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task

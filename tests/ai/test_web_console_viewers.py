@@ -37,7 +37,9 @@ async def test_original_client_http_view_preserves_bytes_and_decode_provenance(e
     if encoding == "gzip-partial":
         response_body = gzip.compress(text)[:-8]
     content_encoding = "gzip" if encoding in {"invalid-gzip", "gzip-partial"} else encoding
-    original = ModelClientRequest("openai.chat.completions", request_body, response=ModelClientResponse(
+    diagnostics = {"started_at": "2026-01-01T00:00:00Z", "headers_received_ns": 7,
+                   "received_bytes": len(response_body), "protocol_terminal": None}
+    original = ModelClientRequest("openai.chat.completions", request_body, diagnostics=diagnostics, response=ModelClientResponse(
         response_body, 200, "sse", content_encoding, False,
     ))
     calls = []
@@ -58,6 +60,7 @@ async def test_original_client_http_view_preserves_bytes_and_decode_provenance(e
         item, = response.json()["items"]
         assert item["request"] == {} and item["response"] is None
         attempt, = item["client_requests"]
+        assert attempt["diagnostics"] == diagnostics
         assert attempt["body_encoding"] == "base64"
         assert base64.b64decode(attempt["body"]) == request_body
         assert json.loads(base64.b64decode(attempt["body"]))["messages"][1]["content"] == ""

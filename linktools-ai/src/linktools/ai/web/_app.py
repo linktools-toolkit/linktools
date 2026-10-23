@@ -50,10 +50,9 @@ _HEADERS = {
 }
 
 
-def _wire(value: object) -> object:
+def _wire(value: object, *, diagnostic: bool = False) -> object:
     if isinstance(value, ErrorDiagnostics):
-        # Exception messages can contain provider credentials; safe details remain available.
-        return {"exception_type": value.exception_type, "cause_digest": value.cause_digest}
+        return _wire(value.to_payload(), diagnostic=True)
     if isinstance(value, (ModelClientRequest, ModelClientResponse)):
         result = {field.name: _wire(getattr(value, field.name)) for field in fields(value) if field.name != "body"}
         result["body"] = None if value.body is None else base64.b64encode(value.body).decode("ascii")
@@ -62,24 +61,23 @@ def _wire(value: object) -> object:
             result["decoded_text"], result["decode_error"] = _response_display(value)
         return result
     if is_dataclass(value) and not isinstance(value, type):
-        # Recurse before asdict so diagnostic messages never enter an HTTP response.
         result = {field.name: _wire(getattr(value, field.name)) for field in fields(value)}
         if isinstance(value, ExecutionStreamEvent):
             payload = result["payload"]
             if isinstance(payload, dict) and isinstance(payload.get("error_diagnostics"), dict):
-                diagnostics = payload["error_diagnostics"]
-                payload["error_diagnostics"] = {
-                    key: diagnostics[key] for key in ("exception_type", "cause_digest") if key in diagnostics
-                }
+                # Historical events are plain JSON, not newly constructed diagnostics.
+                payload["error_diagnostics"] = _wire(payload["error_diagnostics"], diagnostic=True)
         return result
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, Mapping):
-        return {str(key): _wire(item) for key, item in value.items()}
+        return {str(key): _wire(item, diagnostic=diagnostic) for key, item in value.items()}
     if isinstance(value, (tuple, list)):
-        return [_wire(item) for item in value]
+        return [_wire(item, diagnostic=diagnostic) for item in value]
+    if diagnostic and isinstance(value, str):
+        return environ.logging.redact(value)
     return value
 
 

@@ -3,8 +3,10 @@
 """Agent output bindings backed by one durable JSON-schema contract."""
 
 import json
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+import sys
+import traceback
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, cast
 
 from jsonschema import Draft202012Validator
@@ -13,6 +15,9 @@ from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 from pydantic import BaseModel, ConfigDict, ValidationError
 from pydantic_ai import StructuredDict
 from pydantic_core import PydanticCustomError, core_schema
+
+if sys.version_info < (3, 11):
+    from exceptiongroup import BaseExceptionGroup
 
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
@@ -73,7 +78,7 @@ class OutputBinding:
             diagnostic = _OutputSchemaDiagnostic.from_schema_error(
                 error, _declared_property_names(self.schema_definition)
             )
-            raise diagnostic.to_error(ErrorCode.OUTPUT_VALIDATION_FAILED) from None
+            raise diagnostic.to_error(ErrorCode.OUTPUT_VALIDATION_FAILED, error) from None
 
     @property
     def runtime_output_type(self) -> "type[object]":
@@ -225,33 +230,70 @@ class _OutputSchemaDiagnostic:
             hide_input=True,
         )
 
-    def to_error(self, code: ErrorCode) -> AIError:
+    def to_error(self, code: ErrorCode, source: BaseException) -> AIError:
         details: dict[str, JsonValue] = {"path": self.path, "rule": self.rule}
         if self.expected_type is not None:
             details["expected_type"] = self.expected_type
             details["actual_type"] = self.actual_type
+        safe_error = self.to_validation_error()
+        stack = [
+            "Output validation traceback (original messages, notes and source lines omitted):\n"
+        ]
+        # Rejected values may occur in SDK messages and even source literals.
+        # Preserve the original frames, not an unraised replacement's stack.
+        for path, current, repeated in _output_exception_tree(source):
+            stack.append(f"{path}: {type(current).__name__}\n")
+            if repeated:
+                continue
+            stack.extend(traceback.format_list([
+                (frame.f_code.co_filename, lineno, frame.f_code.co_name, "")
+                for frame, lineno in traceback.walk_tb(current.__traceback__)
+            ]))
+        stack.append(f"{type(safe_error).__name__}: {safe_error}\n")
+        diagnostics = replace(
+            ErrorDiagnostics.from_exception(safe_error),
+            exception_chain=None,
+            traceback="".join(stack),
+        )
         return AIError(
             code,
             str(self),
             retryable=False,
             safe_details={"output_validation": details},
-            diagnostics=ErrorDiagnostics.from_exception(self.to_validation_error()),
+            diagnostics=diagnostics,
         )
 
 
 def output_validation_error(error: BaseException, *, code: ErrorCode) -> "AIError | None":
     """Project durable schema failures without SDK input values or exception text."""
-    seen: set[int] = set()
-    current: BaseException | None = error
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(current, ValidationError):
+    for _path, current, repeated in _output_exception_tree(error):
+        if not repeated and isinstance(current, ValidationError):
             for detail in current.errors(include_input=False, include_url=False):
                 diagnostic = detail.get("ctx", {}).get("diagnostic")
                 if isinstance(diagnostic, _OutputSchemaDiagnostic):
-                    return diagnostic.to_error(code)
-        current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)
+                    return diagnostic.to_error(code, error)
     return None
+
+
+def _output_exception_tree(error: BaseException) -> Iterator[tuple[str, BaseException, bool]]:
+    seen: dict[int, str] = {}
+    pending = [("root", error)]
+    while pending:
+        path, current = pending.pop()
+        if id(current) in seen:
+            yield f"{path} (same exception as {seen[id(current)]})", current, True
+            continue
+        seen[id(current)] = path
+        yield path, current, False
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(
+                (f"{path}.branch[{index}]", child)
+                for index, child in reversed(list(enumerate(current.exceptions)))
+            )
+        if current.__cause__ is not None:
+            pending.append(("cause" if path == "root" else f"{path}.cause", current.__cause__))
+        elif not current.__suppress_context__ and current.__context__ is not None:
+            pending.append(("context" if path == "root" else f"{path}.context", current.__context__))
 
 
 def _json_type(value: object) -> str:

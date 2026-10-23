@@ -27,9 +27,9 @@ from linktools.ai.runtime._agent_executor import (
     _event_stream_capability,
     _map_event,
     _thinking_capability,
-    _validate_thinking_model,
 )
 from linktools.ai.runtime._event import ExecutionDelta
+from linktools.ai.runtime._harness import validate_thinking_model
 from linktools.ai.runtime._tool_return_codec import tool_return_content_digest
 
 
@@ -70,9 +70,13 @@ def test_tool_result_uses_model_visible_content_digest() -> None:
     )
 
 
-def test_tool_retry_boundary_carries_error_code() -> None:
+@pytest.mark.parametrize("part", [
+    RetryPromptPart("retry", tool_name="tool", tool_call_id="call-1"),
+    ToolReturnPart("tool", "retry", tool_call_id="call-1", outcome="retried"),
+])
+def test_tool_retry_boundary_carries_error_code(part: object) -> None:
     event = FunctionToolResultEvent(
-        part=RetryPromptPart("retry", tool_name="tool", tool_call_id="call-1")
+        part=part,
     )
 
     assert _map_event(event) == DurableBoundary(
@@ -123,13 +127,13 @@ def test_thinking_uses_native_capability_with_request_model_validation() -> None
     supported = TestModel(
         profile={"supports_thinking": True, "thinking_always_enabled": False}
     )
-    _validate_thinking_model(supported, "high")
+    validate_thinking_model(supported, "high")
 
     unsupported = TestModel(
         profile={"supports_thinking": False, "thinking_always_enabled": False}
     )
     with pytest.raises(AIError) as unsupported_error:
-        _validate_thinking_model(unsupported, True)
+        validate_thinking_model(unsupported, True)
     assert unsupported_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
     assert unsupported_error.value.safe_details == {
         "field": "thinking",
@@ -140,7 +144,7 @@ def test_thinking_uses_native_capability_with_request_model_validation() -> None
         profile={"supports_thinking": True, "thinking_always_enabled": True}
     )
     with pytest.raises(AIError) as always_on_error:
-        _validate_thinking_model(always_on, False)
+        validate_thinking_model(always_on, False)
     assert always_on_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
     assert always_on_error.value.safe_details == {
         "field": "thinking",

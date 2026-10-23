@@ -164,6 +164,7 @@ Useful options:
 - Install `linktools-ai[anthropic]` for Anthropic Messages, or `linktools-ai[openai]` for either OpenAI API; add `web` for `ai-web`, for example `linktools-ai[anthropic,web]`. Missing provider extras produce an installation hint before a Runtime is opened.
 - Endpoint paths retain native SDK semantics: OpenAI normally uses a base ending in `/v1`; Anthropic normally uses the server root and appends `/v1/messages` itself. Configure a gateway according to its supported API, not by copying an OpenAI endpoint.
 - Custom headers and arbitrary SDK profile overrides are not CLI configuration options. Thinking control remains governed by the effective native SDK model profile, independently of whether the response contains thinking parts; selecting Anthropic does not declare arbitrary models thinking-capable.
+- Generic limits use `--context-window`, `--max-tokens`, `--timeout`, `--max-retries`, `--retry-delay`, `--retry-max-delay`, and `--retry-backoff-factor`. Workspace keys use the same words with underscores; environment configuration uses `LINKTOOLS_MODEL_CONTEXT_WINDOW`, etc. Context/output limits are tokens; timeout/delays are seconds. Explicit CLI values override LinkTools configuration/environment, then workspace values, then library defaults. See the [model configuration guide](docs/model-protocols.md#generic-limits-and-configuration-names).
 - `--planning` enables planning for the execution.
 - `--thinking` requests model thinking when supported.
 - `--json` emits one terminal JSON result.
@@ -780,7 +781,41 @@ Subagents are root Agent definitions selected from the same captured catalog. A 
 
 ## 5. Output contracts
 
-Output belongs to an execution, not to `AgentSpec` or Session identity:
+The resolved output contract belongs to an execution, not to Session identity.
+An Agent may declare a default JSON Schema through `AgentSpec.output_schema`,
+`RuntimeFeatures.agent(..., output_schema=...)`, or the `output_schema` field in
+its Asset declaration:
+
+```python
+from pydantic import BaseModel
+
+class ReviewResult(BaseModel):
+    approved: bool
+    findings: list[str]
+
+application.agent(
+    "reviewer",
+    model="decision-route",
+    output_schema=ReviewResult.model_json_schema(),
+    output_retries=2,
+)
+```
+
+Root runs, delegated children, and Agent-backed Tasks use that same default.
+Omitting `output`, or passing `output=None`, inherits the declaration; an Agent
+without a declared schema produces text. An explicit run output type overrides
+the default, and `output=AssistantTextOutput` from `linktools.ai.agent` explicitly
+selects text even for a structured Agent. Task nodes can similarly override the
+default with `output_type`.
+
+The schema is validated through the existing `OutputBinding` structured-output
+path, including native Pydantic AI correction retries controlled by
+`output_retries`. Only JSON Schema constraints are declared; Python-only model
+validators are not persisted. Each execution freezes the resolved output mode
+and schema in its `AgentBindingContract`; recovery uses those stored values,
+not a later Agent declaration.
+
+An explicit per-run contract can be selected as follows:
 
 ```python
 from pydantic import BaseModel
@@ -844,7 +879,10 @@ URL and uploaded-file content remains an external reference: Runtime persists
 its declared metadata and does not implicitly download it. Inline binary
 content and workspace file inputs are materialized as bytes before execution
 reservation when their durable contract requires it. Model transport retries
-use `max_retries=2` with a fixed `retry_delay=1.0`; Agent `tool_retries` and `output_retries` default to `None`.
+use `max_retries=2` with `retry_delay=1.0` as the initial exponential backoff,
+bounded jitter and provider Retry-After hints; see
+[transport retry semantics](docs/model-protocols.md#transport-retries).
+Agent `tool_retries` and `output_retries` default to `None`.
 `RuntimeFeatures` supplies `3` for both unless configured otherwise; an explicit
 Agent value, including `0`, wins. The compiler resolves retries before durable
 binding, so recovery retains the admitted values across Runtime reconfiguration.
@@ -1337,7 +1375,10 @@ for example `linktools.ai.asset`, `linktools.ai.model`, `linktools.ai.spec`,
 Other package contracts include `AgentSpecAdapter`, `SkillSpecAdapter`, `MCPServerSpecAdapter`, `AgentDeclarationLoader`,
 MCP selector helpers, `WorkspaceToolDeclaration`, and the
 optional stdio sandbox protocols. `ErrorDiagnostics` is available from
-`linktools.ai.errors`.
+`linktools.ai.errors`; its `to_payload()` includes collected sanitized exception
+chains and stack traces without display truncation. See
+[complete failure diagnostics](docs/runtime-history.md#read-complete-failure-diagnostics)
+for authoritative reads, unknown historical fields and credential filtering.
 
 Private modules prefixed with `_` are implementation details. Downstream applications should not import Runtime execution infrastructure, state repository internals, or private compiler helpers directly.
 

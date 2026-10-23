@@ -113,6 +113,7 @@ class _LifecycleRecorder:
         response: ModelResponse | None = None,
         error_code: str | None = None,
         include_observation: bool,
+        usage: RequestUsage | None = None,
     ) -> None:
         del response, error_code, include_observation
         self.event_phases.append((phase, fact))
@@ -396,6 +397,7 @@ def test_started_run_cancelled_is_recorded_as_cancelled(
                 response: ModelResponse | None = None,
                 error_code: str | None = None,
                 include_observation: bool,
+                usage: RequestUsage | None = None,
             ) -> None:
                 if failure_location == "record" and phase == "started":
                     raise RunCancelled("cancelled while recording start")
@@ -603,6 +605,7 @@ def test_compaction_started_record_run_cancelled_closes_request() -> None:
                 response: ModelResponse | None = None,
                 error_code: str | None = None,
                 include_observation: bool,
+                usage: RequestUsage | None = None,
             ) -> None:
                 if phase == "started":
                     raise RunCancelled("cancelled while recording compaction start")
@@ -1552,7 +1555,7 @@ def test_active_and_reconnected_streams_follow_broker_replay_fallback(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
 async def test_provider_dispatch_waits_for_prepared_input_commit(streaming: bool) -> None:
-    from linktools.ai.runtime._metric_capability import _PreparedRequestModel
+    from linktools.ai.runtime._metric_capability import PreparedRequestModel
 
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -1572,7 +1575,7 @@ async def test_provider_dispatch_waits_for_prepared_input_commit(streaming: bool
         provider_calls.append(True)
         return ModelResponse(parts=[TextPart("answer")])
 
-    model = _PreparedRequestModel(_BlockingFunctionModel(respond), prepare, lambda error: None)
+    model = PreparedRequestModel(_BlockingFunctionModel(respond), prepare, lambda error: None)
 
     async def run() -> None:
         if streaming:

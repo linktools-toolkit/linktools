@@ -6333,11 +6333,7 @@ def _terminal_error_payload(
         "safe_error_details": dict(safe_error_details),
     }
     if error_diagnostics is not None:
-        payload["error_diagnostics"] = {
-            "exception_type": error_diagnostics.exception_type,
-            "exception_message": error_diagnostics.exception_message,
-            "cause_digest": error_diagnostics.cause_digest,
-        }
+        payload["error_diagnostics"] = error_diagnostics.to_payload()
     return payload
 
 

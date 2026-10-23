@@ -189,7 +189,15 @@ async def test_partial_response_is_published_only_at_request_or_shutdown_complet
         if completion != "success":
             assert "interrupted" in json.dumps(interaction.response)
             assert "; done" not in json.dumps(interaction.response)
-            assert interaction.usage is None
+            if completion == "provider_error":
+                # The SDK committed this interrupted response with its own
+                # usage. Observe that exact fact, not a text-derived estimate.
+                assert interaction.usage is not None
+                assert interaction.usage.input_tokens == interaction.response["usage"]["input_tokens"]
+                assert interaction.usage.output_tokens == interaction.response["usage"]["output_tokens"]
+                assert interaction.usage.model_requests == 1
+            else:
+                assert interaction.usage is None
         history = (await reader.history(
             execution_id, principal=principal, include_content=True,
         )).items

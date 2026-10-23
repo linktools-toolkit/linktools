@@ -213,6 +213,7 @@ class AgentSpec:
     output_retries: int | None = None
     description: "str | None" = None
     metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
+    output_schema: "Mapping[str, JsonValue] | None" = None
     revision: int = field(default=1, kw_only=True)
 
     def __post_init__(self) -> None:
@@ -231,6 +232,12 @@ class AgentSpec:
             raise TypeError("agent usage_limits must be AgentUsageLimits or None")
         if not isinstance(self.planning, bool):
             raise TypeError("agent planning must be bool")
+        if self.output_schema is not None:
+            if not isinstance(self.output_schema, Mapping):
+                raise TypeError("agent output_schema must be a JSON object or None")
+            object.__setattr__(
+                self, "output_schema", ImmutableJsonMapping(self.output_schema, allow_empty_keys=True)
+            )
         for name, value in (
             ("tool_retries", self.tool_retries),
             ("output_retries", self.output_retries),

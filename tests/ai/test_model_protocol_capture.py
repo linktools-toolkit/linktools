@@ -41,6 +41,7 @@ async def test_protocol_terminal_observation_keeps_original_bytes(
     assert captured.api == api
     assert json.loads(captured.body) == {"input": "hello"}
     assert captured.response.body == body and captured.response.complete
+    assert captured.diagnostics["protocol_terminal"] == ("[DONE]" if terminal == "[DONE]" else json.loads(terminal)["type"])
     assert "not-recorded" not in repr(captured)
     assert source.received == [body[:8], body[8:]] and source.closes == 1
 

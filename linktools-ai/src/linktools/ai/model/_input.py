@@ -14,6 +14,7 @@ from pydantic_ai.messages import (
 
 from ..errors import AIError, ErrorCode
 from ._openai_input import openai_input_transport
+from ._referenced_content import ReferencedContent
 
 if TYPE_CHECKING:
     from ._contract import ModelBinding
@@ -72,7 +73,9 @@ def validate_model_input(
 def validate_model_inputs(binding: "ModelBinding", value: object) -> None:
     """Validate concrete inputs, including SDK encoding, without fetching remote files."""
     for item in _file_inputs(value):
-        if isinstance(item, BinaryContent):
+        if isinstance(item, ReferencedContent):
+            kind, size = "binary", item.ref.size
+        elif isinstance(item, BinaryContent):
             kind, size = "binary", len(item.data)
         elif isinstance(item, ImageUrl):
             kind, size = "image-url", None
@@ -147,8 +150,8 @@ def _input_error(mime_type: str, input_kind: str, reason: str) -> None:
                   safe_details={"reason": reason, "mime_type": mime_type, "input_kind": input_kind})
 
 
-def _file_inputs(value: object) -> Iterator[BinaryContent | ImageUrl | AudioUrl | DocumentUrl | VideoUrl | UploadedFile]:
-    if isinstance(value, (BinaryContent, ImageUrl, AudioUrl, DocumentUrl, VideoUrl, UploadedFile)):
+def _file_inputs(value: object) -> Iterator[BinaryContent | ImageUrl | AudioUrl | DocumentUrl | VideoUrl | UploadedFile | ReferencedContent]:
+    if isinstance(value, (BinaryContent, ImageUrl, AudioUrl, DocumentUrl, VideoUrl, UploadedFile, ReferencedContent)):
         yield value
     elif isinstance(value, ModelRequest):
         for part in value.parts:

@@ -150,7 +150,111 @@ block while preserving tool call/return pairing. No consumed-content prefix is
 added. Old stored labels and markers remain readable without rewriting raw history. Legacy
 binaries lacking a reliable metadata association receive one metadata text block
 when projected. URL inputs and uploaded-file references retain their existing
-lifetime; this policy applies only to BinaryContent.
+lifetime. Recoverable reference inputs use the explicit contract below; ordinary
+`BinaryContent` still retains its original bytes in durable history.
+
+## Recoverable reference inputs
+
+Use `ReferencedContent` when the host can reliably retrieve the **same immutable
+content** again. This is a property of the source contract, not of an object-store
+brand, file extension, size or currently valid URL. A mutable source that returns
+its latest value is insufficient. If the accepted version is no longer available,
+the read fails; it must not silently substitute current content.
+
+The input carries an existing `AssetVersionRef`, its MIME type and the existing
+`CapabilityRef` of the authorized loader. Runtime persists that descriptor, not
+another copy of the Asset bytes. The capability reference identifies the loader's
+behavior namespace by `id + revision`; the Asset reference identifies one resource
+version within that namespace. Its `layer_id` is a storage layer, not another
+capability identity. No URL, credentials, host path or callback digest is needed.
+
+Register one loader on the selected Agent. It may route multiple configured
+origins, but must not probe unrelated readers to find one that accepts a reference.
+The following example uses `HostApp.read_admitted_version`, an application-owned
+operation, not a LinkTools API:
+
+```python
+from linktools.ai.capability import AgentContext, ReferencedInputsCapability
+from linktools.ai.model import ReferencedContent
+from linktools.ai.runtime import RuntimeFeatures
+from linktools.ai.spec import CapabilityRef
+
+source = CapabilityRef("capability", "recoverable-inputs", 1)
+
+async def load_input(ctx: AgentContext["HostApp"], item: ReferencedContent) -> bytes:
+    return await ctx.app.read_admitted_version(
+        principal=ctx.principal,
+        execution_id=ctx.execution_id,
+        ref=item.ref,
+        media_type=item.media_type,
+    )
+
+features = RuntimeFeatures("documents")
+features.capability(
+    ReferencedInputsCapability(load_input),
+    id=source.id, revision=source.revision, scope="agent",
+)
+
+# `ref` and `media_type` come from the same host-authorized immutable manifest.
+prompt = ["Inspect this document", ReferencedContent(
+    ref, media_type=media_type, source=source,
+)]
+```
+
+`read_admitted_version` must authorize the original admitted execution principal
+and that execution's selected input membership **before** source IO. Possessing
+a reference, a signed URL, a reader or a service credential is not authorization.
+The MIME type must agree with the same trusted manifest: `AssetVersionRef` does
+not contain a MIME type. Restored or imported references still require this check,
+and their source must match the selected capability revision before the loader is
+called. The host owns same-revision configuration consistency. A model-authored
+reference is not an admitted input.
+
+The host performs a bounded exact-version read and owns cleanup of any temporary
+download. Prefer memory when suitable; otherwise use a per-execution temporary
+directory excluded from workspace archives and backups, and remove the materialized
+file on success, failure and cancellation before returning bytes. This does not
+promise cleanup after an uncatchable process termination. Runtime verifies the
+returned bytes against the reference's existing size and SHA-256 integrity
+contract. It does not create a second Asset store or generic URL resolver.
+
+Hydration happens only in an outbound provider-message copy. Frozen input,
+input capture, tool-result persistence, checkpoints and prepared request traces
+keep the reference. Existing input-part and aggregate byte budgets count its known
+size; the configured MIME and actual protocol must support it. Native OpenAI Chat,
+OpenAI Responses and Anthropic Messages adapters encode the temporary
+`BinaryContent`; there is no model-name protocol inference or automatic size-based
+Files API upload. No additional retry or external-tool replay is introduced.
+Token counting, compaction and recovery may call the loader again. It must be a
+read-only, repeatable exact-version read, not a one-shot external side effect.
+
+A business tool can return `ToolReturn(return_value=metadata, content=[reference])`.
+Only `content` carries consumable attachment references. Native return values and
+JSON mappings/sequences reject that input type in `return_value`; arbitrary return
+objects retain their ordinary JSON-snapshot contract. A descriptor-like snapshot
+is plain result data, never promoted into a readable or recoverable attachment.
+Persisted reference-bearing returns cannot introduce executable tools.
+After a complete logical model response,
+the active context retains ordinary metadata text plus the original descriptor in
+its metadata, and no longer hydrates that occurrence. This is not an automatic
+semantic content summary. Pending or interrupted references remain recoverable.
+
+Even with `TraceCapability(record_http_bodies=True)`, a request containing a
+reference omits its entire raw HTTP request and response bodies. Each attempt's
+diagnostics records `body_omission_reason="referenced_content_lifecycle"`; status,
+request IDs, timing, counts and stream observations remain available. This is a
+declared retention omission, not a capture error, empty body or proof of stream
+completion. Provider failures likewise expose `content_omission_reason` while
+retaining exception types, relationships and frame locations without arbitrary
+messages, notes, source lines or echoed file content. Subsequent ordinary requests
+retain their configured capture behavior.
+
+This is opt-in. Existing `BinaryContent`, workspace file inputs and already-uploaded
+`UploadedFile` references keep their contracts. `UploadedFile` names an existing
+provider file; Runtime does not upload or delete it. Unrecoverable originals and
+intentional long-lived outputs still require their existing storage policy. Old
+history is not rewritten or purged, and moving an input into an output directory
+does not make it an independently authorized operational artifact.
 
 ## Discovery and edits
 

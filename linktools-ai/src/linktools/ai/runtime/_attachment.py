@@ -34,6 +34,7 @@ from ..core import (
     normalize_json_value,
 )
 from ..errors import AIError, ErrorCode
+from ..model import ReferencedContent
 from ..workspace import validate_workspace_path
 
 _URL_TYPES = (ImageUrl, AudioUrl, DocumentUrl, VideoUrl)
@@ -532,6 +533,15 @@ def _same_attachment(
 
 
 def _content_descriptor(item: object) -> dict[str, JsonValue] | None:
+    if isinstance(item, ReferencedContent):
+        return {
+            "source": "referenced",
+            "media_type": item.media_type,
+            "size": item.ref.size,
+            "digest": item.ref.digest,
+            "content_key": item.ref.digest,
+            "input_identifier": None,
+        }
     if isinstance(item, BinaryContent):
         digest = hashlib.sha256(item.data).hexdigest()
         return {

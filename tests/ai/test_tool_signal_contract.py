@@ -16,7 +16,6 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
@@ -24,7 +23,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.tools import ToolDefinition
 
-from ._runtime_test_helpers import _UsageFunctionModel
+from ._runtime_test_helpers import _UsageFunctionModel, is_tool_retry
 
 
 @pytest.mark.parametrize("signal_type", (ToolCallRetry, ToolCallFailed))
@@ -130,7 +129,7 @@ async def test_argument_validator_signal_reaches_model(
             assert isinstance(messages[-1], ModelRequest)
             feedback = messages[-1].parts[0]
             if signal_type is ToolCallRetry:
-                assert isinstance(feedback, RetryPromptPart)
+                assert is_tool_retry(feedback)
                 assert feedback.content == message
                 assert feedback.tool_call_id == "invalid"
                 return ModelResponse(parts=[ToolCallPart("checked", {"value": 1}, tool_call_id="corrected")])
@@ -206,9 +205,9 @@ async def test_argument_schema_validation_preserves_sdk_feedback() -> None:
             return ModelResponse(parts=[ToolCallPart("checked", {"value": []}, tool_call_id="call")])
         assert isinstance(messages[-1], ModelRequest)
         feedback = messages[-1].parts[0]
-        assert isinstance(feedback, RetryPromptPart)
+        assert is_tool_retry(feedback)
         assert isinstance(feedback.content, list)
-        assert feedback.content[0]["loc"] == ("value",)
+        assert tuple(feedback.content[0]["loc"]) == ("value",)
         assert feedback.content[0]["type"] == "int_type"
         return ModelResponse(parts=[TextPart("done")])
 

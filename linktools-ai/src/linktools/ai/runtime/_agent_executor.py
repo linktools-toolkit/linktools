@@ -72,6 +72,7 @@ from ..asset import AssetMaterializer, AssetStoreReader, AssetVersionRef
 from ..capability import (
     AgentContext,
     CapabilityContribution,
+    ReferencedInputsCapability,
     SkillCapability,
     SkillSourceRegistry,
     SubagentCapability,
@@ -96,9 +97,9 @@ from ..core import (
     normalize_json_value,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..model import model_binding_error, validate_model_inputs
+from ..model import FallbackBinding, ModelBinding, model_binding_error, validate_model_inputs
 from ..observe import MetricMeasurement, MetricRecorder, Observation
-from ..spec import MCPServerSpecCodec, RepositoryInstructions
+from ..spec import CapabilityRef, MCPServerSpecCodec, RepositoryInstructions
 from ..workspace import (
     Sandbox,
     SandboxResource,
@@ -115,9 +116,12 @@ from ._compaction import CompactionPolicy
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
 from ._memory import MemoryStore
-from ._metric_capability import ModelObservationCapability
+from ._metric_capability import ModelObservationCapability, PreparedRequestModel
 from ._plan import RuntimePlanStore
-from ._harness import ReinjectRuntimeSystemPrompt, SummaryProviderModel
+from ._harness import (
+    ReinjectRuntimeSystemPrompt, SummaryProviderModel, CandidateProviderModel,
+    FallbackProviderModel, validate_thinking_model,
+)
 from ._message import without_history_system_prompts
 from ._pydantic_tool_control import PydanticToolControlCapability
 from ._repository_instructions import _RepositoryInstructionCapability
@@ -338,7 +342,9 @@ class AgentExecutor:
                 primary_error = error
                 raise
             except AIError as error:
-                mapped = _with_cleanup_diagnostic(error, error)
+                mapped = _with_cleanup_diagnostic(
+                    _failed_fallback_error(error, usage_limits=usage_limits, run_usage=run_usage), error,
+                )
                 primary_error = mapped
                 if mapped is error:
                     raise
@@ -590,7 +596,34 @@ class AgentExecutor:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         validate_model_inputs(compiled_agent.model, scope.user_prompt)
         validate_model_inputs(compiled_agent.model, scope.history)
-        model = SummaryProviderModel(compiled_agent.model.materialize())
+        input_sources = [
+            (leaf, CapabilityRef("capability", candidate.id, candidate.revision))
+            for candidate in compiled_agent.selected_capabilities
+            if isinstance(candidate.value, AbstractCapability)
+            for leaf in runtime_feature_leaves(candidate.value)
+            if isinstance(leaf, ReferencedInputsCapability)
+        ]
+        if len(input_sources) > 1:
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        def prepare_candidate(candidate: ModelBinding) -> Model:
+            if isinstance(candidate, FallbackBinding):
+                return candidate.materialize(prepare=prepare_candidate)
+            return CandidateProviderModel(
+                candidate.materialize(), context=scope.context,
+                referenced_inputs=input_sources[0][0] if input_sources else None,
+                input_source=input_sources[0][1] if input_sources else None,
+                binding=candidate, preserve_errors=True,
+            )
+
+        if isinstance(compiled_agent.model, FallbackBinding):
+            model = FallbackProviderModel(prepare_candidate(compiled_agent.model))
+        else:
+            model = SummaryProviderModel(
+                compiled_agent.model.materialize(), context=scope.context,
+                referenced_inputs=input_sources[0][0] if input_sources else None,
+                input_source=input_sources[0][1] if input_sources else None,
+                binding=compiled_agent.model,
+            )
         # Model cleanup must not replace cancellation or an established run failure.
         execution_error: BaseException | None = None
         try:
@@ -1309,30 +1342,16 @@ class _RuntimeThinking(Thinking):
         handler: WrapModelRequestHandler,
     ) -> ModelResponse:
         del ctx
-        _validate_thinking_model(request_context.model, self.effort)
+        effective = request_context.model
+        while isinstance(effective, PreparedRequestModel):
+            effective = effective.wrapped
+        if not isinstance(effective, FallbackProviderModel):
+            validate_thinking_model(effective, self.effort)
         return await handler(request_context)
 
 
 def _thinking_capability(thinking: ThinkingValue) -> Thinking:
     return _RuntimeThinking(effort=thinking, id="linktools.ai.thinking")
-
-
-def _validate_thinking_model(model: Model, thinking: ThinkingValue) -> None:
-    profile = model.profile
-    supports = bool(profile.get("supports_thinking", False))
-    always = bool(profile.get("thinking_always_enabled", False))
-    if thinking is False:
-        if always:
-            raise AIError(
-                ErrorCode.REQUEST_FIELD_INVALID,
-                safe_details={"field": "thinking", "reason": "model_always_enabled"},
-            )
-        return
-    if not (supports or always):
-        raise AIError(
-            ErrorCode.REQUEST_FIELD_INVALID,
-            safe_details={"field": "thinking", "reason": "model_not_supported"},
-        )
 
 
 def _map_event(event: object) -> "AgentEmission | None":
@@ -1402,6 +1421,19 @@ def _map_event(event: object) -> "AgentEmission | None":
         )
     if isinstance(event, FunctionToolResultEvent):
         part = event.part
+        if isinstance(part, RetryPromptPart) or (
+            isinstance(part, ToolReturnPart) and part.outcome == "retried"
+        ):
+            return DurableBoundary(
+                ExecutionEventType.TOOL_CALL_FINISHED,
+                {
+                    "call_id": part.tool_call_id,
+                    "tool_name": part.tool_name or "unknown",
+                    "result_digest": None,
+                    "status": "FAILED",
+                    "error_code": ErrorCode.TOOL_RETRY_REQUIRED.value,
+                },
+            )
         if isinstance(part, ToolReturnPart):
             success = part.outcome == "success"
             return DurableBoundary(
@@ -1413,17 +1445,6 @@ def _map_event(event: object) -> "AgentEmission | None":
                         tool_return_content_digest(part.content) if success else None
                     ),
                     "status": "SUCCEEDED" if success else "FAILED",
-                },
-            )
-        if isinstance(part, RetryPromptPart):
-            return DurableBoundary(
-                ExecutionEventType.TOOL_CALL_FINISHED,
-                {
-                    "call_id": part.tool_call_id,
-                    "tool_name": part.tool_name or "unknown",
-                    "result_digest": None,
-                    "status": "FAILED",
-                    "error_code": ErrorCode.TOOL_RETRY_REQUIRED.value,
                 },
             )
     return None
@@ -1459,27 +1480,54 @@ def _with_cleanup_diagnostic(error: AIError, source: BaseException) -> AIError:
     )
 
 
+def _failed_fallback_error(
+    error: AIError, *, usage_limits: UsageLimits, run_usage: RunUsage,
+) -> AIError:
+    # The SDK commits an interrupted continuation only after the streaming
+    # failure escapes. Its earlier attempt subtotal can miss this final limit.
+    if "failed_attempts" not in error.safe_details:
+        return error
+    try:
+        usage_limits.check_tokens(run_usage)
+        usage_limits.check_cost(run_usage, warn_if_cost_unavailable=False)
+    except UsageLimitExceeded:
+        return AIError(
+            ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED, retryable=False,
+            safe_details={
+                **error.safe_details,
+                "limits": _limit_details(usage_limits),
+                "usage": _usage_details(run_usage),
+            },
+            diagnostics=error.diagnostics,
+        )
+    return error
+
+
 def _execution_error(
     error: Exception,
     *,
     usage_limits: UsageLimits,
     run_usage: RunUsage,
 ) -> AIError:
+    output_error = output_validation_error(
+        error,
+        code=(
+            ErrorCode.MODEL_RESPONSE_INVALID
+            if isinstance(error, UnexpectedModelBehavior)
+            else ErrorCode.OUTPUT_VALIDATION_FAILED
+        ),
+    )
     provider_error = model_binding_error(error)
     if provider_error is not None:
-        return provider_error
-    if isinstance(error, (UnexpectedModelBehavior, ValidationError)):
-        output_error = output_validation_error(
-            error,
-            code=(
-                ErrorCode.MODEL_RESPONSE_INVALID
-                if isinstance(error, UnexpectedModelBehavior)
-                else ErrorCode.OUTPUT_VALIDATION_FAILED
-            ),
-        )
         if output_error is not None:
-            return output_error
-    diagnostics = ErrorDiagnostics.from_exception(error)
+            provider_error.diagnostics = output_error.diagnostics
+        return provider_error
+    if output_error is not None and isinstance(error, (UnexpectedModelBehavior, ValidationError)):
+        return output_error
+    diagnostics = (
+        output_error.diagnostics
+        if output_error is not None else ErrorDiagnostics.from_exception(error)
+    )
     if isinstance(error, UsageLimitExceeded):
         return AIError(
             ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED,

@@ -60,7 +60,9 @@ def _requests(*, large: bool = False) -> tuple[ModelClientRequest, ...]:
         )),
         ModelClientRequest("openai.chat.completions", body, response=ModelClientResponse(
             partial_sse, 200, "sse", "gzip", False,
-        )),
+        ), diagnostics={"started_at": _NOW.isoformat(), "received_bytes": len(partial_sse),
+                        "first_chunk_ns": 100, "last_chunk_ns": 200, "read_outcome": "cancelled",
+                        "close_started_ns": 300, "close_finished_ns": 400}),
         ModelClientRequest("openai.chat.completions", None, "body_unavailable", ModelClientResponse(
             None, 502, "unknown", None, False, "response_capture_failed",
         )),

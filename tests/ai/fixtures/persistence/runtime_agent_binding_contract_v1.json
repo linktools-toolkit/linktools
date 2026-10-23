@@ -22,6 +22,7 @@
     "thinking": false,
     "tool_retries": 10000,
     "output_retries": 3,
+    "output_schema": null,
     "model": "default"
   },
   "model_contract": {

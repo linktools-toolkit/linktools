@@ -196,6 +196,31 @@ if(process.argv[3]==='protocols') {
   assert.match(content,/Opaque provider thinking data/);
   console.log('Native Responses and Anthropic content preserve protocol blocks, references and opaque reasoning fields');process.exit(0);
 }
+if(process.argv[3]==='diagnostics') {
+  const diagnostics={started_at:'2026-01-01T00:00:00Z',headers_received_ns:10,first_chunk_ns:20,last_chunk_ns:30,received_chunks:2,received_bytes:84,read_outcome:'error',read_error_type:'httpx2.RemoteProtocolError',read_finished_ns:40,close_started_ns:50,close_finished_ns:60,sdk_entered_ns:15,sdk_iteration_error_ns:45,sdk_iteration_error_type:'openai.APIConnectionError',request_id:'req-safe',http_version:'HTTP/2'};
+  const attempt={api:'openai-chat-completions',body:null,record_http_bodies:false,diagnostics,response:{body:null,status_code:200,format:'sse',complete:false}};
+  const attempts=[attempt,{...attempt,diagnostics:null},{...attempt,record_http_bodies:true,diagnostics:{protocol_terminal:'[DONE]',sdk_entered_ns:0,sdk_close_finished_ns:20},response:{...attempt.response,complete:true}}, {...attempt,diagnostics:{protocol_terminal:null}}, {...attempt,diagnostics:{protocol_terminal:'response.failed'},response:{...attempt.response,complete:true}}, {...attempt,response:null,diagnostics:{sdk_entry_error_ns:7,sdk_entry_error_type:'asyncio.exceptions.CancelledError'}}, {...attempt,response:{...attempt.response,format:'json'},diagnostics:{read_outcome:'eof',read_finished_ns:10}}];
+  detailResponses.set('/api/executions/a-run/models',{items:[{execution_id:'a-run',agent_run_seq:1,model_request_seq:1,purpose:'agent',status:'FAILED',model:{},client_requests_included:true,client_requests:attempts}],next_cursor:null});
+  await openOriginal();
+  const pick=index=>{const picker=descendants(node('conversation')).find(value=>value.dataset.requestFocus==='reader:selection');picker.value='a-run:1:1:'+index;picker.onchange();};
+  const panel=()=>descendants(node('conversation')).find(value=>value.className==='native-response');
+  const notes=()=>descendants(node('conversation')).filter(value=>value.className==='source-note').map(value=>value.textContent).join('\n');
+  assert.match(panel().textContent,/HTTP 200 · SSE terminal unknown/);assert.doesNotMatch(panel().textContent,/incomplete/);
+  assert.match(node('conversation').textContent,/HTTP body recording is disabled/);assert.doesNotMatch(node('conversation').textContent,/Readable view unavailable/);
+  assert.match(notes(),/HTTP read: error \(httpx2.RemoteProtocolError\)/);assert.match(notes(),/HTTP close: finished/);
+  assert.match(notes(),/SDK stream observations: entered · iteration error \(openai.APIConnectionError\)/);
+  await descendants(node('conversation')).find(value=>value.tagName==='BUTTON' && value.textContent==='Inspect request').click();
+  const metadata=descendants(node('conversation')).find(value=>value.className==='native-envelope native-info');
+  assert.equal(metadata.hidden,false);const value=JSON.parse(metadata.children.find(child=>child.tagName==='PRE').textContent);
+  assert.deepEqual(value.diagnostics,diagnostics);assert.equal(value.record_http_bodies,false);
+  pick(1);assert.match(panel().textContent,/SSE terminal unknown/);assert.doesNotMatch(notes(),/HTTP read:|HTTP close:|SDK stream observations:/);
+  pick(2);assert.match(panel().textContent,/SSE terminal: \[DONE\]/);assert.match(notes(),/SDK stream observations: entered · close finished/);assert.doesNotMatch(notes(),/HTTP read:|exhausted/,'A protocol terminal does not invent EOF or SDK exhaustion');
+  pick(3);assert.match(panel().textContent,/SSE terminal not seen/);assert.doesNotMatch(notes(),/HTTP read:|SDK stream observations:/);
+  pick(4);assert.match(panel().textContent,/SSE terminal: response.failed/);assert.doesNotMatch(panel().textContent,/complete|success/);
+  pick(5);assert.match(panel().textContent,/No response observed/);assert.match(notes(),/SDK stream observations: entry error \(asyncio.exceptions.CancelledError\)/);assert.doesNotMatch(notes(),/HTTP read:|HTTP close:/);
+  pick(6);assert.match(panel().textContent,/body EOF observed/);assert.match(notes(),/HTTP read: eof/);assert.match(node('conversation').textContent,/HTTP body recording is disabled/);
+  console.log('Attempt diagnostics preserve full metadata and keep HTTP, protocol terminal and SDK observations distinct');process.exit(0);
+}
 if(process.argv[3]==='sdk') {
   const path='/api/executions/a-run/models';
   const sdk={execution_id:'a-run',agent_run_seq:1,model_request_seq:1,purpose:'agent',status:'SUCCEEDED',model:{},content_included:true,request:{messages:[
@@ -473,7 +498,7 @@ if(process.argv[3]==='native') {
   assert.match(node('conversation').textContent,/\"large_integer\":9007199254740993,\"duplicate\":1,\"duplicate\":2/);
   assert.match(node('conversation').textContent,/Request details/);assert.match(node('conversation').textContent,/41 in.*7 out.*3 cache read.*2 cache write/);assert.match(node('conversation').textContent,/\"input_tokens\": 41/);
   assert.match(node('conversation').textContent,/\"step_index\": 4/);assert.match(node('conversation').textContent,/\"output_retry_index\": 2/);assert.match(node('conversation').textContent,/\"duration_ns\": 1000000000/);
-  assert.match(node('conversation').textContent,/HTTP 429 · complete/);
+  assert.match(node('conversation').textContent,/HTTP 429 · body EOF observed/);
   const picker=()=>descendants(node('conversation')).find(value=>value.dataset.requestFocus==='reader:selection');
   const pick=async key=>{const select=picker();select.focus();select.value=key;await select.onchange();};
   assert.deepEqual(picker().children.map(value=>value.value),['a-run:1:1:0','a-run:1:1:1'],'Actual attempts retain original order in a flat selector');
@@ -486,7 +511,7 @@ if(process.argv[3]==='native') {
   await clickText('Inspect request');assert.equal(infoPanel().hidden,false);assert.equal(infoPanel().open,true);assert.match(infoPanel().textContent,/Provider-server receipt is not observable/);assert.match(infoPanel().textContent,/41 in.*7 out/);assert.equal(document.activeElement.dataset.requestFocus,'reader:tools');
   infoPanel().children[0].focus();infoPanel().open=false;infoPanel().ontoggle();assert.equal(infoPanel().hidden,true);assert.equal(document.activeElement.dataset.requestFocus,'reader:tools','Closing Info returns focus to its visible trigger');await clickText('Refresh requests');assert.equal(document.activeElement.dataset.requestFocus,'reader:tools');
   menu().open=true;menu().ontoggle();
-  await pick('a-run:1:1:1');assert.equal(menu().open,false,'Selecting another attempt closes request tools');assert.match(node('conversation').textContent,/HTTP 200 · incomplete/);assert.match(node('conversation').textContent,/<img src=x onerror=alert\(1\)>/);
+  await pick('a-run:1:1:1');assert.equal(menu().open,false,'Selecting another attempt closes request tools');assert.match(node('conversation').textContent,/HTTP 200 · SSE terminal unknown/);assert.match(node('conversation').textContent,/<img src=x onerror=alert\(1\)>/);
   assert.doesNotMatch(node('conversation').textContent,/DO NOT SYNTHESIZE SYSTEM/);
   await clickText('Refresh requests');assert.equal(picker().value,'a-run:1:1:1');assert.equal(document.activeElement.dataset.requestFocus,'reader:selection');
   const responsePanel=()=>descendants(node('conversation')).find(value=>value.className==='native-response');responsePanel().open=true;responsePanel().ontoggle();responsePanel().children[0].focus();await clickText('Refresh requests');assert.equal(responsePanel().open,true,'Refreshing capture retains the expanded response');assert.equal(document.activeElement.dataset.requestFocus,'a-run:1:1:1:response','Response summary focus survives capture refresh');const metadataPanel=()=>descendants(node('conversation')).find(value=>value.children[0]?.dataset.requestFocus==='a-run:1:1:metadata');metadataPanel().open=true;metadataPanel().ontoggle();await clickText('Read messages');assert.equal(metadataPanel().open,true,'Raw/readable switching retains request metadata disclosure');await clickText('View raw');

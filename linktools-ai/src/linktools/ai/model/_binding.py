@@ -4,6 +4,7 @@
 
 import asyncio
 import math
+import random
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import InitVar, dataclass, field
@@ -14,6 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from linktools.core import environ
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UserError
+from pydantic_ai import exceptions as sdk_errors
 from pydantic_ai.models import Model, ModelMessage, ModelRequestParameters, ModelResponse, ModelSettings, StreamedResponse, RunContext as PydanticRunContext
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.profiles import DEFAULT_PROFILE, merge_profile
@@ -21,6 +23,7 @@ from pydantic_ai.profiles import DEFAULT_PROFILE, merge_profile
 from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ._contract import ModelBinding
+from ._errors import _is_quota_error
 from ._input import expand_input_types, validate_model_inputs
 
 _logger = environ.get_logger("ai.model.binding")
@@ -37,17 +40,25 @@ class _ProviderModelBinding:
     timeout: "int | float | None" = None
     max_retries: int = 2
     retry_delay: "int | float" = 1.0
+    retry_max_delay: "int | float" = 60.0
+    retry_backoff_factor: "int | float" = 2.0
     max_tokens: "int | None" = None
 
+    context_window: InitVar[int | None] = None
     profile: InitVar[Mapping[str, JsonValue] | None] = None
     _profile_overrides: ImmutableJsonMapping = field(init=False)
     input_types: InitVar[Sequence[str]] = ()
     _input_mime_types: tuple[str, ...] = field(init=False)
 
-    def __post_init__(self, profile: Mapping[str, JsonValue] | None, input_types: Sequence[str]) -> None:
+    def __post_init__(self, context_window: int | None, profile: Mapping[str, JsonValue] | None,
+                      input_types: Sequence[str]) -> None:
         if profile is not None and not isinstance(profile, Mapping):
             raise TypeError("profile must be a JSON mapping")
-        declared = normalize_json_value(dict(profile) if profile is not None else {})
+        declared = dict(profile) if profile is not None else {}
+        if context_window is not None:
+            _validate_positive_integer("context_window", context_window)
+            declared["context_window"] = context_window
+        declared = normalize_json_value(declared)
         object.__setattr__(self, "_profile_overrides", ImmutableJsonMapping(declared))
         self._sdk_profile()
         model = self.model.strip().removeprefix(f"{self.provider}:")
@@ -61,6 +72,8 @@ class _ProviderModelBinding:
         _validate_positive_number("timeout", self.timeout)
         _validate_non_negative_integer("max_retries", self.max_retries)
         _validate_non_negative_number("retry_delay", self.retry_delay)
+        _validate_finite_number_at_least("retry_max_delay", self.retry_max_delay, 0)
+        _validate_finite_number_at_least("retry_backoff_factor", self.retry_backoff_factor, 1)
         _validate_positive_integer("max_tokens", self.max_tokens)
 
     @property
@@ -123,6 +136,8 @@ class _ProviderModelBinding:
             model,
             self.max_retries,
             self.retry_delay,
+            retry_max_delay=self.retry_max_delay,
+            retry_backoff_factor=self.retry_backoff_factor,
             input_binding=self,
         )
 
@@ -174,8 +189,28 @@ def _validate_non_negative_number(name: str, value: "int | float") -> None:
         raise ValueError(f"{name} must be a finite non-negative number")
 
 
+def _validate_finite_number_at_least(name: str, value: "int | float", minimum: int) -> None:
+    try:
+        valid = (
+            not isinstance(value, bool) and isinstance(value, (int, float))
+            and math.isfinite(value) and value >= minimum
+        )
+    except OverflowError:
+        valid = False
+    if not valid:
+        requirement = "non-negative number" if minimum == 0 else f"number at least {minimum}"
+        raise ValueError(f"{name} must be a finite {requirement}")
+
+
 class _RetryingModel(WrapperModel):
-    """Apply LinkTools' finite transport retry policy at the public Model boundary."""
+    """Finite transport retries with increasing waits at the public Model boundary.
+
+    ``retry_delay`` is the initial base, multiplied by ``retry_backoff_factor``
+    after each wait. Local waits are capped at ``retry_max_delay``, or that base
+    if larger, with up to 25% additive jitter. A provider's Retry-After remains
+    a lower bound, not a local cap.
+    Caller cancellation and the SDK's request_timeout own the overall deadline.
+    """
 
     def __init__(
         self,
@@ -183,12 +218,38 @@ class _RetryingModel(WrapperModel):
         max_retries: int,
         retry_delay: "int | float",
         *,
+        retry_max_delay: "int | float" = 60.0,
+        retry_backoff_factor: "int | float" = 2.0,
         input_binding: ModelBinding | None = None,
     ) -> None:
         super().__init__(wrapped)
         self._max_retries = max_retries
         self._retry_delay = retry_delay
+        self._retry_max_delay = retry_max_delay
+        self._retry_backoff_factor = retry_backoff_factor
         self._input_binding = input_binding
+
+    async def _wait_for_retry(
+        self, error: ModelAPIError, backoff: float,
+    ) -> float:
+        cap = max(self._retry_max_delay, self._retry_delay)
+        wait = min(cap, backoff + random.uniform(0, backoff * 0.25))
+        # Older supported SDKs expose this only on ModelHTTPError. Read its
+        # public normalized value rather than interpreting provider bodies.
+        retry_after = getattr(error, "retry_after", None)
+        if (
+            isinstance(retry_after, (int, float))
+            and not isinstance(retry_after, bool)
+            and math.isfinite(retry_after)
+            and retry_after >= 0
+        ):
+            wait = max(wait, retry_after)
+        await asyncio.sleep(wait)
+        if backoff == 0:
+            return 0
+        # Cap before multiplying so arbitrarily many attempts cannot overflow.
+        next_backoff = cap if self._retry_backoff_factor >= cap / backoff else backoff * self._retry_backoff_factor
+        return next_backoff
 
     async def request(
         self,
@@ -199,6 +260,7 @@ class _RetryingModel(WrapperModel):
         if self._input_binding is not None:
             validate_model_inputs(self._input_binding, messages)
         attempt = 0
+        backoff = self._retry_delay
         while True:
             try:
                 return await self.wrapped.request(
@@ -215,7 +277,7 @@ class _RetryingModel(WrapperModel):
                     self.model_name,
                     attempt,
                 )
-                await asyncio.sleep(self._retry_delay)
+                backoff = await self._wait_for_retry(error, backoff)
 
     @asynccontextmanager
     async def request_stream(
@@ -228,6 +290,7 @@ class _RetryingModel(WrapperModel):
         if self._input_binding is not None:
             validate_model_inputs(self._input_binding, messages)
         attempt = 0
+        backoff = self._retry_delay
         while True:
             entered = False
             try:
@@ -253,10 +316,16 @@ class _RetryingModel(WrapperModel):
                     self.model_name,
                     attempt,
                 )
-                await asyncio.sleep(self._retry_delay)
+                backoff = await self._wait_for_retry(error, backoff)
 
 
 def _retryable_model_error(error: ModelAPIError) -> bool:
+    # These public categories are absent from some supported SDK releases.
+    # Do not reinterpret an explicit permanent failure or an expired deadline
+    # as a transient HTTP status, including quota errors carried by HTTP 429.
+    if (getattr(error, "in_stream", False) or _is_quota_error(error)
+        or isinstance(error, getattr(sdk_errors, "ModelRequestTimeout", ()))):
+        return False
     if isinstance(error, ModelHTTPError):
         return error.status_code in {408, 409, 429} or 500 <= error.status_code < 600
     return True

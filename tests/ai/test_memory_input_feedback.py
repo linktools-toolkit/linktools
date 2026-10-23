@@ -11,7 +11,6 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
     TextPart,
     ToolCallPart,
 )
@@ -23,7 +22,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._harness_memory import build_harness_memory
 from linktools.ai.runtime._pydantic_tool_control import PydanticToolControlCapability
 
-from ._runtime_test_helpers import tool_run_context
+from ._runtime_test_helpers import is_tool_retry, tool_run_context
 
 
 @pytest.mark.asyncio
@@ -70,7 +69,7 @@ async def test_model_can_correct_memory_content_after_feedback() -> None:
         if requests == 2:
             assert isinstance(messages[-1], ModelRequest)
             feedback = messages[-1].parts[0]
-            assert isinstance(feedback, RetryPromptPart)
+            assert is_tool_retry(feedback)
             assert isinstance(feedback.content, str)
             assert "NUL" in feedback.content
             assert "private" not in feedback.content

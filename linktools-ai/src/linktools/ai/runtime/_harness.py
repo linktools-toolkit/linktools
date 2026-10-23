@@ -11,8 +11,9 @@ from typing import Any, cast
 
 from linktools.core import environ
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, SystemPromptPart
-from pydantic_ai.models import ModelRequestContext, ModelRequestParameters, StreamedResponse
+from pydantic_ai.exceptions import FallbackExceptionGroup
+from pydantic_ai.messages import BinaryContent, ModelMessage, ModelRequest, ModelResponse, SystemPromptPart, UserPromptPart
+from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters, StreamedResponse
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext
@@ -24,10 +25,13 @@ from pydantic_ai_harness.planning import (
     TaskStatus,
 )
 
-from ..capability import ToolCallRetry
+from ..capability import AgentContext, ReferencedInputsCapability, ToolCallRetry
 from ..errors import AIError, ErrorCode
+from ..model import ModelBinding, ModelClientRequestRecorder, ReferencedContent, validate_model_inputs
+from ..spec import CapabilityRef, ThinkingValue
 from ._plan import PlanItem, RuntimePlanStore
 from ._message import project_provider_messages, without_history_system_prompts
+from ._metric_capability import model_request_error
 
 _logger = environ.get_logger("ai.runtime.harness")
 
@@ -36,29 +40,118 @@ _logger = environ.get_logger("ai.runtime.harness")
 class SummaryProviderModel(WrapperModel):
     """Keep SDK persistence separate from the provider's supported part union."""
 
+    def __init__(
+        self, model: Model, *, context: AgentContext[object] | None = None,
+        referenced_inputs: ReferencedInputsCapability[object] | None = None,
+        input_source: CapabilityRef | None = None,
+        binding: ModelBinding | None = None,
+        preserve_errors: bool = False,
+    ) -> None:
+        super().__init__(model)
+        self._context = context
+        self._referenced_inputs = referenced_inputs
+        self._input_source = input_source
+        self._binding = binding
+        self._preserve_errors = preserve_errors
+
+    async def _provider_messages(self, messages: list[ModelMessage]) -> list[ModelMessage]:
+        projected = project_provider_messages(messages)
+        if self._binding is not None:
+            validate_model_inputs(self._binding, projected)
+        references = [
+            item for message in projected if isinstance(message, ModelRequest)
+            for part in message.parts if isinstance(part, UserPromptPart)
+            and not isinstance(part.content, str)
+            for item in part.content if isinstance(item, ReferencedContent)
+        ]
+        if not references:
+            return projected
+        if self._referenced_inputs is None or self._context is None or self._binding is None:
+            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                          safe_details={"reason": "referenced_inputs_unavailable"})
+        if any(item.source != self._input_source for item in references):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                          safe_details={"reason": "referenced_input_source_mismatch"})
+        ModelClientRequestRecorder.omit_current_http_bodies("referenced_content_lifecycle")
+        result: list[ModelMessage] = []
+        for message in projected:
+            if not isinstance(message, ModelRequest):
+                result.append(message)
+                continue
+            parts = []
+            for part in message.parts:
+                if not isinstance(part, UserPromptPart) or isinstance(part.content, str):
+                    parts.append(part)
+                    continue
+                content = []
+                for item in part.content:
+                    if isinstance(item, ReferencedContent):
+                        data = await self._referenced_inputs.load(self._context, item)
+                        item = BinaryContent(data, media_type=item.media_type)
+                    content.append(item)
+                parts.append(replace(part, content=content))
+            result.append(replace(message, parts=parts))
+        validate_model_inputs(self._binding, result)
+        return result
+
     async def request(
         self, messages: list[ModelMessage], model_settings: ModelSettings | None,
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
-        return await self.wrapped.request(
-            project_provider_messages(messages), model_settings, model_request_parameters,
-        )
+        try:
+            return await self.wrapped.request(
+                await self._provider_messages(messages), model_settings, model_request_parameters,
+            )
+        except Exception as error:
+            if self._preserve_errors or isinstance(error, FallbackExceptionGroup):
+                raise
+            safe_error = model_request_error(error, content_omission_reason=self.content_omission_reason(messages))
+            if safe_error is not error:
+                raise safe_error from None
+            raise
 
     async def count_tokens(
         self, messages: list[ModelMessage], model_settings: ModelSettings | None,
         model_request_parameters: ModelRequestParameters,
     ) -> RequestUsage:
-        return await self.wrapped.count_tokens(
-            project_provider_messages(messages), model_settings, model_request_parameters,
-        )
+        try:
+            return await self.wrapped.count_tokens(
+                await self._provider_messages(messages), model_settings, model_request_parameters,
+            )
+        except Exception as error:
+            if self._preserve_errors or isinstance(error, FallbackExceptionGroup):
+                raise
+            safe_error = model_request_error(error, content_omission_reason=self.content_omission_reason(messages))
+            if safe_error is not error:
+                raise safe_error from None
+            raise
 
     async def compact_messages(
         self, request_context: ModelRequestContext, *, instructions: str | None = None,
     ) -> ModelResponse:
-        return await self.wrapped.compact_messages(
-            replace(request_context, messages=project_provider_messages(request_context.messages)),
-            instructions=instructions,
-        )
+        try:
+            return await self.wrapped.compact_messages(
+                replace(request_context, messages=await self._provider_messages(request_context.messages)),
+                instructions=instructions,
+            )
+        except Exception as error:
+            if self._preserve_errors or isinstance(error, FallbackExceptionGroup):
+                raise
+            safe_error = model_request_error(
+                error, content_omission_reason=self.content_omission_reason(request_context.messages),
+            )
+            if safe_error is not error:
+                raise safe_error from None
+            raise
+
+    @classmethod
+    def content_omission_reason(cls, messages: Sequence[ModelMessage]) -> str | None:
+        return "referenced_content_lifecycle" if any(
+            isinstance(item, ReferencedContent)
+            for message in messages if isinstance(message, ModelRequest)
+            for part in message.parts if isinstance(part, UserPromptPart) and not isinstance(part.content, str)
+            for item in part.content
+        ) else None
 
     @asynccontextmanager
     async def request_stream(
@@ -67,7 +160,63 @@ class SummaryProviderModel(WrapperModel):
         run_context: RunContext[Any] | None = None,
     ) -> AsyncIterator[StreamedResponse]:
         async with self.wrapped.request_stream(
-            project_provider_messages(messages), model_settings, model_request_parameters, run_context,
+            await self._provider_messages(messages), model_settings, model_request_parameters, run_context,
+        ) as response:
+            yield response
+
+
+def validate_thinking_model(model: Model, thinking: ThinkingValue) -> None:
+    profile = model.profile
+    supports = bool(profile.get("supports_thinking", False))
+    always = bool(profile.get("thinking_always_enabled", False))
+    if thinking is False:
+        if always:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
+                          safe_details={"field": "thinking", "reason": "model_always_enabled"})
+        return
+    if not (supports or always):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
+                      safe_details={"field": "thinking", "reason": "model_not_supported"})
+
+
+class CandidateProviderModel(SummaryProviderModel):
+    """Validate the candidate chosen by SDK dispatch before provider IO."""
+
+    def prepare_request(
+        self, model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+    ) -> tuple[ModelSettings | None, ModelRequestParameters]:
+        thinking = (model_settings or {}).get("thinking", model_request_parameters.thinking)
+        if thinking is not None:
+            validate_thinking_model(self.wrapped, thinking)
+        return self.wrapped.prepare_request(model_settings, model_request_parameters)
+
+
+def prepare_input_retention(messages: list[ModelMessage]) -> None:
+    """Mark the current logical request before candidate or nested dispatch."""
+    if SummaryProviderModel.content_omission_reason(messages) is not None:
+        ModelClientRequestRecorder.omit_current_http_bodies("referenced_content_lifecycle")
+
+
+class FallbackProviderModel(WrapperModel):
+    """Keep logical retention outside SDK dispatch and hydration inside candidates."""
+
+    async def request(
+        self, messages: list[ModelMessage], model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+    ) -> ModelResponse:
+        prepare_input_retention(messages)
+        return await self.wrapped.request(messages, model_settings, model_request_parameters)
+
+    @asynccontextmanager
+    async def request_stream(
+        self, messages: list[ModelMessage], model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+        run_context: RunContext[Any] | None = None,
+    ) -> AsyncIterator[StreamedResponse]:
+        prepare_input_retention(messages)
+        async with self.wrapped.request_stream(
+            messages, model_settings, model_request_parameters, run_context,
         ) as response:
             yield response
 
@@ -256,5 +405,9 @@ def _plan_item_id(index: int) -> str:
 __all__ = [
     "ReinjectRuntimeSystemPrompt",
     "SummaryProviderModel",
+    "CandidateProviderModel",
+    "FallbackProviderModel",
+    "prepare_input_retention",
+    "validate_thinking_model",
     "HarnessPlanStoreAdapter",
 ]
