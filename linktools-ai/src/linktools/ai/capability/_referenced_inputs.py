@@ -7,6 +7,7 @@ from typing import Generic, TypeVar
 
 from pydantic_ai.capabilities import AbstractCapability
 
+from ..errors import AIError, ErrorCode
 from ..model import ReferencedContent
 from ._context import AgentContext
 
@@ -36,7 +37,14 @@ class ReferencedInputsCapability(AbstractCapability[AgentContext[AppT]], Generic
     async def load(self, context: AgentContext[AppT], content: ReferencedContent) -> bytes:
         """Authorize and read one descriptor without retaining the returned bytes."""
         data = await self._authorized_load(context, content)
-        content.ref.verify_content(data)
+        try:
+            content.ref.verify_content(data)
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_INTEGRITY_ERROR:
+                raise
+            # Returned input bytes disagree with their descriptor; this does
+            # not establish corruption of Runtime's authoritative storage.
+            raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH, retryable=False) from error
         return data
 
 
