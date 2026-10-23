@@ -2,6 +2,9 @@
 # -*- coding: utf-8 -*-
 """Provider error projection for model bindings."""
 
+from collections.abc import Mapping
+
+from pydantic_ai import exceptions as sdk_errors
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 
 from ..core import JsonValue
@@ -13,7 +16,27 @@ def model_binding_error(
 ) -> "AIError | None":
     """Project provider failures; leave execution and output failures to callers."""
     details: dict[str, JsonValue] = {}
-    if isinstance(error, ModelHTTPError):
+    retryable: bool | None = None
+    if _is_quota_error(error):
+        code = ErrorCode.MODEL_REQUEST_REJECTED
+        details = {"model_name": error.model_name, "reason": "quota_exceeded"}
+        if isinstance(error, ModelHTTPError):
+            details["status_code"] = error.status_code
+    elif isinstance(error, getattr(sdk_errors, "ModelRequestTimeout", ())):
+        code = ErrorCode.MODEL_TIMEOUT
+        retryable = False
+        details = {"model_name": error.model_name}
+    elif isinstance(error, getattr(sdk_errors, "ModelTimeoutError", ())):
+        code = ErrorCode.MODEL_TIMEOUT
+        details = {"model_name": error.model_name}
+        if error.phase is not None:
+            details["phase"] = error.phase
+    elif isinstance(error, getattr(sdk_errors, "ModelConnectionError", ())):
+        code = ErrorCode.MODEL_UNAVAILABLE
+        details = {"model_name": error.model_name}
+        if error.phase is not None:
+            details["phase"] = error.phase
+    elif isinstance(error, ModelHTTPError):
         code = _http_error_code(error.status_code)
         details = {
             "model_name": error.model_name,
@@ -56,11 +79,25 @@ def model_binding_error(
             break
         else:
             return None
+    if isinstance(error, ModelAPIError) and getattr(error, "in_stream", False):
+        retryable = False
     return AIError(
         code,
+        retryable=retryable,
         safe_details=details,
         diagnostics=diagnostics if diagnostics is not None else ErrorDiagnostics.from_exception(error),
     )
+
+
+def _is_quota_error(error: Exception) -> bool:
+    """Recognize explicit quota exhaustion, including older SDK HTTP errors."""
+    if isinstance(error, getattr(sdk_errors, "ModelQuotaExceededError", ())):
+        return True
+    if not isinstance(error, ModelHTTPError) or not isinstance(error.body, Mapping):
+        return False
+    # OpenAI SDKs can expose either the error envelope or its unwrapped value.
+    detail = error.body.get("error", error.body)
+    return isinstance(detail, Mapping) and detail.get("code") == "insufficient_quota"
 
 
 def _http_error_code(status_code: int) -> ErrorCode:

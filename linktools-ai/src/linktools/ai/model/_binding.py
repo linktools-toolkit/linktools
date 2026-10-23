@@ -4,6 +4,7 @@
 
 import asyncio
 import math
+import random
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import InitVar, dataclass, field
@@ -14,6 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from linktools.core import environ
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UserError
+from pydantic_ai import exceptions as sdk_errors
 from pydantic_ai.models import Model, ModelMessage, ModelRequestParameters, ModelResponse, ModelSettings, StreamedResponse, RunContext as PydanticRunContext
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.profiles import DEFAULT_PROFILE, merge_profile
@@ -21,6 +23,7 @@ from pydantic_ai.profiles import DEFAULT_PROFILE, merge_profile
 from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ._contract import ModelBinding
+from ._errors import _is_quota_error
 from ._input import expand_input_types, validate_model_inputs
 
 _logger = environ.get_logger("ai.model.binding")
@@ -175,7 +178,13 @@ def _validate_non_negative_number(name: str, value: "int | float") -> None:
 
 
 class _RetryingModel(WrapperModel):
-    """Apply LinkTools' finite transport retry policy at the public Model boundary."""
+    """Finite transport retries with increasing waits at the public Model boundary.
+
+    ``retry_delay`` is the initial backoff base. Local exponential waits are
+    capped at sixty seconds, or that base if larger, with up to 25% additive
+    jitter. A provider's Retry-After remains a lower bound, not a local cap.
+    Caller cancellation and the SDK's request_timeout own the overall deadline.
+    """
 
     def __init__(
         self,
@@ -190,6 +199,26 @@ class _RetryingModel(WrapperModel):
         self._retry_delay = retry_delay
         self._input_binding = input_binding
 
+    async def _wait_for_retry(
+        self, error: ModelAPIError, backoff: float,
+    ) -> float:
+        cap = max(60.0, self._retry_delay)
+        wait = min(cap, backoff + random.uniform(0, backoff * 0.25))
+        # Older supported SDKs expose this only on ModelHTTPError. Read its
+        # public normalized value rather than interpreting provider bodies.
+        retry_after = getattr(error, "retry_after", None)
+        if (
+            isinstance(retry_after, (int, float))
+            and not isinstance(retry_after, bool)
+            and math.isfinite(retry_after)
+            and retry_after >= 0
+        ):
+            wait = max(wait, retry_after)
+        await asyncio.sleep(wait)
+        # Cap before doubling so arbitrarily many attempts cannot overflow.
+        next_backoff = cap if backoff >= cap / 2 else backoff * 2
+        return next_backoff
+
     async def request(
         self,
         messages: list[ModelMessage],
@@ -199,6 +228,7 @@ class _RetryingModel(WrapperModel):
         if self._input_binding is not None:
             validate_model_inputs(self._input_binding, messages)
         attempt = 0
+        backoff = self._retry_delay
         while True:
             try:
                 return await self.wrapped.request(
@@ -215,7 +245,7 @@ class _RetryingModel(WrapperModel):
                     self.model_name,
                     attempt,
                 )
-                await asyncio.sleep(self._retry_delay)
+                backoff = await self._wait_for_retry(error, backoff)
 
     @asynccontextmanager
     async def request_stream(
@@ -228,6 +258,7 @@ class _RetryingModel(WrapperModel):
         if self._input_binding is not None:
             validate_model_inputs(self._input_binding, messages)
         attempt = 0
+        backoff = self._retry_delay
         while True:
             entered = False
             try:
@@ -253,10 +284,16 @@ class _RetryingModel(WrapperModel):
                     self.model_name,
                     attempt,
                 )
-                await asyncio.sleep(self._retry_delay)
+                backoff = await self._wait_for_retry(error, backoff)
 
 
 def _retryable_model_error(error: ModelAPIError) -> bool:
+    # These public categories are absent from some supported SDK releases.
+    # Do not reinterpret an explicit permanent failure or an expired deadline
+    # as a transient HTTP status, including quota errors carried by HTTP 429.
+    if (getattr(error, "in_stream", False) or _is_quota_error(error)
+        or isinstance(error, getattr(sdk_errors, "ModelRequestTimeout", ()))):
+        return False
     if isinstance(error, ModelHTTPError):
         return error.status_code in {408, 409, 429} or 500 <= error.status_code < 600
     return True

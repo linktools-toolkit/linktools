@@ -110,6 +110,35 @@ request value are distinct. Runtime validation remains authoritative. Returned
 `ThinkingPart` content stays visible independently of request control. Custom bindings
 without a `thinking_control()` projection report unknown control.
 
+## Transport retries
+
+The model binding owns transport retries; native provider SDK retries remain
+zero. `max_retries` counts additional attempts (default `2`), and `retry_delay`
+is the initial backoff base (default `1.0` seconds), not a fixed wait. The local
+base doubles per retry, with up to 25% additive jitter, capped at 60 seconds or
+the configured initial base if larger. Explicit zero retains immediate retries;
+`max_retries=0` disables them.
+
+The SDK's public normalized `retry_after` is a lower bound for the current
+response only, even when it exceeds the local cap. A later response without
+that hint uses its own exponential base. Caller cancellation and the SDK's
+whole-request `request_timeout`, when supported, interrupt waiting; direct
+Model calls without such a caller deadline have no implicit total-wait budget.
+
+Ordinary transient 429/408/409/5xx errors may retry. Known quota exhaustion is
+not a temporary rate limit: the SDK's public typed quota error, or its exact
+structured `insufficient_quota` code on a model HTTP error, is rejected without
+retry. Overall request-deadline exhaustion also does not start a new attempt.
+Supported SDK phase timeout and connection errors retain timeout/unavailable
+classification rather than becoming generic API failures. No message-text
+heuristics classify quota or infer the configured protocol.
+
+A stream is never replayed once entered, including when the SDK reports an
+`in_stream` failure before yielding its response object. These transport retries
+are distinct from Agent output/tool correction retries, task retries and host
+rate-limit admission. A logical request hook still runs once around potentially
+multiple HTTP attempts; it is not a physical-attempt quota hook.
+
 ## Trace and integrity boundaries
 
 The default model reader uses the existing SDK model interaction projection. It

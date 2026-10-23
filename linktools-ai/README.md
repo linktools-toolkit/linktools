@@ -844,7 +844,10 @@ URL and uploaded-file content remains an external reference: Runtime persists
 its declared metadata and does not implicitly download it. Inline binary
 content and workspace file inputs are materialized as bytes before execution
 reservation when their durable contract requires it. Model transport retries
-use `max_retries=2` with a fixed `retry_delay=1.0`; Agent `tool_retries` and `output_retries` default to `None`.
+use `max_retries=2` with `retry_delay=1.0` as the initial exponential backoff,
+bounded jitter and provider Retry-After hints; see
+[transport retry semantics](docs/model-protocols.md#transport-retries).
+Agent `tool_retries` and `output_retries` default to `None`.
 `RuntimeFeatures` supplies `3` for both unless configured otherwise; an explicit
 Agent value, including `0`, wins. The compiler resolves retries before durable
 binding, so recovery retains the admitted values across Runtime reconfiguration.
