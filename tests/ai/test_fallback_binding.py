@@ -125,13 +125,13 @@ def test_materialize_prepares_ordered_candidates_without_mutating_shared_models(
 
     first = binding.materialize(prepare=prepare)
     second = binding.materialize(prepare=prepare)
-    assert type(first) is type(second) is FallbackModel
+    assert isinstance(first, FallbackModel) and isinstance(second, FallbackModel)
     assert first is not second
     assert prepared == [primary, secondary, primary, secondary]
-    assert [model.wrapped for model in first.models] == [primary.model, secondary.model]
+    assert [model.model_id for model in first.models] == [primary.model.model_id, secondary.model.model_id]
     assert all(left is not right for left, right in zip(first.models, second.models))
     direct = binding.materialize()
-    assert direct.models == [primary.model, secondary.model]
+    assert [model.model_id for model in direct.models] == [primary.model.model_id, secondary.model.model_id]
     assert events == ["materialize:primary", "materialize:secondary"] * 3
 
 
@@ -246,21 +246,27 @@ async def test_native_handler_types_and_response_annotations_are_preserved(polic
         assert seen == [error]
 
 
-def test_nested_bindings_prepare_through_the_same_explicit_callback() -> None:
+@pytest.mark.parametrize("policy", (ModelAPIError, ValueError))
+def test_nested_binding_is_rejected_without_materializing_candidates(policy: type[Exception]) -> None:
     events: list[str] = []
     primary = _Binding(_Candidate("primary", events))
     secondary = _Binding(_Candidate("secondary", events))
-    third = _Binding(_Candidate("third", events))
     nested = FallbackBinding(primary, secondary)
-    outer = FallbackBinding(nested, third)
+    with pytest.raises(ValueError, match="nested fallback bindings are not supported"):
+        FallbackBinding(nested, primary, fallback_on=policy)
+    assert events == []
+
+
+def test_three_candidates_prepare_in_declared_order() -> None:
+    events: list[str] = []
+    bindings = [_Binding(_Candidate(name, events)) for name in ("primary", "secondary", "third")]
+    prepared: list[ModelBinding] = []
 
     def prepare(candidate: ModelBinding) -> Model:
-        if isinstance(candidate, FallbackBinding):
-            return candidate.materialize(prepare=prepare)
+        prepared.append(candidate)
         return WrapperModel(candidate.materialize())
 
-    model = outer.materialize(prepare=prepare)
-    assert isinstance(model.models[0], FallbackModel)
-    assert [item.wrapped for item in model.models[0].models] == [primary.model, secondary.model]
-    assert model.models[1].wrapped is third.model
+    model = FallbackBinding(*bindings).materialize(prepare=prepare)
+    assert prepared == bindings
+    assert [item.model_name for item in model.models] == ["primary", "secondary", "third"]
     assert events == ["materialize:primary", "materialize:secondary", "materialize:third"]

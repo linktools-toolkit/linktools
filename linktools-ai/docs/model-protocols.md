@@ -188,26 +188,48 @@ features.agent("classifier", model="decision-route", allow_tools=())
 
 Ordinary custom bindings keep `materialize(self) -> Model` unchanged. Only
 `FallbackBinding.materialize(*, prepare=None)` accepts a candidate-preparation
-callback; Runtime supplies it internally, including for explicitly nested
-`FallbackBinding` values. Applications do not need another registry, a new
-binding protocol, or a callback argument on their own binding implementations.
-Every materialization creates a fresh native SDK `FallbackModel`; the caller
-owns its async context, and the SDK enters and exits the candidate models.
-Candidate construction and resource ownership are distinct from request dispatch:
-unused candidates can be materialized, but are not requested or input-hydrated.
+callback; Runtime supplies it internally. One composition supports any number of
+ordered candidates. Explicitly nesting a `FallbackBinding` inside another is
+rejected at construction; policies are not silently flattened. Applications do
+not need another registry, binding protocol, or callback argument on custom
+bindings. Each materialization creates a fresh SDK fallback composition; the
+caller owns its async context, and the SDK enters and exits candidate models.
+Unused candidates can be materialized, but are not requested or input-hydrated.
 
-The original `fallback_on` value is passed to the SDK unchanged. Exception types,
-synchronous/asynchronous predicates, annotated response handlers and supported
-sequences retain their native meaning. Omitting it uses the SDK default
-`(ModelAPIError,)`, which also handles `DecisionHandOff` because it inherits
-`ModelAPIError`. The explicit `DecisionHandOff` policy above narrows fallback to
-handoffs rather than all model API errors. The SDK owns fallback selection,
-exception grouping, response rejection, stream boundaries and pinned continuations
-of suspended responses. Response
-handlers are not applied to streamed requests, including Runtime's streaming
-observation path. Supported SDK releases differ in their pre-first-event behavior;
-Runtime does not add replay after a stream has emitted its first event, turn
-cancellation into a handoff, or restart tool execution.
+The SDK interprets `fallback_on`: exception types, synchronous/asynchronous
+predicates, annotated response handlers and supported sequences retain their
+native meaning on fresh requests. Omitting it uses `(ModelAPIError,)`, which also
+handles `DecisionHandOff`. The explicit policy above narrows fallback to handoffs.
+Once a suspended response pins a candidate, successful continuation still uses
+that candidate, including a non-first candidate. A failed continuation propagates
+its original exception after that candidate's own transport retries; it cannot
+rewind the fallback chain and reset retry budgets. A continuation rejected by a
+native response handler fails rather than accepting the response or replaying
+candidates. SDK releases that do not apply response handlers to continuations do
+not acquire additional handler calls.
+
+Response handlers are not applied to streamed requests, including Runtime's
+streaming observation path. Native pre-first-event behavior varies by SDK release;
+Runtime does not add replay after the first event, convert cancellation into a
+handoff, or restart tool execution. Request-local continuation state is reset
+before yielding a stream and does not affect concurrent fresh requests.
+
+Rejected continuation responses retain available attempt timing and usage. For
+the same provider response ID, only a known cumulative increment is billed; a
+new ID retains its independent segment usage. If either cumulative observation
+omits usage, the increment is unknown (`attempt.usage=None`), not zero. Cost stays
+unknown if either endpoint is unpriced; known zero is preserved. Pricing uses the
+public response-cost operation where available, not a duplicated price table or
+private partial-pricing helper. For these rejected continuations, decreasing measured token or cost totals fail with
+`MODEL_RESPONSE_INVALID`; safe details retain numeric before/after observations,
+while previously known run usage remains intact. These observations are diagnostic,
+not additional charges. Provider-specific details are not assumed monotonic.
+
+A newly rejected suspended job is cancelled only through the candidate actually
+called, without interpreting or merging its metadata. The old job remains with
+its existing owner: SDK Agent handles its normal failure/cancellation cleanup;
+a caller using bare `Model.request` retains responsibility for its old suspended
+job. No new durable metadata, model identity or cleanup registry is introduced.
 
 Before an actually selected candidate is called, Runtime checks that candidate's
 thinking policy, MIME permissions and input encoding, then loads authorized

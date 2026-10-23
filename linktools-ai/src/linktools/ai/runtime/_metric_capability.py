@@ -616,7 +616,9 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 except asyncio.CancelledError:
                     provider_error = self._provider_errors.get(model_request_seq)
                     failed = provider_error is not None and not isinstance(provider_error, RunCancelled)
-                    if provider_error is not None and _fallback_error(provider_error) is not None:
+                    prepared_model = self._prepared_models.get(model_request_seq)
+                    observed_response = prepared_model is not None and prepared_model.response_observed
+                    if failed and (_fallback_error(provider_error) is not None or observed_response):
                         # SDK commits the interrupted continuation after cancelling
                         # this wrapper. Finish this same fact at its public node boundary.
                         async def finish_failed_request(messages: Sequence[ModelMessage]) -> None:

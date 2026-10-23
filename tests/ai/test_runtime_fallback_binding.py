@@ -24,7 +24,7 @@ class _AlwaysThinkingModel(_OfflineDecisionModel):
         return {**super().profile, "thinking_always_enabled": True}
 
 
-def _features(first, second, *, nested=False):
+def _features(first, second):
     features = RuntimeFeatures("fallback-runtime")
     features.agent("default", allow_tools=(), allow_subagents=())
     features.capability(TraceCapability(), scope="runtime")
@@ -33,20 +33,16 @@ def _features(first, second, *, nested=False):
 
     def load():
         loads.append(True)
-        tail = _Binding(second)
-        if nested:
-            tail = FallbackBinding(tail, fallback_on=DecisionHandOff)
-        return FallbackBinding(_Binding(first), tail, fallback_on=DecisionHandOff)
+        return FallbackBinding(_Binding(first), _Binding(second), fallback_on=DecisionHandOff)
 
     features.model("default", load)
     return features, loads
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("nested", [False, True])
-async def test_typed_handoff_reaches_one_candidate_and_reopen_preserves_usage(tmp_path, nested):
+async def test_typed_handoff_reaches_one_candidate_and_reopen_preserves_usage(tmp_path):
     first, second = _HandoffModel(), _OfflineDecisionModel()
-    features, loads = _features(first, second, nested=nested)
+    features, loads = _features(first, second)
     storage = RuntimeStorage.sqlite(tmp_path / "fallback.sqlite")
     async with Runtime.open("fallback-runtime", features=features, storage=storage) as runtime:
         execution = await runtime.agents.get().start("classify", output=_Decision)

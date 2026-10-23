@@ -63,13 +63,13 @@ async def test_nested_node_recovery_usage_does_not_enter_failed_request_observat
 
     assert result.status is ExecutionStatus.FAILED
     assert result.error_code == "INTERNAL_ERROR"
-    assert result.usage.input_tokens == 114
-    assert result.usage.output_tokens == 11
+    assert result.usage.input_tokens == 110
+    assert result.usage.output_tokens == 10
     assert len(interactions) == 1
     interaction = interactions[0]
     assert interaction.status == "FAILED"
     assert interaction.error_code == result.error_code
     assert interaction.model_request_seq == result.safe_error_details["model_request_seq"] == 1
-    assert interaction.usage.input_tokens == 13
-    assert interaction.usage.output_tokens == 4
+    assert interaction.usage.input_tokens == 9
+    assert interaction.usage.output_tokens == 3
     assert interaction.usage.model_requests == 1

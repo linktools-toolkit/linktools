@@ -118,7 +118,7 @@ class _PartialThenFailure(FunctionModel):
             return True
 
         # Real native response rejection produces measured attempts. The outer
-        # fallback retries its failed continuation pin once through the chain.
+        # fallback preserves this failure without rewinding its pinned candidate.
         native = FallbackModel(
             FunctionModel(rejected, model_name="rejected"), FunctionModel(fail, model_name="unavailable"),
             fallback_on=[reject, ModelAPIError],
@@ -130,7 +130,7 @@ class _PartialThenFailure(FunctionModel):
 class _CostLimitCapability(AbstractCapability[AgentContext[None]]):
     async def before_run(self, ctx: RunContext[AgentContext[None]]) -> None:
         assert ctx.usage_limits is not None
-        ctx.usage_limits.cost_limit = Decimal("0.010")
+        ctx.usage_limits.cost_limit = Decimal("0.008")
 
 
 @pytest.mark.asyncio
@@ -146,7 +146,7 @@ async def test_partial_response_and_exhausted_attempts_are_counted_once_and_chec
         group = RuntimeFeatures("partial-fallback")
         group.agent(
             "default", allow_tools=(), allow_skills=(), allow_subagents=(),
-            usage_limits=AgentUsageLimits(input_tokens=10) if limit == "tokens" else None,
+            usage_limits=AgentUsageLimits(input_tokens=8) if limit == "tokens" else None,
         )
         group.model("default", FallbackBinding(
             _Binding(_PartialThenFailure(requests, earlier_attempt=earlier_attempt)), fallback_on=FallbackExceptionGroup,
@@ -163,16 +163,16 @@ async def test_partial_response_and_exhausted_attempts_are_counted_once_and_chec
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is ExecutionStatus.FAILED
         assert result.error_code == ("INTERNAL_ERROR" if limit is None else "EXECUTION_USAGE_LIMIT_EXCEEDED")
-        # The accepted partial response contributes 5/2, and two failed native
-        # chains contribute 4/1 each. Neither part is counted twice.
-        expected_input_tokens = 15 if earlier_attempt else 13
+        # The accepted partial response contributes 5/2; its one failed native
+        # chain contributes 4/1. The pinned candidate is never replayed.
+        expected_input_tokens = 11 if earlier_attempt else 9
         assert result.usage.input_tokens == expected_input_tokens
-        assert result.usage.output_tokens == 4
+        assert result.usage.output_tokens == 3
         assert result.usage.model_requests == 1
         attempts = result.safe_error_details["failed_attempts"]
-        assert [item["outcome"] for item in attempts] == ["rejected", "error", "error"] * 2
-        assert [item["usage"]["input_tokens"] for item in attempts if item["usage"] is not None] == [4, 4]
-        assert [item["usage"]["cost"] for item in attempts if item["usage"] is not None] == ["0.004", "0.004"]
+        assert [item["outcome"] for item in attempts] == ["rejected", "error"]
+        assert [item["usage"]["input_tokens"] for item in attempts if item["usage"] is not None] == [4]
+        assert [item["usage"]["cost"] for item in attempts if item["usage"] is not None] == ["0.004"]
         interactions = (await execution.model_interactions(include_content=True)).items
         assert len(interactions) == 1
         assert interactions[0].model_request_seq == result.safe_error_details["model_request_seq"] == 1
@@ -181,7 +181,7 @@ async def test_partial_response_and_exhausted_attempts_are_counted_once_and_chec
         # Continuation segments belong to this same logical request, so its
         # projection includes the accepted partial response as well as attempts.
         assert interactions[0].usage.input_tokens == expected_input_tokens
-        assert interactions[0].usage.output_tokens == 4
+        assert interactions[0].usage.output_tokens == 3
         assert interactions[0].usage.model_requests == 1
         execution_id, principal = execution.execution_id, runtime.default_principal
 
@@ -198,7 +198,7 @@ async def test_partial_response_and_exhausted_attempts_are_counted_once_and_chec
         )).items
         assert restored_interactions[0].usage == interactions[0].usage
     assert requests == (["early-rejected"] if earlier_attempt else []) + [
-        "partial", "rejected", "unavailable", "rejected", "unavailable",
+        "partial", "rejected", "unavailable",
     ]
 
 

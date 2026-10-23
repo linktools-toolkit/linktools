@@ -83,23 +83,18 @@ async def test_fresh_fallback_request_uses_each_candidate_budget_once(
     assert sent == [f"candidate-{index}" for index in range(3) for _ in range(retries + 1)]
 
 
-@pytest.mark.asyncio
-async def test_nested_fallback_does_not_reset_candidate_transport_budgets(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_nested_fallback_is_rejected_before_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     sent: list[str] = []
     _offline_failures(monkeypatch, "openai", sent)
     leaves = [create_model(
         protocol="openai", model=f"candidate-{index}", api_key="synthetic",
         base_url="https://offline.invalid/v1", max_retries=2, retry_delay=0,
     ) for index in range(3)]
-    binding = FallbackBinding(
-        FallbackBinding(*leaves[:2]), leaves[2], fallback_on=(ModelAPIError, FallbackExceptionGroup),
-    )
-    async with Runtime.open(
-        "retry-budget", features=_features(binding), storage=RuntimeStorage.in_memory(),
-    ) as runtime:
-        execution = await runtime.agents.get().start("synthetic")
-        assert (await execution.wait(timeout_seconds=15)).result.status is ExecutionStatus.FAILED
-    assert sent == [f"candidate-{index}" for index in range(3) for _ in range(3)]
+    with pytest.raises(ValueError, match="(?i)nested"):
+        FallbackBinding(
+            FallbackBinding(*leaves[:2]), leaves[2], fallback_on=(ModelAPIError, FallbackExceptionGroup),
+        )
+    assert sent == []
 
 
 @pytest.mark.asyncio
