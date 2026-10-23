@@ -3408,9 +3408,7 @@ class DefaultExecutionService:
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         binding_digest = previous.binding_digest
-        binding = self._binding(binding_digest, previous.binding)
-        if binding.binding_digest != binding_digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._binding(binding_digest, previous.binding)
         input_context = None
         if previous.context_imported:
             if previous.input_context is None:
@@ -3462,9 +3460,7 @@ class DefaultExecutionService:
         if not previous.conversation:
             raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
         binding_digest = previous.binding_digest
-        binding = self._binding(binding_digest, previous.binding)
-        if binding.binding_digest != binding_digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._binding(binding_digest, previous.binding)
         fork_request = ExecutionRequest(
             user_prompt=request.user_prompt,
             principal=request.principal,

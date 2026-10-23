@@ -117,7 +117,6 @@ class _AgentBindingResolver:
             if server.resource is None:
                 if resource_versions is not None or asset_source_id is not None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                asset_source_id = None
             elif (
                 resource_versions is None
                 or not isinstance(asset_source_id, str)
@@ -128,12 +127,7 @@ class _AgentBindingResolver:
                 CapabilityPin(
                     "mcp",
                     pin.id,
-                    codec.to_binding_payload(
-                        server,
-                        resource_versions,
-                        asset_source_id=asset_source_id,
-                        execution_policy=current_policy,
-                    ),
+                    {**pin.contract, "execution_policy": current_policy},
                 )
             )
         return replace(binding_contract, selected=tuple(selected))

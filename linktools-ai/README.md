@@ -342,7 +342,7 @@ async with Runtime.open(
     result = (await runtime.agents.get("audit").run("inspect ticket SEC-123")).result
 ```
 
-Named behavior identity is exactly `(kind, id, revision)`. Agent, Tool, Skill, MCP, Capability, Task, and TaskExpander do not maintain a second hash/digest identity. Full declarations and execution-bound contracts are still persisted for exact restore and same-revision drift validation. `RuntimeFeatures.tool()` and `RuntimeFeatures.capability()` default to revision `1`; Agent/Skill/MCP declarations also carry revision `1` unless explicitly changed. Generic Pydantic capabilities retain their native Pydantic AI behavior, and LinkTools revalidates final output against the durable `OutputBinding`.
+Named behavior identity is exactly `(kind, id, revision)`. Agent, Tool, Skill, MCP, Capability, Task, and TaskExpander do not maintain a second hash/digest identity. Full declarations and execution-bound contracts are still persisted for restoration and integrity checks. Tool, Skill, MCP and generic Capability identity checks use only their ID and revision within the kind namespace; configuration equality is the caller’s responsibility, not a second identity check. Agent/Task declaration validation and resource access, sandbox policy and output validation remain separate boundaries. `RuntimeFeatures.tool()` and `RuntimeFeatures.capability()` default to revision `1`; Agent/Skill/MCP declarations also carry revision `1` unless explicitly changed. Generic Pydantic capabilities retain their native Pydantic AI behavior, and LinkTools revalidates final output against the durable `OutputBinding`.
 
 Generic capabilities are trusted host-Python extensions. LinkTools preserves their native hooks and does not sandbox or deny their file, network, or process access; only LinkTools-owned workspace, opaque-effect, and deferred-resolution boundaries provide those controls.
 
@@ -507,8 +507,10 @@ identity. The execution pin keeps the server id/revision, canonical transport,
 semantic args, resource refs and execution policy, but excludes
 `command`, remote `url`, `env`, `headers`, `init_timeout` and `read_timeout`. Recovery therefore requires
 the host to supply the current declaration with the same MCP id/revision;
-connection values may change under that identity, while transport, semantic
-args or resource semantics require a revision change.
+configuration values may change under that identity without a full-configuration
+equality check. Callers own same-revision consistency. Stored resource references,
+source authorization and the effective sandbox execution policy are still validated;
+identity equality does not authorize access to different resources.
 
 ### MCP files, Python registration, and shared configuration
 
@@ -665,9 +667,11 @@ creates a new Client from the currently supplied same-ID/revision declaration;
 network session IDs, SSE cursors, and Client objects are not persisted.
 
 Changing an address or credential under the same ID/revision must still reach
-the same logical service, data domain, and behavior. Changing tenant, scope,
-tool behavior, transport, or other semantic meaning requires a new ID or
-revision. Asset capture does not freeze a remote server's implementation.
+the same logical service, data domain, and behavior. Callers must use a new ID
+or revision when changing logical behavior; LinkTools does not infer a revision
+change by comparing configuration dictionaries. Tenant access, resource isolation
+and execution policy are enforced independently. Asset capture does not freeze
+a remote server's implementation.
 Resources/prompts APIs, OAuth, dynamic end-user credentials, mTLS, server
 publishing, and arbitrary third-party configuration import are out of scope.
 

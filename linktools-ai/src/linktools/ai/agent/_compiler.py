@@ -314,8 +314,6 @@ class AgentCompiler:
                     pin.contract
                 )
                 candidate = CapabilityContribution.from_declaration(value)
-                if candidate.id != pin.id or candidate.revision != pin.revision:
-                    raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
             elif pin.kind == "mcp":
                 current = self._by_identity.get(("mcp", pin.id))
                 if (
@@ -336,7 +334,6 @@ class AgentCompiler:
                 if (
                     current is None
                     or current.revision != pin.revision
-                    or current.contract != dict(pin.contract)
                 ):
                     raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
                 candidate = current

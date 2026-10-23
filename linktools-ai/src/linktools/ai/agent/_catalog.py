@@ -59,10 +59,10 @@ def _same_compiled_agent(left: CompiledAgent, right: CompiledAgent) -> bool:
     return (
         AgentSpecCodec().to_contract_payload(left.spec)
         == AgentSpecCodec().to_contract_payload(right.spec)
-        and tuple((item.kind, item.id, item.revision, item.contract) for item in left.selected_tools) == tuple((item.kind, item.id, item.revision, item.contract) for item in right.selected_tools)
-        and tuple((item.kind, item.id, item.revision, item.contract) for item in left.selected_skills) == tuple((item.kind, item.id, item.revision, item.contract) for item in right.selected_skills)
-        and tuple((item.kind, item.id, item.revision, item.contract) for item in left.selected_mcp) == tuple((item.kind, item.id, item.revision, item.contract) for item in right.selected_mcp)
-        and tuple((item.kind, item.id, item.revision, item.contract) for item in left.selected_capabilities) == tuple((item.kind, item.id, item.revision, item.contract) for item in right.selected_capabilities)
+        and tuple((item.kind, item.id, item.revision) for item in left.selected_tools) == tuple((item.kind, item.id, item.revision) for item in right.selected_tools)
+        and tuple((item.kind, item.id, item.revision) for item in left.selected_skills) == tuple((item.kind, item.id, item.revision) for item in right.selected_skills)
+        and tuple((item.kind, item.id, item.revision) for item in left.selected_mcp) == tuple((item.kind, item.id, item.revision) for item in right.selected_mcp)
+        and tuple((item.kind, item.id, item.revision) for item in left.selected_capabilities) == tuple((item.kind, item.id, item.revision) for item in right.selected_capabilities)
         and left.selected_subagents == right.selected_subagents
         and left.tool_policy == right.tool_policy
         and left.mcp_policy == right.mcp_policy
