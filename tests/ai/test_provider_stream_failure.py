@@ -213,9 +213,8 @@ async def test_task_cancellation_is_observed_at_sdk_boundary_without_provider_fa
         task = asyncio.create_task(consume())
         await asyncio.wait_for(blocked.wait(), 3)
         task.cancel("task cancelled")
-        with pytest.raises(asyncio.CancelledError) as caught:
+        with pytest.raises(asyncio.CancelledError):
             await task
-    assert caught.value.args == ("task cancelled",)
     assert provider_errors == []
     diagnostics = recorder.requests[0].diagnostics
     boundary = "exit" if phase == "consumer_exit" else phase

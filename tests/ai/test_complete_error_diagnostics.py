@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from httpx2 import RemoteProtocolError
-from pydantic_ai.exceptions import ModelConnectionError
+from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.models.function import FunctionModel
 from linktools.core import environ
 from linktools.core._logging import LoggingManager
@@ -28,8 +28,8 @@ def _raised_failure() -> BaseException:
         try:
             raise RemoteProtocolError("incomplete chunked read " + "x" * 5000 + " END_TRANSPORT")
         except RemoteProtocolError as cause:
-            raise ModelConnectionError("test-model", "model connection failed") from cause
-    except ModelConnectionError as error:
+            raise ModelAPIError("test-model", "model connection failed") from cause
+    except ModelAPIError as error:
         return error
 
 
@@ -39,7 +39,7 @@ def test_complete_chain_keeps_long_messages_frames_and_no_locals(monkeypatch: py
     diagnostics = ErrorDiagnostics.from_exception(_raised_failure())
     assert [cause["relation"] for cause in diagnostics.exception_chain] == ["root", "cause"]
     assert [cause["exception_type"] for cause in diagnostics.exception_chain] == [
-        "ModelConnectionError", "RemoteProtocolError",
+        "ModelAPIError", "RemoteProtocolError",
     ]
     assert diagnostics.exception_chain[1]["exception_message"].endswith("END_TRANSPORT")
     assert diagnostics.traceback.count("_raised_failure") == 2
