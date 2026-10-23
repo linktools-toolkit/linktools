@@ -109,6 +109,50 @@ the same selectors and content flags when continuing a cursor; adding,
 changing, or removing them is rejected. `cutoffs` remain fixed upper bounds,
 not lower bounds or substitutes for exact request selectors.
 
+Each retained `ModelClientRequest` also exposes optional `diagnostics`, independently
+of HTTP body capture. It belongs to that exact dispatch, not another request or
+the execution as a whole. `started_at` is UTC; `*_ns` observations are monotonic
+elapsed nanoseconds from that attempt's start. The mapping can include header,
+first/last chunk and close timings, received byte/chunk counts, HTTP version and a
+sanitized protocol request ID, transport read/close errors, and separate `sdk_*`
+stream entry, exhaustion, cancellation and cleanup observations. Error observations
+contain qualified exception types, not exception text or headers. Missing keys
+mean unobserved; buffered responses do not invent stream chunk timings. See
+[protocol terminal semantics](model-protocols.md) before interpreting a response's
+`complete` flag. The mapping is retained in metadata-only archives too.
+
+## Read complete failure diagnostics
+
+Read the failed execution's authoritative `result()` to obtain its
+`error_diagnostics`; lightweight execution inspection remains a summary. Cancelled
+execution results retain their cancellation status/code, not a fabricated failure
+diagnostic; observed cancellation timing belongs to the affected client attempt.
+The public
+`ErrorDiagnostics.to_payload()` returns every collected diagnostic field. The
+original `exception_type`, bounded `exception_message` and `cause_digest` remain
+summary fields. New failures also collect an optional `exception_chain` (outermost
+first, with `root`, `cause` or visible `context` relations and full messages) and
+`traceback` (all frames and visible exception-group branches, without locals).
+Python traceback display limits do not truncate the durable diagnostic. Normal
+exception context suppression and cycle detection still apply.
+
+Durable output-schema validation has a stricter existing privacy contract: rejected
+input and schema literals must not be retained. Its diagnostic preserves original
+chained frame locations and types plus the safe validation explanation, but omits
+original messages, notes and source lines. The traceback states those omissions;
+`exception_chain=None` does not claim a fully collected message chain.
+
+Collection uses the shared credential redactor before persistence, including the
+bounded summary. It does not retain arbitrary exception attributes, connection
+headers or local variables. Existing access, retention and deletion rules apply;
+complete diagnostics are not automatically safe for publication outside that scope.
+Terminal failure events, retained results and reopened history use the same
+diagnostic projection. Optional fields absent from older records remain absent or
+`None`; enabling capture cannot reconstruct prior chains, stacks or stream timing.
+These additive diagnostic fields keep the current durable format version and do not
+alter model, capability or execution identity. No automatic database migration is
+required.
+
 ## Read one tool call
 
 The default watch keeps safe locator and status metadata, including

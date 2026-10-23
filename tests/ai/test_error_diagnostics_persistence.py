@@ -121,11 +121,7 @@ def _failed_terminal(
         usage=UsageMetrics(),
         created_at=now,
     )
-    diagnostic_payload: dict[str, JsonValue] = {
-        "exception_type": diagnostics.exception_type,
-        "exception_message": diagnostics.exception_message,
-        "cause_digest": diagnostics.cause_digest,
-    }
+    diagnostic_payload = diagnostics.to_payload()
     commit = ExecutionTerminalCommit(
         expected_revision=0,
         expected_event_seq=0,
@@ -249,11 +245,7 @@ async def test_terminal_results_survive_restart_through_live_and_read_only_apis(
             assert summary.error_diagnostics is None
             assert terminal.payload["error_code"] == result.error_code
             assert terminal.payload["safe_error_details"] == dict(result.safe_error_details)
-            assert terminal.payload["error_diagnostics"] == {
-                "exception_type": diagnostics.exception_type,
-                "exception_message": diagnostics.exception_message,
-                "cause_digest": diagnostics.cause_digest,
-            }
+            assert terminal.payload["error_diagnostics"] == diagnostics.to_payload()
 
     history_storage = (
         RuntimeStorage.filesystem(durable_path)

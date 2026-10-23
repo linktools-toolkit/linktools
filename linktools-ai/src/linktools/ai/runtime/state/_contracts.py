@@ -45,6 +45,7 @@ from ...core import (
     ExternalCallStatus,
     IdempotencyStatus,
     JsonValue,
+    ImmutableJsonMapping,
     OperationLedgerInput,
     OperationLedgerRecord,
     OperationStatus,
@@ -214,14 +215,6 @@ def decode_tool_operation_failure(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     return message
-
-
-def _error_diagnostics_payload(diagnostics: ErrorDiagnostics) -> dict[str, JsonValue]:
-    return {
-        "exception_type": diagnostics.exception_type,
-        "exception_message": diagnostics.exception_message,
-        "cause_digest": diagnostics.cause_digest,
-    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -551,6 +544,7 @@ class ModelClientRequestRef:
     capture_error: str | None = None
     response: ModelClientResponseRef | None = None
     record_http_bodies: bool = True
+    diagnostics: Mapping[str, JsonValue] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -565,6 +559,8 @@ class ModelClientRequestRef:
             or self.body is not None and not isinstance(self.body, ModelClientBodyRef)
         ):
             raise ValueError("model client request reference is invalid")
+        if self.diagnostics is not None:
+            object.__setattr__(self, "diagnostics", ImmutableJsonMapping(self.diagnostics))
 
 
 @dataclass(frozen=True, slots=True)

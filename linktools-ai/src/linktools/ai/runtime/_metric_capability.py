@@ -48,6 +48,7 @@ from ._metrics_service import (
 _logger = environ.get_logger("ai.runtime.model_metrics")
 
 ModelRequestEventSink = Callable[[ExecutionEventType, JsonValue], Awaitable[None]]
+_StreamObserver = Callable[[str, BaseException | None], None]
 
 
 class ModelInteractionRecorder(Protocol):
@@ -104,9 +105,12 @@ class ModelInteractionRecorder(Protocol):
 class _ProviderStreamedResponse(StreamedResponse):
     """Observe errors at provider pulls without intercepting consumer failures."""
 
-    def __init__(self, response: StreamedResponse, failed: Callable[[Exception], None]) -> None:
+    def __init__(
+        self, response: StreamedResponse, failed: Callable[[Exception], None], observed: _StreamObserver,
+    ) -> None:
         self._response = response
         self._failed = failed
+        self._observed = observed
         self._iterator: AsyncIterator[ModelResponseStreamEvent] | None = None
         super().__init__(model_request_parameters=response.model_request_parameters)
 
@@ -118,15 +122,24 @@ class _ProviderStreamedResponse(StreamedResponse):
     async def _get_event_iterator(self) -> AsyncIterator[ModelResponseStreamEvent]:
         try:
             iterator = self._response.__aiter__()
+        except asyncio.CancelledError as error:
+            self._observed("iteration_error", error)
+            raise
         except Exception as error:
+            self._observed("iteration_error", error)
             self._failed(error)
             raise
         while True:
             try:
                 event = await iterator.__anext__()
             except StopAsyncIteration:
+                self._observed("exhausted", None)
                 return
+            except asyncio.CancelledError as error:
+                self._observed("iteration_error", error)
+                raise
             except Exception as error:
+                self._observed("iteration_error", error)
                 self._failed(error)
                 raise
             yield event
@@ -207,10 +220,18 @@ class _ProviderStreamedResponse(StreamedResponse):
         return self._response.cancelled
 
     async def cancel(self) -> None:
+        self._observed("cancel_requested", None)
         await self._response.cancel()
 
     async def close_stream(self) -> None:
-        await self._response.close_stream()
+        self._observed("close_started", None)
+        try:
+            await self._response.close_stream()
+        except BaseException as error:
+            self._observed("close_error", error)
+            raise
+        finally:
+            self._observed("close_finished", None)
 
     def get_stream_cancel_errors(self) -> tuple[type[BaseException], ...]:
         return self._response.get_stream_cancel_errors()
@@ -230,10 +251,12 @@ class _PreparedRequestModel(WrapperModel):
             Awaitable[Model],
         ],
         failed: Callable[[Exception], None],
+        observed: _StreamObserver | None = None,
     ) -> None:
         super().__init__(wrapped)
         self._prepare = prepare
         self._failed = failed
+        self._observed = observed or (lambda event, error: None)
 
     async def request(
         self,
@@ -258,20 +281,40 @@ class _PreparedRequestModel(WrapperModel):
                 messages, model_settings, model_request_parameters, run_context,
             )
             response = await manager.__aenter__()
+        except asyncio.CancelledError as error:
+            self._observed("entry_error", error)
+            raise
         except Exception as error:
+            self._observed("entry_error", error)
             self._failed(error)
             raise
+        self._observed("entered", None)
         try:
-            yield _ProviderStreamedResponse(response, self._failed)
+            yield _ProviderStreamedResponse(response, self._failed, self._observed)
         except BaseException as error:
             # Context managers receive consumer failures too. Forward their
             # suppression semantics without treating those failures as provider errors.
-            if not await manager.__aexit__(type(error), error, error.__traceback__):
+            try:
+                suppressed = await manager.__aexit__(type(error), error, error.__traceback__)
+            except asyncio.CancelledError as exit_error:
+                if exit_error is not error:
+                    self._observed("exit_error", exit_error)
+                raise
+            except Exception as exit_error:
+                if exit_error is not error:
+                    self._observed("exit_error", exit_error)
+                    self._failed(exit_error)
+                raise
+            if not suppressed:
                 raise
         else:
             try:
                 await manager.__aexit__(None, None, None)
+            except asyncio.CancelledError as error:
+                self._observed("exit_error", error)
+                raise
             except Exception as error:
+                self._observed("exit_error", error)
                 self._failed(error)
                 raise
 
@@ -339,6 +382,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
     ) -> ModelRequestContext:
         model = request_context.model
         request_sequence: int | None = None
+        stream_attempt_index: int | None = None
 
         async def prepare(
             messages: Sequence[ModelMessage],
@@ -378,7 +422,17 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             self._provider_errors.setdefault(request_sequence, error)
 
-        request_context.model = _PreparedRequestModel(model, prepare, provider_failed)
+        def stream_observed(event: str, error: BaseException | None) -> None:
+            nonlocal stream_attempt_index
+            recorder = self._client_recorders.get(request_sequence) if request_sequence is not None else None
+            if recorder is None:
+                return
+            if event in {"entered", "entry_error"}:
+                stream_attempt_index = len(recorder.requests) - 1
+            if stream_attempt_index is not None:
+                recorder.observe_stream(event, attempt_index=stream_attempt_index, error=error)
+
+        request_context.model = _PreparedRequestModel(model, prepare, provider_failed, stream_observed)
         return request_context
 
     async def wrap_model_request(

@@ -214,10 +214,11 @@ async def test_native_stream_observation_and_http_retry_are_not_multiplied(monke
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('kind,api,model_name', PROTOCOLS)
-async def test_native_partial_stream_is_not_replayed(monkeypatch, kind, api, model_name):
+@pytest.mark.parametrize('record_http_bodies', [False, True])
+async def test_native_partial_stream_is_not_replayed(monkeypatch, kind, api, model_name, record_http_bodies):
     from .test_model_client_response_capture import _Stream, _invoke
     from pydantic_ai.exceptions import ModelAPIError
-    source = _Stream(stream_events(api)[:-1] + [httpx2.ReadError('stream interrupted')])
+    source = _Stream(stream_events(api)[:-1] + [httpx2.RemoteProtocolError('incomplete chunked read')])
     sent = []
 
     def handler(request):
@@ -226,13 +227,21 @@ async def test_native_partial_stream_is_not_replayed(monkeypatch, kind, api, mod
 
     models, _ = model_binding(monkeypatch, kind, model_name, handler, max_retries=1)
     model = models.materialize()
-    with ModelClientRequestRecorder(record_http_bodies=True) as capture:
+    with ModelClientRequestRecorder(record_http_bodies=record_http_bodies) as capture:
         async with model:
-            with pytest.raises((ModelAPIError, httpx2.ReadError)):
+            with pytest.raises((ModelAPIError, httpx2.RemoteProtocolError)):
                 await _invoke(model, True)
     assert len(sent) == 1
-    assert capture.requests[0].response.body == b''.join(source.received)
+    assert capture.requests[0].response.body == (b''.join(source.received) if record_http_bodies else None)
     assert not capture.requests[0].response.complete
+    diagnostics = capture.requests[0].diagnostics
+    assert diagnostics['received_bytes'] == sum(map(len, source.received))
+    assert diagnostics['read_outcome'] == 'error'
+    assert diagnostics['read_error_type'] == 'httpx2.RemoteProtocolError'
+    assert diagnostics['headers_received_ns'] <= diagnostics['first_chunk_ns'] <= diagnostics['last_chunk_ns']
+    assert diagnostics['last_chunk_ns'] <= diagnostics['close_started_ns'] <= diagnostics['close_finished_ns']
+    assert ('protocol_terminal' in diagnostics) is record_http_bodies
+    assert diagnostics.get('protocol_terminal') is None
 
 
 @pytest.mark.asyncio

@@ -1337,7 +1337,10 @@ for example `linktools.ai.asset`, `linktools.ai.model`, `linktools.ai.spec`,
 Other package contracts include `AgentSpecAdapter`, `SkillSpecAdapter`, `MCPServerSpecAdapter`, `AgentDeclarationLoader`,
 MCP selector helpers, `WorkspaceToolDeclaration`, and the
 optional stdio sandbox protocols. `ErrorDiagnostics` is available from
-`linktools.ai.errors`.
+`linktools.ai.errors`; its `to_payload()` includes collected sanitized exception
+chains and stack traces without display truncation. See
+[complete failure diagnostics](docs/runtime-history.md#read-complete-failure-diagnostics)
+for authoritative reads, unknown historical fields and credential filtering.
 
 Private modules prefixed with `_` are implementation details. Downstream applications should not import Runtime execution infrastructure, state repository internals, or private compiler helpers directly.
 

@@ -49,6 +49,7 @@ async def prepare_client_requests(
         result.append(ModelClientRequestRef(
             api=request.api,
             record_http_bodies=request.record_http_bodies,
+            diagnostics=request.diagnostics,
             body=await prepare_body(request.body),
             capture_error=request.capture_error,
             response=None if response is None else ModelClientResponseRef(
@@ -99,6 +100,7 @@ async def resolve_client_requests(
         result.append(ModelClientRequest(
             api=request.api,
             record_http_bodies=request.record_http_bodies,
+            diagnostics=request.diagnostics,
             body=await read_body(request.body),
             capture_error=request.capture_error,
             response=None if response is None else ModelClientResponse(

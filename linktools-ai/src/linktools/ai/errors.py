@@ -5,11 +5,14 @@
 import hashlib
 import json
 import math
+import sys
+import traceback
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Literal, TypeAlias
 
+from linktools.core import environ
 from linktools.errors import Error
 
 _SafeJsonValue: TypeAlias = (
@@ -238,9 +241,19 @@ class ErrorCode(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class ErrorDiagnostics:
+    """Failure detail captured before wrapping, without frame locals.
+
+    The original three fields remain the bounded summary. ``exception_chain``
+    retains full messages along the visible cause/context chain, outermost
+    first; ``traceback`` also includes exception-group branches and notes.
+    Missing optional values mean they were not collected, not an empty failure.
+    """
+
     exception_type: str
     exception_message: str
     cause_digest: str
+    exception_chain: tuple[Mapping[str, str], ...] | None = None
+    traceback: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -256,23 +269,93 @@ class ErrorDiagnostics:
             raise ValueError("diagnostic exception message is invalid")
         if not _is_sha256(self.cause_digest):
             raise ValueError("diagnostic cause digest must be lowercase SHA-256")
+        if self.traceback is not None and not isinstance(self.traceback, str):
+            raise TypeError("diagnostic traceback must be text or null")
+        if self.exception_chain is not None:
+            if not isinstance(self.exception_chain, tuple):
+                raise TypeError("diagnostic exception chain must be a tuple or null")
+            chain = []
+            for cause in self.exception_chain:
+                if (
+                    not isinstance(cause, Mapping)
+                    or not {"exception_type", "exception_message", "relation"}.issubset(cause)
+                    or not all(isinstance(name, str) for name in cause)
+                    or not all(isinstance(value, str) for value in cause.values())
+                ):
+                    raise ValueError("diagnostic exception chain entry is invalid")
+                chain.append({
+                    name: environ.logging.redact(value) for name, value in cause.items()
+                })
+            object.__setattr__(self, "exception_chain", tuple(chain))
+        object.__setattr__(self, "exception_type", environ.logging.redact(self.exception_type))
+        object.__setattr__(self, "exception_message", environ.logging.redact(self.exception_message))
+        if self.traceback is not None:
+            object.__setattr__(self, "traceback", environ.logging.redact(self.traceback))
+
+    def to_payload(self) -> "dict[str, _SafeJsonValue]":
+        """Return all collected diagnostics as JSON, without display limits."""
+        payload: dict[str, _SafeJsonValue] = {
+            "exception_type": self.exception_type,
+            "exception_message": self.exception_message,
+            "cause_digest": self.cause_digest,
+        }
+        if self.exception_chain is not None:
+            payload["exception_chain"] = [dict(cause) for cause in self.exception_chain]
+        if self.traceback is not None:
+            payload["traceback"] = self.traceback
+        return payload
 
     @classmethod
     def from_exception(cls, error: BaseException) -> "ErrorDiagnostics":
         exception_type = type(error).__name__
+        chain: list[Mapping[str, str]] = []
+        current: BaseException | None = error
+        seen: set[int] = set()
+        relation = "root"
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            try:
+                message = str(current)
+            except BaseException:
+                message = ""
+            chain.append({
+                "exception_type": type(current).__name__,
+                "exception_message": message,
+                "relation": relation,
+            })
+            if current.__cause__ is not None:
+                current, relation = current.__cause__, "cause"
+            elif not current.__suppress_context__:
+                current, relation = current.__context__, "context"
+            else:
+                current = None
+        exception_message = chain[0]["exception_message"]
+        # Python's default group formatting and sys.tracebacklimit are display
+        # limits, not bounds for a durable failure diagnostic.
+        group_options = (
+            {"max_group_width": sys.maxsize, "max_group_depth": sys.maxsize}
+            if sys.version_info >= (3, 11) else {}
+        )
         try:
-            exception_message = str(error)
+            formatted = traceback.TracebackException(
+                type(error), error, error.__traceback__, limit=sys.maxsize,
+                capture_locals=False, **group_options,
+            )
+            stack = "".join(formatted.format(chain=True))
         except BaseException:
-            exception_message = ""
+            # Diagnostic formatting must not replace the failure being handled.
+            stack = None
         return cls(
-            exception_type[:_DIAGNOSTIC_EXCEPTION_TYPE_MAX_LENGTH],
-            exception_message[:_DIAGNOSTIC_EXCEPTION_MESSAGE_MAX_LENGTH],
+            environ.logging.redact(exception_type)[:_DIAGNOSTIC_EXCEPTION_TYPE_MAX_LENGTH],
+            environ.logging.redact(exception_message)[:_DIAGNOSTIC_EXCEPTION_MESSAGE_MAX_LENGTH],
             _cause_digest(
                 {
                     "exception_message": exception_message,
                     "exception_type": exception_type,
                 }
             ),
+            exception_chain=tuple(chain),
+            traceback=stack,
         )
 
 

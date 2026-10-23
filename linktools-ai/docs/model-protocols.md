@@ -133,6 +133,18 @@ mean a successful model response. Cancellation or disconnection retains only the
 observed partial body; consumed streams are not replayed automatically. SDK retry is
 disabled in favor of the existing bounded model retry wrapper.
 
+Passive timing and byte/chunk counts remain available when body capture is off;
+that mode does not buffer or parse request/response bodies. Per-attempt
+`diagnostics.protocol_terminal` is a terminal name when observed, `null` when
+recorded SSE bytes were decoded without a terminal, and absent when unobserved
+(including body capture off or decoding failure). `response.complete=False` alone
+therefore does not prove a truncated response. A protocol terminal can precede
+HTTP EOF because the SDK may stop reading and close the connection first. Inspect
+transport `read_outcome` and separate `sdk_*` exhaustion/cancellation/close timing
+without treating either as proof of provider success or fault. Observations use
+the configured protocol, never inference from the model name. They neither add
+model retries nor replay external effects.
+
 PydanticAI 2.55 constructs Anthropic `BetaMessageParam` as a mapping. Anthropic 2.x
 changed that symbol to a union, so the dependency is constrained to the supported 1.x
 line until the native adapter supports that change. No SDK monkeypatch is applied.

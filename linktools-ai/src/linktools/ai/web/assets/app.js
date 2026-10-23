@@ -726,15 +726,16 @@ function renderNativeTimeline(container,{conversation=false}={}) {
   if(!selected)container.append(element('p','empty',view.loading?'Loading model records…':'No records for this selection.'));
   else {
     const {item,attempt}=selected;
-    const metadata=readerDetail(modelKey(item)+':metadata','Request details','native-envelope native-info');metadata.hidden=!metadata.open;metadata.append(element('p','native-identity',`${modelLabel(item.model)} · ${item.purpose}`),element('p','source-note',state.readerHttp?'SDK-client input, in original array order. View raw and Download bytes retain the source; readable strings are decoded. Provider-server receipt is not observable here. Supported Chat, Responses and Anthropic dispatches are captured; SDK history never fills missing captures.':'SDK preparation evidence, not provider wire bytes.'),element('pre','json',json({execution_id:item.execution_id,agent_run_seq:item.agent_run_seq,model_request_seq:item.model_request_seq,purpose:item.purpose,step_index:item.step_index,output_retry_index:item.output_retry_index,started_at:item.started_at,finished_at:item.finished_at,duration_ns:item.duration_ns,status:item.status,error_code:item.error_code,usage:item.usage,api:attempt?.api})));if(item.usage)metadata.append(element('p','muted',usageLabel(item.usage)));container.append(metadata);
+    const metadata=readerDetail(modelKey(item)+':metadata','Request details','native-envelope native-info');metadata.hidden=!metadata.open;metadata.append(element('p','native-identity',`${modelLabel(item.model)} · ${item.purpose}`),element('p','source-note',state.readerHttp?'SDK-client input, in original array order. View raw and Download bytes retain the source; readable strings are decoded. Provider-server receipt is not observable here. Supported Chat, Responses and Anthropic dispatches are captured; SDK history never fills missing captures.':'SDK preparation evidence, not provider wire bytes.'),element('pre','json',json({execution_id:item.execution_id,agent_run_seq:item.agent_run_seq,model_request_seq:item.model_request_seq,purpose:item.purpose,step_index:item.step_index,output_retry_index:item.output_retry_index,started_at:item.started_at,finished_at:item.finished_at,duration_ns:item.duration_ns,status:item.status,error_code:item.error_code,usage:item.usage,api:attempt?.api,record_http_bodies:attempt?.record_http_bodies,diagnostics:attempt?.diagnostics})));if(item.usage)metadata.append(element('p','muted',usageLabel(item.usage)));container.append(metadata);
     const toggleInfo=metadata.ontoggle;metadata.ontoggle=()=>{toggleInfo();if(!metadata.isConnected)return;metadata.hidden=!metadata.open;if(!metadata.open && metadata.contains(document.activeElement))tools.children[0].focus({preventScroll:true});};
     if(!state.readerHttp)sdkMessages(container,item,selected.key);
     else if(!attempt)container.append(element('p','muted',!item.client_requests_included?'Original client content was not requested.':item.status==='RUNNING'?'Request running; capture is saved on completion.':item.client_requests===null?'Original client messages were not recorded.':'No supported client dispatch was observed.'));
     else {
       try {
         const source=clientBodyText(attempt);
-        if(source===null)throw new Error(attempt.capture_error || 'Original body unavailable');
-        if(state.readerRaw)container.append(element('pre','native-literal native-raw',source));
+        if(source===null && attempt.record_http_bodies===false)container.append(element('p','muted','HTTP body recording is disabled. Attempt diagnostics remain available in Inspect request.'));
+        else if(source===null)throw new Error(attempt.capture_error || 'Original body unavailable');
+        else if(state.readerRaw)container.append(element('pre','native-literal native-raw',source));
         else {
           if(state.readerCache?.source!==source){state.readerCache={source,projection:capturedRequest(source)};}
           nativeMessages(container,state.readerCache.projection,selected.key,attempt.api);
@@ -743,8 +744,17 @@ function renderNativeTimeline(container,{conversation=false}={}) {
           if(envelope.length){const detail=readerDetail(selected.key+':envelope','Request envelope fields','native-envelope');envelope.forEach(field=>detail.append(literalSource(field.raw)));container.append(detail);}
         }
       } catch(error){container.append(element('p','source-warning',`Readable view unavailable: ${error.message}. The original request remains authoritative.`));try {const source=clientBodyText(attempt);if(source!==null)container.append(element('pre','native-literal',source));}catch{}}
-      const response=readerDetail(selected.key+':response',attempt.response?`Observed response · HTTP ${attempt.response.status_code} · ${attempt.response.complete?'complete':'incomplete'}`:'No response observed','native-response');
-      if(attempt.response)response.append(element('p','muted',`${attempt.response.format} · ${attempt.response.content_encoding || 'identity'} · Separate from this request’s input messages. Only bytes pulled by the SDK were captured.`),nativeBody(attempt.response,`${selected.key}-response.bin`));container.append(response);
+      const observed=attempt.diagnostics || {};
+      if(observed.read_outcome)container.append(element('p','source-note',`HTTP read: ${observed.read_outcome}${observed.read_error_type?' ('+observed.read_error_type+')':''}.`));
+      if(observed.close_started_ns!=null)container.append(element('p','source-note',`HTTP close: ${observed.close_error_type?'error ('+observed.close_error_type+')':observed.close_finished_ns!=null?'finished':'started'}.`));
+      const sdkEvents=['entered','exhausted','cancel_requested','close_started','close_finished','entry_error','iteration_error','exit_error','close_error'].filter(event=>observed[`sdk_${event}_ns`]!=null).sort((a,b)=>observed[`sdk_${a}_ns`]-observed[`sdk_${b}_ns`]);
+      if(sdkEvents.length)container.append(element('p','source-note','SDK stream observations: '+sdkEvents.map(event=>event.replaceAll('_',' ')+(observed[`sdk_${event}_type`]?' ('+observed[`sdk_${event}_type`]+')':'')).join(' · ')+'. These are lifecycle observations, not provider success.'));
+      let completion='body EOF unknown';
+      if(attempt.response?.format==='sse')completion=Object.hasOwn(observed,'protocol_terminal')?observed.protocol_terminal===null?'SSE terminal not seen':'SSE terminal: '+observed.protocol_terminal:attempt.response.complete?'SSE terminal observed':'SSE terminal unknown';
+      else if(attempt.response?.complete || observed.read_outcome==='eof')completion='body EOF observed';
+      else if(attempt.response?.body!=null && !attempt.response.capture_error)completion='body EOF not observed';
+      const response=readerDetail(selected.key+':response',attempt.response?`Observed response · HTTP ${attempt.response.status_code} · ${completion}`:'No response observed','native-response');
+      if(attempt.response)response.append(element('p','muted',`${attempt.response.format} · ${attempt.response.content_encoding || 'identity'} · Separate from this request’s input messages. ${attempt.response.body==null?'Response body not retained; terminal absence is not evidence of a broken stream.':'Only bytes pulled by the SDK were captured; protocol terminal and HTTP EOF are separate observations.'}`),nativeBody(attempt.response,`${selected.key}-response.bin`));container.append(response);
     }
     if(item.execution_id!==state.selectedExecution)container.append(button('Open subagent',async()=>selectExecution(item.execution_id)));
   }

@@ -32,9 +32,9 @@ async def test_http_policy_gates_body_observation_before_stream_capture(
     monkeypatch: pytest.MonkeyPatch, streaming: bool, enabled: bool,
 ) -> None:
     if not enabled:
-        def forbidden_buffer(*args: object, **kwargs: object) -> object:
-            pytest.fail('disabled policy must not construct a response-body capture buffer')
-        monkeypatch.setattr(_http, 'CapturedResponseStream', forbidden_buffer)
+        def forbidden_parse(*args: object, **kwargs: object) -> object:
+            pytest.fail('disabled body policy must not parse response content')
+        monkeypatch.setattr(_http, 'EventSource', forbidden_parse)
     model, _clients = _model(monkeypatch, _response)
     async with model:
         with ModelClientRequestRecorder(record_http_bodies=enabled) as capture:
@@ -55,7 +55,9 @@ async def test_disabled_capture_does_not_read_request_body() -> None:
     request = httpx2.Request('POST', 'https://capture.invalid/chat/completions', content=iter([b'body']))
     with ModelClientRequestRecorder() as capture:
         await _http.capture_request(request)
-    assert capture.requests == (ModelClientRequest('openai', None, record_http_bodies=False),)
+    attempt, = capture.requests
+    assert attempt.api == 'openai' and attempt.body is None and not attempt.record_http_bodies
+    assert attempt.diagnostics is not None and set(attempt.diagnostics) == {'started_at'}
     with pytest.raises(httpx2.RequestNotRead):
         _ = request.content
 
@@ -69,6 +71,8 @@ async def test_attempt_policy_and_metadata_roundtrip_without_copying_bodies_to_c
     source = ModelClientRequest(
         'openai', b'request' if enabled else None, record_http_bodies=enabled,
         response=ModelClientResponse(b'response' if enabled else None, 200, 'json', None, enabled),
+        diagnostics={'started_at': '2026-01-01T00:00:00+00:00', 'received_bytes': 8,
+                     'read_outcome': 'error', 'read_error_type': 'httpx2.RemoteProtocolError'},
     )
     refs = await prepare_client_requests((source,), domain)
     assert refs is not None
@@ -78,12 +82,26 @@ async def test_attempt_policy_and_metadata_roundtrip_without_copying_bodies_to_c
     assert recovered is not None
     value = recovered[0]
     assert value.record_http_bodies is enabled
+    assert value.diagnostics == source.diagnostics
     assert value.response is not None and value.response.status_code == 200
     assert value.capture_error is value.response.capture_error is None
     if domain is RuntimeDomain.TRACE:
         assert value == source
     else:
         assert value.body is value.response.body is None
+
+
+@pytest.mark.parametrize("missing", (False, True))
+def test_missing_attempt_diagnostics_remain_unknown_on_existing_wire(missing: bool) -> None:
+    encoded = _encode_persisted_domain(ModelClientRequestRef(
+        "openai", None, record_http_bodies=False, diagnostics={"received_bytes": 7},
+    ))
+    if missing:
+        del encoded["fields"]["diagnostics"]
+    else:
+        encoded["fields"]["diagnostics"] = None
+    restored = _decode_domain(encoded, ModelClientRequestRef, _CURRENT_CODEC, persisted=True)
+    assert restored.diagnostics is None
 
 
 def test_trace_policy_is_read_through_native_wrappers_without_defaulting_on() -> None:
@@ -119,4 +137,5 @@ async def test_runtime_policy_survives_checkpoint_and_cold_trace_read(
         assert attempt.response is not None
         assert (attempt.response.body is not None) is enabled
         assert attempt.capture_error is attempt.response.capture_error is None
+        assert attempt.diagnostics is not None and "headers_received_ns" in attempt.diagnostics
         assert items.items[0].usage is not None

@@ -1159,8 +1159,65 @@ def _decode_v1_slot_disposition_view(
     )
 
 
+def _encode_v1_error_diagnostics(
+    value: object, codec: "_VersionCodec", persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, ErrorDiagnostics):
+        raise TypeError("V1 error_diagnostics encoder received the wrong type")
+    encoded = value.to_payload()
+    if value.exception_chain is not None:
+        encoded["exception_chain"] = _encode_domain(value.exception_chain, codec, persisted=persisted)
+    return encoded
+
+
+def _decode_v1_error_diagnostics(
+    raw_fields: Mapping[str, object], codec: "_VersionCodec", persisted: bool,
+) -> ErrorDiagnostics:
+    _require_required_keys(raw_fields, frozenset({"exception_type", "exception_message", "cause_digest"}))
+    return ErrorDiagnostics(
+        _decode_domain(raw_fields["exception_type"], str, codec, persisted=persisted),
+        _decode_domain(raw_fields["exception_message"], str, codec, persisted=persisted),
+        _decode_domain(raw_fields["cause_digest"], str, codec, persisted=persisted),
+        exception_chain=_decode_domain(
+            raw_fields.get("exception_chain"), tuple[Mapping[str, str], ...] | None,
+            codec, persisted=persisted,
+        ),
+        traceback=_decode_domain(raw_fields.get("traceback"), str | None, codec, persisted=persisted),
+    )
+
+
+def _encode_v1_model_client_request_ref(
+    value: object, codec: "_VersionCodec", persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, ModelClientRequestRef):
+        raise TypeError("V1 model_client_request_ref encoder received the wrong type")
+    return {
+        field.name: _encode_domain(getattr(value, field.name), codec, persisted=persisted)
+        for field in fields(value)
+        if field.name != "diagnostics" or value.diagnostics is not None
+    }
+
+
+def _decode_v1_model_client_request_ref(
+    raw_fields: Mapping[str, object], codec: "_VersionCodec", persisted: bool,
+) -> ModelClientRequestRef:
+    _require_required_keys(raw_fields, frozenset({
+        "api", "body", "capture_error", "response", "record_http_bodies",
+    }))
+    return ModelClientRequestRef(
+        api=_decode_domain(raw_fields["api"], str, codec, persisted=persisted),
+        body=_decode_domain(raw_fields["body"], ModelClientBodyRef | None, codec, persisted=persisted),
+        capture_error=_decode_domain(raw_fields["capture_error"], str | None, codec, persisted=persisted),
+        response=_decode_domain(raw_fields["response"], ModelClientResponseRef | None, codec, persisted=persisted),
+        record_http_bodies=_decode_domain(raw_fields["record_http_bodies"], bool, codec, persisted=persisted),
+        diagnostics=_decode_domain(raw_fields.get("diagnostics"), Mapping[str, JsonValue] | None, codec, persisted=persisted),
+    )
+
+
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
     {
+        "error_diagnostics": _encode_v1_error_diagnostics,
+        "model_client_request_ref": _encode_v1_model_client_request_ref,
         "object_ref": _encode_v1_object_ref,
         "stored_payload": _encode_v1_stored_payload,
         "stored_user_input": _encode_v1_stored_user_input,
@@ -1174,6 +1231,8 @@ _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
 )
 _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
     {
+        "error_diagnostics": _decode_v1_error_diagnostics,
+        "model_client_request_ref": _decode_v1_model_client_request_ref,
         "object_ref": _decode_v1_object_ref,
         "stored_payload": _decode_v1_stored_payload,
         "stored_user_input": _decode_v1_stored_user_input,

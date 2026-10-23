@@ -18,11 +18,6 @@ from ..model import StoredUserInput
 from ..task import TaskBindingContract
 
 
-def _error_diagnostics_payload(diagnostics: ErrorDiagnostics) -> dict[str, JsonValue]:
-    return {"exception_type": diagnostics.exception_type,
-            "exception_message": diagnostics.exception_message,
-            "cause_digest": diagnostics.cause_digest}
-
 @dataclass(frozen=True, slots=True)
 class RuntimePayloadRef:
     payload: StoredPayload
@@ -343,7 +338,7 @@ class ExecutionTerminalCommit:
                     )
             elif self.terminal_event_payload.get(
                 "error_diagnostics"
-            ) != _error_diagnostics_payload(diagnostics):
+            ) != diagnostics.to_payload():
                 raise ValueError("failed terminal error diagnostics mismatch")
         elif "error_diagnostics" in self.terminal_event_payload:
             raise ValueError("non-failed terminal cannot carry error diagnostics")

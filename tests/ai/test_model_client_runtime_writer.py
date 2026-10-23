@@ -139,8 +139,9 @@ async def test_runtime_records_compaction_and_agent_dispatches_separately(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
 @pytest.mark.parametrize("outcome", ("success", "retry", "read_error", "cancel"))
+@pytest.mark.parametrize("record_http_bodies", (False, True))
 async def test_runtime_flushes_original_attempts_only_at_request_completion(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, outcome: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, outcome: str, record_http_bodies: bool,
 ) -> None:
     partial = _EVENT.replace(b'"finish_reason": "stop"', b'"finish_reason": null')
     chunks: list[bytes | BaseException] = [partial]
@@ -170,7 +171,7 @@ async def test_runtime_flushes_original_attempts_only_at_request_completion(
     models, _clients = _binding(monkeypatch, handler, retries=int(outcome == "retry"))
     storage = RuntimeStorage.in_memory() if backend == "memory" else RuntimeStorage.sqlite(tmp_path / "state.db")
     features = _agents()
-    features.capability(TraceCapability(record_http_bodies=True), scope="runtime")
+    features.capability(TraceCapability(record_http_bodies=record_http_bodies), scope="runtime")
     async with Runtime.open("default", storage=storage, features=model_features(models, features)) as runtime:
         execution = await runtime.agents.get("default").start("original prompt")
         if outcome == "cancel":
@@ -191,15 +192,24 @@ async def test_runtime_flushes_original_attempts_only_at_request_completion(
         logical_requests = await _attempts(execution)
         assert len(logical_requests) == 1
         attempts = logical_requests[0]
-        assert [attempt.body for attempt in attempts] == sent
+        assert [attempt.body for attempt in attempts] == (sent if record_http_bodies else [None] * len(sent))
         assert len(attempts) == (2 if outcome == "retry" else 1)
         if outcome == "retry":
             assert attempts[0].response.status_code == 429
-            assert attempts[0].response.body == failure
+            assert attempts[0].response.body == (failure if record_http_bodies else None)
         response = attempts[-1].response
         assert response is not None and response.status_code == 200
-        assert response.body == partial + (_DONE if outcome in {"success", "retry"} else b"")
-        assert response.complete is (outcome in {"success", "retry"})
+        assert response.body == (partial + (_DONE if outcome in {"success", "retry"} else b"") if record_http_bodies else None)
+        assert response.complete is (record_http_bodies and outcome in {"success", "retry"})
+        diagnostics = attempts[-1].diagnostics
+        assert diagnostics["received_bytes"] == sum(map(len, stream.received))
+        assert diagnostics["headers_received_ns"] <= diagnostics["first_chunk_ns"] <= diagnostics["last_chunk_ns"]
+        assert diagnostics["close_started_ns"] <= diagnostics["close_finished_ns"]
+        assert "sdk_entered_ns" in diagnostics
+        if outcome in {"success", "retry"}:
+            assert diagnostics["sdk_entered_ns"] <= diagnostics["sdk_exhausted_ns"]
+        elif outcome == "read_error":
+            assert "sdk_iteration_error_type" in diagnostics
         assert stream.closes == 1
 
 

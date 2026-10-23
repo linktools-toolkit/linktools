@@ -9,17 +9,22 @@ thread-local log context, the two-phase bootstrap/configure lifecycle,
 third-party logger bridging (paramiko), and the process-global linktools log
 handler.
 """
+import ast
+import base64
+import binascii
 import contextlib
 import datetime
+import json
 import logging
 import os
 import re
 import threading
 from abc import ABCMeta, abstractmethod
 from typing import TYPE_CHECKING
+from urllib.parse import unquote
 
 if TYPE_CHECKING:
-    from typing import Any, Callable, Iterator, Pattern
+    from typing import Any, Callable, Iterator, Match, Pattern
 
 # ---------------------------------------------------------------------------
 # Global LogRecordFactory manager
@@ -64,17 +69,52 @@ def _unregister_redactor(key: int) -> None:
 
 __all__ = ["LoggingManager"]
 
+_SECRET_NAME = (
+    r"(?:authorization|set[_-]?cookie|cookie|token|password|passwd|pwd|"
+    r"secret[_\s-]?key|secret|api[_\s-]?key|apikey|access[_\s-]?key|"
+    r"signature|private[_\s-]?key|(?<![^\W_])(?:session(?:[_\s-]?(?:id|key|token))?|sid))"
+)
+_QUOTE = r"\\*[\"']"
+_HEADER_SECRET = r"(?:[\w.-]+[-_])?" + _SECRET_NAME
+_SECRET_VALUE = re.compile(
+    r"(?i)(?:"
+    # Header tuples have no colon immediately after the header name.
+    r"[\[(]\s*(?:b)?" + _QUOTE + _HEADER_SECRET + _QUOTE + r"\s*,\s*|"
+    r"(?P<sshpass>sshpass\s+(?:-p\s+|--password[=\s]))|"
+    + _SECRET_NAME + r"(?P<quoted>" + _QUOTE + r")?\s*[:=]\s*)"
+)
+_HEADER_NAME = re.compile(r"(?i)" + _HEADER_SECRET)
+_HEADER_RECORD = re.compile(
+    r"(?i)" + _QUOTE + r"(?:name|key)" + _QUOTE + r"\s*:\s*(?:b)?"
+    + _QUOTE + _HEADER_SECRET + _QUOTE
+)
+_QUERY_SECRET = re.compile(r"(?i)(?:" + _HEADER_SECRET + r"|key)$")
+_QUERY_VALUE = re.compile(
+    r"(?i)(?P<separator>(?P<plain>[?&])|%3f|%26)(?P<key>[^&\s#=\"'<>]*?)"
+    r"(?P<equals>=|%3d)"
+    r"(?P<value>(?(plain)[^&\s#\"'<>]*|(?:(?!%26|%23)[^&\s#\"'<>])*))"
+)
+_VALUE_QUOTE = re.compile(r"(?:b)?(\\*)(\"{3}|'{3}|[\"'])")
+_BASIC_VALUE = re.compile(r"(?i)(\bBasic\s+)([A-Za-z0-9+/]+={0,2})(?![\w+/=])")
+_PEM_NEWLINE = r"(?:\r?\n|\\+r?\\*n)"
+_PEM_BODY_LINE = r"[A-Za-z0-9+/]+={0,2}(?=$|[\r\n\"']|\\)"
+
 _BUILTIN_REDACTORS: "list[tuple[Pattern[str], str]]" = [
-    (re.compile(r"(://)[^\s/]*@"), r"://***@"),
+    (re.compile(r"(://)[^\s/\"'<>?#]*@"), r"\1***@"),
     (re.compile(
-        r"(?i)([?&](?:access[_-]?token|api[_-]?key|apikey|token|key|signature|"
-        r"secret|password|passwd|pwd)=)([^&\s#]+)"), r"\1***"),
+        r"(?i)(%3a%2f%2f)"
+        r"(?:(?!%2f|%3f|%23)[^\s/\"'<>?#])*(@|%40)"), r"\1***\2"),
     (re.compile(
-        r"(?i)((?:authorization|set[_-]?cookie|cookie|"
-        r"(?:token|password|passwd|pwd|secret[_\s-]?key|secret|"
-        r"api[_\s-]?key|apikey|access[_\s-]?key|signature|private[_\s-]?key))"
-        r"\s*[:=]\s*)([^\r\n]*)"), r"\1***"),
-    (re.compile(r"(?i)(sshpass\s+(?:-p\s+|--password[=\s]))(\S+)"), r"\1***"),
+        r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----[\s\S]*?"
+        r"-----END (?:[A-Z]+ )?PRIVATE KEY-----"), "***"),
+    (re.compile(
+        r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----[ \t]*"
+        r"(?:" + _PEM_NEWLINE + r"(?:Proc-Type:[ \t]*\d+,[ \t]*ENCRYPTED|"
+        r"DEK-Info:[ \t]*[A-Z0-9-]+,[ \t]*[A-F0-9]+))*"
+        r"(?:(?:" + _PEM_NEWLINE + r"[ \t]*)*" + _PEM_BODY_LINE
+        + r"(?:(?:" + _PEM_NEWLINE + r"[ \t]*)+" + _PEM_BODY_LINE + r")*)?", re.I), "***"),
+    (re.compile(r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/-]+=*"), r"\1***"),
+    (re.compile(r"(?<![\w-])(?:sk-[A-Za-z0-9_-]{20,}|AIza[A-Za-z0-9_-]{20,})(?![\w-])"), "***"),
 ]
 
 
@@ -286,7 +326,7 @@ class LoggingManager(object):
     def __init__(self, environ: "Any | None" = None) -> None:
         self._environ = environ
         self._secrets: "list[str]" = []
-        self._patterns: "list[tuple[Pattern[str], str]]" = list(_BUILTIN_REDACTORS)
+        self._patterns: "list[tuple[Pattern[str], str]]" = []
         self._local = _LocalContext()
         self._installed = False
         self._bootstrapped = False
@@ -307,12 +347,236 @@ class LoggingManager(object):
     def redact(self, text: "Any") -> "Any":
         if not isinstance(text, str):
             return text
+        text = self._redact_text(text)
         for regex, repl in self._patterns:
             text = regex.sub(repl, text)
+        if self._secrets:
+            text = self._redact_encoded_strings(text, registered=True)
         for secret in self._secrets:
             if secret:
                 text = text.replace(secret, "***")
         return text
+
+    def _redact_text(self, text: str) -> str:
+        text = self._redact_encoded_strings(text)
+        for regex, repl in _BUILTIN_REDACTORS:
+            text = regex.sub(repl, text)
+        text = _BASIC_VALUE.sub(self._redact_basic, text)
+        text = _QUERY_VALUE.sub(self._redact_query, text)
+        text = self._redact_header_records(text)
+        return self._redact_values(text)
+
+    def _redact_encoded_strings(self, text: str, registered: bool = False) -> str:
+        if not registered and "{" not in text and "[" not in text:
+            return text
+        parts = []
+        consumed = position = 0
+        while position < len(text):
+            opening = _VALUE_QUOTE.search(text, position)
+            if opening is None:
+                break
+            start = opening.start()
+            end = self._quoted_end(text, start)
+            position = end
+            if opening.group(1):
+                continue
+            literal = text[start:end]
+            for truncated in (False, True):
+                candidate = literal + opening.group(2) if truncated else literal
+                try:
+                    decoded = json.loads(candidate)
+                    json_string = True
+                except ValueError:
+                    try:
+                        decoded = ast.literal_eval(candidate)
+                    except (SyntaxError, ValueError):
+                        continue
+                    json_string = False
+                break
+            else:
+                continue
+            binary = isinstance(decoded, bytes)
+            value = decoded.decode("latin1") if binary else decoded
+            if not isinstance(value, str) or (not registered and "{" not in value and "[" not in value):
+                continue
+            if registered:
+                redacted = self._redact_encoded_strings(value, registered=True)
+                for secret in self._secrets:
+                    redacted = redacted.replace(secret, "***")
+            else:
+                redacted = self._redact_text(value)
+            if redacted == value:
+                continue
+            if json_string:
+                replacement = json.dumps(redacted, ensure_ascii=all(ord(char) < 128 for char in literal))
+            else:
+                replacement = repr(redacted.encode("latin1") if binary else redacted)
+            if truncated:
+                replacement = replacement[:-1]
+            parts.extend((text[consumed:start], replacement))
+            consumed = end
+        parts.append(text[consumed:])
+        return "".join(parts)
+
+    @classmethod
+    def _redact_basic(cls, match: "Match[str]") -> str:
+        value = match.group(2)
+        try:
+            credentials = base64.b64decode(value + "=" * (-len(value) % 4), validate=True)
+        except (ValueError, binascii.Error):
+            return match.group()
+        return match.group(1) + "***" if b":" in credentials else match.group()
+
+    @classmethod
+    def _redact_query(cls, match: "Match[str]") -> str:
+        if _QUERY_SECRET.fullmatch(unquote(match.group("key"))):
+            return match.group("separator") + match.group("key") + match.group("equals") + "***"
+        return match.group()
+
+    @classmethod
+    def _quoted_end(cls, text: str, start: int) -> int:
+        opening = _VALUE_QUOTE.match(text, start)
+        if opening is None:
+            return start
+        slashes, quote = opening.groups()
+        position = opening.end()
+        while True:
+            position = text.find(quote, position)
+            if position < 0:
+                newline = text.find("\n", opening.end())
+                return newline if newline >= 0 else len(text)
+            backslash = position
+            while backslash > start and text[backslash - 1] == "\\":
+                backslash -= 1
+            # JSON embedded in a repr may escape both its delimiters and
+            # literal quotes. Each encoding layer doubles the escape width.
+            if (position - backslash) % (2 * (len(slashes) + 1)) == len(slashes):
+                return position + len(quote)
+            position += len(quote)
+
+    @classmethod
+    def _redact_header_records(cls, text: str) -> str:
+        if _HEADER_RECORD.search(text) is None:
+            return text
+        spans = []
+        pending = [(0, len(text))]
+        while pending:
+            position, limit = pending.pop()
+            stack = []
+            while position < limit:
+                if not stack:
+                    position = text.find("{", position, limit)
+                    if position < 0:
+                        break
+                char = text[position]
+                opening = _VALUE_QUOTE.match(text, position)
+                if opening is not None:
+                    end = min(cls._quoted_end(text, position), limit)
+                    content_end = end - len("".join(opening.groups()))
+                    value = text[opening.end():content_end]
+                    after = end
+                    while after < limit and text[after].isspace():
+                        after += 1
+                    record = stack[-1]
+                    if record["kind"] == "{" and after < limit and text[after] == ":":
+                        record["key"] = value.lower()
+                    else:
+                        if record["key"] in ("name", "key") and _HEADER_NAME.fullmatch(value):
+                            record["secret"] = True
+                        elif record["key"] == "value":
+                            record["values"].append((position, end))
+                        record["key"] = None
+                        if "{" in value:
+                            pending.append((opening.end(), content_end))
+                    position = end
+                    continue
+                if char in "[{(":
+                    parent_value = bool(stack and stack[-1]["key"] == "value")
+                    if stack:
+                        stack[-1]["key"] = None
+                    stack.append({"kind": char, "start": position, "key": None,
+                                  "secret": False, "values": [], "parent_value": parent_value})
+                elif char in "]})":
+                    record = stack.pop()
+                    if record["secret"]:
+                        spans.extend(record["values"])
+                    if stack and record["parent_value"]:
+                        stack[-1]["values"].append((record["start"], position + 1))
+                elif char not in ":, \t\r\n" and stack[-1]["key"] is not None:
+                    end = re.compile(r"[,}\]]").search(text, position, limit)
+                    end = end.start() if end is not None else limit
+                    if stack[-1]["key"] == "value":
+                        stack[-1]["values"].append((position, end))
+                    stack[-1]["key"] = None
+                    position = end
+                    continue
+                position += 1
+            # Interrupted diagnostics can end before the record closes.
+            for index in range(len(stack) - 1, -1, -1):
+                record = stack[index]
+                if record["secret"]:
+                    spans.extend(record["values"])
+                if index and record["parent_value"]:
+                    stack[index - 1]["values"].append((record["start"], limit))
+        parts = []
+        consumed = 0
+        for start, end in sorted(spans):
+            if start < consumed:
+                continue
+            opening = _VALUE_QUOTE.match(text, start)
+            replacement = opening.group() + "***" + "".join(opening.groups()) if opening else '"***"'
+            parts.extend((text[consumed:start], replacement))
+            consumed = end
+        parts.append(text[consumed:])
+        return "".join(parts)
+
+    @classmethod
+    def _redact_values(cls, text: str) -> str:
+        parts = []
+        consumed = 0
+        queries = iter(_QUERY_VALUE.finditer(text))
+        query = next(queries, None)
+        for match in _SECRET_VALUE.finditer(text):
+            if match.start() < consumed:
+                continue
+            while query is not None and query.end("key") <= match.start():
+                query = next(queries, None)
+            if query is not None and query.start() <= match.start() < query.end("key"):
+                continue
+            start = match.end()
+            opening = _VALUE_QUOTE.match(text, start)
+            replacement = "***"
+            if opening is not None:
+                end = cls._quoted_end(text, start)
+                replacement = opening.group() + replacement + "".join(opening.groups())
+            elif start < len(text) and text[start] in "[{(":
+                stack = [text[start]]
+                end = start + 1
+                while end < len(text) and stack:
+                    quote = _VALUE_QUOTE.match(text, end)
+                    if quote is not None:
+                        end = cls._quoted_end(text, end)
+                        continue
+                    char = text[end]
+                    if char in "[{(":
+                        stack.append(char)
+                    elif char in "]})":
+                        stack.pop()
+                    end += 1
+                replacement = '"***"'
+            else:
+                # Without quotes, spaces can be part of the secret. Retain
+                # that conservative rule, but respect structured separators.
+                if match.group("sshpass"):
+                    boundary_pattern = r"\s"
+                else:
+                    boundary_pattern = r"[,}\]\r\n]" if match.group("quoted") else r"[\r\n]"
+                boundary = re.compile(boundary_pattern).search(text, start)
+                end = boundary.start() if boundary is not None else len(text)
+            parts.extend((text[consumed:start], replacement))
+            consumed = end
+        parts.append(text[consumed:])
+        return "".join(parts)
 
     # -- context -----------------------------------------------------------
 

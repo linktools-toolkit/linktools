@@ -1699,11 +1699,7 @@ class DefaultExecutionService:
             "safe_error_details": details,
         }
         if error.diagnostics is not None:
-            payload["error_diagnostics"] = {
-                "exception_type": error.diagnostics.exception_type,
-                "exception_message": error.diagnostics.exception_message,
-                "cause_digest": error.diagnostics.cause_digest,
-            }
+            payload["error_diagnostics"] = error.diagnostics.to_payload()
         await self._state.executions.commit_terminal(
             ExecutionTerminalCommit(
                 current.revision,
@@ -4021,11 +4017,7 @@ def _failed_event_payload(
     return {
         "error_code": error_code,
         "safe_error_details": dict(safe_error_details),
-        "error_diagnostics": {
-            "exception_type": diagnostics.exception_type,
-            "exception_message": diagnostics.exception_message,
-            "cause_digest": diagnostics.cause_digest,
-        },
+        "error_diagnostics": diagnostics.to_payload(),
     }
 
 

@@ -1465,21 +1465,25 @@ def _execution_error(
     usage_limits: UsageLimits,
     run_usage: RunUsage,
 ) -> AIError:
+    output_error = output_validation_error(
+        error,
+        code=(
+            ErrorCode.MODEL_RESPONSE_INVALID
+            if isinstance(error, UnexpectedModelBehavior)
+            else ErrorCode.OUTPUT_VALIDATION_FAILED
+        ),
+    )
     provider_error = model_binding_error(error)
     if provider_error is not None:
-        return provider_error
-    if isinstance(error, (UnexpectedModelBehavior, ValidationError)):
-        output_error = output_validation_error(
-            error,
-            code=(
-                ErrorCode.MODEL_RESPONSE_INVALID
-                if isinstance(error, UnexpectedModelBehavior)
-                else ErrorCode.OUTPUT_VALIDATION_FAILED
-            ),
-        )
         if output_error is not None:
-            return output_error
-    diagnostics = ErrorDiagnostics.from_exception(error)
+            provider_error.diagnostics = output_error.diagnostics
+        return provider_error
+    if output_error is not None and isinstance(error, (UnexpectedModelBehavior, ValidationError)):
+        return output_error
+    diagnostics = (
+        output_error.diagnostics
+        if output_error is not None else ErrorDiagnostics.from_exception(error)
+    )
     if isinstance(error, UsageLimitExceeded):
         return AIError(
             ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED,
