@@ -26,6 +26,7 @@ from pydantic_ai.messages import (
     RetryPromptPart,
     SpeechPart,
     SystemPromptPart,
+    TextContent,
     TextPart,
     ThinkingPart,
     ToolAvailabilityDeltaPart,
@@ -41,6 +42,7 @@ except ImportError:
 
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
+from ..model import ReferencedContent
 from ._attachment import binary_attachment_text, has_binary_attachment_metadata
 from ._user_content_codec import decode_user_content_item, encode_user_content_item
 from ._json_snapshot import stable_json_snapshot
@@ -148,7 +150,14 @@ def project_transient_binary_content(
             content = []
             part_changed = False
             for item in part.content:
-                if isinstance(item, BinaryContent):
+                if isinstance(item, ReferencedContent):
+                    descriptor = encode_user_content_item(item)
+                    canonical = decode_user_content_item(descriptor)
+                    content.append(TextContent(canonical.content, metadata={
+                        "referenced_content": descriptor,
+                    }))
+                    part_changed = True
+                elif isinstance(item, BinaryContent):
                     if not has_binary_attachment_metadata(item, message):
                         content.append(binary_attachment_text(item))
                     part_changed = True
@@ -183,7 +192,10 @@ def binary_content_usage(messages: Sequence[ModelMessage]) -> tuple[int, int]:
             if not isinstance(part, UserPromptPart) or isinstance(part.content, str):
                 continue
             for item in part.content:
-                if isinstance(item, BinaryContent):
+                if isinstance(item, ReferencedContent):
+                    count += 1
+                    total_bytes += item.ref.size
+                elif isinstance(item, BinaryContent):
                     count += 1
                     total_bytes += len(item.data)
     return count, total_bytes

@@ -4,6 +4,7 @@
 
 from ._persistence import CheckpointCapability, TraceCapability
 from ._tool_responses import ToolResponseFixture, ToolResponsesCapability
+from ._referenced_inputs import ReferencedInputsCapability
 from ._asset import AssetCapability
 from ._context import AgentContext
 from ._declaration import AgentDeclarationLoader, capture_contributions
@@ -58,6 +59,7 @@ from ._session import SessionCapability
 from ._execution import ExecutionCapability
 
 __all__ = [
+    "ReferencedInputsCapability",
     "SessionCapability",
     "ExecutionCapability",
     "ToolResponseFixture",

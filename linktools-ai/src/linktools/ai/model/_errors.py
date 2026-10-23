@@ -8,7 +8,9 @@ from ..core import JsonValue
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 
 
-def model_binding_error(error: Exception) -> "AIError | None":
+def model_binding_error(
+    error: Exception, *, diagnostics: ErrorDiagnostics | None = None,
+) -> "AIError | None":
     """Project provider failures; leave execution and output failures to callers."""
     details: dict[str, JsonValue] = {}
     if isinstance(error, ModelHTTPError):
@@ -57,7 +59,7 @@ def model_binding_error(error: Exception) -> "AIError | None":
     return AIError(
         code,
         safe_details=details,
-        diagnostics=ErrorDiagnostics.from_exception(error),
+        diagnostics=diagnostics if diagnostics is not None else ErrorDiagnostics.from_exception(error),
     )
 
 

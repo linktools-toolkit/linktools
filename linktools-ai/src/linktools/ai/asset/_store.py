@@ -495,8 +495,7 @@ class AssetStore:
         if value is None:
             raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
         data = bytes(value)
-        if len(data) != ref.size or hashlib.sha256(data).hexdigest() != ref.digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        ref.verify_content(data)
         return data
 
     async def list_info_with_locations(

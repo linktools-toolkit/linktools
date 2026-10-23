@@ -15,6 +15,9 @@ from typing import Literal, TypeAlias
 from linktools.core import environ
 from linktools.errors import Error
 
+if sys.version_info < (3, 11):
+    from exceptiongroup import BaseExceptionGroup
+
 _SafeJsonValue: TypeAlias = (
     None
     | bool
@@ -247,6 +250,9 @@ class ErrorDiagnostics:
     retains full messages along the visible cause/context chain, outermost
     first; ``traceback`` also includes exception-group branches and notes.
     Missing optional values mean they were not collected, not an empty failure.
+    With ``content_omission_reason``, messages and notes are never inspected;
+    the chain retains exception types, relationships and group paths while the
+    traceback retains frames without locals or source lines.
     """
 
     exception_type: str
@@ -254,6 +260,7 @@ class ErrorDiagnostics:
     cause_digest: str
     exception_chain: tuple[Mapping[str, str], ...] | None = None
     traceback: str | None = None
+    content_omission_reason: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -271,6 +278,10 @@ class ErrorDiagnostics:
             raise ValueError("diagnostic cause digest must be lowercase SHA-256")
         if self.traceback is not None and not isinstance(self.traceback, str):
             raise TypeError("diagnostic traceback must be text or null")
+        if self.content_omission_reason is not None:
+            if not isinstance(self.content_omission_reason, str) or not self.content_omission_reason.strip():
+                raise ValueError("diagnostic content omission reason must be a nonempty string or null")
+            object.__setattr__(self, "content_omission_reason", environ.logging.redact(self.content_omission_reason))
         if self.exception_chain is not None:
             if not isinstance(self.exception_chain, tuple):
                 raise TypeError("diagnostic exception chain must be a tuple or null")
@@ -303,10 +314,24 @@ class ErrorDiagnostics:
             payload["exception_chain"] = [dict(cause) for cause in self.exception_chain]
         if self.traceback is not None:
             payload["traceback"] = self.traceback
+        if self.content_omission_reason is not None:
+            payload["content_omission_reason"] = self.content_omission_reason
         return payload
 
     @classmethod
-    def from_exception(cls, error: BaseException) -> "ErrorDiagnostics":
+    def from_exception(
+        cls, error: BaseException, *, content_omission_reason: "str | None" = None,
+    ) -> "ErrorDiagnostics":
+        """Capture a failure, optionally omitting all original exception content.
+
+        An omission reason is a diagnostic label, not request content. Omission
+        reads only exception types, relationships and traceback frame locations;
+        it does not format original messages, notes, source lines or frame locals.
+        """
+        if content_omission_reason is not None:
+            if not isinstance(content_omission_reason, str) or not content_omission_reason.strip():
+                raise ValueError("diagnostic content omission reason must be a nonempty string or null")
+            return cls._from_exception_omitting_content(error, content_omission_reason)
         exception_type = type(error).__name__
         chain: list[Mapping[str, str]] = []
         current: BaseException | None = error
@@ -356,6 +381,60 @@ class ErrorDiagnostics:
             ),
             exception_chain=tuple(chain),
             traceback=stack,
+        )
+
+    @classmethod
+    def _from_exception_omitting_content(cls, error: BaseException, reason: str) -> "ErrorDiagnostics":
+        reason = environ.logging.redact(reason)
+        message = f"[content omitted: {reason}]"
+        chain: list[Mapping[str, str]] = []
+        stack = ["Exception traceback (original messages, notes and source lines omitted):\n"]
+        seen: dict[int, str] = {}
+        pending = [("root", "root", error)]
+        while pending:
+            path, relation, current = pending.pop()
+            exception_type = type(current).__name__
+            previous = seen.get(id(current))
+            entry = {
+                "exception_type": exception_type,
+                "exception_message": message,
+                "relation": relation,
+                "path": path,
+            }
+            if previous is not None:
+                entry["same_exception_as"] = previous
+            chain.append(entry)
+            alias = f" (same exception as {previous})" if previous is not None else ""
+            stack.append(f"{path}{alias}: {exception_type}: {message}\n")
+            # Reading code locations directly avoids traceback formatters that
+            # stringify exceptions, inspect notes or load source text.
+            for frame, lineno in traceback.walk_tb(current.__traceback__):
+                code = frame.f_code
+                stack.append(f'  File "{code.co_filename}", line {lineno}, in {code.co_name}\n')
+            if previous is not None:
+                continue
+            seen[id(current)] = path
+            if isinstance(current, BaseExceptionGroup):
+                pending.extend(
+                    (f"{path}.branch[{index}]", "branch", child)
+                    for index, child in reversed(list(enumerate(current.exceptions)))
+                )
+            if current.__cause__ is not None:
+                pending.append(("cause" if path == "root" else f"{path}.cause", "cause", current.__cause__))
+            elif not current.__suppress_context__ and current.__context__ is not None:
+                pending.append(("context" if path == "root" else f"{path}.context", "context", current.__context__))
+        stack_text = environ.logging.redact("".join(stack))
+        return cls(
+            environ.logging.redact(type(error).__name__)[:_DIAGNOSTIC_EXCEPTION_TYPE_MAX_LENGTH],
+            message[:_DIAGNOSTIC_EXCEPTION_MESSAGE_MAX_LENGTH],
+            _cause_digest({
+                "exception_type": environ.logging.redact(type(error).__name__),
+                "exception_message": message,
+                "traceback": stack_text,
+            }),
+            exception_chain=tuple(chain),
+            traceback=stack_text,
+            content_omission_reason=reason,
         )
 
 

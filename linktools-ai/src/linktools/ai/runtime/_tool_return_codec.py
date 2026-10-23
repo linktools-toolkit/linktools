@@ -6,11 +6,12 @@ import binascii
 from collections.abc import Mapping, Sequence
 from typing import cast
 
-from pydantic_ai.messages import ToolReturnContent, is_multi_modal_content
+from pydantic_ai.messages import ToolReturn, ToolReturnContent, is_multi_modal_content
 from pydantic_ai.tools import DeferredToolResults
 
 from ..core import JsonValue, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
+from ..model import ReferencedContent
 from ._user_content_codec import decode_user_content_item, encode_user_content_item
 from ._json_snapshot import stable_json_snapshot
 
@@ -59,6 +60,22 @@ def decode_tool_return_content(value: JsonValue) -> ToolReturnContent:
 
 
 def _encode_node(value: object) -> JsonValue:
+    if isinstance(value, ReferencedContent):
+        raise ValueError("referenced input must be supplied through ToolReturn.content")
+    if isinstance(value, ToolReturn):
+        _reject_referenced_return_value(value.return_value)
+    if (isinstance(value, ToolReturn) and value.content is not None
+        and not isinstance(value.content, str)
+        and any(isinstance(item, ReferencedContent) for item in value.content)):
+        if value.tools:
+            raise ValueError("referenced tool content cannot persist new executable tools")
+        return {
+            "type": "tool-return",
+            "return_value": _encode_node(value.return_value),
+            "content": [encode_user_content_item(item) for item in value.content],
+            "metadata": normalize_json_value(value.metadata),
+            "tools": None if value.tools is None else [],
+        }
     if is_multi_modal_content(value):
         return {
             "type": "multimodal",
@@ -97,10 +114,30 @@ def _encode_node(value: object) -> JsonValue:
     }
 
 
+def _reject_referenced_return_value(value: object) -> None:
+    if isinstance(value, ReferencedContent):
+        raise ValueError("referenced input must be supplied through ToolReturn.content")
+    if isinstance(value, Mapping):
+        for item in value.values():
+            _reject_referenced_return_value(item)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in value:
+            _reject_referenced_return_value(item)
+
+
 def _decode_node(value: object) -> object:
     if not isinstance(value, Mapping):
         raise ValueError("tool-return node must be an object")
     node_type = value.get("type")
+    if node_type == "tool-return":
+        _require_keys(value, {"type", "return_value", "content", "metadata", "tools"})
+        if not isinstance(value["content"], list) or value["tools"] not in (None, []):
+            raise ValueError("referenced tool-return content is invalid")
+        return ToolReturn(
+            return_value=_decode_node(value["return_value"]),
+            content=[decode_user_content_item(item) for item in value["content"]],
+            metadata=normalize_json_value(value["metadata"]), tools=value["tools"],
+        )
     if node_type == "scalar":
         _require_keys(value, {"type", "value"})
         scalar = normalize_json_value(value["value"])

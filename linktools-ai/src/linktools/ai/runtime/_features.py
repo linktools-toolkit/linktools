@@ -37,6 +37,7 @@ from ..capability import (
     CapabilityLoadContext,
     ToolEffectPolicy,
     ToolResponsesCapability,
+    ReferencedInputsCapability,
     WorkspaceCapability,
     capture_contributions,
     is_tool_effect_policy,
@@ -241,6 +242,9 @@ class RuntimeFeatures(Generic[AppT]):
                 workspace_capabilities.append(value)
             else:
                 def collect_leaf(leaf: AbstractCapability[object]) -> None:
+                    if isinstance(leaf, ReferencedInputsCapability) and scope != "agent":
+                        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                                      "ReferencedInputsCapability requires Agent scope")
                     if isinstance(leaf, ToolResponsesCapability):
                         response_capabilities.append(leaf)
                     elif isinstance(leaf, WorkspaceCapability):

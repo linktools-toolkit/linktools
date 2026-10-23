@@ -41,7 +41,10 @@ Completion or a controlled abnormal end publishes the actual prepared input and
 any received response. Requesting content early does not force a write or provider completion.
 With `TraceCapability(record_http_bodies=True)`, complete outgoing raw HTTP
 input may be captured before provider completion; the deferred body rule excludes
-half-received response fragments. Raw HTTP body capture is disabled by default. Model metadata
+half-received response fragments. Requests containing `ReferencedContent` instead
+omit both raw bodies with an explicit lifecycle reason; their prepared input keeps
+the immutable descriptor. See [recoverable reference inputs](file-tools.md#recoverable-reference-inputs).
+Raw HTTP body capture is disabled by default. Model metadata
 may be refined during preparation without changing request identity or start time.
 
 With shared retained backing storage, independently opened
@@ -141,6 +144,13 @@ input and schema literals must not be retained. Its diagnostic preserves origina
 chained frame locations and types plus the safe validation explanation, but omits
 original messages, notes and source lines. The traceback states those omissions;
 `exception_chain=None` does not claim a fully collected message chain.
+
+Provider failures for recoverable reference inputs also omit arbitrary exception
+messages, notes and source lines, since an SDK or server can echo the temporary
+file body. Their optional `content_omission_reason` identifies that policy.
+Exception types, relationships and frame locations remain available without locals.
+This does not weaken ordinary credential-redacted diagnostics or fabricate absent
+content for older records.
 
 Collection uses the shared credential redactor before persistence, including the
 bounded summary. It does not retain arbitrary exception attributes, connection
@@ -269,7 +279,10 @@ retain independent response evidence. Request settings and attempt metadata
 remain available. Original HTTP request/response bodies are recorded only with
 `TraceCapability(record_http_bodies=True)`; this diagnostic option can duplicate
 full prompts and may contain sensitive content. Disabling it does not remove
-canonical model messages, tool evidence or usage facts. Archive relocation may materialize
+canonical model messages, tool evidence or usage facts. An explicit recoverable
+reference input overrides raw body capture for its logical request, recording
+`diagnostics.body_omission_reason` while preserving attempt metadata. Its canonical
+messages keep descriptors rather than file bytes. Archive relocation may materialize
 content again; Trace, Checkpoint, and Conversation retain their own lifecycle
 roots rather than depending on another capability's retained history.
 

@@ -1183,6 +1183,9 @@ def _decode_v1_error_diagnostics(
             codec, persisted=persisted,
         ),
         traceback=_decode_domain(raw_fields.get("traceback"), str | None, codec, persisted=persisted),
+        content_omission_reason=_decode_domain(
+            raw_fields.get("content_omission_reason"), str | None, codec, persisted=persisted,
+        ),
     )
 
 

@@ -66,6 +66,8 @@ class ModelClientRequest:
     was recorded, not proof that the provider produced no response.
     record_http_bodies preserves the dispatch's capture policy. Metadata-only
     archives can omit recorded bytes without changing that policy or inventing errors.
+    An explicit recorder-level omission sets this policy to false and retains
+    its diagnostic label as ``diagnostics.body_omission_reason``.
 
     ``diagnostics`` contains passive observations of this HTTP attempt. Missing
     diagnostics or keys mean unobserved, including older records. ``started_at``
@@ -125,6 +127,7 @@ class ModelClientRequestRecorder:
         if not isinstance(record_http_bodies, bool):
             raise ValueError("record_http_bodies must be a boolean")
         self.record_http_bodies = record_http_bodies
+        self._body_omission_reason: str | None = None
         self._entries: list[_ClientRequestEntry] = []
         self._token: Token[ModelClientRequestRecorder | None] | None = None
         self._entered = False
@@ -133,6 +136,40 @@ class ModelClientRequestRecorder:
     def requests(self) -> tuple[ModelClientRequest, ...]:
         """Immutable views; response closure replaces values in later views."""
         return tuple(entry.request for entry in self._entries)
+
+    @property
+    def body_omission_reason(self) -> str | None:
+        """The explicit omission label for this logical request, if any."""
+        return self._body_omission_reason
+
+    @classmethod
+    def omit_current_http_bodies(cls, reason: str) -> None:
+        """Omit raw HTTP bodies for the active logical request and its retries.
+
+        Call before the first HTTP dispatch, for example before hydrating
+        referenced content. The reason is a nonempty diagnostic label, not
+        request content. Omission lasts for this recorder without changing its
+        configured ``record_http_bodies`` value or affecting nested recorders.
+        No active recorder is a no-op. Repeating the same reason is idempotent.
+        Changing the reason or first requesting omission after a dispatch raises
+        ``RuntimeError`` because previously observed bodies cannot be unobserved.
+        """
+        capture = _current_capture.get()
+        if capture is None or capture._token is None:
+            return
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("HTTP body omission reason must be a nonempty string")
+        if capture._body_omission_reason == reason:
+            return
+        if capture._body_omission_reason is not None:
+            raise RuntimeError("HTTP body omission reason cannot change within a logical request")
+        if capture._entries:
+            raise RuntimeError("HTTP body omission must be requested before the first dispatch")
+        capture._body_omission_reason = reason
+
+    @property
+    def _effective_record_http_bodies(self) -> bool:
+        return self.record_http_bodies and self._body_omission_reason is None
 
     def observe_stream(
         self, event: str, *, attempt_index: int, error: BaseException | None = None,
@@ -260,7 +297,7 @@ class _ClientRequestEntry:
 
 def _record_http_bodies() -> bool:
     capture = _current_capture.get()
-    return capture is not None and capture._token is not None and capture.record_http_bodies
+    return capture is not None and capture._token is not None and capture._effective_record_http_bodies
 
 
 def _record_client_request(
@@ -269,9 +306,13 @@ def _record_client_request(
     capture = _current_capture.get()
     if capture is not None and capture._token is not None:
         started_ns = monotonic_ns()
+        record_http_bodies = capture._effective_record_http_bodies
+        diagnostics: dict[str, JsonValue] = {"started_at": datetime.now(timezone.utc).isoformat()}
+        if capture._body_omission_reason is not None:
+            diagnostics["body_omission_reason"] = capture._body_omission_reason
         request = ModelClientRequest(
-            api, body, capture_error, record_http_bodies=capture.record_http_bodies,
-            diagnostics={"started_at": datetime.now(timezone.utc).isoformat()},
+            api, body if record_http_bodies else None, capture_error,
+            record_http_bodies=record_http_bodies, diagnostics=diagnostics,
         )
         entry = _ClientRequestEntry(capture, request, started_ns)
         capture._entries.append(entry)

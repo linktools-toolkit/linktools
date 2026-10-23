@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Literal, Protocol, runtime_checkable
 
 from ..core import ImmutableJsonMapping, JsonValue, validate_asset_kind
-from ..errors import AIError
+from ..errors import AIError, ErrorCode
 from ..storage import (
     ReadableStorageBackend,
     StorageEntryRevision,
@@ -78,6 +78,13 @@ class AssetVersionRef:
             "digest": self.digest,
             "size": self.size,
         }
+
+    def verify_content(self, data: bytes) -> None:
+        """Validate bytes against this version's existing integrity contract."""
+        if not isinstance(data, bytes):
+            raise TypeError("asset version content must be bytes")
+        if len(data) != self.size or hashlib.sha256(data).hexdigest() != self.digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     def matches_info(self, info: "AssetInfo") -> bool:
         """Check the captured key, entry revision, and byte integrity fields."""

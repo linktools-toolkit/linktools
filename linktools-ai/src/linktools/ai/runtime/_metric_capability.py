@@ -35,7 +35,7 @@ from pydantic_ai.usage import RequestUsage, UsageLimitExceeded
 from ..capability import AgentContext
 from ._trace_capture import record_http_bodies_enabled
 from ..core import ExecutionEventType, JsonValue
-from ..errors import AIError, ErrorCode
+from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..model import ModelClientRequest, ModelClientRequestRecorder, model_binding_error
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ._budget import RunBudgetContext
@@ -145,7 +145,11 @@ class _ProviderStreamedResponse(StreamedResponse):
             yield event
 
     def get(self) -> ModelResponse:
-        return self._response.get()
+        try:
+            return self._response.get()
+        except Exception as error:
+            self._failed(error)
+            raise
 
     @property
     def usage(self) -> RequestUsage:
@@ -221,7 +225,11 @@ class _ProviderStreamedResponse(StreamedResponse):
 
     async def cancel(self) -> None:
         self._observed("cancel_requested", None)
-        await self._response.cancel()
+        try:
+            await self._response.cancel()
+        except Exception as error:
+            self._failed(error)
+            raise
 
     async def close_stream(self) -> None:
         self._observed("close_started", None)
@@ -229,6 +237,8 @@ class _ProviderStreamedResponse(StreamedResponse):
             await self._response.close_stream()
         except BaseException as error:
             self._observed("close_error", error)
+            if isinstance(error, Exception):
+                self._failed(error)
             raise
         finally:
             self._observed("close_finished", None)
@@ -420,7 +430,13 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         def provider_failed(error: Exception) -> None:
             if request_sequence is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._provider_errors.setdefault(request_sequence, error)
+            recorder = self._client_recorders.get(request_sequence)
+            safe_error = model_request_error(
+                error, content_omission_reason=recorder.body_omission_reason if recorder else None,
+            )
+            self._provider_errors.setdefault(request_sequence, safe_error)
+            if safe_error is not error:
+                raise safe_error from None
 
         def stream_observed(event: str, error: BaseException | None) -> None:
             nonlocal stream_attempt_index
@@ -1045,6 +1061,32 @@ def _provider_usage_measurements(
     return tuple(measurements)
 
 
+def model_request_error(
+    error: Exception, *, content_omission_reason: str | None,
+) -> Exception:
+    """Apply request retention without attributing consumer errors to transport."""
+    if content_omission_reason is None or isinstance(error, RunCancelled):
+        return error
+    diagnostics = (
+        error.diagnostics
+        if isinstance(error, AIError) and error.diagnostics is not None
+        and error.diagnostics.content_omission_reason == content_omission_reason
+        else ErrorDiagnostics.from_exception(error, content_omission_reason=content_omission_reason)
+    )
+    provider = model_binding_error(error, diagnostics=diagnostics)
+    classified = provider if provider is not None else error
+    details: dict[str, JsonValue] = {"content_omission_reason": content_omission_reason}
+    if isinstance(classified, AIError):
+        status = classified.safe_details.get("status_code")
+        if type(status) is int:
+            details["status_code"] = status
+    return AIError(
+        ErrorCode(_model_error_code(classified)),
+        retryable=classified.retryable if isinstance(classified, AIError) else False,
+        safe_details=details, diagnostics=diagnostics,
+    )
+
+
 def _model_error_code(error: Exception) -> str:
     if isinstance(error, AIError):
         return error.code.value
@@ -1068,4 +1110,4 @@ def _model_error_code(error: Exception) -> str:
     return ErrorCode.INTERNAL_ERROR.value
 
 
-__all__ = ["ModelInteractionRecorder", "ModelObservationCapability", "ModelRequestEventSink"]
+__all__ = ["ModelInteractionRecorder", "ModelObservationCapability", "ModelRequestEventSink", "model_request_error"]

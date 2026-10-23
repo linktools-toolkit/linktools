@@ -72,6 +72,7 @@ from ..asset import AssetMaterializer, AssetStoreReader, AssetVersionRef
 from ..capability import (
     AgentContext,
     CapabilityContribution,
+    ReferencedInputsCapability,
     SkillCapability,
     SkillSourceRegistry,
     SubagentCapability,
@@ -98,7 +99,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..model import model_binding_error, validate_model_inputs
 from ..observe import MetricMeasurement, MetricRecorder, Observation
-from ..spec import MCPServerSpecCodec, RepositoryInstructions
+from ..spec import CapabilityRef, MCPServerSpecCodec, RepositoryInstructions
 from ..workspace import (
     Sandbox,
     SandboxResource,
@@ -590,7 +591,21 @@ class AgentExecutor:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         validate_model_inputs(compiled_agent.model, scope.user_prompt)
         validate_model_inputs(compiled_agent.model, scope.history)
-        model = SummaryProviderModel(compiled_agent.model.materialize())
+        input_sources = [
+            (leaf, CapabilityRef("capability", candidate.id, candidate.revision))
+            for candidate in compiled_agent.selected_capabilities
+            if isinstance(candidate.value, AbstractCapability)
+            for leaf in runtime_feature_leaves(candidate.value)
+            if isinstance(leaf, ReferencedInputsCapability)
+        ]
+        if len(input_sources) > 1:
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        model = SummaryProviderModel(
+            compiled_agent.model.materialize(), context=scope.context,
+            referenced_inputs=input_sources[0][0] if input_sources else None,
+            input_source=input_sources[0][1] if input_sources else None,
+            binding=compiled_agent.model,
+        )
         # Model cleanup must not replace cancellation or an established run failure.
         execution_error: BaseException | None = None
         try:
