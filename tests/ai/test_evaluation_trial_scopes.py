@@ -387,8 +387,8 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
         def materialize(self) -> FunctionModel:
             async def respond(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
                 del info
-                prompt = [part.content for message in messages for part in message.parts
-                          if isinstance(part, UserPromptPart)][-1]
+                prompt = next(part.content for message in messages for part in message.parts
+                              if isinstance(part, UserPromptPart))
                 assert isinstance(prompt, str)
                 model_prompts.append(prompt)
                 if self.interrupt:

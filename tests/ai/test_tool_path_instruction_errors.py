@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Tool targets and instruction metadata have separate error contracts."""
-from ._runtime_test_helpers import model_features
+from ._runtime_test_helpers import is_tool_retry, model_features
 
 from ._runtime_test_helpers import workspace_features
 
@@ -10,7 +10,7 @@ from pathlib import Path
 from linktools.ai.capability import TraceCapability
 
 import pytest
-from pydantic_ai.messages import ModelResponse, RetryPromptPart, TextPart, ToolCallPart
+from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
@@ -47,7 +47,7 @@ async def test_runtime_path_retry_rechecks_allowed_target(tmp_path: Path, bad_ta
         if requests == 1:
             return ModelResponse(parts=[ToolCallPart("read_file", {"path": bad_target}, "bad")])
         if requests == 2:
-            retries = [part for message in messages for part in message.parts if isinstance(part, RetryPromptPart)]
+            retries = [part for message in messages for part in message.parts if is_tool_retry(part)]
             assert len(retries) == 1 and retries[0].tool_call_id == "bad"
             assert "must not be read" not in str(messages)
             return ModelResponse(parts=[ToolCallPart("read_file", {"path": "allowed.txt"}, "corrected")])
@@ -142,7 +142,7 @@ async def test_shared_rule_boundary_allows_literal_paths_for_workspace_tools(tmp
         requests += 1
         if requests == 1:
             return ModelResponse(parts=[ToolCallPart(name, args, "literal")])
-        assert not any(isinstance(part, RetryPromptPart) for part in messages[-1].parts)
+        assert not any(is_tool_retry(part) for part in messages[-1].parts)
         return ModelResponse(parts=[TextPart("finished")])
 
     group = workspace_features("literal-paths", workspace=Workspace.load(tmp_path))

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Captured tool declarations own execution semantics, not authoring SDK objects."""
-from ._runtime_test_helpers import model_features
+from ._runtime_test_helpers import is_tool_retry, model_features
 
 import pytest
 from pydantic_ai import Agent, DeferredToolRequests, RunContext, Tool
 from pydantic_ai.messages import (
-    ModelMessage, ModelResponse, RetryPromptPart, TextPart, ToolCallPart, ToolReturnPart,
+    ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
@@ -189,7 +189,7 @@ async def test_restored_tool_preserves_validator_callable_and_prepare_hook() -> 
         assert definition.parameters_json_schema["properties"]["value"]["description"] == "Prepared argument"
         assert definition.include_return_schema is True
         last = messages[-1].parts[0]
-        if isinstance(last, RetryPromptPart):
+        if is_tool_retry(last):
             assert last.content[0]["type"] == "int_parsing"
             return ModelResponse(parts=[ToolCallPart("checked", {"value": "7"})])
         if isinstance(last, ToolReturnPart):

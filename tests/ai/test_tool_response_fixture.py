@@ -5,17 +5,19 @@ from ._runtime_test_helpers import model_features
 
 import asyncio
 import copy
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, fields, replace
 from typing import Any, Literal
 
 import pytest
+from pydantic import TypeAdapter
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.mcp import MCPToolset
+from pydantic_ai.tools import ToolDefinition
 
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import AssetCapability, AgentContext, ToolCallFailed, ToolCallRetry, ToolResponseFixture, ToolResponsesCapability
 from linktools.ai.core import canonical_json_bytes
-from linktools.ai.errors import AIError
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._mcp import (
     _MCPBinding,
     _model_tool_name,
@@ -103,6 +105,26 @@ async def test_fixture_declaration_retains_validated_immutable_reference_and_bor
             ToolResponseFixture(object(), store)
         with pytest.raises(TypeError, match="reader must be AssetStoreReader"):
             ToolResponseFixture(fixture.ref, object())
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filter_kind", [None, "file-read", True])
+async def test_fixture_preserves_optional_tool_kind_filter_without_silent_downgrade(filter_kind: object) -> None:
+    payload = _manifest()
+    payload["servers"][0]["tools"][0]["definition"]["unless_tool_kind"] = filter_kind
+    supports_filter = "unless_tool_kind" in {field.name for field in fields(ToolDefinition)}
+    store, fixture = await _store(payload)
+    try:
+        if filter_kind is True or (filter_kind is not None and not supports_filter):
+            with pytest.raises(AIError) as failed:
+                await _load_tool_response_fixture(fixture, fixture.ref)
+            assert failed.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        else:
+            loaded = await _load_tool_response_fixture(fixture, fixture.ref)
+            definition = loaded.server("server").tools[0].tool_definition()
+            assert TypeAdapter(ToolDefinition).dump_python(definition).get("unless_tool_kind") == filter_kind
     finally:
         await store.close()
 

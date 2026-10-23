@@ -142,6 +142,33 @@ async def test_summary_tail_preserves_retry_dependency_occurrences() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('options', [
+    {'keep_tokens': 10}, {'keep_user_messages': True}, {'receipts': True}, {'bridge_prefix': True},
+])
+async def test_summary_options_keep_the_complete_history_for_sdk_processing(
+    monkeypatch: pytest.MonkeyPatch, options: dict[str, object],
+) -> None:
+    from pydantic_ai.models.test import TestModel
+    from pydantic_ai_harness.compaction import SummarizingCompaction
+
+    source = _history()
+    original = encode_model_messages(source)
+    model = TestModel()
+    ctx = RunContext(deps=None, model=model, usage=RunUsage())
+
+    async def inspect(self, messages, context):
+        assert messages is source and context is ctx
+        for name, value in options.items():
+            assert getattr(self, name) == value
+        return messages
+
+    monkeypatch.setattr(SummarizingCompaction, 'compact', inspect)
+    adapter = RuntimeSummarizingCompaction(model=model, max_messages=1, keep_messages=2, **options)
+    assert await adapter.compact(source, ctx) is source
+    assert encode_model_messages(source) == original
+
+
+@pytest.mark.asyncio
 async def test_streaming_provider_lowering_does_not_rewrite_persistent_summary() -> None:
     async def stream(messages, info):
         assert type(messages[0].parts[0]) is SystemPromptPart

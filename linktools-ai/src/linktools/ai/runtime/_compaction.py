@@ -156,10 +156,19 @@ class RuntimeSummarizingCompaction(SummarizingCompaction):
         if start == 0:
             raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE,
                           safe_details={"reason": "unsplittable_tool_context"})
-        # The public keep_messages parameter protects tool retries as well as returns.
-        adapter = replace(self, keep_messages=len(messages) - start,
-                          preserve_first_user_message=False)
-        result = await SummarizingCompaction.compact(adapter, messages, ctx)
+        retained = len(messages) - start
+        summary_input = messages
+        suffix: list[ModelMessage] = []
+        if self.keep_tokens is None and not (
+            self.keep_user_messages or self.receipts or self.bridge_prefix
+        ):
+            # The first retained message is the real boundary. Later reuse of a
+            # call ID must not link an older completed call to a new retry.
+            summary_input = messages[:start + 1]
+            suffix = messages[start + 1:]
+            retained = 1
+        adapter = replace(self, keep_messages=retained, preserve_first_user_message=False)
+        result = [*await SummarizingCompaction.compact(adapter, summary_input, ctx), *suffix]
         if result == messages:
             return messages
         original = {id(part) for message in messages for part in message.parts}

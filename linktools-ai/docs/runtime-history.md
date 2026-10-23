@@ -171,10 +171,24 @@ page = await runtime.executions.history(
 
 The result has the same `ExecutionHistoryItem` shapes as unfiltered history:
 `tool_call` contains the model's arguments, `tool_result` contains the returned
-content, and `retry` contains the retry prompt. These are not effective
+content, and `retry` contains a legacy SDK retry prompt. On SDKs with native
+retry feedback, a tool retry remains a `tool_result` with a failed status, not a
+successful result; its original `ToolReturnPart` has `outcome="retried"` and
+optional `retry` information. Non-tool output feedback has item kind
+`retry-feedback`, without a fabricated tool name or call ID. Its content
+includes the feedback and retry cause, attempt and maximum retry count.
+These are not effective
 post-validation parameters or a separate external-effect ledger. A call can be
 visible before any result exists. A failed or cancelled call without a returned
 part does not acquire a fabricated result.
+
+The durable message codec preserves both the legacy retry prompt and the native
+feedback/tool-return shapes. Native retry information is retained through
+checkpoints and history, including explicit unknown (`None`) retry budgets.
+Ordinary tool returns without retry information keep their existing encoding.
+Reading native retry semantics on an older SDK that cannot represent them fails
+with `STORAGE_VERSION_UNSUPPORTED`, rather than silently translating or dropping
+the feedback. These additive message fields do not change the format version.
 
 An empty page means no matching committed fact is currently available. During
 an active run it does not prove that a live-observed request or call is absent.

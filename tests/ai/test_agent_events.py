@@ -70,9 +70,13 @@ def test_tool_result_uses_model_visible_content_digest() -> None:
     )
 
 
-def test_tool_retry_boundary_carries_error_code() -> None:
+@pytest.mark.parametrize("part", [
+    RetryPromptPart("retry", tool_name="tool", tool_call_id="call-1"),
+    ToolReturnPart("tool", "retry", tool_call_id="call-1", outcome="retried"),
+])
+def test_tool_retry_boundary_carries_error_code(part: object) -> None:
     event = FunctionToolResultEvent(
-        part=RetryPromptPart("retry", tool_name="tool", tool_call_id="call-1")
+        part=part,
     )
 
     assert _map_event(event) == DurableBoundary(

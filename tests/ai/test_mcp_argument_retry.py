@@ -17,7 +17,7 @@ from linktools.ai.runtime._mcp import _MCPDiscoveryToolset
 from linktools.ai.runtime._tool_boundary import ManagedToolDescriptor
 from linktools.ai.spec import MCPServerSpec
 
-from ._runtime_test_helpers import tool_run_context
+from ._runtime_test_helpers import is_tool_retry, tool_run_context
 from .test_tool_effect_semantics import _Bridge, _call
 
 
@@ -182,7 +182,7 @@ async def test_mcp_schema_feedback_precedes_dispatch_and_obeys_retry_budget(
     from mcp.types import TextContent
     from pydantic_ai import Agent
     from pydantic_ai.exceptions import UnexpectedModelBehavior
-    from pydantic_ai.messages import ModelMessage, ModelResponse, RetryPromptPart, TextPart, ToolCallPart
+    from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
     from pydantic_ai.models.function import AgentInfo, FunctionModel
 
     from linktools.ai.runtime._pydantic_tool_control import PydanticToolControlCapability
@@ -229,7 +229,7 @@ async def test_mcp_schema_feedback_precedes_dispatch_and_obeys_retry_budget(
         requests += 1
         if requests == 2:
             assert dispatched == []
-            feedback = [part for part in messages[-1].parts if isinstance(part, RetryPromptPart)]
+            feedback = [part for part in messages[-1].parts if is_tool_retry(part)]
             assert len(feedback) == 1
             assert feedback[0].tool_call_id == "invalid"
             assert "private-instance-value" not in str(feedback[0].content)

@@ -1402,6 +1402,19 @@ def _map_event(event: object) -> "AgentEmission | None":
         )
     if isinstance(event, FunctionToolResultEvent):
         part = event.part
+        if isinstance(part, RetryPromptPart) or (
+            isinstance(part, ToolReturnPart) and part.outcome == "retried"
+        ):
+            return DurableBoundary(
+                ExecutionEventType.TOOL_CALL_FINISHED,
+                {
+                    "call_id": part.tool_call_id,
+                    "tool_name": part.tool_name or "unknown",
+                    "result_digest": None,
+                    "status": "FAILED",
+                    "error_code": ErrorCode.TOOL_RETRY_REQUIRED.value,
+                },
+            )
         if isinstance(part, ToolReturnPart):
             success = part.outcome == "success"
             return DurableBoundary(
@@ -1413,17 +1426,6 @@ def _map_event(event: object) -> "AgentEmission | None":
                         tool_return_content_digest(part.content) if success else None
                     ),
                     "status": "SUCCEEDED" if success else "FAILED",
-                },
-            )
-        if isinstance(part, RetryPromptPart):
-            return DurableBoundary(
-                ExecutionEventType.TOOL_CALL_FINISHED,
-                {
-                    "call_id": part.tool_call_id,
-                    "tool_name": part.tool_name or "unknown",
-                    "result_digest": None,
-                    "status": "FAILED",
-                    "error_code": ErrorCode.TOOL_RETRY_REQUIRED.value,
                 },
             )
     return None

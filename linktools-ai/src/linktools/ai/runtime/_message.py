@@ -34,6 +34,11 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
+try:
+    from pydantic_ai.messages import RetryFeedbackPart, RetryInfo
+except ImportError:
+    RetryFeedbackPart = RetryInfo = None
+
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ._attachment import binary_attachment_text, has_binary_attachment_metadata
@@ -46,7 +51,9 @@ _TOOL_KINDS = frozenset({"tool-search", "capability-load"})
 _REQUEST_STATES = frozenset({"complete", "interrupted"})
 _RESPONSE_STATES = frozenset({"complete", "incomplete", "suspended", "interrupted"})
 _FINISH_REASONS = frozenset({"stop", "length", "content_filter", "tool_call", "error"})
-_TOOL_OUTCOMES = frozenset({"success", "failed", "denied", "interrupted"})
+_TOOL_OUTCOMES = frozenset({"success", "failed", "denied", "interrupted", "retried"})
+_TOOL_RETRY_CAUSES = frozenset({"validation_error", "model_retry", "unknown_tool", "unavailable_tool"})
+_FEEDBACK_RETRY_CAUSES = frozenset({"validation_error", "model_retry", "no_output"})
 _ERROR_DETAILS_ADAPTER = TypeAdapter(list[ErrorDetails])
 
 
@@ -370,6 +377,13 @@ def _encode_request_part(part: object) -> dict[str, JsonValue]:
             "tool_call_id": part.tool_call_id,
             "timestamp": _encode_datetime(part.timestamp),
         }
+    if RetryFeedbackPart is not None and isinstance(part, RetryFeedbackPart):
+        return {
+            "part_kind": "retry-feedback",
+            "content": _portable_json(_retry_content(part.content)),
+            "retry": _encode_retry_info(part.retry, feedback=True),
+            "timestamp": _encode_datetime(part.timestamp),
+        }
     if isinstance(part, ToolAvailabilityDeltaPart):
         return {
             "part_kind": "tool-availability-delta",
@@ -420,17 +434,19 @@ def _decode_request_part(value: object) -> object:
             part,
             {"part_kind", "content", "tool_name", "tool_call_id", "timestamp"},
         )
-        content = part["content"]
-        if isinstance(content, str):
-            retry_content: object = content
-        elif isinstance(content, list):
-            retry_content = _ERROR_DETAILS_ADAPTER.validate_python(content)
-        else:
-            raise ValueError("retry content is invalid")
         return RetryPromptPart(
-            cast(object, retry_content),
+            _retry_content(part["content"]),
             tool_name=_optional_string(part["tool_name"]),
             tool_call_id=_required_string(part["tool_call_id"]),
+            timestamp=_required_datetime(part["timestamp"]),
+        )
+    if kind == "retry-feedback":
+        _require_keys(part, {"part_kind", "content", "retry", "timestamp"})
+        if RetryFeedbackPart is None:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        return RetryFeedbackPart(
+            _retry_content(part["content"]),
+            retry=_decode_retry_info(part["retry"], feedback=True),
             timestamp=_required_datetime(part["timestamp"]),
         )
     if kind == "tool-availability-delta":
@@ -632,6 +648,10 @@ def _encode_tool_return_part(
     *,
     native: bool,
 ) -> dict[str, JsonValue]:
+    if part.outcome not in _TOOL_OUTCOMES:
+        raise ValueError("tool outcome is invalid")
+    if part.outcome == "retried" and RetryInfo is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     result: dict[str, JsonValue] = {
         "part_kind": "builtin-tool-return" if native else "tool-return",
         "tool_name": part.tool_name,
@@ -648,6 +668,10 @@ def _encode_tool_return_part(
         result["provider_details"] = _encode_optional_mapping(
             native_part.provider_details
         )
+    elif RetryInfo is not None:
+        tool_part = cast(ToolReturnPart, part)
+        if tool_part.retry is not None:
+            result["retry"] = _encode_retry_info(tool_part.retry, feedback=False)
     return result
 
 
@@ -668,10 +692,14 @@ def _decode_tool_return_part(
     }
     if native:
         expected |= {"provider_name", "provider_details"}
+    elif "retry" in part:
+        expected.add("retry")
     _require_keys(part, expected)
     outcome = _required_string(part["outcome"])
     if outcome not in _TOOL_OUTCOMES:
         raise ValueError("tool outcome is invalid")
+    if outcome == "retried" and RetryInfo is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     kwargs = {
         "tool_name": _required_string(part["tool_name"]),
         "content": decode_tool_return_content(cast(JsonValue, part["content"])),
@@ -688,8 +716,41 @@ def _decode_tool_return_part(
             provider_details=_decode_optional_mapping(part["provider_details"]),
         )
         return NativeToolReturnPart.narrow_type(value)
+    if part.get("retry") is not None:
+        kwargs["retry"] = _decode_retry_info(part["retry"], feedback=False)
     value = ToolReturnPart(**kwargs)
     return ToolReturnPart.narrow_type(value)
+
+
+def _retry_content(value: object) -> str | list[ErrorDetails]:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return _ERROR_DETAILS_ADAPTER.validate_python(value)
+    raise ValueError("retry content is invalid")
+
+
+def _encode_retry_info(value: object, *, feedback: bool) -> dict[str, JsonValue]:
+    if RetryInfo is None or not isinstance(value, RetryInfo):
+        raise TypeError("retry information is invalid")
+    causes = _FEEDBACK_RETRY_CAUSES if feedback else _TOOL_RETRY_CAUSES
+    if not isinstance(value.cause, str) or value.cause not in causes:
+        raise ValueError("retry cause is invalid")
+    for budget in (value.attempt, value.max_retries):
+        if budget is not None and (isinstance(budget, bool) or not isinstance(budget, int)):
+            raise ValueError("retry budget must be an integer or null")
+    return {"cause": value.cause, "attempt": value.attempt, "max_retries": value.max_retries}
+
+
+def _decode_retry_info(value: object, *, feedback: bool) -> "RetryInfo":
+    fields = _part_mapping(value)
+    _require_keys(fields, {"cause", "attempt", "max_retries"})
+    if RetryInfo is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    retry = RetryInfo(cause=fields["cause"], attempt=fields["attempt"], max_retries=fields["max_retries"])
+    # The SDK dataclass constructor does not validate its field annotations.
+    _encode_retry_info(retry, feedback=feedback)
+    return retry
 
 
 def _encode_speech_part(part: SpeechPart) -> dict[str, JsonValue]:

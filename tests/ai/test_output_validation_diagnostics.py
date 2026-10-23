@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Schema corrections retain useful paths without retaining rejected values."""
-from ._runtime_test_helpers import model_features
+from ._runtime_test_helpers import is_tool_retry, model_features
 
 import asyncio
 import json
@@ -196,9 +196,13 @@ async def test_model_corrects_output_from_safe_retry_feedback() -> None:
     retry_feedback: list[str] = []
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        retries = [part for message in messages for part in message.parts if isinstance(part, RetryPromptPart)]
+        retries = [part for message in messages for part in message.parts if is_tool_retry(part)]
         if retries:
-            retry_feedback.append(retries[-1].model_response())
+            part = retries[-1]
+            retry_feedback.append(
+                part.model_response() if isinstance(part, RetryPromptPart)
+                else part.model_response_str()
+            )
         return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {"count": 3 if retries else _SECRET})])
 
     binding = _binding({"count": {"type": "integer"}})
