@@ -607,7 +607,7 @@ class AgentExecutor:
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         def prepare_candidate(candidate: ModelBinding) -> Model:
             if isinstance(candidate, FallbackBinding):
-                return FallbackProviderModel(candidate.materialize(prepare=prepare_candidate))
+                return candidate.materialize(prepare=prepare_candidate)
             return CandidateProviderModel(
                 candidate.materialize(), context=scope.context,
                 referenced_inputs=input_sources[0][0] if input_sources else None,
@@ -616,7 +616,7 @@ class AgentExecutor:
             )
 
         if isinstance(compiled_agent.model, FallbackBinding):
-            model = prepare_candidate(compiled_agent.model)
+            model = FallbackProviderModel(prepare_candidate(compiled_agent.model))
         else:
             model = SummaryProviderModel(
                 compiled_agent.model.materialize(), context=scope.context,
@@ -1346,16 +1346,12 @@ class _RuntimeThinking(Thinking):
         while isinstance(effective, PreparedRequestModel):
             effective = effective.wrapped
         if not isinstance(effective, FallbackProviderModel):
-            _validate_thinking_model(effective, self.effort)
+            validate_thinking_model(effective, self.effort)
         return await handler(request_context)
 
 
 def _thinking_capability(thinking: ThinkingValue) -> Thinking:
     return _RuntimeThinking(effort=thinking, id="linktools.ai.thinking")
-
-
-def _validate_thinking_model(model: Model, thinking: ThinkingValue) -> None:
-    validate_thinking_model(model, thinking)
 
 
 def _map_event(event: object) -> "AgentEmission | None":

@@ -82,6 +82,19 @@ def test_schema_binding_uses_existing_supported_schema_validation(schema: dict[s
     assert failed.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
+@pytest.mark.parametrize("schema", ({}, {"type": "string"}, {"type": "array", "items": {"type": "string"}},
+                                    {"type": ["object", "null"], "properties": {}}))
+def test_default_schema_must_be_executable_at_binding(schema: dict[str, JsonValue]) -> None:
+    spec = AgentSpec("agent", output_schema=schema)
+    compiler = _compiler(spec)
+    compiled = compiler.compile(spec)
+    for bind in (compiler.bind, compiler.bind_subagent):
+        with pytest.raises(AIError) as failed:
+            bind(compiled)
+        assert failed.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+    assert compiler.bind(compiled, output=_Label).output_binding == bind_output(_Label)
+
+
 @pytest.mark.parametrize("output", (_Label, AssistantTextOutput, bind_output(_Label), bind_output()))
 def test_explicit_outputs_override_agent_schema(output: type[BaseModel] | OutputBinding) -> None:
     spec = AgentSpec("agent", output_schema=_Count.model_json_schema())

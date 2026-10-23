@@ -72,7 +72,6 @@ class SummaryProviderModel(WrapperModel):
         if any(item.source != self._input_source for item in references):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
                           safe_details={"reason": "referenced_input_source_mismatch"})
-        validate_model_inputs(self._binding, projected)
         ModelClientRequestRecorder.omit_current_http_bodies("referenced_content_lifecycle")
         result: list[ModelMessage] = []
         for message in projected:

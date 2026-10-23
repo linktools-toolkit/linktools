@@ -628,11 +628,6 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                                     or partial.state != "interrupted" or partial.run_id != ctx.run_id
                                     or partial.conversation_id != ctx.conversation_id):
                                     partial = None
-                                elif (not partial.parts and not partial.model_name and partial.usage == RequestUsage()
-                                      and not getattr(partial, "failed_attempts", None)):
-                                    # SDK creates an empty history placeholder even
-                                    # when no candidate ever produced a response.
-                                    partial = None
                                 usage = _failed_attempt_usage(provider_error)
                                 if partial is not None:
                                     partial = project_model_response_attempts(

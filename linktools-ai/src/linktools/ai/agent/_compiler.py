@@ -233,17 +233,17 @@ class AgentCompiler:
         output: "type[BaseModel] | OutputBinding | None",
         subagents: Sequence[SubagentRef],
     ) -> AgentBinding:
+        if isinstance(output, OutputBinding):
+            output_binding = output
+        elif output is None and compiled_agent.spec.output_schema is not None:
+            output_binding = restore_output("structured", compiled_agent.spec.output_schema)
+        else:
+            output_binding = bind_output(output)
         # A current admission owns one binding, shared by contract and execution.
         compiled_agent = replace(
             compiled_agent,
             model=self._models.capture(self._models.resolve(compiled_agent.spec.model)),
         )
-        if isinstance(output, OutputBinding):
-            output_binding = output
-        elif output is None and compiled_agent.spec.output_schema is not None:
-            output_binding = OutputBinding.create("structured", compiled_agent.spec.output_schema)
-        else:
-            output_binding = bind_output(output)
         binding_contract = AgentBindingContract(
             agent_spec=AgentSpecCodec().from_payload(
                 AgentSpecCodec().to_contract_payload(compiled_agent.spec)
