@@ -90,7 +90,7 @@ class _Binding:
     provider = "test"
     model_identity = "test:result-projection"
     contract = {"provider": provider, "model_identity": model_identity,
-                "input_mime_types": ["image/png", "text/plain"]}
+                "input_mime_types": ["image/png"]}
 
     def __init__(self, stream: object) -> None:
         self.stream = stream
@@ -153,6 +153,7 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
         AssetVersionRef(AssetKey("file", "document/page-1"), "renderer",
                         StorageEntryRevision(1), hashlib.sha256(body).hexdigest(), len(body)),
         media_type=media_type, source=_SOURCE,
+        representation="text" if media_type == "text/plain" else "binary",
     )
     arguments = {"path": filename} if kind == "read_file" else {"page": 1}
 
@@ -179,7 +180,15 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
             assert body not in _stored_bytes(state)
             assert base64.b64encode(body) not in _stored_bytes(state)
             pipeline.append("project")
-            return ToolReturn(return_value={"page": 1}, content=[reference])
+            content = reference
+            if kind == "read_file" and media_type == "image/png":
+                assert result.content[0].identifier == result.return_value["files"][0]["attachment"]
+                content = ReferencedContent(reference.ref, media_type=media_type, source=_SOURCE,
+                                            identifier=result.content[0].identifier)
+            return ToolReturn(
+                return_value=result.return_value if kind == "read_file" and media_type == "image/png" else {"page": 1},
+                content=[content],
+            )
 
         async def after_tool_execute(self, ctx, *, call, tool_def, args, result):
             after_hooks.append(call.tool_name)
@@ -189,12 +198,16 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
         async def process_tool_result(self, context, tool, arguments, result):
             if tool.name != "finish":
                 assert pipeline == ["project"]
-                assert isinstance(result, ToolReturn) and result.content == [reference]
+                assert isinstance(result, ToolReturn) and len(result.content) == 1
+                assert result.content[0].ref == reference.ref
                 pipeline.append("observe")
             return result
 
     async def load(context: AgentContext[None], content: ReferencedContent) -> bytes:
-        assert context.principal == principal and content == reference
+        assert context.principal == principal
+        assert content.ref == reference.ref and content.source == reference.source
+        assert content.representation == reference.representation
+        assert bool(content.identifier) is (kind == "read_file" and media_type == "image/png")
         loads.append(content)
         return body
 
@@ -207,18 +220,24 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
         return "done"
 
     async def stream(messages, info):
-        binaries = [item for message in messages for part in message.parts
-                    if isinstance(part, UserPromptPart) and not isinstance(part.content, str)
-                    for item in part.content if isinstance(item, BinaryContent)]
-        provider_counts.append(len(binaries))
+        items = [item for message in messages for part in message.parts
+                 if isinstance(part, UserPromptPart) and not isinstance(part.content, str)
+                 for item in part.content]
+        bodies = [item for item in items if isinstance(item, BinaryContent)] if media_type == "image/png" else [
+            item for item in items if isinstance(item, str) and item == _TEXT
+        ]
+        provider_counts.append(len(bodies))
         if len(provider_counts) == 1:
             name = next(tool.name for tool in info.function_tools if tool.name != "finish")
             yield {0: DeltaToolCall(name=name, json_args=json.dumps(arguments), tool_call_id="render")}
         elif len(provider_counts) == 2:
-            assert len(binaries) == 1 and binaries[0].data == body
+            assert len(bodies) == 1
+            assert (bodies[0].data if isinstance(bodies[0], BinaryContent) else bodies[0].encode()) == body
+            if kind == "read_file" and media_type == "image/png":
+                assert bodies[0].identifier == loads[0].identifier
             yield {0: DeltaToolCall(name="finish", json_args="{}", tool_call_id="finish")}
         else:
-            assert len(provider_counts) == 3 and not binaries
+            assert len(provider_counts) == 3 and not bodies
             yield "done"
 
     features = RuntimeFeatures("projection")
@@ -248,6 +267,12 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
         execution = await runtime.agents.get("reader").start("Render page one.", principal=principal)
         result = (await execution.wait(timeout_seconds=15)).result
         assert result.status is ExecutionStatus.SUCCEEDED, result.error_diagnostics
+        if kind == "read_file" and media_type == "image/png":
+            facts = await runtime.history.attachment_facts(execution.execution_id, principal=principal)
+            assert [(item.fact, item.attachment_id) for item in facts.items] == [
+                ("accepted", loads[0].identifier), ("included_in_request", loads[0].identifier),
+            ]
+            assert all(item.source == "read_file" and item.call_id == "render" for item in facts.items)
         operations = await runtime._state.recovery.tools.list_by_execution(
             execution.execution_id, tenant_id=principal.tenant_id,
         )
@@ -255,7 +280,7 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
         if operations:
             assert operations[0].status is ToolOperationStatus.COMPLETED
             assert operations[0].replay_safe is (kind == "replay_safe")
-    assert provider_counts == [0, 1, 0] and loads == [reference]
+    assert provider_counts == [0, 1, 0] and len(loads) == 1
     assert pipeline == ["project", "observe"]
     assert len(after_hooks) == 2 and after_hooks[1] == "finish"
     if kind == "mcp":

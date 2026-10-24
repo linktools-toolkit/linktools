@@ -316,6 +316,10 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         async def invoke(args: dict[str, Any]) -> Any:
             result = await raw_toolset.call_tool(name, args, ctx, raw_tool)
             if self._result_capabilities:
+                if descriptor.effect_owner == "none":
+                    # Give projections the existing file occurrence to preserve;
+                    # equal bytes alone do not identify a particular occurrence.
+                    result = bind_tool_return_attachments(name, call_id, result)
                 try:
                     # Preserve validated Python values; projection is not another
                     # argument codec or authorization boundary.

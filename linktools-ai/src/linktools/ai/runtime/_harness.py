@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from typing import Any, cast
+from typing import Any, cast, TYPE_CHECKING
 
 from linktools.core import environ
 from pydantic_ai.capabilities import AbstractCapability
@@ -33,6 +33,9 @@ from ._plan import PlanItem, RuntimePlanStore
 from ._message import project_provider_messages, without_history_system_prompts
 from ._metric_capability import model_request_error
 
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
 _logger = environ.get_logger("ai.runtime.harness")
 
 
@@ -42,15 +45,13 @@ class SummaryProviderModel(WrapperModel):
 
     def __init__(
         self, model: Model, *, context: AgentContext[object] | None = None,
-        referenced_inputs: ReferencedInputsCapability[object] | None = None,
-        input_source: CapabilityRef | None = None,
+        referenced_inputs: Mapping[CapabilityRef, ReferencedInputsCapability[object]] | None = None,
         binding: ModelBinding | None = None,
         preserve_errors: bool = False,
     ) -> None:
         super().__init__(model)
         self._context = context
-        self._referenced_inputs = referenced_inputs
-        self._input_source = input_source
+        self._referenced_inputs = dict(referenced_inputs or {})
         self._binding = binding
         self._preserve_errors = preserve_errors
 
@@ -66,10 +67,10 @@ class SummaryProviderModel(WrapperModel):
         ]
         if not references:
             return projected
-        if self._referenced_inputs is None or self._context is None or self._binding is None:
+        if not self._referenced_inputs or self._context is None or self._binding is None:
             raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING,
                           safe_details={"reason": "referenced_inputs_unavailable"})
-        if any(item.source != self._input_source for item in references):
+        if any(item.source not in self._referenced_inputs for item in references):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
                           safe_details={"reason": "referenced_input_source_mismatch"})
         ModelClientRequestRecorder.omit_current_http_bodies("referenced_content_lifecycle")
@@ -86,8 +87,15 @@ class SummaryProviderModel(WrapperModel):
                 content = []
                 for item in part.content:
                     if isinstance(item, ReferencedContent):
-                        data = await self._referenced_inputs.load(self._context, item)
-                        item = BinaryContent(data, media_type=item.media_type)
+                        data = await self._referenced_inputs[item.source].load(self._context, item)
+                        if item.representation == "text":
+                            try:
+                                item = data.decode("utf-8")
+                            except UnicodeDecodeError:
+                                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, retryable=False,
+                                              safe_details={"reason": "text_input_not_utf8"}) from None
+                        else:
+                            item = BinaryContent(data, media_type=item.media_type, identifier=item.identifier)
                     content.append(item)
                 parts.append(replace(part, content=content))
             result.append(replace(message, parts=parts))

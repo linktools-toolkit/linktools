@@ -31,7 +31,10 @@ def encode_user_content_item(item: UserContent) -> JsonValue:
             return {"kind": "referenced-content", "ref": item.ref.to_payload(),
                     "source": {"kind": item.source.kind, "id": item.source.id,
                                "revision": item.source.revision},
-                    "media_type": item.media_type}
+                    "media_type": item.media_type,
+                    **({"identifier": item.identifier} if item.identifier is not None else {}),
+                    **({"representation": item.representation} if item.representation != "binary" else {}),
+                    **({"source_parameters": dict(item.source_parameters)} if item.source_parameters else {})}
         if isinstance(item, TextContent):
             return {
                 "kind": "text-content",
@@ -79,11 +82,16 @@ def decode_user_content_item(value: object) -> UserContent:
         from ..asset import AssetVersionRef
         from ..spec import CapabilityRef
         source = value.get("source")
-        if (set(value) != {"kind", "ref", "media_type", "source"}
+        required = {"kind", "ref", "media_type", "source"}
+        if (not required.issubset(value) or set(value) - required - {"representation", "source_parameters", "identifier"}
+            or not isinstance(value.get("source_parameters", {}), Mapping)
             or not isinstance(source, Mapping) or set(source) != {"kind", "id", "revision"}):
             raise ValueError("referenced content is invalid")
         return ReferencedContent(AssetVersionRef.from_payload(value["ref"]),
                                  media_type=value["media_type"],
+                                 representation=value.get("representation", "binary"),
+                                 source_parameters=value.get("source_parameters", {}),
+                                 identifier=_optional_string(value.get("identifier")),
                                  source=CapabilityRef(source["kind"], source["id"], source["revision"]))
     if kind == "text":
         text = value.get("text")

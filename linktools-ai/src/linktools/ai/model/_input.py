@@ -74,6 +74,10 @@ def validate_model_inputs(binding: "ModelBinding", value: object) -> None:
     """Validate concrete inputs, including SDK encoding, without fetching remote files."""
     for item in _file_inputs(value):
         if isinstance(item, ReferencedContent):
+            if item.representation not in ("binary", "text"):
+                _input_error(item.media_type, "binary", "reference_representation_invalid")
+            if item.representation == "text":
+                continue
             kind, size = "binary", item.ref.size
         elif isinstance(item, BinaryContent):
             kind, size = "binary", len(item.data)

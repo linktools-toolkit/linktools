@@ -597,22 +597,22 @@ class AgentExecutor:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         validate_model_inputs(compiled_agent.model, scope.user_prompt)
         validate_model_inputs(compiled_agent.model, scope.history)
-        input_sources = [
-            (leaf, CapabilityRef("capability", candidate.id, candidate.revision))
-            for candidate in compiled_agent.selected_capabilities
-            if isinstance(candidate.value, AbstractCapability)
-            for leaf in runtime_feature_leaves(candidate.value)
-            if isinstance(leaf, ReferencedInputsCapability)
-        ]
-        if len(input_sources) > 1:
-            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        input_sources: dict[CapabilityRef, ReferencedInputsCapability[object]] = {}
+        for candidate in compiled_agent.selected_capabilities:
+            if not isinstance(candidate.value, AbstractCapability):
+                continue
+            loaders = [leaf for leaf in runtime_feature_leaves(candidate.value)
+                       if isinstance(leaf, ReferencedInputsCapability)]
+            if len(loaders) > 1:
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+            if loaders:
+                input_sources[CapabilityRef("capability", candidate.id, candidate.revision)] = loaders[0]
         def prepare_candidate(candidate: ModelBinding) -> Model:
             if isinstance(candidate, FallbackBinding):
                 return candidate.materialize(prepare=prepare_candidate)
             return CandidateProviderModel(
                 candidate.materialize(), context=scope.context,
-                referenced_inputs=input_sources[0][0] if input_sources else None,
-                input_source=input_sources[0][1] if input_sources else None,
+                referenced_inputs=input_sources,
                 binding=candidate, preserve_errors=True,
             )
 
@@ -621,8 +621,7 @@ class AgentExecutor:
         else:
             model = SummaryProviderModel(
                 compiled_agent.model.materialize(), context=scope.context,
-                referenced_inputs=input_sources[0][0] if input_sources else None,
-                input_source=input_sources[0][1] if input_sources else None,
+                referenced_inputs=input_sources,
                 binding=compiled_agent.model,
             )
         # Model cleanup must not replace cancellation or an established run failure.

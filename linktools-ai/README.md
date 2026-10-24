@@ -406,6 +406,45 @@ exact immutable content on consumption and recovery. A summary or temporary
 path alone cannot restore bytes. Keep necessary receipts and non-reconstructible
 results; this is not automatic lossy summarization of every tool result.
 
+Use `ReferencedContent(..., representation="text")` for content that should
+reach the model as an ordinary string, without attachment-profile permission.
+The loader still returns the exact version's bytes; Runtime verifies their
+size and digest before strict UTF-8 decoding. MIME remains descriptive metadata
+(for example, `application/json` or `text/csv`), not a representation selector.
+The default `representation="binary"` retains existing file-input MIME
+admission and SDK encoding, including for `text/plain` documents. Invalid UTF-8
+fails before provider dispatch; bytes are never silently replaced or repaired.
+Both representations keep the existing input-size limits and transient-content
+lifecycle: only descriptors/consumption summaries are retained, not loaded bodies.
+
+Several selected `ReferencedInputsCapability` contributions may serve different
+source references. Runtime routes each descriptor only to its exact selected
+`CapabilityRef`, retaining the original actor and saved revision. Missing sources
+fail before any loader runs; a single contribution containing multiple loaders
+is ambiguous and is rejected. There is no fallback to a different source or a
+second loader registry. Reopened hosts must still supply the saved capabilities
+and immutable resource versions.
+
+Optional `source_parameters={...}` retains source-owned JSON reconstruction
+arguments with a reference. Values are detached and deeply immutable; they do
+not enter the displayed model summary or define capability identity. Keep only
+necessary parameters, never content bodies or credentials. The selected loader
+must still authorize the original actor and exact parent/version; parameters
+are not authorization proof. Keep `AssetKey.id` short and opaque instead of
+encoding a complete reconstruction request into it.
+
+File-result projection preserves existing `files` receipts by copying each bound
+binary's `identifier` to its replacement reference. Runtime supplies the original
+occurrences before processing and validates their identifiers, MIME, size and
+digest afterwards. Equal content alone never identifies a file occurrence.
+The optional reference `identifier` is not source identity or authorization;
+ordinary text references need no file occurrence.
+
+The local context heuristic accounts for pending text references using their
+UTF-8 byte size, approximately four bytes per token, rather than only their
+small descriptor. This is an estimate without loading content; actual provider
+usage and explicit provider token counting remain authoritative.
+
 Result capabilities use normal capability `id + revision` capture and recovery,
 including Asset-loader contributions. Reopened hosts supply the implementation
 for the saved revision; callers own same-revision consistency and bump the

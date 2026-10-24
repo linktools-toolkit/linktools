@@ -38,25 +38,27 @@ _SOURCE = CapabilityRef("capability", "files", 1)
 _REASON = "referenced_content_lifecycle"
 
 
-def _reference() -> ReferencedContent:
+def _reference(representation: str = "binary") -> ReferencedContent:
     return ReferencedContent(
         AssetVersionRef(
             AssetKey("document", "immutable-file"), "configured", StorageEntryRevision(1),
             hashlib.sha256(_BODY).hexdigest(), len(_BODY),
         ),
-        media_type="application/pdf", source=_SOURCE,
+        media_type="application/pdf", source=_SOURCE, representation=representation,
+        source_parameters={"selection": "reconstruction-only-parameter-never-in-provider-summary"},
     )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind,api,suffix", _PROTOCOLS)
 @pytest.mark.parametrize("streaming", (False, True))
+@pytest.mark.parametrize("representation", ("binary", "text"))
 async def test_referenced_pdf_reaches_explicit_native_protocol_without_retained_http_bodies(
-    monkeypatch: pytest.MonkeyPatch, kind: str, api: str, suffix: str, streaming: bool,
+    monkeypatch: pytest.MonkeyPatch, kind: str, api: str, suffix: str, streaming: bool, representation: str,
 ) -> None:
     sent: list[bytes] = []
     sources: list[_Stream] = []
-    content = _reference()
+    content = _reference(representation)
     context = AgentContext(None, service_principal("tenant", "admitted-user"),
                            "provider-test", None, "execution", {})
     loaded = []
@@ -79,12 +81,13 @@ async def test_referenced_pdf_reaches_explicit_native_protocol_without_retained_
         })
 
     binding, clients = model_binding(
-        monkeypatch, kind, _MODEL, handler, input_types=["mime:application/pdf"],
-        profile={"openai_chat_supports_document_input": True} if api == "openai" else {},
+        monkeypatch, kind, _MODEL, handler,
+        input_types=[] if representation == "text" else ["mime:application/pdf"],
+        profile={"openai_chat_supports_document_input": True} if api == "openai" and representation == "binary" else {},
     )
     model = SummaryProviderModel(
         binding.materialize(), context=context,
-        referenced_inputs=ReferencedInputsCapability(authorized_load), input_source=_SOURCE, binding=binding,
+        referenced_inputs={_SOURCE: ReferencedInputsCapability(authorized_load)}, binding=binding,
     )
     original = [ModelRequest(parts=[UserPromptPart(["inspect file", content])])]
     encoded = encode_model_messages(original)
@@ -108,8 +111,12 @@ async def test_referenced_pdf_reaches_explicit_native_protocol_without_retained_
     assert original[0].parts[0].content[1] is content
     assert _BODY not in encoded and _BASE64.encode() not in encoded
     assert len(sent) == len(captures) == 2
+    assert b"reconstruction-only-parameter-never-in-provider-summary" not in b"".join(sent)
     outgoing = json.loads(sent[0])
-    if api == "openai":
+    if representation == "text":
+        messages = outgoing["input"] if api == "openai-responses" else outgoing["messages"]
+        assert messages[0]["content"][1]["text"] == _BODY.decode()
+    elif api == "openai":
         assert outgoing["messages"][0]["content"][1]["file"]["file_data"] == (
             f"data:application/pdf;base64,{_BASE64}"
         )
@@ -121,7 +128,8 @@ async def test_referenced_pdf_reaches_explicit_native_protocol_without_retained_
         assert outgoing["messages"][0]["content"][1]["source"] == {
             "type": "base64", "media_type": "application/pdf", "data": _BASE64,
         }
-    assert _BASE64.encode() in sent[0] and _BASE64.encode() not in sent[1]
+    assert (_BASE64.encode() in sent[0]) is (representation == "binary")
+    assert _BASE64.encode() not in sent[1]
     omitted, ordinary = (capture.requests[0] for capture in captures)
     assert captures[0].record_http_bodies is True and captures[0].body_omission_reason == _REASON
     assert omitted.api == ordinary.api == api
@@ -173,7 +181,7 @@ async def test_native_error_echoes_of_referenced_bytes_are_omitted_from_safe_dia
     )
     model = SummaryProviderModel(
         binding.materialize(), context=context,
-        referenced_inputs=ReferencedInputsCapability(authorized_load), input_source=_SOURCE, binding=binding,
+        referenced_inputs={_SOURCE: ReferencedInputsCapability(authorized_load)}, binding=binding,
     )
     original = [ModelRequest(parts=[UserPromptPart(["inspect file", content])])]
     encoded = encode_model_messages(original)

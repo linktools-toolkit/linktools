@@ -235,7 +235,9 @@ def bind_tool_return_attachments(
     )
     if not occurrences:
         if tool_name == "read_file" and result.content is not None and any(
-            isinstance(item, BinaryContent) for item in result.content
+            isinstance(item, BinaryContent)
+            or isinstance(item, ReferencedContent) and item.identifier is not None
+            for item in result.content
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return result
@@ -243,31 +245,38 @@ def bind_tool_return_attachments(
     if content is None or isinstance(content, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     values = tuple(content)
-    binaries = tuple(item for item in values if isinstance(item, BinaryContent))
-    if len(binaries) != len(occurrences):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
     occurrence_index = 0
     bound: list[UserContent] = []
     for item in values:
-        if not isinstance(item, BinaryContent):
+        if (not isinstance(item, (BinaryContent, ReferencedContent))
+            or isinstance(item, ReferencedContent) and item.identifier is None):
             bound.append(item)
             continue
-        occurrence = occurrences[occurrence_index]
-        occurrence_index += 1
         descriptor = _content_descriptor(item)
+        occurrence = occurrences[occurrence_index] if occurrence_index < len(occurrences) else None
+        if occurrence is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        occurrence_index += 1
         if descriptor is None or not _same_attachment(occurrence, descriptor):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        identifier = _require_string(occurrence.get("attachment_id"))
+        if isinstance(item, ReferencedContent):
+            if item.identifier != identifier:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            bound.append(item)
+            continue
         bound.append(
             BinaryContent.narrow_type(
                 BinaryContent(
                     item.data,
                     media_type=item.media_type,
-                    identifier=_require_string(occurrence.get("attachment_id")),
+                    identifier=identifier,
                     vendor_metadata=item.vendor_metadata,
                 )
             )
         )
+    if occurrence_index != len(occurrences):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     value = result.return_value
     if tool_name == "read_file":
         value = dict(cast(Mapping[str, JsonValue], value))
@@ -341,7 +350,7 @@ def request_attachment_facts(
                     continue
                 occurrence = (
                     tool_occurrences.get(item.identifier)
-                    if isinstance(item, BinaryContent)
+                    if isinstance(item, (BinaryContent, ReferencedContent))
                     else None
                 )
                 if occurrence is not None and _same_attachment(
@@ -519,7 +528,10 @@ def _same_attachment(
 ) -> bool:
     source = expected.get("source")
     candidate_source = candidate.get("source")
-    if source in {"workspace", "attach_files", "read_file"}:
+    if source in {"attach_files", "read_file"}:
+        if candidate_source not in {"binary", "referenced"}:
+            return False
+    elif source == "workspace":
         if candidate_source != "binary":
             return False
     elif source != candidate_source:
@@ -540,7 +552,7 @@ def _content_descriptor(item: object) -> dict[str, JsonValue] | None:
             "size": item.ref.size,
             "digest": item.ref.digest,
             "content_key": item.ref.digest,
-            "input_identifier": None,
+            "input_identifier": item.identifier,
         }
     if isinstance(item, BinaryContent):
         digest = hashlib.sha256(item.data).hexdigest()
