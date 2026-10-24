@@ -20,7 +20,7 @@ from pydantic_ai_harness.memory import InMemoryStore, MemoryFile
 from linktools.ai.capability import ToolCallRetry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._harness_memory import build_harness_memory
-from linktools.ai.runtime._pydantic_tool_control import PydanticToolControlCapability
+from linktools.ai.capability import PydanticToolControlCapability
 
 from ._runtime_test_helpers import is_tool_retry, tool_run_context
 

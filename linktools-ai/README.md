@@ -356,6 +356,58 @@ these declarations instead of inferring behavior from Tool names.
 
 `RuntimeFeatures.agent()` creates an `AgentSpec`; the declaration carries its explicit positive `revision` in the single v1 wire contract.
 
+### Native SDK composition and Runtime hosting
+
+`SkillCapability`, `SubagentCapability`, and the capabilities returned by
+`workspace_capabilities(..., session=...)` can be composed directly with a native
+Pydantic Agent. Supply their public source registry, delegate, or already-opened
+sandbox session, and install the public SDK feedback adapter once:
+
+```python
+from pydantic_ai import Agent
+from linktools.ai.capability import (
+    PydanticToolControlCapability, SkillCapability,
+)
+
+agent = Agent(
+    model,
+    capabilities=[PydanticToolControlCapability(), SkillCapability(skills, sources)],
+)
+result = await agent.run("Use an available skill.", deps=agent_context)
+```
+
+`agent_context` is an `AgentContext` populated by the caller with its application
+dependencies and authorized identity. It is not a Runtime service locator or
+proof of authorization. The adapter converts `ToolCallRetry` and `ToolCallFailed`
+into the SDK's model-facing feedback, preserving its retry budget. Unrelated
+errors, native SDK controls, and cancellation are not translated. Runtime already
+installs this same adapter; Runtime users do not register it again. Its public
+`build_model_retry()` and `build_tool_failed()` class methods also serve deferred
+recovery, so normal execution and recovery share one conversion owner.
+
+Native SDK composition does not create Runtime admission, approvals, effect
+journals, receipts, checkpoints, or recovery. Native capabilities may also be
+registered with `features.capability(native_capability, revision=1, scope="agent")`;
+their SDK lifecycle remains native. Selecting a capability does not individually
+filter its internal toolset through `allow_tools`. Tools requiring Runtime's
+managed guarantees must use the existing tool, MCP, or Workspace declaration
+paths rather than assuming an arbitrary native toolset is managed automatically.
+
+Capability names do not imply one execution mode. `AssetCapability` is consumed
+during declaration capture, not native execution hooks. Session, Execution,
+Checkpoint, Trace, and ToolResponses capabilities configure Runtime services.
+`ToolResultsCapability` and automatic `ReferencedInputsCapability` hydration are
+Runtime extension points; simply adding them to a native Agent does not install
+Runtime's provider or settlement boundary. Explicit `ReferencedInputsCapability.load()`
+remains available for authorized reads and integrity checks.
+
+The creator retains resource ownership. Public standalone adapters borrow their
+sources, delegates, and open sessions; they do not close those dependencies.
+Runtime drains its own work and closes its owned services without taking ownership
+of application clients. A reference loader cleans up temporary resources it creates
+on success, failure, and cancellation. Neither mode duplicates the SDK's
+`for_agent`/`for_run`, ordering, activation, or run-local cleanup lifecycle.
+
 ### Tool results before persistence
 
 Use an Agent-scoped `ToolResultsCapability` to project successful tool results
