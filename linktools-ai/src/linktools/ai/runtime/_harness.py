@@ -34,7 +34,7 @@ from ._message import project_provider_messages, without_history_system_prompts
 from ._metric_capability import model_request_error
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
 _logger = environ.get_logger("ai.runtime.harness")
 
@@ -45,13 +45,14 @@ class SummaryProviderModel(WrapperModel):
 
     def __init__(
         self, model: Model, *, context: AgentContext[object] | None = None,
-        referenced_inputs: Mapping[CapabilityRef, ReferencedInputsCapability[object]] | None = None,
+        referenced_inputs: (Mapping[CapabilityRef, ReferencedInputsCapability[object]]
+                            | Callable[[], Mapping[CapabilityRef, ReferencedInputsCapability[object]]] | None) = None,
         binding: ModelBinding | None = None,
         preserve_errors: bool = False,
     ) -> None:
         super().__init__(model)
         self._context = context
-        self._referenced_inputs = dict(referenced_inputs or {})
+        self._referenced_inputs = referenced_inputs if callable(referenced_inputs) else dict(referenced_inputs or {})
         self._binding = binding
         self._preserve_errors = preserve_errors
 
@@ -67,10 +68,11 @@ class SummaryProviderModel(WrapperModel):
         ]
         if not references:
             return projected
-        if not self._referenced_inputs or self._context is None or self._binding is None:
+        sources = self._referenced_inputs() if callable(self._referenced_inputs) else self._referenced_inputs
+        if not sources or self._context is None or self._binding is None:
             raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING,
                           safe_details={"reason": "referenced_inputs_unavailable"})
-        if any(item.source not in self._referenced_inputs for item in references):
+        if any(item.source not in sources for item in references):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
                           safe_details={"reason": "referenced_input_source_mismatch"})
         ModelClientRequestRecorder.omit_current_http_bodies("referenced_content_lifecycle")
@@ -87,7 +89,7 @@ class SummaryProviderModel(WrapperModel):
                 content = []
                 for item in part.content:
                     if isinstance(item, ReferencedContent):
-                        data = await self._referenced_inputs[item.source].load(self._context, item)
+                        data = await sources[item.source].load(self._context, item)
                         if item.representation == "text":
                             try:
                                 item = data.decode("utf-8")

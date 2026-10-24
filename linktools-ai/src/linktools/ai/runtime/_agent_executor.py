@@ -71,7 +71,6 @@ from ..agent import AgentBinding, CompiledAgent, AssistantTextOutput, output_val
 from ..asset import AssetMaterializer, AssetStoreReader, AssetVersionRef
 from ..capability import (
     AgentContext,
-    ToolResultsCapability,
     CapabilityContribution,
     ReferencedInputsCapability,
     SkillCapability,
@@ -111,6 +110,7 @@ from ..workspace import (
 from ._budget import RunBudgetContext, RunBudgetCapability
 from ._tool_metrics import ToolMetricContext
 from ._capabilities import compose_platform_capabilities, runtime_feature_leaves
+from ._run_callbacks import RunCallbacks, RunCallbackScope, bind_run_callbacks
 from ._agent_run_recorder import AgentRunRecorder
 from .state._steps import RuntimeAgentRunStore
 from ._compaction import CompactionPolicy
@@ -597,7 +597,7 @@ class AgentExecutor:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         validate_model_inputs(compiled_agent.model, scope.user_prompt)
         validate_model_inputs(compiled_agent.model, scope.history)
-        input_sources: dict[CapabilityRef, ReferencedInputsCapability[object]] = {}
+        callbacks = RunCallbacks()
         for candidate in compiled_agent.selected_capabilities:
             if not isinstance(candidate.value, AbstractCapability):
                 continue
@@ -605,14 +605,12 @@ class AgentExecutor:
                        if isinstance(leaf, ReferencedInputsCapability)]
             if len(loaders) > 1:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            if loaders:
-                input_sources[CapabilityRef("capability", candidate.id, candidate.revision)] = loaders[0]
         def prepare_candidate(candidate: ModelBinding) -> Model:
             if isinstance(candidate, FallbackBinding):
                 return candidate.materialize(prepare=prepare_candidate)
             return CandidateProviderModel(
                 candidate.materialize(), context=scope.context,
-                referenced_inputs=input_sources,
+                referenced_inputs=callbacks.referenced_inputs,
                 binding=candidate, preserve_errors=True,
             )
 
@@ -621,7 +619,7 @@ class AgentExecutor:
         else:
             model = SummaryProviderModel(
                 compiled_agent.model.materialize(), context=scope.context,
-                referenced_inputs=input_sources,
+                referenced_inputs=callbacks.referenced_inputs,
                 binding=compiled_agent.model,
             )
         # Model cleanup must not replace cancellation or an established run failure.
@@ -654,6 +652,7 @@ class AgentExecutor:
                         deferred_pause_sink=record_deferred_step,
                         metrics=self._metrics,
                         runtime_capabilities=self._runtime_capabilities,
+                        callbacks=callbacks,
                         model_journal=model_journal,
                         sandbox=self._sandbox,
                     )
@@ -939,6 +938,7 @@ async def _materialize_agent(
     skill_sources: SkillSourceRegistry,
     deferred_pause_sink: Callable[[int], None],
     metrics: MetricRecorder | None,
+    callbacks: RunCallbacks,
     runtime_capabilities: Sequence[AbstractCapability[AgentContext[object]]],
     model_journal: ModelRequestJournal,
     sandbox: Sandbox | None,
@@ -974,12 +974,14 @@ async def _materialize_agent(
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
     capabilities: list[AbstractCapability[AgentContext[object]]] = [
-        PydanticToolControlCapability()
+        PydanticToolControlCapability(), RunCallbackScope(callbacks)
     ]
     for candidate in compiled_agent.selected_capabilities:
         if not isinstance(candidate.value, AbstractCapability):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        capabilities.append(candidate.value)
+        capabilities.append(bind_run_callbacks(
+            candidate.value, CapabilityRef("capability", candidate.id, candidate.revision), callbacks,
+        ))
     if compiled_agent.skill_definitions:
         skill_capability = SkillCapability(
             compiled_agent.skill_definitions,
@@ -1070,11 +1072,6 @@ async def _materialize_agent(
     if scope.budget is not None:
         capabilities.append(RunBudgetCapability(scope.budget))
 
-    result_capabilities = tuple(
-        leaf for candidate in compiled_agent.selected_capabilities
-        for leaf in runtime_feature_leaves(candidate.value)
-        if isinstance(leaf, ToolResultsCapability)
-    )
     raw_toolsets: list[AbstractToolset[AgentContext[object]]] = []
     def wrap_workspace_toolset(
         toolset: AbstractToolset[AgentContext[object]],
@@ -1085,7 +1082,7 @@ async def _materialize_agent(
             sandbox_session=scope.sandbox_session,
             tool_operations=scope.tool_operations, tool_metrics=tool_metrics,
             budget=scope.budget, repository_boundary=repository_boundary,
-            result_capabilities=result_capabilities,
+            result_callbacks=callbacks,
         )
 
     def bind_workspace(
@@ -1125,7 +1122,7 @@ async def _materialize_agent(
                 tool_metrics=tool_metrics,
                 budget=scope.budget,
                 response_fixture=scope.response_fixture,
-                result_capabilities=result_capabilities,
+                result_callbacks=callbacks,
             )
         )
     if business_tools:
@@ -1136,7 +1133,7 @@ async def _materialize_agent(
                 (raw_business,),
                 business_descriptors,
                 id="linktools.business",
-                result_capabilities=result_capabilities,
+                result_callbacks=callbacks,
                 tool_operations=scope.tool_operations,
                 tool_metrics=tool_metrics,
                 budget=scope.budget,

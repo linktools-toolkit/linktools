@@ -47,7 +47,7 @@ from ._tool_metrics import (
 
 
 if TYPE_CHECKING:
-    from ..capability import ToolResultsCapability
+    from ._run_callbacks import RunCallbacks
 
 
 class RepositoryInstructionBoundary(Protocol):
@@ -127,7 +127,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         tool_metrics: ToolMetricContext | None = None,
         budget: RunBudgetContext | None = None,
         repository_boundary: RepositoryInstructionBoundary | None = None,
-        result_capabilities: Sequence[ToolResultsCapability[object]] = (),
+        result_callbacks: RunCallbacks | None = None,
     ) -> None:
         if not isinstance(id, str) or not id:
             raise ValueError("toolset id must be non-empty")
@@ -141,7 +141,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         self._tool_metrics = tool_metrics
         self._budget = budget
         self._repository_boundary = repository_boundary
-        self._result_capabilities = tuple(result_capabilities)
+        self._result_callbacks = result_callbacks
         self._raw_tools: dict[
             str,
             tuple[
@@ -231,6 +231,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
     ) -> Any:
         if not isinstance(tool_args, dict):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        processors = () if self._result_callbacks is None else self._result_callbacks.tool_results(ctx.tool_call_id)
         descriptor = self._descriptors.get(name)
         owner = tool.toolset
         seen: set[int] = set()
@@ -315,7 +316,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             raise
         async def invoke(args: dict[str, Any]) -> Any:
             result = await raw_toolset.call_tool(name, args, ctx, raw_tool)
-            if self._result_capabilities:
+            if processors:
                 if descriptor.effect_owner == "none":
                     # Give projections the existing file occurrence to preserve;
                     # equal bytes alone do not identify a particular occurrence.
@@ -324,7 +325,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                     # Preserve validated Python values; projection is not another
                     # argument codec or authorization boundary.
                     arguments = MappingProxyType(dict(args))
-                    for capability in self._result_capabilities:
+                    for capability in processors:
                         result = await capability.process_tool_result(
                             ctx.deps, tool.tool_def, arguments, result,
                         )

@@ -445,6 +445,11 @@ UTF-8 byte size, approximately four bytes per token, rather than only their
 small descriptor. This is an estimate without loading content; actual provider
 usage and explicit provider token counting remain authoritative.
 
+Result and input callbacks borrow the effective instances returned by native
+SDK `for_run`, including initialization and cleanup on those same instances.
+Runtime does not bind or close them again. Result dispatch follows native
+capability ordering and activation, with isolated scopes for concurrent calls.
+
 Result capabilities use normal capability `id + revision` capture and recovery,
 including Asset-loader contributions. Reopened hosts supply the implementation
 for the saved revision; callers own same-revision consistency and bump the

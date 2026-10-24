@@ -30,6 +30,7 @@ from linktools.ai.core import ExecutionStatus, ToolOperationStatus, service_prin
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ReferencedContent
 from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
+from linktools.ai.runtime._run_callbacks import RunCallbacks
 from linktools.ai.spec import AgentSpec, CapabilityRef, MCPServerSpec
 from linktools.ai.storage import StorageEntryRevision, StorageOverlay
 from linktools.ai.workspace import Workspace
@@ -426,6 +427,7 @@ async def test_final_results_bypass_live_result_projections(tmp_path: Path, sour
             raise AssertionError("Final results must not be projected again")
 
     store, capabilities = None, ()
+    callbacks = RunCallbacks()
     try:
         if source == "fixture":
             store, fixture = await _store(_manifest())
@@ -450,13 +452,14 @@ async def test_final_results_bypass_live_result_projections(tmp_path: Path, sour
             (server,), (f"mcp:{server.id}:{tool_name}",), sandbox=None,
             sandbox_session=None, host_cwd=str(tmp_path), bindings=bindings,
             projections=projections, tool_operations=bridge, tool_metrics=None,
-            response_fixture=manifest, result_capabilities=(Reject(),),
+            response_fixture=manifest, result_callbacks=callbacks,
         )
         boundary, context = capabilities[0].get_toolset(), tool_run_context()
         async with boundary:
             tools = await boundary.get_tools(context)
             name = _model_tool_name(server.id, tool_name)
-            assert await boundary.call_tool(name, arguments, context, tools[name]) == expected
+            with callbacks.tool_scope(context.tool_call_id, Reject()):
+                assert await boundary.call_tool(name, arguments, context, tools[name]) == expected
         assert bridge.calls == (["begin", "complete"] if source == "fixture" else ["begin"])
         assert not (tmp_path / "calls").exists()
     finally:
@@ -530,14 +533,15 @@ async def test_original_tool_control_signals_bypass_result_processing(policy: st
         effect_policy=policy, tool_class="business",
     )
     bridge = _Bridge(policy == "replay_safe")
+    callbacks = RunCallbacks()
     boundary = BoundaryToolset(
         (FunctionToolset([tool_with_metadata(execute, descriptor)]),),
         {"execute": descriptor}, id="control-signals", tool_operations=bridge,
-        result_capabilities=(Reject(),),
+        result_callbacks=callbacks,
     )
     context = tool_run_context()
     tools = await boundary.get_tools(context)
-    with pytest.raises(type(error)) as raised:
+    with callbacks.tool_scope(context.tool_call_id, Reject()), pytest.raises(type(error)) as raised:
         await boundary.call_tool("execute", {}, context, tools["execute"])
     assert raised.value is error
     assert calls == ["execute"]
@@ -564,14 +568,15 @@ async def test_authorization_precedes_tool_and_result_processing() -> None:
     descriptor = ManagedToolDescriptor(effect_owner="tool_operation",
                                        effect_policy="non_replay_safe", tool_class="filesystem.write")
     bridge = _Bridge(False)
+    callbacks = RunCallbacks()
     boundary = BoundaryToolset(
         (FunctionToolset([tool_with_metadata(execute, descriptor)]),),
         {"execute": descriptor}, id="authorization", tool_operations=bridge,
-        permission_policy=ToolPermissionPolicy(default="ask"), result_capabilities=(Reject(),),
+        permission_policy=ToolPermissionPolicy(default="ask"), result_callbacks=callbacks,
     )
     context = tool_run_context()
     tools = await boundary.get_tools(context)
-    with pytest.raises(ApprovalRequired):
+    with callbacks.tool_scope(context.tool_call_id, Reject()), pytest.raises(ApprovalRequired):
         await boundary.call_tool("execute", {}, context, tools["execute"])
     assert bridge.calls == []
 

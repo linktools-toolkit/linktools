@@ -67,7 +67,7 @@ from ._mcp_transport import _create_mcp_transport
 from ._tool_response_fixture import _FixtureToolset, _ToolResponseManifest
 
 if TYPE_CHECKING:
-    from ..capability import ToolResultsCapability
+    from ._run_callbacks import RunCallbacks
 
 _logger = environ.get_logger("ai.runtime.mcp")
 _MCP_TOOL_METADATA = tool_metadata(
@@ -503,7 +503,7 @@ async def materialize_mcp_capabilities(
     tool_metrics: "ToolMetricContext | None",
     budget: "RunBudgetContext | None" = None,
     response_fixture: "_ToolResponseManifest | None" = None,
-    result_capabilities: "Sequence[ToolResultsCapability[object]]" = (),
+    result_callbacks: "RunCallbacks | None" = None,
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
     """Materialize compiler-selected MCP servers."""
     policy, required = _selector_policy(selectors)
@@ -564,7 +564,7 @@ async def materialize_mcp_capabilities(
                 {},
                 id=f"linktools.mcp.{server.id}",
                 descriptor=descriptor,
-                result_capabilities=result_capabilities if response_fixture is None else (),
+                result_callbacks=result_callbacks if response_fixture is None else None,
                 tool_operations=tool_operations,
                 tool_metrics=tool_metrics,
                 budget=budget,
