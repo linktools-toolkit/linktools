@@ -72,6 +72,7 @@ from ..asset import AssetMaterializer, AssetStoreReader, AssetVersionRef
 from ..capability import (
     AgentContext,
     CapabilityContribution,
+    PydanticToolControlCapability,
     ReferencedInputsCapability,
     SkillCapability,
     SkillSourceRegistry,
@@ -124,7 +125,6 @@ from ._harness import (
     FallbackProviderModel, validate_thinking_model,
 )
 from ._message import without_history_system_prompts
-from ._pydantic_tool_control import PydanticToolControlCapability
 from ._repository_instructions import _RepositoryInstructionCapability
 from ._tool import ToolOperationBridge
 from ..capability import ToolResponseFixture

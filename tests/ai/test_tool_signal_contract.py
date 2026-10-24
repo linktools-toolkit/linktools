@@ -3,13 +3,8 @@
 """LinkTools tool signal and final Pydantic boundary contracts."""
 
 import pytest
-from linktools.ai.capability import ToolCallFailed, ToolCallRetry
+from linktools.ai.capability import PydanticToolControlCapability, ToolCallFailed, ToolCallRetry
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._pydantic_tool_control import (
-    PydanticToolControlCapability,
-    build_model_retry,
-    build_tool_failed,
-)
 from pydantic_ai import Agent, RunContext, Tool
 from pydantic_ai.exceptions import ModelRetry, ToolFailed, UnexpectedModelBehavior
 from pydantic_ai.messages import (
@@ -97,8 +92,8 @@ async def test_pydantic_tool_control_propagates_other_errors() -> None:
 
 
 def test_deferred_control_constructors_remain_in_the_owner() -> None:
-    assert isinstance(build_model_retry("retry"), ModelRetry)
-    assert isinstance(build_tool_failed("failed"), ToolFailed)
+    assert isinstance(PydanticToolControlCapability.build_model_retry("retry"), ModelRetry)
+    assert isinstance(PydanticToolControlCapability.build_tool_failed("failed"), ToolFailed)
 
 
 @pytest.mark.asyncio

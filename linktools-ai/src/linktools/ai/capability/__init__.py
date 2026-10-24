@@ -28,6 +28,7 @@ from ._skill_source import (
 )
 from ._subagent import SubagentCapability, SubagentDelegate
 from ._tool_signal import ToolCallFailed, ToolCallRetry
+from ._pydantic_tool_control import PydanticToolControlCapability
 from ._tool_metadata import (
     ToolClass,
     ToolEffectPolicy,
@@ -102,6 +103,7 @@ __all__ = [
     "SubagentDelegate",
     "ToolCallFailed",
     "ToolCallRetry",
+    "PydanticToolControlCapability",
     "mcp_resource_path",
     "mcp_server_selector",
     "mcp_tool_selector",
