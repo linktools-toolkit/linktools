@@ -133,11 +133,16 @@ async def test_sdk_observer_sees_original_signal_before_public_conversion(signal
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stage", ("validate", "execute"))
-async def test_public_control_preserves_cancellation_and_tool_cleanup(stage: str) -> None:
+@pytest.mark.parametrize("with_control", (False, True))
+async def test_public_control_preserves_cancellation_and_tool_cleanup(stage: str, with_control: bool) -> None:
     cancelled = asyncio.CancelledError()
     cleaned = []
+    requests = 0
+    validations = 0
 
     async def validate(_ctx: RunContext[None]) -> None:
+        nonlocal validations
+        validations += 1
         if stage == "validate":
             raise cancelled
 
@@ -148,13 +153,15 @@ async def test_public_control_preserves_cancellation_and_tool_cleanup(stage: str
             cleaned.append(True)
 
     def respond(_messages, _info):
+        nonlocal requests
+        requests += 1
         return ModelResponse(parts=[ToolCallPart("tool", {}, tool_call_id="call")])
 
     agent = Agent(FunctionModel(respond), tools=[Tool(tool, args_validator=validate)],
-                  capabilities=[PydanticToolControlCapability()])
-    with pytest.raises(asyncio.CancelledError) as raised:
+                  capabilities=[PydanticToolControlCapability()] if with_control else [])
+    with pytest.raises(asyncio.CancelledError):
         await agent.run("Call tool")
-    assert raised.value is cancelled
+    assert requests == validations == 1
     assert cleaned == ([True] if stage == "execute" else [])
 
 
