@@ -8,7 +8,8 @@ import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
-from typing import Any, Literal, Protocol
+from types import MappingProxyType
+from typing import Any, Literal, Protocol, TYPE_CHECKING
 
 from pydantic_ai.exceptions import (
     ApprovalRequired,
@@ -43,6 +44,10 @@ from ._tool_metrics import (
     TOOL_METRICS_MANAGED_METADATA_KEY,
     ToolMetricContext,
 )
+
+
+if TYPE_CHECKING:
+    from ..capability import ToolResultsCapability
 
 
 class RepositoryInstructionBoundary(Protocol):
@@ -122,6 +127,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         tool_metrics: ToolMetricContext | None = None,
         budget: RunBudgetContext | None = None,
         repository_boundary: RepositoryInstructionBoundary | None = None,
+        result_capabilities: Sequence[ToolResultsCapability[object]] = (),
     ) -> None:
         if not isinstance(id, str) or not id:
             raise ValueError("toolset id must be non-empty")
@@ -135,6 +141,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         self._tool_metrics = tool_metrics
         self._budget = budget
         self._repository_boundary = repository_boundary
+        self._result_capabilities = tuple(result_capabilities)
         self._raw_tools: dict[
             str,
             tuple[
@@ -306,6 +313,23 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                 error,
             )
             raise
+        async def invoke(args: dict[str, Any]) -> Any:
+            result = await raw_toolset.call_tool(name, args, ctx, raw_tool)
+            if self._result_capabilities:
+                try:
+                    # Preserve validated Python values; projection is not another
+                    # argument codec or authorization boundary.
+                    arguments = MappingProxyType(dict(args))
+                    for capability in self._result_capabilities:
+                        result = await capability.process_tool_result(
+                            ctx.deps, tool.tool_def, arguments, result,
+                        )
+                except Exception as error:
+                    # The tool already returned; projection signals cannot
+                    # establish that an external effect is safe to repeat.
+                    raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+            return result
+
         if descriptor.effect_owner == "none":
             if self._budget is not None:
                 await self._budget.admit_tool(call_id)
@@ -313,7 +337,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                 call,
                 tool.tool_def,
                 final_args,
-                lambda args: raw_toolset.call_tool(name, args, ctx, raw_tool),
+                invoke,
             )
             return bind_tool_return_attachments(name, call_id, result)
         bridge = self._tool_operations
@@ -331,9 +355,6 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             raise decision.cached_error
         if decision.has_cached_result:
             return decision.cached_result
-
-        async def invoke(args: dict[str, Any]) -> Any:
-            return await raw_toolset.call_tool(name, args, ctx, raw_tool)
 
         caller = asyncio.current_task()
         if caller is None:

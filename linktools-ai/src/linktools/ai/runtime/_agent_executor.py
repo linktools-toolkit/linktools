@@ -71,6 +71,7 @@ from ..agent import AgentBinding, CompiledAgent, AssistantTextOutput, output_val
 from ..asset import AssetMaterializer, AssetStoreReader, AssetVersionRef
 from ..capability import (
     AgentContext,
+    ToolResultsCapability,
     CapabilityContribution,
     ReferencedInputsCapability,
     SkillCapability,
@@ -1070,6 +1071,11 @@ async def _materialize_agent(
     if scope.budget is not None:
         capabilities.append(RunBudgetCapability(scope.budget))
 
+    result_capabilities = tuple(
+        leaf for candidate in compiled_agent.selected_capabilities
+        for leaf in runtime_feature_leaves(candidate.value)
+        if isinstance(leaf, ToolResultsCapability)
+    )
     raw_toolsets: list[AbstractToolset[AgentContext[object]]] = []
     def wrap_workspace_toolset(
         toolset: AbstractToolset[AgentContext[object]],
@@ -1080,6 +1086,7 @@ async def _materialize_agent(
             sandbox_session=scope.sandbox_session,
             tool_operations=scope.tool_operations, tool_metrics=tool_metrics,
             budget=scope.budget, repository_boundary=repository_boundary,
+            result_capabilities=result_capabilities,
         )
 
     def bind_workspace(
@@ -1119,6 +1126,7 @@ async def _materialize_agent(
                 tool_metrics=tool_metrics,
                 budget=scope.budget,
                 response_fixture=scope.response_fixture,
+                result_capabilities=result_capabilities,
             )
         )
     if business_tools:
@@ -1129,6 +1137,7 @@ async def _materialize_agent(
                 (raw_business,),
                 business_descriptors,
                 id="linktools.business",
+                result_capabilities=result_capabilities,
                 tool_operations=scope.tool_operations,
                 tool_metrics=tool_metrics,
                 budget=scope.budget,

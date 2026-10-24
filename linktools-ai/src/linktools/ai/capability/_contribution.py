@@ -22,6 +22,7 @@ from ..spec import (
 from ._context import AgentContext
 from ._skill import SkillDefinition
 from ._tool_metadata import validate_tool_metadata
+from ._tool_results import ToolResultsCapability
 
 AppT = TypeVar("AppT")
 
@@ -271,6 +272,8 @@ def _freeze_contribution(
 
 
 def _validate_runtime_capability(capability: AbstractCapability[object]) -> None:
+    if isinstance(capability, ToolResultsCapability):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "ToolResultsCapability requires Agent scope")
     if not isinstance(capability.defer_loading, bool) or capability.defer_loading:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     if capability.id is not None:

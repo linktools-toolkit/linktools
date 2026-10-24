@@ -10,6 +10,7 @@ from ..errors import AIError, ErrorCode
 TOOL_EFFECT_POLICY_METADATA_KEY = "linktools.ai.effect_policy"
 TOOL_PLAN_SAFE_METADATA_KEY = "linktools.ai.plan_safe"
 TOOL_CLASS_METADATA_KEY = "linktools.ai.tool_class"
+TOOL_MCP_SELECTOR_METADATA_KEY = "linktools.ai.mcp_selector"
 TOOL_PATH_FIELDS_METADATA_KEY = "linktools.ai.path_fields"
 TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY = (
     "linktools.ai.compaction_keep_result"
@@ -188,6 +189,7 @@ def tool_context_dedupe_from_metadata(
 
 __all__ = [
     "TOOL_CLASS_METADATA_KEY",
+    "TOOL_MCP_SELECTOR_METADATA_KEY",
     "TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY",
     "TOOL_CONTEXT_DEDUPE_METADATA_KEY",
     "TOOL_EFFECT_POLICY_METADATA_KEY",
