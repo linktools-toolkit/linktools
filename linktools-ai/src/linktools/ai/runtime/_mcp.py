@@ -7,7 +7,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import TracebackType
-from typing import Any, NoReturn
+from typing import Any, NoReturn, TYPE_CHECKING
 
 import anyio
 import httpx
@@ -35,6 +35,7 @@ from mcp.types import Tool as MCPTool
 
 from ..capability import (
     AgentContext,
+    TOOL_MCP_SELECTOR_METADATA_KEY,
     ToolCallRetry,
     tool_metadata,
     validate_resource_path,
@@ -64,6 +65,9 @@ from ._tool_boundary import (
 from ._tool_metrics import ToolMetricContext
 from ._mcp_transport import _create_mcp_transport
 from ._tool_response_fixture import _FixtureToolset, _ToolResponseManifest
+
+if TYPE_CHECKING:
+    from ._run_callbacks import RunCallbacks
 
 _logger = environ.get_logger("ai.runtime.mcp")
 _MCP_TOOL_METADATA = tool_metadata(
@@ -150,7 +154,10 @@ class _MCPModelToolset(WrapperToolset[object]):
                     tool.tool_def,
                     name=model_name,
                     description=description,
-                    metadata=_mcp_tool_metadata(tool.tool_def.metadata),
+                    metadata={
+                        **_mcp_tool_metadata(tool.tool_def.metadata),
+                        TOOL_MCP_SELECTOR_METADATA_KEY: mcp_tool_selector(self._server_id, upstream_name),
+                    },
                 ),
             )
         return result
@@ -496,6 +503,7 @@ async def materialize_mcp_capabilities(
     tool_metrics: "ToolMetricContext | None",
     budget: "RunBudgetContext | None" = None,
     response_fixture: "_ToolResponseManifest | None" = None,
+    result_callbacks: "RunCallbacks | None" = None,
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
     """Materialize compiler-selected MCP servers."""
     policy, required = _selector_policy(selectors)
@@ -556,6 +564,7 @@ async def materialize_mcp_capabilities(
                 {},
                 id=f"linktools.mcp.{server.id}",
                 descriptor=descriptor,
+                result_callbacks=result_callbacks if response_fixture is None else None,
                 tool_operations=tool_operations,
                 tool_metrics=tool_metrics,
                 budget=budget,

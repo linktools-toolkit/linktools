@@ -20,9 +20,12 @@ class ReferencedInputsCapability(AbstractCapability[AgentContext[AppT]], Generic
     Register with ``scope='agent'``. The callback must authorize the original
     execution principal against the host's admitted input set, validate MIME
     against its trusted descriptor, and fetch the exact immutable version.
-    It may route multiple configured sources, but must never probe unrelated
-    readers or substitute a newer version. It owns any temporary download files
-    and must remove them on success, failure and cancellation before returning.
+    It may route multiple configured resources, but must never probe unrelated
+    readers or substitute a newer version. Multiple selected input capabilities
+    are routed by the reference's exact source id and revision; one contribution
+    must not contain multiple loaders for that same source. It owns temporary
+    download files and removes them on success, failure and cancellation before
+    returning.
     Runtime borrows the callback; it neither creates nor deletes provider files.
     """
 

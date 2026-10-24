@@ -4,6 +4,7 @@
 
 import asyncio
 import base64
+import hashlib
 import json
 import multiprocessing
 from collections.abc import Awaitable, Callable
@@ -25,6 +26,9 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo
 
+from linktools.ai.asset import AssetKey, AssetVersionRef
+from linktools.ai.spec import CapabilityRef
+from linktools.ai.storage import StorageEntryRevision
 from linktools.ai.capability import (
     AgentContext, CheckpointCapability, ExecutionCapability,
     ReferencedInputsCapability, TraceCapability,
@@ -58,6 +62,7 @@ async def test_business_tool_reference_is_consumed_once_after_live_or_durable_re
     )
     stored = await bridge._payload_bytes(payload)
     assert _BODY not in stored and base64.b64encode(_BODY) not in stored
+    assert _TEXT_BODY not in stored and base64.b64encode(_TEXT_BODY) not in stored
     recovered = await bridge._decode_result(SimpleNamespace(
         result_payload=payload, tool_operation_id="operation",
     ))
@@ -136,6 +141,16 @@ async def test_business_tool_reference_is_consumed_once_after_live_or_durable_re
 _ADMITTED = Principal("admitted-user", "default")
 _RECOVERY_ACTOR = service_principal("default", "recovery-operator")
 _RECOVERY_NAMESPACE = "referenced-pending-recovery"
+_TEXT_BODY = b"synthetic transient text from a second independently bound source"
+_TEXT_SOURCE = CapabilityRef("capability", "text-files", 3)
+
+
+def _text_content() -> ReferencedContent:
+    return ReferencedContent(AssetVersionRef(
+        AssetKey("document", "immutable-text"), "configured", StorageEntryRevision(1),
+        hashlib.sha256(_TEXT_BODY).hexdigest(), len(_TEXT_BODY),
+    ), media_type="text/csv", source=_TEXT_SOURCE, representation="text",
+       source_parameters={"member": "synthetic-directory/" * 40, "selection": {"pages": [1, 2]}})
 
 
 class _RecoveryAuthorization(TenantAuthorizationPolicy):
@@ -150,10 +165,14 @@ class _RecoveryAuthorization(TenantAuthorizationPolicy):
 
 def _recovery_features(
     loader: Callable[[AgentContext[None], ReferencedContent], Awaitable[bytes]],
+    text_loader: Callable[[AgentContext[None], ReferencedContent], Awaitable[bytes]] | None = None,
 ) -> RuntimeFeatures:
     group = RuntimeFeatures(_RECOVERY_NAMESPACE, authorization=_RecoveryAuthorization())
     group.capability(ReferencedInputsCapability(loader), id=_SOURCE.id,
                      revision=_SOURCE.revision, scope="agent")
+    if text_loader is not None:
+        group.capability(ReferencedInputsCapability(text_loader), id=_TEXT_SOURCE.id,
+                         revision=_TEXT_SOURCE.revision, scope="agent")
     group.capability(CheckpointCapability(), scope="runtime")
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.capability(TraceCapability(record_http_bodies=True), scope="runtime")
@@ -169,10 +188,15 @@ async def _recovery_model(messages: list[ModelMessage], info: AgentInfo) -> Mode
         if isinstance(item, BinaryContent)
     ]
     assert len(binaries) == 1 and binaries[0].data == _BODY
+    strings = [item for message in messages if isinstance(message, ModelRequest)
+               for part in message.parts if isinstance(part, UserPromptPart)
+               and not isinstance(part.content, str) for item in part.content if isinstance(item, str)]
+    expected = ["Inspect text and file", _TEXT_BODY.decode()] if "Inspect text and file" in strings else ["Inspect"]
+    assert strings == expected
     return ModelResponse(parts=[TextPart("recovered reference")])
 
 
-def _pending_reference_process(connection: Connection, path: str) -> None:
+def _pending_reference_process(connection: Connection, path: str, multiple_sources: bool) -> None:
     async def run() -> None:
         async def pending_load(context: AgentContext[None], content: ReferencedContent) -> bytes:
             assert context.principal == _ADMITTED and content == _content()
@@ -180,24 +204,30 @@ def _pending_reference_process(connection: Connection, path: str) -> None:
             await asyncio.Event().wait()
             raise AssertionError("the interrupted loader must not return bytes")
 
+        async def load_text(context: AgentContext[None], content: ReferencedContent) -> bytes:
+            assert context.principal == _ADMITTED and content == _text_content()
+            return _TEXT_BODY
+
         async with Runtime.open(
             _RECOVERY_NAMESPACE, storage=RuntimeStorage.filesystem(Path(path)),
-            features=_recovery_features(pending_load),
+            features=_recovery_features(pending_load, load_text if multiple_sources else None),
         ) as runtime:
-            await runtime.agents.get().start(["Inspect", _content()], principal=_ADMITTED)
+            prompt = ["Inspect text and file", _text_content(), _content()] if multiple_sources else ["Inspect", _content()]
+            await runtime.agents.get().start(prompt, principal=_ADMITTED)
             await asyncio.Event().wait()
 
     asyncio.run(run())
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("multiple_sources", (False, True))
 async def test_pending_reference_reopens_from_checkpoint_with_original_principal(
-    tmp_path: Path,
+    tmp_path: Path, multiple_sources: bool,
 ) -> None:
     path = tmp_path / "state"
     context = multiprocessing.get_context("spawn")
     reader, writer = context.Pipe(duplex=False)
-    owner = context.Process(target=_pending_reference_process, args=(writer, str(path)))
+    owner = context.Process(target=_pending_reference_process, args=(writer, str(path), multiple_sources))
     owner.start()
     writer.close()
     try:
@@ -221,9 +251,14 @@ async def test_pending_reference_reopens_from_checkpoint_with_original_principal
         loaded.append((agent_context.principal, content))
         return _BODY
 
+    async def authorized_text(agent_context: AgentContext[None], content: ReferencedContent) -> bytes:
+        assert agent_context.principal == _ADMITTED and content == _text_content()
+        loaded.append((agent_context.principal, content))
+        return _TEXT_BODY
+
     async with Runtime.open(
         _RECOVERY_NAMESPACE, storage=RuntimeStorage.filesystem(path),
-        features=_recovery_features(authorized_load), auto_recover=False,
+        features=_recovery_features(authorized_load, authorized_text if multiple_sources else None), auto_recover=False,
     ) as runtime:
         checkpoint = await runtime._state.recovery.checkpoints.get(
             execution_id, tenant_id=_ADMITTED.tenant_id,
@@ -240,7 +275,7 @@ async def test_pending_reference_reopens_from_checkpoint_with_original_principal
         assert result.output == {"text": "recovered reference"}
     async with Runtime.open(
         _RECOVERY_NAMESPACE, storage=RuntimeStorage.filesystem(path),
-        features=_recovery_features(authorized_load), auto_recover=False,
+        features=_recovery_features(authorized_load, authorized_text if multiple_sources else None), auto_recover=False,
     ) as reopened:
         history = await reopened.executions.history(
             execution_id, principal=_ADMITTED, include_content=True,
@@ -248,6 +283,6 @@ async def test_pending_reference_reopens_from_checkpoint_with_original_principal
         history_bytes = json.dumps([item.content for item in history.items]).encode()
         assert _content().ref.digest.encode() in history_bytes
         assert _BODY not in history_bytes and base64.b64encode(_BODY) not in history_bytes
-    assert loaded == [(_ADMITTED, _content())]
+    assert loaded == ([(_ADMITTED, _text_content())] if multiple_sources else []) + [(_ADMITTED, _content())]
     stored = b"\n".join(file.read_bytes() for file in path.rglob("*") if file.is_file())
     assert _BODY not in stored and base64.b64encode(_BODY) not in stored

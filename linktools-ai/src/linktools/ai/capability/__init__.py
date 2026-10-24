@@ -4,6 +4,7 @@
 
 from ._persistence import CheckpointCapability, TraceCapability
 from ._tool_responses import ToolResponseFixture, ToolResponsesCapability
+from ._tool_results import ToolResultsCapability
 from ._referenced_inputs import ReferencedInputsCapability
 from ._asset import AssetCapability
 from ._context import AgentContext
@@ -33,6 +34,7 @@ from ._tool_metadata import (
     is_tool_class,
     is_tool_effect_policy,
     TOOL_CLASS_METADATA_KEY,
+    TOOL_MCP_SELECTOR_METADATA_KEY,
     TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY,
     TOOL_CONTEXT_DEDUPE_METADATA_KEY,
     TOOL_EFFECT_POLICY_METADATA_KEY,
@@ -65,6 +67,7 @@ __all__ = [
     "ToolResponseFixture",
     "CheckpointCapability", "TraceCapability",
     "ToolResponsesCapability",
+    "ToolResultsCapability",
     "AssetCapability",
     "WorkspaceCapability",
     "ToolClass",
@@ -82,6 +85,7 @@ __all__ = [
     "SkillCapability",
     "SubagentCapability",
     "TOOL_CLASS_METADATA_KEY",
+    "TOOL_MCP_SELECTOR_METADATA_KEY",
     "TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY",
     "TOOL_CONTEXT_DEDUPE_METADATA_KEY",
     "TOOL_EFFECT_POLICY_METADATA_KEY",

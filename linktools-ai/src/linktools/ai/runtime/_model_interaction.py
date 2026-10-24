@@ -24,6 +24,7 @@ from ..core import (
 from ..model import ModelClientRequest
 from ..storage import StoredPayload
 from ._message import encode_model_messages
+from ._json_snapshot import stable_json_snapshot
 from .state._contracts import (
     ContextProjection,
     InlineContextBlock,
@@ -354,7 +355,7 @@ def _message_key(message: ModelMessage) -> bytes:
 
 
 def _json_snapshot(value: object) -> JsonValue:
-    return cast(JsonValue, TypeAdapter(object).dump_python(value, mode="json"))
+    return cast(JsonValue, TypeAdapter(object).dump_python(value, mode="json", fallback=stable_json_snapshot))
 
 
 def _parameters_snapshot(parameters: ModelRequestParameters) -> JsonValue:

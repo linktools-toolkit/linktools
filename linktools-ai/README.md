@@ -356,6 +356,109 @@ these declarations instead of inferring behavior from Tool names.
 
 `RuntimeFeatures.agent()` creates an `AgentSpec`; the declaration carries its explicit positive `revision` in the single v1 wire contract.
 
+### Tool results before persistence
+
+Use an Agent-scoped `ToolResultsCapability` to project successful tool results
+before Runtime stores an external-effect receipt. The same hook covers
+ordinary Python tools, Workspace tools such as `read_file`, and MCP tools:
+
+```python
+from collections.abc import Mapping
+from pydantic_ai.tools import ToolDefinition
+from linktools.ai.capability import (
+    AgentContext, ToolResultsCapability, TOOL_MCP_SELECTOR_METADATA_KEY,
+)
+
+class ApplicationResults(ToolResultsCapability):
+    async def process_tool_result(
+        self, context: AgentContext[object], tool: ToolDefinition,
+        arguments: Mapping[str, object], result: object,
+    ) -> object:
+        selector = (tool.metadata or {}).get(TOOL_MCP_SELECTOR_METADATA_KEY, tool.name)
+        # Route explicitly supported results using selector and the admitted
+        # context. Return result unchanged for all other tools.
+        return result
+
+features.capability(ApplicationResults(), id="application.results", revision=1, scope="agent")
+```
+
+For MCP, Runtime sets the metadata selector from the actual server binding and
+upstream tool name; server-supplied metadata cannot override it. The selector
+uses the existing `mcp_tool_selector(server_id, tool_name)` format. Other tools
+use their model-visible `tool.name`. The context preserves the execution's
+admitted principal. Arguments are a read-only top-level mapping of the existing
+validated Python values, not another JSON conversion or authorization boundary;
+processors must not mutate nested borrowed values or the tool definition.
+
+Runtime first authorizes and invokes the tool, then applies selected result
+capabilities in their captured capability/container order. Only the final
+projection reaches the existing operation owner. Effect-free tools also run
+the hook once but acquire no operation journal. Native SDK
+`after_tool_execute` still runs once afterward; it does not retroactively
+change an already stored operation receipt. Completed-operation replay and
+offline response fixtures already supply final results and skip these hooks.
+
+The default implementation preserves the result. An application can explicitly
+return `ToolReturn(return_value=summary, content=[referenced_content])` for
+reconstructible text or binary content instead of persisting its body. Its selected
+`ReferencedInputsCapability` must independently authorize and rebuild the
+exact immutable content on consumption and recovery. A summary or temporary
+path alone cannot restore bytes. Keep necessary receipts and non-reconstructible
+results; this is not automatic lossy summarization of every tool result.
+
+Use `ReferencedContent(..., representation="text")` for content that should
+reach the model as an ordinary string, without attachment-profile permission.
+The loader still returns the exact version's bytes; Runtime verifies their
+size and digest before strict UTF-8 decoding. MIME remains descriptive metadata
+(for example, `application/json` or `text/csv`), not a representation selector.
+The default `representation="binary"` retains existing file-input MIME
+admission and SDK encoding, including for `text/plain` documents. Invalid UTF-8
+fails before provider dispatch; bytes are never silently replaced or repaired.
+Both representations keep the existing input-size limits and transient-content
+lifecycle: only descriptors/consumption summaries are retained, not loaded bodies.
+
+Several selected `ReferencedInputsCapability` contributions may serve different
+source references. Runtime routes each descriptor only to its exact selected
+`CapabilityRef`, retaining the original actor and saved revision. Missing sources
+fail before any loader runs; a single contribution containing multiple loaders
+is ambiguous and is rejected. There is no fallback to a different source or a
+second loader registry. Reopened hosts must still supply the saved capabilities
+and immutable resource versions.
+
+Optional `source_parameters={...}` retains source-owned JSON reconstruction
+arguments with a reference. Values are detached and deeply immutable; they do
+not enter the displayed model summary or define capability identity. Keep only
+necessary parameters, never content bodies or credentials. The selected loader
+must still authorize the original actor and exact parent/version; parameters
+are not authorization proof. Keep `AssetKey.id` short and opaque instead of
+encoding a complete reconstruction request into it.
+
+File-result projection preserves existing `files` receipts by copying each bound
+binary's `identifier` to its replacement reference. Runtime supplies the original
+occurrences before processing and validates their identifiers, MIME, size and
+digest afterwards. Equal content alone never identifies a file occurrence.
+The optional reference `identifier` is not source identity or authorization;
+ordinary text references need no file occurrence.
+
+The local context heuristic accounts for pending text references using their
+UTF-8 byte size, approximately four bytes per token, rather than only their
+small descriptor. This is an estimate without loading content; actual provider
+usage and explicit provider token counting remain authoritative.
+
+Result and input callbacks borrow the effective instances returned by native
+SDK `for_run`, including initialization and cleanup on those same instances.
+Runtime does not bind or close them again. Result dispatch follows native
+capability ordering and activation, with isolated scopes for concurrent calls.
+
+Result capabilities use normal capability `id + revision` capture and recovery,
+including Asset-loader contributions. Reopened hosts supply the implementation
+for the saved revision; callers own same-revision consistency and bump the
+revision when changing behavior. There is no callback digest or second result
+store. A processing error or cancellation after a tool returned cannot establish
+that an external effect is safe to repeat: existing unknown-effect recovery
+rules remain intact. Original tool errors, permissions and effect policies are
+unchanged.
+
 ## 3. Workspace and declaration assets
 
 Registering `WorkspaceCapability(workspace)` at Runtime scope contributes the stable

@@ -40,7 +40,7 @@ from pydantic_ai_harness.compaction import (
 from ._trace_capture import record_http_bodies_enabled
 from ..core import PromptLimits
 from ..errors import AIError, ErrorCode
-from ..model import ModelClientRequest, ModelClientRequestRecorder
+from ..model import ModelClientRequest, ModelClientRequestRecorder, ReferencedContent
 from ..workspace import validate_workspace_path
 from ._budget import RunBudgetContext
 from ._journal import ModelRequestFact, ModelRequestJournal, await_request_handoff
@@ -590,7 +590,22 @@ class CompactionCapability(AbstractCapability[None]):
             request.messages,
             model_request_parameters=parameters,
         )
-        return max(1, target - max(0, current_estimate - anchored_estimate))
+        pending_text_growth = 0
+        for message in reversed(request.messages):
+            if isinstance(message, ModelResponse) and message.usage.input_tokens:
+                break
+            if not isinstance(message, ModelRequest):
+                continue
+            for part in message.parts:
+                if not isinstance(part, UserPromptPart) or isinstance(part.content, str):
+                    continue
+                for item in part.content:
+                    if isinstance(item, ReferencedContent) and item.representation == "text":
+                        pending_text_growth += max(0, item.ref.size - len(item.content))
+        # Unconsumed text bodies are absent from the SDK's descriptor-only
+        # heuristic. Approximate their tail growth at four UTF-8 bytes/token,
+        # without loading bytes or charging content already covered by usage.
+        return max(1, target - max(0, current_estimate - anchored_estimate) - pending_text_growth // 4)
 
     def _refresh_policy(self) -> None:
         if self._policy is None:

@@ -117,8 +117,8 @@ async def test_provider_gets_authorized_bytes_without_mutating_durable_messages(
     original = [ModelRequest(parts=[UserPromptPart([_content()])])]
     encoded = encode_model_messages(original)
     model = SummaryProviderModel(FunctionModel(respond), context=context,
-                                 referenced_inputs=ReferencedInputsCapability(authorized_load),
-                                 binding=_Binding(), input_source=_SOURCE)
+                                 referenced_inputs={_SOURCE: ReferencedInputsCapability(authorized_load)},
+                                 binding=_Binding())
     with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
         await model.request(original, None, ModelRequestParameters())
         assert recorder.record_http_bodies is True
@@ -148,8 +148,7 @@ async def test_failed_load_never_dispatches_and_preserves_original_ref(failure: 
 
     original = [ModelRequest(parts=[UserPromptPart([_content()])])]
     model = SummaryProviderModel(FunctionModel(respond), context=_context(),
-                                 referenced_inputs=ReferencedInputsCapability(load), binding=_Binding(),
-                                 input_source=_SOURCE)
+                                 referenced_inputs={_SOURCE: ReferencedInputsCapability(load)}, binding=_Binding())
     with pytest.raises(asyncio.CancelledError if failure == "cancelled" else AIError):
         await model.request(original, None, ModelRequestParameters())
     assert not requests and cleanup == [True]
@@ -249,8 +248,8 @@ async def test_imported_unconsumed_reference_cannot_select_a_different_source(ch
         ModelRequest(parts=[UserPromptPart([_content()])]),
     ]))
     model = SummaryProviderModel(FunctionModel(lambda *_: ModelResponse(parts=[])),
-                                 context=_context(), referenced_inputs=ReferencedInputsCapability(load),
-                                 binding=_Binding(), input_source=source)
+                                 context=_context(), referenced_inputs={source: ReferencedInputsCapability(load)},
+                                 binding=_Binding())
     with pytest.raises(AIError) as failure:
         await model.request(list(imported), None, ModelRequestParameters())
     assert failure.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
