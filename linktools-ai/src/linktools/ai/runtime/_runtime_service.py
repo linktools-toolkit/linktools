@@ -21,6 +21,7 @@ from ..agent import (
     AgentCompiler,
     CompiledAgent,
     OutputBinding,
+    bind_output,
     restore_output,
 )
 from ._features import RuntimeFeatures, RuntimeFeaturesCapture
@@ -692,6 +693,7 @@ class Runtime(Generic[AppT]):
         thinking: "ThinkingValue | None",
         correlation: "Mapping[str, object] | None" = None,
         compiled_agent: "CompiledAgent | None" = None,
+        binding_contract: AgentBindingContract | None = None,
         dependency_hold_id: "str | None" = None,
         requires_task_invocation_capture: bool = False,
         input_context: ExecutionInputContext | None = None,
@@ -731,7 +733,21 @@ class Runtime(Generic[AppT]):
         )
         if session_id is not None and (not isinstance(session_id, str) or not session_id.strip()):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        binding = self._compiler.bind(compiled_agent, output=output)
+        if binding_contract is None:
+            binding = self._compiler.bind(compiled_agent, output=output)
+        else:
+            binding = self._compiler.restore(binding_contract, model=compiled_agent.model)
+            if output is not None:
+                output_binding = output if isinstance(output, OutputBinding) else bind_output(output)
+                binding = replace(
+                    binding,
+                    output_binding=output_binding,
+                    binding_contract=replace(
+                        binding.binding_contract,
+                        output_mode=output_binding.mode,
+                        output_schema=output_binding.schema_definition,
+                    ),
+                )
         binding = await self._resolve_agent_binding(binding)
         if session_id is None:
             handle = await self._execution_service.start(
@@ -962,6 +978,7 @@ class Runtime(Generic[AppT]):
         if build_input is not None and not inspect.iscoroutinefunction(build_input):
             raise TypeError("build_input must be async")
         compiled = self._compiled_agent(agent.id, agent.revision, agent.compiled)
+        captured_binding_contract = binding_contract
         binding_contract = binding_contract or self._compiler.bind(compiled).binding_contract
         input_mode = "projected" if build_input is not None else "literal"
 
@@ -1020,6 +1037,7 @@ class Runtime(Generic[AppT]):
                 thinking=thinking,
                 correlation=invocation.correlation,
                 compiled_agent=compiled,
+                binding_contract=captured_binding_contract,
                 dependency_hold_id=dependency_hold_id,
                 budget_scope_id=admission.budget_scope_id,
                 requires_task_invocation_capture=True,
