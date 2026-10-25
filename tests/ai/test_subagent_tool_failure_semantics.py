@@ -258,7 +258,7 @@ async def test_model_input_failure_reaches_parent_and_receipt_without_losing_saf
     from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
     from pydantic_ai.models.function import FunctionModel
     from linktools.ai.model import create_model, validate_model_input
-    from linktools.ai.runtime._pydantic_tool_control import PydanticToolControlCapability
+    from linktools.ai.capability import PydanticToolControlCapability
     from linktools.ai.runtime._tool import RuntimeToolOperationBridge
     from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
 
