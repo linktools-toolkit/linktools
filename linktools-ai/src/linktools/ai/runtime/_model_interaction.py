@@ -29,6 +29,7 @@ from .state._contracts import (
     ContextProjection,
     InlineContextBlock,
     RuntimePayloadRef,
+    StreamAttemptRecord,
     TranscriptMessageRef,
     TranscriptSpanRef,
 )
@@ -81,6 +82,62 @@ class StagedContextProjection:
 
 
 @dataclass(frozen=True, slots=True)
+class StagedStreamAttemptRecord:
+    """One completed stream attempt; only failed partials own response content."""
+
+    stream_attempt_seq: int
+    status: str
+    started_at: datetime
+    finished_at: datetime
+    duration_ns: int
+    client_request_start: int
+    client_request_end: int
+    response_context: StagedContextProjection | None
+    usage: UsageMetrics | None
+    error_code: str | None
+    error_type: str | None
+    retry_scheduled: bool
+
+    def __post_init__(self) -> None:
+        if (
+            any(isinstance(value, bool) or not isinstance(value, int) for value in (
+                self.stream_attempt_seq, self.duration_ns,
+                self.client_request_start, self.client_request_end,
+            ))
+            or self.stream_attempt_seq < 1 or self.duration_ns < 0
+            or self.client_request_start < 0 or self.client_request_end < self.client_request_start
+            or self.status not in {"SUCCEEDED", "FAILED", "CANCELLED"}
+            or not isinstance(self.started_at, datetime) or self.started_at.tzinfo is None
+            or not isinstance(self.finished_at, datetime) or self.finished_at.tzinfo is None
+            or self.finished_at < self.started_at
+            or not isinstance(self.retry_scheduled, bool)
+            or self.retry_scheduled and self.status != "FAILED"
+            or self.status == "SUCCEEDED" and (
+                self.response_context is not None or self.error_code is not None or self.error_type is not None
+            )
+            or self.status == "FAILED" and not self.error_code
+            or self.error_code is not None and not isinstance(self.error_code, str)
+            or self.error_type is not None and not isinstance(self.error_type, str)
+            or self.usage is not None and not isinstance(self.usage, UsageMetrics)
+        ):
+            raise ValueError("stream attempt is invalid")
+        if self.response_context is not None and (
+            not isinstance(self.response_context, StagedContextProjection)
+            or any(not isinstance(item, StagedContextInline) for item in self.response_context.items)
+        ):
+            raise ValueError("failed stream response must be independent of the transcript")
+
+    def to_durable(self, response_context: ContextProjection | None) -> StreamAttemptRecord:
+        return StreamAttemptRecord(
+            stream_attempt_seq=self.stream_attempt_seq, status=self.status,
+            started_at=self.started_at, finished_at=self.finished_at, duration_ns=self.duration_ns,
+            client_request_start=self.client_request_start, client_request_end=self.client_request_end,
+            response_context=response_context, usage=self.usage, error_code=self.error_code,
+            error_type=self.error_type, retry_scheduled=self.retry_scheduled,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class StagedModelInteraction:
     agent_run_id: str
     step_index: int
@@ -99,6 +156,7 @@ class StagedModelInteraction:
     finished_at: datetime | None
     attachments: tuple[Mapping[str, JsonValue], ...] = ()
     client_requests: tuple[ModelClientRequest, ...] | None = None
+    stream_attempts: tuple[StagedStreamAttemptRecord, ...] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -161,6 +219,24 @@ class StagedModelInteraction:
             or any(not isinstance(value, ModelClientRequest) for value in self.client_requests)
         ):
             raise TypeError("staged client requests are invalid")
+        if self.stream_attempts is not None:
+            if self.status in {"RUNNING", "INTERRUPTED"}:
+                raise ValueError("unfinished model interaction cannot have stream attempts")
+            if not isinstance(self.stream_attempts, tuple) or any(
+                not isinstance(value, StagedStreamAttemptRecord) for value in self.stream_attempts
+            ):
+                raise TypeError("stream attempts are invalid")
+            previous_end = 0
+            for sequence, attempt in enumerate(self.stream_attempts, 1):
+                if (
+                    attempt.stream_attempt_seq != sequence
+                    or attempt.client_request_start < previous_end
+                    or attempt.client_request_end > len(self.client_requests or ())
+                    or attempt.status == "SUCCEEDED" and sequence != len(self.stream_attempts)
+                    or attempt.response_context is not None and self.request_context is None
+                ):
+                    raise ValueError("stream attempt sequence or client range is invalid")
+                previous_end = attempt.client_request_end
         object.__setattr__(self, "model", dict(self.model))
         normalized_attachments: list[Mapping[str, JsonValue]] = []
         for attachment in self.attachments:
@@ -424,6 +500,7 @@ __all__ = [
     "StagedContextSpan",
     "StagedContextSource",
     "StagedModelInteraction",
+    "StagedStreamAttemptRecord",
     "build_context_projection",
     "build_inline_context_projection",
     "model_identity",
