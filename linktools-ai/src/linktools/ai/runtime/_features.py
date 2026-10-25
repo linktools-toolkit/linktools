@@ -302,7 +302,7 @@ class RuntimeFeatures(Generic[AppT]):
         allow_capabilities: Sequence[str] = ("*",),
         usage_limits: "AgentUsageLimits | None" = None,
         planning: bool = False,
-        thinking: ThinkingValue = False,
+        thinking: ThinkingValue = None,
         tool_retries: int | None = None,
         output_retries: int | None = None,
         output_schema: "Mapping[str, JsonValue] | None" = None,

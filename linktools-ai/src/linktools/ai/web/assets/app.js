@@ -63,8 +63,6 @@ function showError(error) {
   if(error.name==='AbortError')return;
   notice(error.message || String(error));
   if(error.context)$('notice').append(element('div','',error.context));
-  if(error.details?.safe_details?.field==='thinking' && error.details.safe_details.reason==='model_always_enabled')$('notice').append(element('p','','This model declares thinking always enabled; disabling it is not supported.'));
-  if(error.details?.safe_details?.field==='thinking' && error.details.safe_details.reason==='model_not_supported')$('notice').append(element('p','','The active model profile does not declare thinking support. This does not establish that the provider lacks it; compatible gateways may need an explicit SDK model profile and request mapping.'));
   if(error.details?.operation_id || Object.keys(error.details?.safe_details || {}).length) {
     $('notice').append(rawDetail({operation_id:error.details.operation_id,safe_details:error.details.safe_details},'Error details'));
   }
@@ -130,10 +128,7 @@ function setDisabled() {
   $('open-recovery').disabled=readonly || !state.selectedExecution;
   ['new-session','welcome-new'].forEach(id => $(id).disabled=readonly);
   ['send','planning','thinking','memory','files','prompt'].forEach(id => $(id).disabled=readonly || state.session?.status === 'CLOSED' || !state.selectedSession);
-  const control=state.session?.thinking_control, mode=control?.mode;
-  if(mode==='always_on'){$('thinking').checked=true;$('thinking').disabled=true;}
-  else if(mode==='undeclared'){$('thinking').checked=false;$('thinking').disabled=true;}
-  if($('thinking-hint'))$('thinking-hint').textContent=mode==='always_on'?'Thinking is always on for this model.':mode==='controllable'?`Thinking control is available. Model default: ${control.enabled_by_default?'on':'off'}; this checkbox selects the next request.`:mode==='unknown'?'Thinking control is unknown. Choose the request setting; Runtime will validate it. Returned reasoning remains visible.':'Thinking control is not declared. Returned reasoning remains visible; compatible models may require a profile override.';
+  if($('thinking-hint'))$('thinking-hint').textContent='Inherit keeps Agent/model settings. Off requests no thinking or the lowest supported effort. Provider-specific settings and native body extensions retain SDK precedence.';
   ['rename-session','fork-session','close-session'].forEach(id => $(id).disabled=readonly || !state.session);
   const ending=state.actionsPending.has(`${state.selectedExecution}:end-stopped`);
   const recoverable=['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(state.execution?.status);
@@ -313,7 +308,7 @@ async function readSession(id, metadataOnly=false) {
 }
 function acceptSession(payload) {
   if(payload.session.session_id!==state.selectedSession || payload.readGeneration<state.sessionAppliedGeneration)return false;
-  state.session={...payload.session,thinking_control:payload.thinking_control};state.sessionAppliedGeneration=payload.readGeneration;return true;
+  state.session={...payload.session};state.sessionAppliedGeneration=payload.readGeneration;return true;
 }
 function renderSessionHeader() {
   if(!state.session)return;
@@ -321,14 +316,18 @@ function renderSessionHeader() {
   $('conversation-meta').textContent=`${state.session.agent_id}${state.session.status==='CLOSED'?' · CLOSED':''}${state.session.history_quality!=='complete'?' · history '+state.session.history_quality:''}`;
   $('session-details').replaceChildren(rawDetail(state.session,'Session metadata'));
 }
+function readThinking() {
+  const value=$('thinking').value;
+  return value===''?null:value==='false'?false:value==='true'?true:value;
+}
 function saveDraft() {
   if(!state.selectedSession)return;
-  state.drafts.set(state.selectedSession,{prompt:$('prompt').value,files:$('files').value,planning:$('planning').checked,thinking:$('thinking').checked,memory:$('memory').value});
+  state.drafts.set(state.selectedSession,{prompt:$('prompt').value,files:$('files').value,planning:$('planning').checked,thinking:$('thinking').value,memory:$('memory').value});
 }
 function restoreDraft(sessionId) {
-  const draft=state.drafts.get(sessionId) || {prompt:'',files:'',planning:false,thinking:false,memory:state.config.memory_scope};
+  const draft=state.drafts.get(sessionId) || {prompt:'',files:'',planning:false,thinking:'',memory:state.config.memory_scope};
   for(const id of ['prompt','files','memory'])$(id).value=draft[id];
-  for(const id of ['planning','thinking'])$(id).checked=draft[id];
+  $('planning').checked=draft.planning;$('thinking').value=draft.thinking ?? '';
 }
 async function openSelection(sessionId, executionId, {preserveInspector=false}={}) {
   const preserveObservation=Boolean(sessionId && sessionId===state.selectedSession);saveDraft();
@@ -1214,7 +1213,7 @@ async function sendMessage(event) {
   $('send').disabled=true;notice('');
   try {
     // Rejected admission is terminal for its key; another explicit send is a new attempt.
-    const result=await mutate(sessionURL(sessionId,"messages"),{prompt:promptValue,planning:$('planning').checked,thinking:$('thinking').checked,memory_scope:$('memory').value,files:$('files').value.split('\n').map(s=>s.trim()).filter(Boolean)}, {newAttemptOn:['SESSION_BUSY','SESSION_CONFLICT']});
+    const result=await mutate(sessionURL(sessionId,"messages"),{prompt:promptValue,planning:$('planning').checked,thinking:readThinking(),memory_scope:$('memory').value,files:$('files').value.split('\n').map(s=>s.trim()).filter(Boolean)}, {newAttemptOn:['SESSION_BUSY','SESSION_CONFLICT']});
     if(generation!==state.generation){const draft=state.drafts.get(sessionId);if(draft?.prompt===promptValue)draft.prompt='';if(state.selectedSession===sessionId && $('prompt').value===promptValue)$('prompt').value='';return;}
     if($('prompt').value===promptValue)$('prompt').value=''; await openSelection(sessionId,result.execution_id,{preserveInspector:true}); await loadList();
   } catch(error){

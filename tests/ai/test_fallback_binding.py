@@ -16,7 +16,7 @@ from pydantic_ai.settings import ModelSettings
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError
 from linktools.ai.model import (
-    FallbackBinding, ModelBinding, create_model, model_thinking_control,
+    FallbackBinding, ModelBinding, create_model,
     validate_model_input,
 )
 
@@ -107,7 +107,6 @@ def test_fallback_requires_a_candidate_and_preserves_ordered_semantics() -> None
     validate_model_input(binding, "application/pdf")
     with pytest.raises(AIError):
         validate_model_input(binding, "audio/wav")
-    assert model_thinking_control(binding) == {"mode": "unknown", "enabled_by_default": None}
 
 
 def test_materialize_prepares_ordered_candidates_without_mutating_shared_models() -> None:

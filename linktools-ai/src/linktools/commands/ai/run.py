@@ -4,7 +4,7 @@
 
 import asyncio
 import json
-from argparse import Namespace
+from argparse import BooleanOptionalAction, Namespace
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -46,8 +46,9 @@ class Command(BaseCommand):
         )
         parser.add_argument(
             "--thinking",
-            action="store_true",
-            help="enable model thinking for this execution",
+            action=BooleanOptionalAction,
+            default=None,
+            help="override inherited thinking (--no-thinking requests off or the lowest effort)",
         )
         parser.add_argument(
             "--json",
@@ -90,7 +91,7 @@ async def _emit_result(
     memory_scope: str,
     as_json: bool,
     planning: bool,
-    thinking: bool,
+    thinking: bool | None,
 ) -> int:
     execution = await runtime.agents.get().start(
         prompt,

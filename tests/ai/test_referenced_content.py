@@ -81,8 +81,8 @@ def test_complete_response_retires_reference_but_pending_tail_remains_recoverabl
     pending = ModelRequest(parts=[UserPromptPart([_content(b"pending")])])
     messages = [consumed, ModelResponse(parts=[TextPart("understood")]), pending]
     projected = project_transient_binary_content(messages)
-    assert type(projected[0].parts[0].content[0]) is TextContent
-    assert projected[0].parts[0].content[0].metadata["referenced_content"]["ref"] == _content().ref.to_payload()
+    assert isinstance(projected[0].parts[0].content[0], TextContent)
+    assert _content().ref.to_payload()["digest"] in encode_model_messages(projected).decode()
     assert projected[2] is pending
     assert isinstance(consumed.parts[0].content[0], ReferencedContent)
 
@@ -94,7 +94,7 @@ def test_consumed_reference_summary_uses_the_current_descriptor() -> None:
     projected = project_transient_binary_content(messages)
     summary = projected[0].parts[0].content[0]
     assert json.loads(summary.content)["size"] == 1
-    assert summary.metadata["referenced_content"]["ref"] == content.ref.to_payload()
+    assert content.ref.digest in encode_model_messages(projected).decode()
 
 
 @pytest.mark.asyncio
@@ -226,9 +226,8 @@ def test_tool_content_recovery_preserves_reference_instead_of_sdk_text_snapshot(
     assert isinstance(restored.content[1], ReferencedContent)
     assert restored.return_value == value.return_value and restored.metadata == value.metadata
     assert base64.b64encode(_BODY).decode() not in json.dumps(wire)
-    with pytest.raises(AIError):
-        encode_tool_return_content(_content())
-    for value in (_content(), {"nested": [_content()]}):
+    assert decode_tool_return_content(encode_tool_return_content(_content())) == _content()
+    for value in ({"nested": [_content()]}, [[_content()]]):
         with pytest.raises(AIError):
             encode_tool_return_content(ToolReturn(return_value=value))
 
@@ -319,3 +318,20 @@ async def test_runtime_retains_refs_and_safe_failure_structure_never_original_by
     stored = b"\n".join(path.read_bytes() for path in tmp_path.rglob("*") if path.is_file())
     assert _BODY not in stored
     assert base64.b64encode(_BODY) not in stored
+
+
+@pytest.mark.parametrize("extra", [False, True])
+@pytest.mark.parametrize("container", ["mapping", "list"])
+def test_nested_tool_return_cannot_hide_reference_inputs(extra: bool, container: str) -> None:
+    inner = ToolReturn(return_value="summary", content=[_content()]) if extra else ToolReturn(return_value=[_content()])
+    nested = {"inner": inner} if container == "mapping" else [inner]
+    with pytest.raises(AIError) as failure:
+        encode_tool_return_content(nested)
+    assert failure.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    wire = encode_tool_return_content(inner)
+    node = wire["value"]
+    wire["value"] = ({"type": "mapping", "items": {"inner": node}} if container == "mapping"
+                     else {"type": "sequence", "items": [node]})
+    with pytest.raises(AIError) as failure:
+        decode_tool_return_content(wire)
+    assert failure.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

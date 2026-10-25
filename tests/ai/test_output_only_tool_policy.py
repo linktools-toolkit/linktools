@@ -121,8 +121,10 @@ def _model(
         profile["openai_chat_supports_web_search"] = True
         if unsupported_parallel:
             profile["openai_unsupported_model_settings"] = ["parallel_tool_calls"]
+    provider = _anthropic.AnthropicProvider if protocol == "anthropic" else _openai.OpenAIProvider
+    monkeypatch.setattr(provider, "model_profile", staticmethod(lambda name: profile))
     model = create_model(
-        protocol=protocol, model="fixture-model", api_key="synthetic", profile=profile,
+        protocol=protocol, model="fixture-model", api_key="synthetic",
         base_url="https://offline.invalid/v1", max_retries=0, max_tokens=max_tokens,
     ).materialize()
     return model, bodies

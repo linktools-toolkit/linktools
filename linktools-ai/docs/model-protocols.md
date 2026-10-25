@@ -1,7 +1,9 @@
 # Model protocols and readable traces
 
-Use Python >= 3.11 with `pydantic-ai-slim>=2.59.0,<3.0.0` and
-`pydantic-ai-harness>=0.59.0`; Harness requires its matching SDK version.
+Use Python >= 3.11 with `pydantic-ai-slim>=2.61.0,<3.0.0` and
+`pydantic-ai-harness>=0.61.0`; Harness requires its matching SDK version.
+These minimum versions provide the native Thinking semantics used here, including
+`"max"`; no LinkTools provider capability table substitutes for SDK behavior.
 The `evaluation` extra uses the SDK's `evals` extra to select the matching evaluation package.
 Install only the provider adapters you use:
 
@@ -25,9 +27,8 @@ from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
 features = RuntimeFeatures()
 features.model("default", create_model(protocol="openai-responses", model="gpt-5"))
 features.model("messages", create_model(protocol="anthropic", model="claude-sonnet-4-5"))
-features.model("compatible", create_model(protocol="openai", model="gateway-model", profile={
-    "supports_thinking": True,
-    "thinking_always_enabled": False,
+features.model("compatible", create_model(protocol="openai", model="gateway-model", model_settings={
+    "extra_body": {"enable_thinking": True},
 }))
 
 async with Runtime.open("app", features=features, storage=RuntimeStorage.in_memory()) as runtime:
@@ -35,7 +36,7 @@ async with Runtime.open("app", features=features, storage=RuntimeStorage.in_memo
 ```
 
 `create_model` returns a `ModelBinding`, not a registry. It accepts input types,
-profile, credentials, timeouts and retry/token limits. Missing
+JSON-valued SDK model settings, credentials, timeouts and retry/token limits. Missing
 provider extras fail with the matching installation hint. Unknown protocol strings
 fail with `MODEL_CONFIG_INVALID` without echoing connection values.
 
@@ -46,8 +47,7 @@ paths are unchanged. There is no separate public registry or `Runtime.open(model
 
 ## Generic limits and configuration names
 
-Use explicit generic options rather than placing ordinary limits in an SDK
-profile. For example:
+Use explicit generic options for ordinary limits. For example:
 
 ```python
 features.model("default", lambda: create_model(
@@ -59,20 +59,18 @@ features.model("default", lambda: create_model(
 ```
 
 `context_window` is the total context capacity in tokens, not the maximum output
-length or a provider capacity upgrade. A non-null explicit value overrides
-`profile["context_window"]`; otherwise the profile override and then native SDK
-model defaults apply. The effective value is recorded only in the existing model
-contract's profile, not in a second competing field. `None` means no explicit
-override. The explicit value must be a positive integer, not a boolean.
-Other native capability overrides remain available through `profile`; there is no
-new public copy of the SDK capability table or provider-key allowlist.
+length or a provider capacity upgrade. A non-null explicit value overrides the
+SDK's inferred context window and is recorded in `contract["context_window"]`.
+`None` leaves the SDK default unchanged. Explicit values must be positive integers,
+not booleans. SDK-inferred capability profiles remain internal to the adapter;
+`create_model` does not expose a profile override.
 
 `max_tokens` reserves output tokens. Compaction uses a known context window minus
 the effective output reserve and current instruction/tool/output-schema overhead.
 If the SDK has no known window and no explicit compaction target exists, Runtime
 does not invent one. Native fallback uses the smallest **known** candidate window;
 unknown candidates do not constrain that value. This is context budgeting, not
-up-front thinking/MIME validation of an unused candidate, and estimates do not
+up-front MIME validation of an unused candidate, and estimates do not
 replace the provider's actual input limit.
 
 The same seven numeric names are accepted in workspace `.linktools/config.yaml`:
@@ -94,7 +92,7 @@ remain timeout/output/context unspecified, two retries, initial delay 1, maximum
 delay 60, and factor 2. The protocol value `openai-responses`, existing
 `LINKTOOLS_MODEL_API`, and provider-native `OPENAI_*` / `ANTHROPIC_*` connection
 variables retain their meanings. These generic options do not expose arbitrary
-headers or profile JSON through the CLI.
+headers or `model_settings` JSON through the CLI.
 
 For delayed configuration, register a synchronous zero-argument function returning
 an existing `ModelBinding`:
@@ -119,7 +117,7 @@ loaders and recursive same-route loads are rejected. A later feature registratio
 affects future captures only.
 
 The registered route name is model identity. Recovery resolves the current binding
-under that same route; protocol, provider model, profile and connection changes do
+under that same route; protocol, provider model, request-body and connection changes do
 not change identity or block task execution. Callers own configuration consistency.
 Historical `model_contract` metadata describes the captured configuration for
 diagnostics, not an equality requirement. Actual requests retain their own model
@@ -287,15 +285,14 @@ a caller using bare `Model.request` retains responsibility for its old suspended
 job. No new durable metadata, model identity or cleanup registry is introduced.
 
 Before an actually selected candidate is called, Runtime checks that candidate's
-thinking policy, MIME permissions and input encoding, then loads authorized
-reference inputs for that candidate. The composite MIME declaration is a union
-for initial admission, not a promise that every candidate accepts every format.
-Thinking or declared input-capability rejection happens before reference loading
-or provider IO; hydrated bytes are checked again before dispatch. Whether an
-error permits another candidate is still governed by `fallback_on`. A valid but
-incompatible thinking/MIME policy on an unused candidate does not reject an
-otherwise valid request. The composite does not invent a shared thinking profile;
-its control projection is unknown. Reference bytes retain their existing
+MIME permissions and input encoding, then loads authorized reference inputs for
+that candidate. The composite MIME declaration is a union for initial admission,
+not a promise that every candidate accepts every format. Declared input-capability
+rejection happens before reference loading or provider IO; hydrated bytes are
+checked again before dispatch. Whether an error permits another candidate is still
+governed by `fallback_on`. An unused candidate's input policy does not reject an
+otherwise valid request. Thinking translation belongs to the selected SDK adapter,
+not a composite LinkTools capability table. Reference bytes retain their existing
 authorization and omission policy and are not eagerly loaded for unused models.
 
 The route loader still resolves one binding per agent run. Its ordered candidate
@@ -326,29 +323,91 @@ interaction projections do not add those amounts again. A custom candidate bindi
 built-in HTTP recorder or transport retries; absent physical requests are not
 evidence that no provider call occurred.
 
-## Explicit profiles
+## SDK model settings and native request fields
 
-`profile` is a partial mapping of native PydanticAI profile keys to JSON values.
-Only explicit declarations are frozen, copied and included in the binding contract.
-Omitting it, or passing `{}`, preserves the original Chat contract. It is not a
-serialization of the complete inferred SDK profile. Classes, functions and arbitrary
-Python objects are rejected; advanced integrations can still register their own
-`ModelBinding`. Declared input types and actual protocol encoding must both permit
-an attachment. A profile cannot make unsupported wire formats work.
+`create_model(..., model_settings={...})` is the single JSON extension point for
+SDK common and provider-specific settings across Chat Completions, Responses and
+Anthropic Messages. Explicit settings override the corresponding top-level
+`max_tokens` and `timeout` defaults. LinkTools does not maintain a provider-key
+allowlist or translate proprietary switches; the selected SDK adapter owns their
+interpretation. An unknown SDK settings key is not automatically a body field.
+Use nested `extra_body` for native endpoint fields:
 
-An unknown compatible model name may have no declared thinking control. That does
-not mean the server cannot produce reasoning. Declare only capabilities the chosen
-SDK adapter can actually encode, such as native OpenAI reasoning effort. Setting
-`supports_thinking=True` does not implement a proprietary `enable_thinking` gateway
-field. We do not guess vendor-specific switches from model names.
+```python
+binding = create_model(
+    protocol="anthropic", model="claude-opus-4-5", max_tokens=8192,
+    model_settings={
+        "anthropic_thinking": {"type": "enabled", "budget_tokens": 4096},
+        "extra_body": {"custom_endpoint_option": True},
+    },
+)
+```
 
-The Web composer reads a small, non-persisted capability projection of the current
-agent binding, without resolving credentials or creating a provider client.
-Always-on models cannot be switched off. Undeclared control is disabled, not labeled
-as proof that the model cannot reason. The model's default and the selected next
-request value are distinct. Runtime validation remains authoritative. Returned
-`ThinkingPart` content stays visible independently of request control. Custom bindings
-without a `thinking_control()` projection report unknown control.
+The manual budget applies only to models supporting that control; adaptive-thinking
+models may use different settings. The custom body field is illustrative and must
+be supported by the endpoint. For raw thinking fields use
+`model_settings={"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 4096}}}`.
+Body fields can override SDK-generated fields of the same name, including output
+limits and thinking. Thus `max_tokens` is not an unbypassable hard cap; raw overrides
+can also make local context estimates differ from the request. The SDK owns nested
+merge semantics and the endpoint validates native fields.
+
+The binding copies and freezes JSON settings. Its `contract["settings"]` records
+the resolved semantic settings, excluding operational `timeout`, `request_timeout`,
+`max_retries` and `extra_headers`; those controls still reach the SDK. Authentication
+belongs in connection parameters, not in body fields. Semantic settings and
+`extra_body` are contract-captured data, not a secret store. Excluding headers from
+the contract does not make arbitrary request logging safe for secrets.
+
+A host can forward its parsed JSON/YAML `model_settings` mapping directly to
+`create_model`; configuring these settings does not require writing a custom
+`ModelBinding`. This is a Python construction interface, not an automatic new
+workspace/CLI configuration loader. Recovery still resolves the current binding
+under the registered route, not frozen historical settings.
+
+## Native thinking and migration
+
+Runtime uses the public PydanticAI `Thinking` capability. The Agent spec defaults
+to `thinking=None`; an omitted run value inherits the spec. When the resolved value
+is `None`, Runtime adds no thinking override, preserving model settings and native
+application capabilities. An explicit boolean or effort is appended after application
+capabilities as the host choice. Provider-specific settings and final native body
+overrides retain SDK precedence over unified thinking.
+
+Values are `None`, `True`, `False`, `"minimal"`, `"low"`, `"medium"`, `"high"`,
+`"xhigh"` and `"max"`. `False` is an explicit request for disabled thinking where
+possible, or the lowest available effort on always-on models—not inheritance or a
+LinkTools validation error. `None` preserves defaults, including across durable
+restore and fork. CLI omission inherits; `--thinking` and `--no-thinking` explicitly
+select true and false. The Web composer offers an inherit choice as well as explicit
+on/off. The SDK translates effort for the selected model; see the official
+[PydanticAI Thinking documentation](https://pydantic.dev/docs/ai/capabilities/thinking/).
+Details depend on the installed SDK version.
+
+The Web composer no longer disables the thinking selector based on a separate
+capability projection. Returned thinking remains displayable independently of the
+requested setting. Input MIME authorization and actual protocol encoding remain
+separate requirements; neither thinking nor a body extension grants attachment
+support.
+
+Migrate the removed pre-release APIs directly; no compatibility aliases remain:
+
+- Remove `create_model(profile=...)`. Move a declared `context_window` to the
+  dedicated argument; its contract location is now top-level `context_window`,
+  not `profile.context_window`. Do not move the old profile wholesale into
+  `model_settings` or `extra_body`: SDK capability/encoding switches such as
+  `openai_chat_supports_document_input` are not wire fields. Their automatic SDK
+  inference remains in effect; body extensions cannot enable unsupported SDK
+  encoding or teach an adapter a new capability.
+- Replace native wire options with `model_settings={"extra_body": {...}}`, using endpoint field names,
+  not SDK profile keys such as `supports_thinking`. For ordinary thinking use
+  Agent/run `thinking=` instead. SDK capability inference remains automatic;
+  SDK common/provider settings go directly in `model_settings`; only custom model
+  construction needs a `ModelBinding`. The former top-level `extra_body=` argument
+  is removed, not retained as an alias.
+- Remove imports/calls of `model_thinking_control` and custom `thinking_control()`
+  projections. Do not replace them with a duplicated provider capability table or
+  use them to disable controls. Handle actual SDK/provider outcomes instead.
 
 ## Output-only requests
 
@@ -368,8 +427,14 @@ honor the provider field; no token reduction is inferred from the setting alone.
 
 ## Transport retries
 
-The model binding owns transport retries; native provider SDK retries remain
-zero. `max_retries` counts additional attempts (default `2`), and `retry_delay`
+By default the model binding owns transport retries and native SDK retries are
+zero. An explicit non-null `model_settings["max_retries"]` instead selects SDK
+retry ownership and disables outer retries, avoiding multiplied attempts. This
+includes final request-level overrides. In SDK-owned mode, the SDK controls which
+errors retry and its wait policy; top-level `retry_delay`, `retry_max_delay` and
+`retry_backoff_factor` do not apply. Explicit SDK zero means no retries.
+
+The remainder of this section describes the default LinkTools-owned policy. `max_retries` counts additional attempts (default `2`), and `retry_delay`
 is the initial backoff base (default `1.0` seconds), not a fixed wait. The local
 base is multiplied by `retry_backoff_factor` (default `2.0`) after each retry
 wait, with up to 25% additive jitter. The factor must be finite and at least

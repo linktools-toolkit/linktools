@@ -65,7 +65,7 @@ def test_representation_survives_all_reference_codecs_and_consumed_summary() -> 
     consumed = project_transient_binary_content([*restored, ModelResponse(parts=[TextPart("done")])])
     summary = consumed[0].parts[0].content[0]
     assert json.loads(summary.content)["representation"] == "text"
-    assert decode_user_content_item(summary.metadata["referenced_content"]) == reference
+    assert decode_user_content_item(encode_user_content_item(summary)["metadata"]["referenced_content"]) == reference
     serialized = raw + json.dumps(view.content).encode()
     assert _BODY not in serialized and base64.b64encode(_BODY) not in serialized
     # Omission is the explicit binary default, not MIME-based inference.
@@ -330,7 +330,7 @@ def test_source_parameters_are_immutable_durable_and_absent_from_default_summary
     messages = [ModelRequest(parts=[UserPromptPart([reference])]), ModelResponse(parts=[TextPart("done")])]
     summary = project_transient_binary_content(messages)[0].parts[0].content[0]
     assert long_member not in summary.content
-    assert decode_user_content_item(summary.metadata["referenced_content"]) == reference
+    assert decode_user_content_item(encode_user_content_item(summary)["metadata"]["referenced_content"]) == reference
     assert decode_task_prompt_draft(task_prompt_draft([reference])) == (reference,)
     content = decode_tool_return_content(encode_tool_return_content(ToolReturn(return_value="summary", content=[reference])))
     assert content.content == [reference]

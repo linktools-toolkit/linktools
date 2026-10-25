@@ -23,10 +23,26 @@ from ..errors import AIError, ErrorCode
 from ..model import ReferencedContent
 
 
+class RetiredReferencedContent(TextContent):
+    """Keep recovery provenance outside SDK-visible dataclass fields."""
+
+    def __init__(self, reference: ReferencedContent, summary: str) -> None:
+        super().__init__(summary)
+        self.reference = reference
+
+    def __eq__(self, other: object) -> bool:
+        if type(other) is not type(self):
+            return NotImplemented
+        return self.content == other.content and self.reference == other.reference
+
+
 def encode_user_content_item(item: UserContent) -> JsonValue:
     try:
         if isinstance(item, str):
             return {"kind": "text", "text": item}
+        if isinstance(item, RetiredReferencedContent):
+            return {"kind": "text-content", "content": item.content,
+                    "metadata": {"referenced_content": encode_user_content_item(item.reference)}}
         if isinstance(item, ReferencedContent):
             return {"kind": "referenced-content", "ref": item.ref.to_payload(),
                     "source": {"kind": item.source.kind, "id": item.source.id,
@@ -102,7 +118,13 @@ def decode_user_content_item(value: object) -> UserContent:
         content = value.get("content")
         if not isinstance(content, str) or "metadata" not in value:
             raise ValueError("text content is invalid")
-        return TextContent(content, metadata=value["metadata"])
+        metadata = value["metadata"]
+        if isinstance(metadata, Mapping) and set(metadata) == {"referenced_content"}:
+            reference = decode_user_content_item(metadata["referenced_content"])
+            if not isinstance(reference, ReferencedContent):
+                raise ValueError("retired reference descriptor is invalid")
+            return RetiredReferencedContent(reference, content)
+        return TextContent(content, metadata=metadata)
     if kind == "binary":
         data = value.get("data")
         media_type = value.get("media_type")

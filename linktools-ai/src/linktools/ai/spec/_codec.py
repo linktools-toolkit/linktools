@@ -82,7 +82,7 @@ class AgentSpecCodec:
         allow_subagents = raw.get("allow_subagents", ["*"])
         allow_capabilities = raw.get("allow_capabilities", ["*"])
         planning = raw.get("planning", False)
-        thinking = raw.get("thinking", False)
+        thinking = raw.get("thinking")
         tool_retries = raw.get("tool_retries")
         output_retries = raw.get("output_retries")
         description = raw.get("description")

@@ -27,6 +27,12 @@ def model_binding(monkeypatch: pytest.MonkeyPatch, kind: str, model: str, handle
              **options: object) -> tuple[ModelBinding, list[httpx2.AsyncClient]]:
     module = _anthropic if kind == 'anthropic' else _openai
     clients = []
+    sdk_profile = options.pop('sdk_profile', None)
+    if sdk_profile is not None:
+        provider = module.AnthropicProvider if kind == 'anthropic' else module.OpenAIProvider
+        native_profile = provider.model_profile
+        monkeypatch.setattr(provider, 'model_profile', staticmethod(
+            lambda name: {**(native_profile(name) or {}), **sdk_profile}))
 
     def client(**kwargs: object) -> httpx2.AsyncClient:
         result = httpx2.AsyncClient(transport=httpx2.MockTransport(handler), **kwargs)
@@ -73,7 +79,7 @@ async def test_native_tool_turn_survives_durable_restore_and_client_reentry(monk
         return httpx2.Response(200, json=response(api, tool=len(sent) == 1))
 
     profile = {'openai_chat_thinking_field': 'reasoning_content', 'openai_chat_send_back_thinking_parts': 'field'} if kind == 'openai' else None
-    models, clients = model_binding(monkeypatch, kind, model_name, handler, profile=profile)
+    models, clients = model_binding(monkeypatch, kind, model_name, handler, sdk_profile=profile)
     resolver = _ModelResolver({"default": models})
     binding = resolver.resolve('default')
     contract = json.loads(json.dumps(dict(binding.contract)))
@@ -125,24 +131,21 @@ async def test_public_registration_matches_model_type_and_restores(kind, api, mo
         assert resolver.resolve("selected").contract == actual
 
 
-def test_profile_overrides_are_explicit_frozen_and_contract_owned():
+def test_extension_body_is_explicit_frozen_and_contract_owned():
     expected = {'provider': 'openai', 'model_identity': 'openai:same', 'settings': {}, 'input_mime_types': []}
     assert create_model(protocol="openai", model='same').contract == expected
-    assert create_model(protocol="openai", model='same', profile={}).contract == expected
-    declaration = {'supports_thinking': True, 'openai_chat_thinking_field': 'reasoning_content'}
-    models = create_model(protocol="openai", model='same', profile=declaration)
-    binding = models
-    declaration['supports_thinking'] = False
-    assert binding.contract['profile']['supports_thinking'] is True
+    declaration = {'thinking': {'type': 'enabled', 'budget_tokens': 2048}}
+    binding = create_model(protocol="openai", model='same', model_settings={"extra_body": declaration})
+    declaration['thinking']['budget_tokens'] = 4096
+    assert binding.contract['settings']['extra_body']['thinking']['budget_tokens'] == 2048
     exposed = binding.contract
-    exposed['profile']['supports_thinking'] = False
-    assert binding.contract['profile']['supports_thinking'] is True
+    exposed['settings']['extra_body']['thinking']['budget_tokens'] = 8192
+    assert binding.contract['settings']['extra_body']['thinking']['budget_tokens'] == 2048
     assert create_model(protocol="openai-responses", model='same').contract != expected
-    models = create_model(protocol='openai', model='same', profile={'supports_thinking': False})
-    assert _ModelResolver({'default': models}).resolve('default') is models
-    for invalid in ({'supports_thinking': 'yes'}, {'unknown_capability': True}, {'json_schema_transformer': object}, {'supports_thinking': float('nan')}):
+    assert _ModelResolver({'default': binding}).resolve('default') is binding
+    for invalid in ({'value': object()}, {'value': float('nan')}):
         with pytest.raises((TypeError, ValueError)):
-            create_model(protocol="openai", model='same', profile=invalid)
+            create_model(protocol="openai", model='same', model_settings={"extra_body": invalid})
 
 
 @pytest.mark.parametrize('kind,accepted,rejected', [
@@ -150,12 +153,14 @@ def test_profile_overrides_are_explicit_frozen_and_contract_owned():
     ('openai_responses', 'application/pdf', 'audio/wav'),
     ('anthropic', 'text/plain', 'audio/wav'),
 ])
-def test_native_protocol_input_encoding_is_distinct(kind, accepted, rejected):
+def test_native_protocol_input_encoding_is_distinct(monkeypatch, kind, accepted, rejected):
     binding = create_model(protocol=kind.replace('_', '-'), model='unknown', input_types=['audio', 'video', 'document'])
     validate_model_input(binding, accepted)
     with pytest.raises(AIError):
         validate_model_input(binding, rejected)
-    chat = create_model(protocol="openai", model='unknown', input_types=['document'], profile={'openai_chat_supports_document_input': False})
+    monkeypatch.setattr(_openai.OpenAIProvider, "model_profile", staticmethod(
+        lambda model: {"openai_chat_supports_document_input": False}))
+    chat = create_model(protocol="openai", model='unknown', input_types=['document'])
     with pytest.raises(AIError):
         validate_model_input(chat, 'application/pdf')
 
@@ -307,22 +312,16 @@ async def test_native_cancelled_stream_preserves_partial_observation(monkeypatch
     assert len(recorder.requests) == 1 and all(client.is_closed for client in clients)
 
 
-def test_thinking_control_uses_frozen_effective_profile_without_connections_is_pure(monkeypatch):
-    from linktools.ai.model import model_thinking_control
-    binding = create_model(protocol="openai", model="fixture", api_key="secret",
-                           profile={"supports_thinking": True})
-    monkeypatch.setattr(_openai, "DefaultAsyncHttpxClient", lambda **kwargs: pytest.fail("capability read created client"))
-    assert model_thinking_control(binding)["mode"] == "controllable"
+def test_model_declaration_inspection_does_not_open_connections(monkeypatch):
+    binding = create_model(protocol="openai", model="gpt-5", api_key="secret", model_settings={"extra_body": {"custom": True}})
+    monkeypatch.setattr(_openai, "DefaultAsyncHttpxClient", lambda **kwargs: pytest.fail("declaration read created client"))
     resolver = _ModelResolver({"default": binding, "alias": binding})
-    assert model_thinking_control(resolver.resolve("alias")) == model_thinking_control(binding)
-    always = create_model(protocol="anthropic", model="fixture", profile={"thinking_always_enabled":True,"thinking_enabled_by_default":True})
-    assert model_thinking_control(always)["mode"] == "always_on"
-    assert model_thinking_control(create_model(protocol="openai", model="unknown"))["mode"] == "undeclared"
+    assert resolver.resolve("alias").contract == binding.contract
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("factory,api,name", PROTOCOLS)
-async def test_runtime_web_profile_and_durable_model_content(monkeypatch, tmp_path, factory, api, name):
+async def test_runtime_web_session_and_durable_model_content(monkeypatch, tmp_path, factory, api, name):
     from linktools.ai.capability import TraceCapability, ExecutionCapability
     from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeFeatures
     from linktools.ai.web import create_app
@@ -344,9 +343,7 @@ async def test_runtime_web_profile_and_durable_model_content(monkeypatch, tmp_pa
         async with _client(create_app(runtime=runtime)) as http:
             meta = await http.get("/api/session", params={"session_id":"session","include_timeline":"false"})
             assert meta.status_code == 200, meta.text
-            control = meta.json()["thinking_control"]
-            assert control["mode"] in {"controllable", "always_on", "undeclared"}
-            execution = await session.start("Hello", thinking=control["mode"] == "always_on")
+            execution = await session.start("Hello", thinking=False)
             result = await execution.wait()
             assert result.result.status.value == "SUCCEEDED", result
             content = await http.get(f"/api/executions/{execution.execution_id}/models", params={"include_content":"true","include_client_requests":"true"})
@@ -366,7 +363,7 @@ async def test_runtime_web_profile_and_durable_model_content(monkeypatch, tmp_pa
         async with _client(create_app(runtime=runtime)) as http:
             meta = await http.get("/api/session", params={"session_id":"session","include_timeline":"false"})
             assert meta.status_code == 200, meta.text
-            assert meta.json()["thinking_control"]["mode"] == "unknown"
+            assert meta.json()["session"]["session_id"] == "session"
 
 
 @pytest.mark.parametrize('kind,api,model_name', PROTOCOLS)
@@ -379,7 +376,7 @@ def test_generic_factory_forwards_all_options(monkeypatch, kind, api, model_name
         received.update(kwargs)
         return sentinel
     monkeypatch.setattr(module, name, construct)
-    options = dict(model=model_name, input_types=("image",), profile={"supports_thinking": True},
+    options = dict(model=model_name, input_types=("image",), model_settings={"extra_body": {"custom": True}},
                    base_url="https://model.invalid/v1", api_key="fixture-secret", timeout=9,
                    max_retries=3, retry_delay=0.2, retry_max_delay=120, retry_backoff_factor=4, max_tokens=99, context_window=131072)
     assert create_model(protocol=api, **options) is sentinel

@@ -26,7 +26,7 @@
       "type": "object"
     },
     "return_schema": {},
-    "revision": 1,
+    "revision": 2,
     "strict": null,
     "version": 1
   },
@@ -336,7 +336,7 @@
       "type": "object"
     },
     "return_schema": {},
-    "revision": 1,
+    "revision": 2,
     "strict": null,
     "version": 1
   },

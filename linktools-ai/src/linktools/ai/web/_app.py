@@ -19,7 +19,6 @@ from starlette.responses import FileResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Route
 
 from linktools.core import environ
-from ..model import model_thinking_control
 from ..core import Principal, PrincipalKind
 from ..errors import AIError, ErrorCode, ErrorDiagnostics, ObservationError
 from ..model import ModelClientRequest, ModelClientResponse
@@ -239,14 +238,7 @@ class _Console:
             if environ.debug:
                 request.state.phase = "session.timeline"
             timeline = await history.session_timeline(identity, principal=self.principal, **_paging(request))
-        control = {"mode": "unknown", "enabled_by_default": None}
-        if self.runtime is not None:
-            try:
-                control = model_thinking_control(self.runtime.agents.get(session.agent_id).model)
-            except AIError as error:
-                if error.code != ErrorCode.AGENT_BINDING_UNAVAILABLE:
-                    raise
-        return _json({"session": session, "timeline": timeline, "thinking_control": control})
+        return _json({"session": session, "timeline": timeline})
 
     async def session_action(self, request: Request) -> Response:
         if environ.debug:
@@ -263,7 +255,7 @@ class _Console:
             execution = await session.start(
                 _text(payload, "prompt"), files=payload.get("files", ()), idempotency_key=request_id,
                 memory_scope=_text(payload, "memory_scope", self.memory_scope),
-                planning=payload.get("planning", False), thinking=payload.get("thinking", False),
+                planning=payload.get("planning", False), thinking=payload.get("thinking"),
             )
             return _json({"execution_id": execution.execution_id}, 202)
         if action == "close":

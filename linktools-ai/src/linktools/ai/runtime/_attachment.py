@@ -101,8 +101,10 @@ def has_binary_attachment_metadata(item: BinaryContent, message: ModelRequest) -
                 return True
         if (not isinstance(part, BaseToolReturnPart)
             or part.tool_name not in _FILE_TOOLS
-            or not isinstance(part.tool_call_id, str) or not part.tool_call_id
-            or not isinstance(part.content, Mapping)):
+            or not isinstance(part.tool_call_id, str) or not part.tool_call_id):
+            continue
+        value = file_tool_result_metadata(part.content)
+        if value is None:
             continue
         try:
             occurrences = _tool_file_occurrences(
@@ -117,7 +119,7 @@ def has_binary_attachment_metadata(item: BinaryContent, message: ModelRequest) -
                 descriptor = _content_descriptor(item)
             if descriptor is None or not _same_attachment(occurrence, descriptor):
                 continue
-            files = cast(list[Mapping[str, JsonValue]], part.content["files"])
+            files = cast(list[Mapping[str, JsonValue]], value["files"])
             file = files[cast(int, occurrence["call_position"])]
             if "attachment" in file and file["attachment"] != item.identifier:
                 continue
@@ -230,18 +232,20 @@ def bind_tool_return_attachments(
     """Bind file-input content to stable occurrence ids before it enters history."""
     if tool_name not in _FILE_TOOLS or not isinstance(result, ToolReturn):
         return result
+    native = isinstance(result.return_value, list)
+    value = file_tool_result_metadata(result.return_value)
+    content = result.return_value[1:] if native else result.content
     occurrences = _tool_file_occurrences(
-        result.return_value, source=tool_name, call_id=call_id,
+        value, source=tool_name, call_id=call_id,
     )
     if not occurrences:
-        if tool_name == "read_file" and result.content is not None and any(
+        if tool_name == "read_file" and content is not None and any(
             isinstance(item, BinaryContent)
             or isinstance(item, ReferencedContent) and item.identifier is not None
-            for item in result.content
+            for item in content
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return result
-    content = result.content
     if content is None or isinstance(content, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     values = tuple(content)
@@ -277,7 +281,6 @@ def bind_tool_return_attachments(
         )
     if occurrence_index != len(occurrences):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    value = result.return_value
     if tool_name == "read_file":
         value = dict(cast(Mapping[str, JsonValue], value))
         files = cast(list[Mapping[str, JsonValue]], value["files"])
@@ -286,8 +289,8 @@ def bind_tool_return_attachments(
             for file, occurrence in zip(files, occurrences)
         ]
     return ToolReturn(
-        return_value=value,
-        content=bound,
+        return_value=[value, *bound] if native else value,
+        content=result.content if native else bound,
         metadata=result.metadata,
         tools=result.tools,
     )
@@ -340,11 +343,12 @@ def request_attachment_facts(
                         )
                     )
                     accepted_attachment_ids.add(attachment_id)
+                content = part.content[1:] if isinstance(part.content, list) else ()
+            elif isinstance(part, UserPromptPart) and not isinstance(part.content, str):
+                content = part.content
+            else:
                 continue
-
-            if not isinstance(part, UserPromptPart) or isinstance(part.content, str):
-                continue
-            for item in part.content:
+            for item in content:
                 descriptor = _content_descriptor(item)
                 if descriptor is None:
                     continue
@@ -353,6 +357,9 @@ def request_attachment_facts(
                     if isinstance(item, (BinaryContent, ReferencedContent))
                     else None
                 )
+                if (isinstance(part, BaseToolReturnPart) and occurrence is not None
+                    and occurrence.get("call_id") != part.tool_call_id):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if occurrence is not None and _same_attachment(
                     occurrence,
                     descriptor,
@@ -386,13 +393,21 @@ def request_attachment_facts(
     return tuple((*initial_facts, *tool_facts))
 
 
+def file_tool_result_metadata(value: object) -> Mapping[str, object] | None:
+    """Read the structured receipt from a file tool's native or metadata-only result."""
+    if isinstance(value, list) and value:
+        value = value[0]
+    return value if isinstance(value, Mapping) else None
+
+
 def _tool_file_occurrences(
     value: object,
     *,
     source: str,
     call_id: str,
 ) -> tuple[dict[str, JsonValue], ...]:
-    if not isinstance(value, Mapping):
+    value = file_tool_result_metadata(value)
+    if value is None:
         return ()
     raw_files = value.get("files")
     if not isinstance(raw_files, list):
@@ -662,6 +677,7 @@ def _is_digest(value: object) -> bool:
 
 __all__ = [
     "bind_tool_return_attachments",
+    "file_tool_result_metadata",
     "binary_attachment_text",
     "has_binary_attachment_metadata",
     "is_binary_attachment_text",

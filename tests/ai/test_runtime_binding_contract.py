@@ -119,7 +119,7 @@ def _execution(
     *,
     binding: AgentBindingContract | None = None,
     planning: bool = False,
-    thinking: bool = False,
+    thinking: bool | str | None = False,
 ) -> ExecutionRecord:
     now = datetime.now(timezone.utc)
     binding_contract = _binding_contract() if binding is None else binding
@@ -575,9 +575,17 @@ def test_execution_binding_digest_is_derived_from_binding_contract() -> None:
     assert value.binding_digest == value.binding.binding_digest
 
 
+@pytest.mark.parametrize("thinking", (None, False, "max"))
+def test_execution_record_codec_preserves_inherited_and_explicit_thinking(thinking) -> None:
+    execution = _execution(thinking=thinking)
+    restored = runtime_codec.decode_domain(runtime_codec.encode_domain(execution), ExecutionRecord)
+    assert restored.thinking == thinking
+    assert restored == execution
+
+
 def test_model_diagnostics_do_not_affect_contract_equality_or_other_guards() -> None:
     original = _binding_contract()
-    current = replace(original, model_contract={"api": "anthropic", "model_identity": "other", "profile": {"supports_thinking": True}})
+    current = replace(original, model_contract={"api": "anthropic", "model_identity": "other", "settings": {"extra_body": {"custom": True}}})
     assert original == current
     assert original.binding_digest == current.binding_digest
     assert original.to_payload() != current.to_payload()

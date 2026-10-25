@@ -78,7 +78,7 @@ def test_referenced_files_keep_distinct_occurrences_and_request_facts(tool: str,
     assert request_attachment_facts(restored, (), accepted_attachment_ids=set()) == facts
     consumed = project_transient_binary_content([*restored, ModelResponse(parts=[TextPart("done")])])
     summaries = consumed[0].parts[1].content
-    assert [item.metadata["referenced_content"]["identifier"] for item in summaries] == [second.identifier, first.identifier]
+    assert [encode_user_content_item(item)["metadata"]["referenced_content"]["identifier"] for item in summaries] == [second.identifier, first.identifier]
     assert not request_attachment_facts(consumed, (), accepted_attachment_ids=accepted)
 
 

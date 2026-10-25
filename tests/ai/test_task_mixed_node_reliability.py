@@ -1710,7 +1710,7 @@ def test_agent_task_input_authoring_defaults_and_durable_required_fields() -> No
         ("session_id", 1),
         ("memory_scope", 1),
         ("planning", None),
-        ("thinking", None),
+        ("thinking", 1),
     ),
 )
 def test_agent_task_input_durable_known_fields_fail_closed(
@@ -1724,6 +1724,14 @@ def test_agent_task_input_durable_known_fields_fail_closed(
         AgentTaskInput.from_mapping(durable)
 
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("thinking", (None, False, "max"))
+def test_agent_task_input_durable_thinking_preserves_inheritance_and_explicit_values(thinking) -> None:
+    durable = dict(AgentTaskInput("prompt", planning=False, thinking=thinking))
+    restored = AgentTaskInput.from_mapping(durable)
+    assert restored.thinking == thinking
+    assert restored["thinking"] == thinking
 
 
 def test_agent_task_input_unknown_durable_version_is_unsupported() -> None:
@@ -2022,7 +2030,8 @@ async def test_task_results_page_reads_only_page_states_and_preserves_null(
 
 
 @pytest.mark.asyncio
-async def test_agent_task_thinking_false_and_none_resolve_before_model_calls() -> None:
+@pytest.mark.parametrize("agent_thinking", (None, "high"))
+async def test_agent_task_thinking_false_and_none_resolve_before_model_calls(agent_thinking) -> None:
     application = RuntimeFeatures[None]("thinking-agent")
     application.agent(
         "default",
@@ -2030,7 +2039,7 @@ async def test_agent_task_thinking_false_and_none_resolve_before_model_calls() -
         allow_tools=(),
         allow_skills=(),
         allow_subagents=(),
-        thinking="high",
+        thinking=agent_thinking,
     )
     state = RuntimeStorage.in_memory()
     async with Runtime.open(
@@ -2064,9 +2073,9 @@ async def test_agent_task_thinking_false_and_none_resolve_before_model_calls() -
         state_view = await run.state(include_content=True)
         inputs = {node.node_id: node.input for node in state_view.nodes}
         assert inputs["explicit-false"]["thinking"] is False
-        assert inputs["default-thinking"]["thinking"] == "high"
+        assert inputs["default-thinking"]["thinking"] == agent_thinking
 
-        for node_id, expected in (("explicit-false", False), ("default-thinking", "high")):
+        for node_id, expected in (("explicit-false", False), ("default-thinking", agent_thinking)):
             node_result = next(item for item in result.node_states if item.node_id == node_id)
             assert node_result.execution_id is not None
             execution = await runtime._state.execution.executions.get(

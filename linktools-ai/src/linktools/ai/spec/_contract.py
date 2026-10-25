@@ -208,7 +208,7 @@ class AgentSpec:
     allow_capabilities: "tuple[str, ...]" = ("*",)
     usage_limits: "AgentUsageLimits | None" = None
     planning: bool = False
-    thinking: ThinkingValue = False
+    thinking: ThinkingValue = None
     tool_retries: int | None = None
     output_retries: int | None = None
     description: "str | None" = None

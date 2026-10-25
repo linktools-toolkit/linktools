@@ -17,21 +17,17 @@ from linktools.commands.ai.web import command as web_command
 
 
 @pytest.mark.parametrize("protocol", ("openai", "openai-responses", "anthropic"))
-@pytest.mark.parametrize("explicit", (None, 131072))
-def test_context_window_uses_one_effective_profile_without_mutating_input(protocol, explicit):
-    profile = {"context_window": 65536, "supports_tools": True}
+@pytest.mark.parametrize("explicit", (65536, 131072))
+def test_context_window_is_one_explicit_contract_field(protocol, explicit):
     binding = create_model(protocol=protocol, model="synthetic", api_key="synthetic",
-                           profile=profile, context_window=explicit, max_tokens=8192)
-    expected = 65536 if explicit is None else explicit
+                           context_window=explicit, max_tokens=8192)
     model = binding.materialize()
-    assert model.context_window == expected
+    assert model.context_window == explicit
     assert model.settings["max_tokens"] == 8192
-    assert binding.contract["profile"] == {"context_window": expected, "supports_tools": True}
-    assert "context_window" not in binding.contract
-    assert profile == {"context_window": 65536, "supports_tools": True}
+    assert binding.contract["context_window"] == explicit
     request = ModelRequestContext(model=model, messages=[], model_settings=None,
                                   model_request_parameters=ModelRequestParameters())
-    assert CompactionCapability(None, limits=PromptLimits())._request_target(request) == expected - 8192
+    assert CompactionCapability(None, limits=PromptLimits())._request_target(request) == explicit - 8192
 
 
 @pytest.mark.parametrize("value", (True, False, 0, -1, 1.5, "131072"))
@@ -42,7 +38,7 @@ def test_explicit_context_window_rejects_non_positive_integer_tokens(value):
 
 def test_context_window_defaults_and_fallback_use_native_profile_resolution():
     default = create_model(protocol="openai", model="synthetic", api_key="synthetic")
-    assert "profile" not in default.contract
+    assert "context_window" not in default.contract
     assert default.materialize().context_window is None
     candidates = [create_model(protocol="openai", model="synthetic", api_key="synthetic", context_window=size)
                   for size in (131072, 32768)]
@@ -62,7 +58,7 @@ def test_cli_numeric_options_override_config_environment_and_workspace(monkeypat
     monkeypatch.setenv("LINKTOOLS_MODEL_CONTEXT_WINDOW", "65536")
     args = command.create_parser().parse_args(arguments + ["--model", "synthetic", "--api-key", "synthetic"])
     binding = _local_runtime_model(workspace, args)
-    assert binding.contract["profile"]["context_window"] == 65536
+    assert binding.contract["context_window"] == 65536
     assert binding.max_tokens == 8192 and binding.timeout == 45
     assert binding.max_retries == 3 and binding.retry_delay == 5
     assert binding.retry_max_delay == 120 and binding.retry_backoff_factor == 4
@@ -70,7 +66,7 @@ def test_cli_numeric_options_override_config_environment_and_workspace(monkeypat
     for name, value in values.items():
         options.extend(("--" + name.replace("_", "-"), str(value)))
     args = command.create_parser().parse_args(arguments + ["--model", "synthetic", "--api-key", "synthetic", *options])
-    assert _local_runtime_model(workspace, args).contract["profile"]["context_window"] == 131072
+    assert _local_runtime_model(workspace, args).contract["context_window"] == 131072
 
 
 @pytest.mark.parametrize(("name", "value"), (("context_window", True), ("max_tokens", 0), ("timeout", -1),
@@ -89,7 +85,7 @@ def test_missing_generic_configuration_keeps_library_defaults(monkeypatch, tmp_p
     for option in ("context_window", "max_tokens", "timeout", "max_retries", "retry_delay", "retry_max_delay", "retry_backoff_factor"):
         monkeypatch.delenv("LINKTOOLS_MODEL_" + option.upper(), raising=False)
     binding = _local_model(Workspace(tmp_path, {"model": "synthetic"}), api_key="synthetic")
-    assert "profile" not in binding.contract
+    assert "context_window" not in binding.contract
     assert binding.max_tokens is None and binding.timeout is None
     assert (binding.max_retries, binding.retry_delay, binding.retry_max_delay, binding.retry_backoff_factor) == (2, 1, 60, 2)
 
@@ -119,9 +115,9 @@ def test_persisted_model_limit_is_read_before_workspace_without_copying_it(monke
     monkeypatch.delenv("LINKTOOLS_MODEL_CONTEXT_WINDOW", raising=False)
     workspace = Workspace(tmp_path, {"model": "synthetic", "context_window": 32768})
     binding = _local_model(workspace, api_key="synthetic")
-    assert binding.contract["profile"]["context_window"] == 65536
+    assert binding.contract["context_window"] == 65536
     monkeypatch.setenv("LINKTOOLS_MODEL_CONTEXT_WINDOW", "131072")
-    assert _local_model(workspace, api_key="synthetic").contract["profile"]["context_window"] == 131072
+    assert _local_model(workspace, api_key="synthetic").contract["context_window"] == 131072
     assert persistent.get("MODEL_CONTEXT_WINDOW") == (65536, True)
     assert workspace.config["context_window"] == 32768
 
@@ -134,3 +130,9 @@ def test_invalid_numeric_environment_does_not_silently_fall_back(monkeypatch, tm
     with pytest.raises(AIError) as failed:
         _local_model(Workspace(tmp_path, {"model": "synthetic"}), api_key="synthetic")
     assert failed.value.code is ErrorCode.MODEL_CONFIG_INVALID
+
+
+@pytest.mark.parametrize("arguments,expected", (([], None), (["--thinking"], True), (["--no-thinking"], False)))
+def test_cli_thinking_distinguishes_inheritance_from_explicit_override(arguments, expected):
+    parsed = run_command.create_parser().parse_args(["hello", *arguments])
+    assert parsed.thinking is expected
