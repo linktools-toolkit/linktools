@@ -27,11 +27,9 @@ from pydantic_ai import TextOutput, Tool
 from pydantic_ai.capabilities import (
     AbstractCapability,
     WrapperCapability,
-    CapabilityOrdering,
     PrepareTools,
     ProcessEventStream,
     Thinking,
-    WrapModelRequestHandler,
 )
 from pydantic_ai.exceptions import (
     ConcurrencyLimitExceeded,
@@ -55,7 +53,7 @@ from pydantic_ai.messages import (
     ThinkingPartDelta,
     ToolReturnPart,
 )
-from pydantic_ai.models import Model, ModelRequestContext, ModelResponse
+from pydantic_ai.models import Model, ModelResponse
 from pydantic_ai.tools import (
     DeferredToolRequests,
     DeferredToolResults,
@@ -120,11 +118,11 @@ from ._compaction import CompactionPolicy
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
 from ._memory import MemoryStore
-from ._metric_capability import ModelObservationCapability, PreparedRequestModel
+from ._metric_capability import ModelObservationCapability
 from ._plan import RuntimePlanStore
 from ._harness import (
-    ReinjectRuntimeSystemPrompt, SummaryProviderModel, CandidateProviderModel,
-    FallbackProviderModel, validate_thinking_model,
+    ReinjectRuntimeSystemPrompt, SummaryProviderModel,
+    FallbackProviderModel,
 )
 from ._message import without_history_system_prompts
 from ._repository_instructions import _RepositoryInstructionCapability
@@ -218,7 +216,7 @@ class _AgentRunScope:
     )
     mode: ExecutionMode = "run"
     planning: bool = False
-    thinking: ThinkingValue = False
+    thinking: ThinkingValue = None
     parent_agent_run_id: str | None = None
     subagent_available: bool = False
     subagent_descriptions: Mapping[str, str | None] = field(default_factory=dict)
@@ -611,7 +609,7 @@ class AgentExecutor:
         def prepare_candidate(candidate: ModelBinding) -> Model:
             if isinstance(candidate, FallbackBinding):
                 return candidate.materialize(prepare=prepare_candidate)
-            return CandidateProviderModel(
+            return SummaryProviderModel(
                 candidate.materialize(), context=scope.context,
                 referenced_inputs=callbacks.referenced_inputs,
                 binding=candidate, preserve_errors=True,
@@ -659,7 +657,8 @@ class AgentExecutor:
                         model_journal=model_journal,
                         sandbox=self._sandbox,
                     )
-                    capabilities = (*capabilities, _thinking_capability(scope.thinking))
+                    if scope.thinking is not None:
+                        capabilities = (*capabilities, _thinking_capability(scope.thinking))
                     if scope.replace_history_system_prompt:
                         capabilities = (
                             *capabilities,
@@ -1341,30 +1340,8 @@ def _event_stream_capability(
     return ProcessEventStream(forward, id="linktools.ai.event-stream")
 
 
-class _RuntimeThinking(Thinking):
-    """Validate thinking against the effective model at the final request boundary."""
-
-    def get_ordering(self) -> CapabilityOrdering:
-        return CapabilityOrdering(position="innermost")
-
-    async def wrap_model_request(
-        self,
-        ctx: PydanticRunContext[Any],
-        *,
-        request_context: ModelRequestContext,
-        handler: WrapModelRequestHandler,
-    ) -> ModelResponse:
-        del ctx
-        effective = request_context.model
-        while isinstance(effective, PreparedRequestModel):
-            effective = effective.wrapped
-        if not isinstance(effective, FallbackProviderModel):
-            validate_thinking_model(effective, self.effort)
-        return await handler(request_context)
-
-
 def _thinking_capability(thinking: ThinkingValue) -> Thinking:
-    return _RuntimeThinking(effort=thinking, id="linktools.ai.thinking")
+    return Thinking(effort=thinking, id="linktools.ai.thinking")
 
 
 def _map_event(event: object) -> "AgentEmission | None":

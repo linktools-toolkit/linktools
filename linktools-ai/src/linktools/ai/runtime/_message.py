@@ -49,9 +49,9 @@ except ImportError:
 
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
-from ..model import ReferencedContent, project_model_attempts, project_model_response_attempts
+from ..model import model_input_content, ReferencedContent, project_model_attempts, project_model_response_attempts
 from ._attachment import binary_attachment_text, has_binary_attachment_metadata
-from ._user_content_codec import decode_user_content_item, encode_user_content_item
+from ._user_content_codec import RetiredReferencedContent, decode_user_content_item, encode_user_content_item
 from ._json_snapshot import stable_json_snapshot
 from ._tool_return_codec import decode_tool_return_content, encode_tool_return_content
 
@@ -152,18 +152,16 @@ def project_transient_binary_content(
         message_changed = False
         parts = []
         for part in message.parts:
-            if not isinstance(part, UserPromptPart) or isinstance(part.content, str):
+            if not isinstance(part, (UserPromptPart, ToolReturnPart)):
                 parts.append(part)
                 continue
             content = []
             part_changed = False
-            for item in part.content:
+            for item in model_input_content(part):
                 if isinstance(item, ReferencedContent):
                     descriptor = encode_user_content_item(item)
                     canonical = decode_user_content_item(descriptor)
-                    content.append(TextContent(canonical.content, metadata={
-                        "referenced_content": descriptor,
-                    }))
+                    content.append(RetiredReferencedContent(canonical, canonical.content))
                     part_changed = True
                 elif isinstance(item, BinaryContent):
                     if not has_binary_attachment_metadata(item, message):
@@ -172,7 +170,11 @@ def project_transient_binary_content(
                 else:
                     content.append(item)
             if part_changed:
-                if content:
+                if isinstance(part, ToolReturnPart):
+                    # Empty results still acknowledge their original tool call.
+                    value = content if isinstance(part.content, list) else (content[0] if content else "")
+                    parts.append(replace(part, content=value))
+                elif content:
                     parts.append(replace(part, content=content))
                 message_changed = True
             else:
@@ -190,16 +192,14 @@ def project_transient_binary_content(
 
 
 def binary_content_usage(messages: Sequence[ModelMessage]) -> tuple[int, int]:
-    """Return BinaryContent part count and bytes in user-prompt content."""
+    """Count pending input bytes in user prompts and native tool results."""
     count = 0
     total_bytes = 0
     for message in messages:
         if not isinstance(message, ModelRequest):
             continue
         for part in message.parts:
-            if not isinstance(part, UserPromptPart) or isinstance(part.content, str):
-                continue
-            for item in part.content:
+            for item in model_input_content(part):
                 if isinstance(item, ReferencedContent):
                     count += 1
                     total_bytes += item.ref.size
@@ -1225,6 +1225,7 @@ __all__ = [
     "SummaryPromptPart",
     "without_history_system_prompts",
     "project_provider_messages",
+    "model_input_content",
     "binary_content_usage",
     "decode_model_messages",
     "encode_model_messages",

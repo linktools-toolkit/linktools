@@ -15,6 +15,8 @@ from pydantic import BaseModel, ConfigDict
 from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai.capabilities import (
     AbstractCapability,
+    Thinking,
+    SelectModel,
     ValidatedToolArgs,
     WrapToolExecuteHandler,
 )
@@ -28,7 +30,6 @@ from pydantic_ai.usage import RunUsage
 from linktools.ai.agent._output import bind_output, canonicalize_output_schema_v1
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._agent_executor import _thinking_capability
 from linktools.ai.runtime._tool import ToolOperationDecision
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
@@ -380,40 +381,23 @@ def _run_context(model: TestModel) -> RunContext[None]:
 
 
 @pytest.mark.asyncio
-async def test_thinking_validates_the_effective_request_model() -> None:
-    capability = _thinking_capability(True)
-    assert capability.get_ordering().position == "innermost"
+@pytest.mark.parametrize("effort", (False, "max"))
+async def test_thinking_follows_the_effective_request_model(effort) -> None:
+    from pydantic_ai.models.function import FunctionModel
+    from pydantic_ai.messages import TextPart
+    seen = []
 
-    bootstrap = TestModel(profile={"supports_thinking": False})
-    selected = TestModel(
-        model_name="selected",
-        profile={"supports_thinking": True},
-    )
-    seen: list[TestModel] = []
+    def respond(messages, info):
+        seen.append(info.model_request_parameters.thinking)
+        return ModelResponse(parts=[TextPart("selected")])
 
-    async def handler(request_context: ModelRequestContext) -> ModelResponse:
-        seen.append(request_context.model)  # type: ignore[arg-type]
-        return ModelResponse(parts=[], model_name="selected")
-
-    await capability.wrap_model_request(
-        _run_context(bootstrap),
-        request_context=_request_context(selected),
-        handler=handler,
-    )
-    assert seen == [selected]
-
-    rejected = TestModel(
-        model_name="selected-without-thinking",
-        profile={"supports_thinking": False},
-    )
-    with pytest.raises(AIError) as error:
-        await capability.wrap_model_request(
-            _run_context(TestModel(profile={"supports_thinking": True})),
-            request_context=_request_context(rejected),
-            handler=handler,
-        )
-    assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
-    assert error.value.safe_details["reason"] == "model_not_supported"
+    selected = FunctionModel(respond, profile={"supports_thinking": True, "thinking_always_enabled": True})
+    agent = PydanticAgent(TestModel(profile={"supports_thinking": False}), capabilities=[
+        SelectModel(lambda context: selected), Thinking(effort=effort),
+    ])
+    result = await agent.run("inspect")
+    assert result.output == "selected"
+    assert seen == [effort]
 
 
 class _MutateToolArgs(AbstractCapability[None]):

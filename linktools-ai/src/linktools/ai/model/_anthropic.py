@@ -12,7 +12,6 @@ except ModuleNotFoundError as error:
     raise ImportError('Anthropic model adapters require pip install "linktools-ai[anthropic]"') from error
 from httpx2 import AsyncClient, Limits
 from pydantic_ai.models import Model, ModelRequestParameters, ModelSettings
-from pydantic_ai.profiles.anthropic import AnthropicModelProfile
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.providers.anthropic import AnthropicProvider
 
@@ -57,8 +56,6 @@ class _CapturedAnthropicProvider(AnthropicProvider):
 
 class _AnthropicModelBinding(_ProviderModelBinding):
     __slots__ = ()
-    _provider_type = AnthropicProvider
-    _profile_type = AnthropicModelProfile
     api = "anthropic"
     _provider = "anthropic"
 

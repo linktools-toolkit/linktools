@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from linktools.ai.runtime._user_content_codec import encode_user_content_item
 from pydantic_ai.messages import (
     BinaryContent,
     ModelMessage,
@@ -107,11 +108,11 @@ async def test_business_tool_reference_is_consumed_once_after_live_or_durable_re
         assert calls["requests"] == 3 and not binaries
         summaries = [
             item for item in content if isinstance(item, TextContent)
-            and (item.metadata or {}).get("referenced_content") is not None
+            and (encode_user_content_item(item).get("metadata") or {}).get("referenced_content") is not None
         ]
         assert len(summaries) == 1
         assert json.loads(summaries[0].content)["size"] == len(_BODY)
-        descriptor = summaries[0].metadata["referenced_content"]
+        descriptor = encode_user_content_item(summaries[0])["metadata"]["referenced_content"]
         assert descriptor["ref"] == _content().ref.to_payload()
         assert descriptor["source"] == {
             "kind": _SOURCE.kind, "id": _SOURCE.id, "revision": _SOURCE.revision,

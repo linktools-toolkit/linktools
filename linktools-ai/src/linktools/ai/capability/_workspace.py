@@ -74,7 +74,7 @@ _WORKSPACE_TOOL_DECLARATIONS = (
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("paths",),
-    ), revision=1),
+    ), revision=2),
     WorkspaceToolDeclaration("create_directory", tool_metadata(
         effect_policy="non_replay_safe",
         tool_class="filesystem.write",
@@ -115,7 +115,7 @@ _WORKSPACE_TOOL_DECLARATIONS = (
         tool_class="filesystem.read",
         path_fields=("path",),
         context_dedupe="workspace_file_read_v1",
-    ), revision=1),
+    ), revision=2),
     WorkspaceToolDeclaration("search_files", tool_metadata(
         effect_policy="none",
         plan_safe=True,
@@ -371,8 +371,7 @@ class _WorkspaceToolSurface:
                 )
             )
         return ToolReturn(
-            return_value={"files": metadata},
-            content=content,
+            return_value=[{"files": metadata}, *content],
         )
 
     async def read_file(
@@ -517,7 +516,7 @@ class _WorkspaceToolSurface:
         if len(json.dumps(value, ensure_ascii=False).encode("utf-8")) > output_limit:
             raise AIError(ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
                           safe_details={"reason": "file_batch_output_limit"})
-        return ToolReturn(return_value=value, content=content or None)
+        return ToolReturn(return_value=[value, *content] if content else value)
 
     async def write_file(
         self, path: str, content: str, *, old_text: str | None = None,

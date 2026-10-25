@@ -14,7 +14,7 @@ def create_model(
     protocol: str,
     model: str,
     input_types: Sequence[str] = (),
-    profile: Mapping[str, JsonValue] | None = None,
+    model_settings: Mapping[str, JsonValue] | None = None,
     base_url: "str | None" = None,
     api_key: "str | None" = None,
     timeout: "int | float | None" = None,
@@ -25,7 +25,13 @@ def create_model(
     max_tokens: "int | None" = None,
     context_window: "int | None" = None,
 ) -> ModelBinding:
-    """Construct a model binding without creating a client or resolving credentials."""
+    """Construct a binding without creating a client or resolving credentials.
+
+    ``model_settings`` accepts JSON-valued SDK settings, including provider-specific
+    settings and ``extra_body`` for native fields. Explicit settings override the
+    top-level request defaults. Authentication stays in connection parameters;
+    request-body values are durable configuration and must not contain secrets.
+    """
     if protocol == "openai":
         from ._openai import _OpenAIModelBinding as binding_type
     elif protocol == "openai-responses":
@@ -42,7 +48,7 @@ def create_model(
     return binding_type(
         model=model,
         input_types=input_types,
-        profile=profile,
+        model_settings={} if model_settings is None else model_settings,
         base_url=base_url,
         api_key=api_key,
         timeout=timeout,

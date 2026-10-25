@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 from pydantic_ai.exceptions import FallbackExceptionGroup, ModelHTTPError
-from pydantic_ai.messages import BinaryContent, ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.messages import BinaryContent, ModelMessage, ModelRequest, ModelResponse, TextPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.models import CompletedStreamedResponse, Model, ModelRequestContext, ModelRequestParameters, StreamedResponse
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.test import TestModel
@@ -140,8 +140,9 @@ async def _invoke(model: Model, messages: list[ModelMessage], operation: str) ->
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("representation", ("text", "binary"))
+@pytest.mark.parametrize("position", ("user", "tool_list", "tool_scalar"))
 async def test_materialized_contract_and_shared_owner_cover_every_provider_operation(
-    monkeypatch: pytest.MonkeyPatch, representation: str,
+    monkeypatch: pytest.MonkeyPatch, representation: str, position: str,
 ) -> None:
     provider = _Provider()
     binding = _binding(monkeypatch, provider)
@@ -149,6 +150,10 @@ async def test_materialized_contract_and_shared_owner_cover_every_provider_opera
     assert isinstance(actual, ModelInputValidator)
     original = _messages(representation)
     content = original[0].parts[0].content[1]
+    if position != "user":
+        original = [ModelRequest(parts=[ToolReturnPart(
+            "read", ["read", content] if position == "tool_list" else content, "call-1",
+        )])]
     loaded = []
 
     async def load(item: ReferencedContent) -> bytes:
@@ -165,9 +170,11 @@ async def test_materialized_contract_and_shared_owner_cover_every_provider_opera
     assert provider.entries == provider.exits == 1
     assert provider.stream_closes == 1
     assert loaded == [content] * 4
-    assert original[0].parts[0].content[1] is content
+    original_content = original[0].parts[0].content
+    assert (original_content if position == "tool_scalar" else original_content[1]) is content
     for messages in provider.inputs:
-        outgoing = messages[0].parts[0].content[1]
+        delivered = messages[0].parts[0].content
+        outgoing = delivered if position == "tool_scalar" else delivered[1]
         if representation == "binary":
             assert isinstance(outgoing, BinaryContent)
             assert outgoing.data == _BODY and outgoing.identifier == "attachment-1"
@@ -312,7 +319,7 @@ async def test_native_builtin_provider_uses_its_own_contract_and_omits_http_bodi
 
     binding, clients = model_binding(
         monkeypatch, kind, "fixture", handler, input_types=["mime:application/pdf"],
-        profile={"openai_chat_supports_document_input": True} if api == "openai" else {},
+        sdk_profile={"openai_chat_supports_document_input": True} if api == "openai" else {},
     )
 
     async def load(item: ReferencedContent) -> bytes:

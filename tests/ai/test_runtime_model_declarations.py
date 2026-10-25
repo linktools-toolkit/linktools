@@ -346,13 +346,13 @@ def test_registered_model_identity_is_independent_of_configuration(protocol) -> 
     from linktools.ai.spec import AgentSpec
 
     state = {"binding": create_model(protocol="openai", model="original",
-                                     profile={"supports_thinking": False})}
+                                     model_settings={"extra_body": {"custom": False}})}
     spec = AgentSpec("agent", model="registered")
     compiler = AgentCompiler(models={"registered": lambda: state["binding"]}, candidates=(), agents={"agent": spec})
     compiled = compiler.compile(spec)
     original = compiler.bind(compiled)
     state["binding"] = create_model(protocol=protocol, model="replacement",
-                                   profile={"supports_thinking": True}, max_tokens=4096)
+                                   model_settings={"extra_body": {"custom": True}}, max_tokens=4096)
     current = compiler.bind(compiled)
     assert current.binding_digest == original.binding_digest
     assert current.binding_contract.model_contract != original.binding_contract.model_contract

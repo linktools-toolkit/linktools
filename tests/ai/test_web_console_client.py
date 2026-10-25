@@ -165,7 +165,8 @@ assert.equal(nodes['settings-content'].children[1].children.find(item=>item.tag=
 
 
 @pytest.mark.asyncio
-async def test_unknown_thinking_control_preserves_custom_binding_request(tmp_path: Path) -> None:
+@pytest.mark.parametrize("thinking", (None, False, "max"))
+async def test_thinking_request_reaches_custom_binding(tmp_path: Path, thinking) -> None:
     import json
     from pydantic_ai.models.test import TestModel
 
@@ -183,6 +184,7 @@ async def test_unknown_thinking_control_preserves_custom_binding_request(tmp_pat
     assert result.returncode == 0, result.stderr
     payload = json.loads(next(line.removeprefix("THINKING_REQUEST=") for line in result.stdout.splitlines()
                               if line.startswith("THINKING_REQUEST=")))
+    payload["thinking"] = thinking
     models = _ModelBinding(TestModel(custom_output_text="ok", profile={
         "supports_thinking": True, "thinking_always_enabled": True,
     }))
@@ -193,10 +195,13 @@ async def test_unknown_thinking_control_preserves_custom_binding_request(tmp_pat
         await runtime.agents.get("default").create_session("a")
         async with _client(create_app(runtime=runtime)) as http:
             meta = await http.get("/api/session", params={"session_id": "a", "include_timeline": "false"})
-            assert meta.json()["thinking_control"]["mode"] == "unknown"
+            assert meta.status_code == 200
             started = await http.post("/api/session/messages", params={"session_id": "a"}, json=payload,
                                       headers={"X-LinkTools-Console": "1"})
             assert started.status_code == 202, started.text
             execution = await runtime.executions.get(started.json()["execution_id"])
             outcome = (await execution.wait()).result
             assert outcome.status.value == "SUCCEEDED", outcome
+            record = await runtime._state.execution.executions.get(
+                execution.execution_id, tenant_id=runtime.tenant_id)
+            assert record.thinking == thinking

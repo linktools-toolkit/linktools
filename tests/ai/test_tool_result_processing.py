@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai.capabilities import CombinedCapability
-from pydantic_ai.messages import BinaryContent, ToolReturn, UserPromptPart
+from pydantic_ai.messages import BinaryContent, ToolReturn, ToolReturnPart, UserPromptPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
 from linktools.ai.agent import AgentCompiler
@@ -169,7 +169,7 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
                 assert tool.name == "read_file" and arguments["path"] == filename
                 assert isinstance(result, ToolReturn)
                 if media_type == "image/png":
-                    assert len(result.content) == 1 and result.content[0].data == body
+                    assert result.content is None and len(result.return_value) == 2 and result.return_value[1].data == body
                 else:
                     assert _TEXT in repr(result)
             else:
@@ -183,13 +183,11 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
             pipeline.append("project")
             content = reference
             if kind == "read_file" and media_type == "image/png":
-                assert result.content[0].identifier == result.return_value["files"][0]["attachment"]
+                assert result.return_value[1].identifier == result.return_value[0]["files"][0]["attachment"]
                 content = ReferencedContent(reference.ref, media_type=media_type, source=_SOURCE,
-                                            identifier=result.content[0].identifier)
-            return ToolReturn(
-                return_value=result.return_value if kind == "read_file" and media_type == "image/png" else {"page": 1},
-                content=[content],
-            )
+                                            identifier=result.return_value[1].identifier)
+                return ToolReturn(return_value=[result.return_value[0], content])
+            return ToolReturn(return_value={"page": 1}, content=[content])
 
         async def after_tool_execute(self, ctx, *, call, tool_def, args, result):
             after_hooks.append(call.tool_name)
@@ -199,8 +197,9 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
         async def process_tool_result(self, context, tool, arguments, result):
             if tool.name != "finish":
                 assert pipeline == ["project"]
-                assert isinstance(result, ToolReturn) and len(result.content) == 1
-                assert result.content[0].ref == reference.ref
+                assert isinstance(result, ToolReturn)
+                attachment = result.return_value[1] if kind == "read_file" and media_type == "image/png" else result.content[0]
+                assert attachment.ref == reference.ref
                 pipeline.append("observe")
             return result
 
@@ -222,7 +221,7 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
 
     async def stream(messages, info):
         items = [item for message in messages for part in message.parts
-                 if isinstance(part, UserPromptPart) and not isinstance(part.content, str)
+                 if isinstance(part, (UserPromptPart, ToolReturnPart)) and isinstance(part.content, list)
                  for item in part.content]
         bodies = [item for item in items if isinstance(item, BinaryContent)] if media_type == "image/png" else [
             item for item in items if isinstance(item, str) and item == _TEXT

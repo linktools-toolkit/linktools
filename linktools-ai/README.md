@@ -163,7 +163,7 @@ Useful options:
 - Model selection order is explicit nonempty CLI value, selected-protocol LinkTools configuration, workspace `model`, then the selected-protocol native fallback. Standard LinkTools configuration itself reads both native and `LINKTOOLS_`-prefixed environment variables. Connection settings use explicit CLI value, selected-protocol LinkTools configuration, then the native fallback. Empty connection values retain the native SDK fallback to the selected protocol's environment; they do not disable environment credentials. Credentials are secret fields and are not persisted by configuration resolution.
 - Install `linktools-ai[anthropic]` for Anthropic Messages, or `linktools-ai[openai]` for either OpenAI API; add `web` for `ai-web`, for example `linktools-ai[anthropic,web]`. Missing provider extras produce an installation hint before a Runtime is opened.
 - Endpoint paths retain native SDK semantics: OpenAI normally uses a base ending in `/v1`; Anthropic normally uses the server root and appends `/v1/messages` itself. Configure a gateway according to its supported API, not by copying an OpenAI endpoint.
-- Custom headers and arbitrary SDK profile overrides are not CLI configuration options. Thinking control remains governed by the effective native SDK model profile, independently of whether the response contains thinking parts; selecting Anthropic does not declare arbitrary models thinking-capable.
+- Arbitrary `model_settings` JSON is a Python binding option, not a CLI option. It accepts SDK common/provider settings and nested `extra_body` for endpoint request fields; thinking translation uses the SDK directly, independently of whether a response contains thinking parts.
 - Generic limits use `--context-window`, `--max-tokens`, `--timeout`, `--max-retries`, `--retry-delay`, `--retry-max-delay`, and `--retry-backoff-factor`. Workspace keys use the same words with underscores; environment configuration uses `LINKTOOLS_MODEL_CONTEXT_WINDOW`, etc. Context/output limits are tokens; timeout/delays are seconds. Explicit CLI values override LinkTools configuration/environment, then workspace values, then library defaults. See the [model configuration guide](docs/model-protocols.md#generic-limits-and-configuration-names).
 - `--planning` enables planning for the execution.
 - `--thinking` requests model thinking when supported.
@@ -282,7 +282,7 @@ features.model("production", binding)
 features.model("default", binding)
 ```
 
-### Protocols and thinking profiles
+### Protocols, native request fields and thinking
 
 Install `linktools-ai[openai]` for Chat Completions and Responses, or
 `linktools-ai[anthropic]` for Messages; combine extras when using both.
@@ -308,7 +308,26 @@ A callable is evaluated once per agent run. That run uses the same binding for
 contract capture, model validation, tool rounds and retries; the next run reloads
 it. Concurrent runs do not share mutable loader results. Client resources are
 created and released per run. See [model protocols](docs/model-protocols.md) for
-custom bindings, profiles, restore boundaries and trace semantics.
+custom bindings, request-body extensions, restore boundaries and trace semantics.
+
+`create_model(..., model_settings={"extra_body": {"enable_thinking": True}})`
+forwards native body fields when the endpoint supports them. Common and
+provider-specific SDK settings go directly in `model_settings`; unknown keys are
+not automatically body fields. A host can pass its JSON/YAML mapping without a
+custom `ModelBinding`. Explicit settings override top-level request defaults; raw
+body fields can override standard fields, including token limits. Keep credentials
+in connection configuration, not contract-captured semantic values. Operational
+`timeout`, `request_timeout`, `max_retries` and `extra_headers` reach the SDK but
+are excluded from the semantic contract. Explicit SDK `max_retries` selects SDK
+retry policy and disables outer retries, including their delay/backoff controls.
+
+Agent/run `thinking=` supports `"max"`. The default `None` inherits settings/native
+capabilities; an explicit host effort takes precedence over application Thinking.
+`False` explicitly requests the least thinking available on always-on models.
+SDK provider/body precedence remains unchanged. CLI omission inherits; use
+`--thinking` or `--no-thinking` for an explicit choice.
+The pre-release `profile=` and `model_thinking_control` APIs are removed; see the
+[migration guide](docs/model-protocols.md#native-thinking-and-migration).
 
 ## 2. Define application capabilities and Agents
 

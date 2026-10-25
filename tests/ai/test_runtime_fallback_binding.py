@@ -74,13 +74,11 @@ async def test_unused_incompatible_candidate_is_not_checked():
 
 
 @pytest.mark.asyncio
-async def test_selected_always_on_candidate_rejects_explicit_false_before_provider():
+async def test_selected_always_on_candidate_preserves_native_false_semantics():
     first, second = _HandoffModel(), _AlwaysThinkingModel()
     features, _ = _features(first, second)
     async with Runtime.open("fallback-runtime", features=features, storage=RuntimeStorage.in_memory()) as runtime:
         execution = await runtime.agents.get().start("classify", output=_Decision, thinking=False)
         result = (await execution.wait(timeout_seconds=10)).result
-        assert result.status is ExecutionStatus.FAILED
-        assert result.error_code == "REQUEST_FIELD_INVALID"
-        assert len(first.requests) == 1
-        assert not second.requests
+        assert result.status is ExecutionStatus.SUCCEEDED
+        assert len(first.requests) == len(second.requests) == 1

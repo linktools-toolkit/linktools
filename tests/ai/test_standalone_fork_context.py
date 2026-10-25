@@ -271,3 +271,28 @@ async def test_unfinished_standalone_run_never_publishes_a_complete_fork_seed(tm
                 if state == "running":
                     await source.cancel()
     assert raised.value.code is ErrorCode.EXECUTION_HISTORY_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thinking", (None, False, "max"))
+async def test_standalone_fork_reopens_with_the_same_thinking_policy(tmp_path, thinking) -> None:
+    group = RuntimeFeatures("thinking-fork")
+    group.agent("default", model="default", allow_tools=())
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    model = _UsageFunctionModel(
+        lambda messages, info: ModelResponse(parts=[TextPart("done")]),
+        profile={"supports_thinking": True},
+    )
+    features = model_features(_Models(model), group)
+    storage = RuntimeStorage.sqlite(tmp_path / "thinking.db")
+    async with Runtime.open("thinking-fork", storage=storage, features=features) as runtime:
+        source = await runtime.agents.get().start("source", thinking=thinking)
+        assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
+        source_id = source.execution_id
+    async with Runtime.open("thinking-fork", storage=storage, features=features) as runtime:
+        source = await runtime.executions.get(source_id)
+        fork = await source.fork("continue")
+        assert (await fork.wait()).result.status is ExecutionStatus.SUCCEEDED
+        for execution_id in (source_id, fork.execution_id):
+            record = await runtime._state.execution.executions.get(execution_id, tenant_id=runtime.tenant_id)
+            assert record.thinking == thinking

@@ -12,7 +12,7 @@ from typing import Any, TYPE_CHECKING
 
 from pydantic_ai.messages import (
     BinaryContent, FinalResultEvent, FinishReason, ModelMessage, ModelRequest,
-    ModelResponse, ModelResponseState, ModelResponseStreamEvent, UserPromptPart,
+    ModelResponse, ModelResponseState, ModelResponseStreamEvent, ToolReturnPart, UserPromptPart,
 )
 from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters, StreamedResponse
 from pydantic_ai.models.wrapper import WrapperModel
@@ -24,7 +24,7 @@ from ..errors import AIError, ErrorCode
 from ._client_request import ModelClientRequestRecorder
 from ._contract import ModelBinding, ModelInputValidator
 from ._errors import model_request_error
-from ._input import validate_model_inputs
+from ._input import model_input_content, validate_model_inputs
 from ._referenced_content import ReferencedContent
 from ._response import project_model_attempts, project_model_response_attempts
 
@@ -85,8 +85,8 @@ class ReferencedInputModel(WrapperModel):
         return "referenced_content_lifecycle" if any(
             isinstance(item, ReferencedContent)
             for message in messages if isinstance(message, ModelRequest)
-            for part in message.parts if isinstance(part, UserPromptPart) and not isinstance(part.content, str)
-            for item in part.content
+            for part in message.parts
+            for item in model_input_content(part)
         ) else None
 
     def _validate_request(self, messages: list[ModelMessage]) -> None:
@@ -110,11 +110,12 @@ class ReferencedInputModel(WrapperModel):
                 continue
             parts = []
             for part in message.parts:
-                if not isinstance(part, UserPromptPart) or isinstance(part.content, str):
+                if (not isinstance(part, (UserPromptPart, ToolReturnPart))
+                    or isinstance(part, UserPromptPart) and isinstance(part.content, str)):
                     parts.append(part)
                     continue
                 content = []
-                for item in part.content:
+                for item in model_input_content(part):
                     if isinstance(item, ReferencedContent):
                         data = await self._load(item)
                         if item.representation == "text":
@@ -126,7 +127,9 @@ class ReferencedInputModel(WrapperModel):
                         else:
                             item = BinaryContent(data, media_type=item.media_type, identifier=item.identifier)
                     content.append(item)
-                parts.append(replace(part, content=content))
+                value = (content if isinstance(part, UserPromptPart) or isinstance(part.content, list)
+                         else content[0])
+                parts.append(replace(part, content=value))
             result.append(replace(message, parts=parts))
         self.validate_inputs(result)
         return result

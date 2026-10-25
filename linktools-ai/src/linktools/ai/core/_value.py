@@ -18,9 +18,9 @@ from ._validation import (
 
 
 ExecutionMode: TypeAlias = Literal["run", "plan"]
-ThinkingEffort: TypeAlias = Literal["minimal", "low", "medium", "high", "xhigh"]
-ThinkingValue: TypeAlias = bool | ThinkingEffort
-_THINKING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
+ThinkingEffort: TypeAlias = Literal["minimal", "low", "medium", "high", "xhigh", "max"]
+ThinkingValue: TypeAlias = bool | ThinkingEffort | None
+_THINKING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +53,7 @@ def normalize_execution_mode(value: JsonValue) -> ExecutionMode:
 
 
 def normalize_thinking(value: JsonValue) -> ThinkingValue:
-    if isinstance(value, bool):
+    if value is None or isinstance(value, bool):
         return value
     if isinstance(value, str) and value in _THINKING_EFFORTS:
         return value  # type: ignore[return-value]

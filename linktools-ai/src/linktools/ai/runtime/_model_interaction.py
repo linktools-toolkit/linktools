@@ -396,7 +396,9 @@ def request_envelope(
     value: dict[str, JsonValue] = {
         "version": _ENVELOPE_VERSION,
         "streaming": streaming,
-        "settings": _json_snapshot({} if model_settings is None else model_settings),
+        # Headers can carry credentials; retain request semantics, never header values.
+        "settings": _json_snapshot({key: value for key, value in (model_settings or {}).items()
+                                    if key != "extra_headers"}),
         "parameters": _parameters_snapshot(parameters),
     }
     return value, canonical_json_bytes(value)

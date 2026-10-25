@@ -81,7 +81,7 @@ globalThis.fetch=async(path,options={})=>{
   if(key==='/api/executions')return response({items:[...executions.values()],next_cursor:null,recent_scan:url.searchParams.get('recent')==='true'});
   if(detailResponses.has(key)){const value=detailResponses.get(key),result=typeof value==='function'?value(url):value;return result instanceof Response?result:response(result);}
   if(key==='/api/metrics')return response({items:[]});
-  if(url.pathname==='/api/session'){const id=url.searchParams.get('session_id');if(url.searchParams.get('include_timeline')==='false')return response({session:sessions.get(id),timeline:null,thinking_control:sessions.get(id)?.thinking_control});if(unavailableTimelines.has(id))return response({code:'SESSION_HISTORY_UNAVAILABLE'},503);return response({session:sessions.get(id),timeline:timeline(id),thinking_control:sessions.get(id)?.thinking_control});}
+  if(url.pathname==='/api/session'){const id=url.searchParams.get('session_id');if(url.searchParams.get('include_timeline')==='false')return response({session:sessions.get(id),timeline:null});if(unavailableTimelines.has(id))return response({code:'SESSION_HISTORY_UNAVAILABLE'},503);return response({session:sessions.get(id),timeline:timeline(id)});}
   const execution=key.match(/^\/api\/executions\/([^/]+)$/);
   if(execution)return response(executions.get(execution[1]) || info(execution[1],null));
   if(key.endsWith('/events') && streamBlocks.has(key.split('/')[3]))return new Response(new ReadableStream({start(controller){streamBlocks.get(key.split('/')[3]).controller=controller;},cancel(){}}));
@@ -280,22 +280,19 @@ if(process.argv[3]==='attempts') {
   console.log('Attempt UI isolates active answers, retains failed trace, reconnects and keeps historical selection separate');process.exit(0);
 }
 if(process.argv[3]==='thinking') {
-  for(const [mode,checked,disabled] of [['always_on',true,true],['controllable',true,false],['undeclared',false,true],['unknown',false,false]]) {
-    sessions.get('a').thinking_control={mode,enabled_by_default:true};await refresh();
-    assert.equal(node('thinking').checked,checked);assert.equal(node('thinking').disabled,disabled);
-    assert.match(node('thinking-hint').textContent,mode==='always_on'?/always on/:mode==='controllable'?/checkbox selects the next request/:/Returned reasoning remains visible/);
-  }
-  sessions.get('a').thinking_control={mode:'controllable',enabled_by_default:true};await refresh();
-  assert.equal(node('thinking').checked,false,'model default must not overwrite the current request selection');
-  sessions.get('a').thinking_control={mode:'unknown'};node('thinking').checked=true;await refresh();
-  assert.equal(node('thinking').checked,true);assert.equal(node('thinking').disabled,false);
+  assert.equal(node('thinking').value,'','a new draft inherits model defaults');
+  node('thinking').value='max';await refresh();assert.equal(node('thinking').value,'max');
+  node('thinking').value='false';await refresh();
+  assert.equal(node('thinking').value,'false');assert.equal(node('thinking').disabled,false);
+  node('thinking').value='true';await refresh();
+  assert.equal(node('thinking').value,'true');assert.equal(node('thinking').disabled,false);
   sessions.get('a').status='CLOSED';await refresh();assert.equal(node('thinking').disabled,true);
   sessions.get('a').status='OPEN';await refresh();assert.equal(node('thinking').disabled,false);
   node('prompt').value='Hello';await node('composer').requestSubmit();
   const submitted=calls.findLast(call=>call.method==='POST' && call.key==='/api/sessions/a/messages');
   assert.equal(submitted.body.thinking,true);
   console.log('THINKING_REQUEST='+JSON.stringify(submitted.body));
-  console.log('Thinking controls follow the declared profile without hiding returned content');process.exit(0);
+  console.log('Thinking keeps the request selection without hiding returned content');process.exit(0);
 }
 if(process.argv[3]==='protocols') {
   const path='/api/executions/a-run/models';

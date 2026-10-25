@@ -4,10 +4,8 @@
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
-from typing import Annotated, Literal, TYPE_CHECKING
+from typing import Literal, TYPE_CHECKING
 
-from pydantic import PlainSerializer
 from pydantic_ai.messages import TextContent
 
 from ..asset import AssetVersionRef
@@ -19,7 +17,6 @@ if TYPE_CHECKING:
     from ..core import JsonValue
 
 
-@dataclass(init=False)
 class ReferencedContent(TextContent):
     """Deliver a recoverable Asset without copying its bytes into Runtime storage.
 
@@ -27,6 +24,8 @@ class ReferencedContent(TextContent):
     exact version for each provider request. The host must retain that version;
     a URL alone, or a mutable path resolved to its latest value, is insufficient.
     Runtime-owned codecs preserve this type; SDK JSON is not its durable codec.
+    Descriptor attributes are not dataclass fields: SDK serialization exposes only
+    the inherited text summary, including before provider hydration.
     Binary representation keeps file-input admission and encoding. Explicit text
     representation decodes verified UTF-8 bytes into an ordinary provider string;
     MIME metadata alone never chooses or changes the representation.
@@ -42,7 +41,15 @@ class ReferencedContent(TextContent):
     source: CapabilityRef
     representation: "Literal['binary', 'text']"
     identifier: str | None
-    source_parameters: Annotated[Mapping[str, object], PlainSerializer(dict, return_type=dict[str, object])] = field(repr=False)
+    source_parameters: Mapping[str, object]
+
+    def __eq__(self, other: object) -> bool:
+        if type(other) is not type(self):
+            return NotImplemented
+        return (self.ref, self.media_type, self.source, self.representation,
+                self.identifier, self.source_parameters, self.content, self.metadata) == (
+                    other.ref, other.media_type, other.source, other.representation,
+                    other.identifier, other.source_parameters, other.content, other.metadata)
 
     def __init__(
         self, ref: AssetVersionRef, *, media_type: str, source: CapabilityRef,

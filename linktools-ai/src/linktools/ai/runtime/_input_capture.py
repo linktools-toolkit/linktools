@@ -595,7 +595,7 @@ class RuntimeInputCaptures:
             contract = replace(contract, original_input=original_input)
             if input_mode == "fixed_input":
                 from ._agent_task_input import AgentTaskInput
-                normalized = dict(AgentTaskInput(agent.prompt, planning=False, thinking=False,
+                normalized = dict(AgentTaskInput(agent.prompt, planning=False, thinking=None,
                                                 input_context=agent.input_context))
                 normalized["capture_fixed_input"] = True
             else:
@@ -735,7 +735,7 @@ class RuntimeInputCaptures:
                         else node.original_input if node.original_input is not None else node.input,
                         agent.prompt, agent.task_input.input if agent.task_input is not None else node.input,
                         agent.input_context)
-                    body = dict(AgentTaskInput(agent.prompt, planning=False, thinking=False,
+                    body = dict(AgentTaskInput(agent.prompt, planning=False, thinking=None,
                                               input_context=agent.input_context))
                     body["capture_fixed_input"] = True
                     if input_capture is not None:

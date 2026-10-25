@@ -22,6 +22,15 @@ if TYPE_CHECKING:
 _INPUT_KINDS = frozenset({"binary", "image-url", "audio-url", "document-url", "video-url", "uploaded"})
 
 
+def model_input_content(part: object) -> tuple[object, ...]:
+    """Expose only SDK-supported input positions, not attachments hidden in JSON."""
+    if isinstance(part, UserPromptPart):
+        return () if isinstance(part.content, str) else tuple(part.content)
+    if isinstance(part, ToolReturnPart):
+        return tuple(part.content) if isinstance(part.content, list) else (part.content,)
+    return ()
+
+
 def expand_input_types(values: Sequence[str]) -> tuple[str, ...]:
     """Resolve authoring categories once; captured contracts contain only MIME patterns."""
     if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
@@ -131,8 +140,7 @@ def _input_transport(binding: "ModelBinding", mime_type: str, kind: str) -> str 
     contract = binding.contract
     api = contract.get("api", "openai" if binding.provider == "openai" else None)
     if api == "openai":
-        return openai_input_transport(mime_type, kind, binding.model_identity.removeprefix("openai:"),
-                                      contract.get("profile"))
+        return openai_input_transport(mime_type, kind, binding.model_identity.removeprefix("openai:"))
     if api == "openai-responses":
         if kind in {"uploaded", "image-url"}:
             return "file-block"
@@ -193,4 +201,4 @@ def _mime_type(value: str, *, allow_family: bool = False) -> str:
     return value
 
 
-__all__ = ["validate_model_input", "validate_model_inputs", "validate_provider_inputs"]
+__all__ = ["model_input_content", "validate_model_input", "validate_model_inputs", "validate_provider_inputs"]

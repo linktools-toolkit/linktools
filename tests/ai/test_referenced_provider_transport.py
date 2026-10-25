@@ -83,7 +83,7 @@ async def test_referenced_pdf_reaches_explicit_native_protocol_without_retained_
     binding, clients = model_binding(
         monkeypatch, kind, _MODEL, handler,
         input_types=[] if representation == "text" else ["mime:application/pdf"],
-        profile={"openai_chat_supports_document_input": True} if api == "openai" and representation == "binary" else {},
+        sdk_profile={"openai_chat_supports_document_input": True} if api == "openai" and representation == "binary" else {},
     )
     model = SummaryProviderModel(
         binding.materialize(), context=context,
@@ -177,7 +177,7 @@ async def test_native_error_echoes_of_referenced_bytes_are_omitted_from_safe_dia
 
     binding, clients = model_binding(
         monkeypatch, kind, _MODEL, handler, input_types=["mime:application/pdf"],
-        profile={"openai_chat_supports_document_input": True} if api == "openai" else {},
+        sdk_profile={"openai_chat_supports_document_input": True} if api == "openai" else {},
     )
     model = SummaryProviderModel(
         binding.materialize(), context=context,

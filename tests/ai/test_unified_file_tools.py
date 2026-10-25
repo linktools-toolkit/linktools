@@ -54,16 +54,17 @@ async def test_unified_read_mixed_batch_preserves_input_order_and_duplicate_occu
         tools = _tools(tmp_path, session)
         result = await tools["read_file"].function(["image.png", "notes.txt", "image.png"])
         assert isinstance(result, ToolReturn)
-        assert [item["input_index"] for item in result.return_value["files"]] == [0, 2]
-        assert [item["input_index"] for item in result.return_value["texts"]] == [1]
-        assert "alpha" in result.return_value["texts"][0]["content"]
-        assert result.return_value["texts"][0]["mime_type"] == "text/plain"
-        assert "media_type" not in result.return_value["texts"][0]
+        assert [item["input_index"] for item in result.return_value[0]["files"]] == [0, 2]
+        assert [item["input_index"] for item in result.return_value[0]["texts"]] == [1]
+        assert "alpha" in result.return_value[0]["texts"][0]["content"]
+        assert result.return_value[0]["texts"][0]["mime_type"] == "text/plain"
+        assert "media_type" not in result.return_value[0]["texts"][0]
         assert all(item["mime_type"] == "image/png" and "media_type" not in item
-                   for item in result.return_value["files"])
-        assert "hash" not in result.return_value["texts"][0]
-        assert len(result.content) == 2
-        assert all(isinstance(item, BinaryContent) and item.data == _PNG for item in result.content)
+                   for item in result.return_value[0]["files"])
+        assert "hash" not in result.return_value[0]["texts"][0]
+        assert result.content is None
+        assert len(result.return_value[1:]) == 2
+        assert all(isinstance(item, BinaryContent) and item.data == _PNG for item in result.return_value[1:])
     finally:
         await session.close()
 
@@ -94,9 +95,10 @@ async def test_unified_read_explicit_text_attachment_preserves_mime_type(tmp_pat
     session = await LocalSandbox().open(root=tmp_path)
     try:
         result = await _tools(tmp_path, session)["read_file"].function("notes.txt", as_file=True)
-        assert result.return_value["texts"] == []
-        assert result.return_value["files"][0]["mime_type"] == "text/plain"
-        assert result.content[0].data == b"whole text"
+        assert result.return_value[0]["texts"] == []
+        assert result.return_value[0]["files"][0]["mime_type"] == "text/plain"
+        assert result.content is None
+        assert result.return_value[1].data == b"whole text"
     finally:
         await session.close()
 
@@ -193,9 +195,9 @@ def test_unified_file_behavior_revisions_do_not_bump_unchanged_tools(tmp_path: P
     contributions = workspace_features("workspace", workspace=Workspace.load(tmp_path))._contributions
     revisions = {item.id: item.revision for item in contributions}
     assert {name: revisions[name] for name in ("read_file", "write_file", "search_files")} == {
-        "read_file": 1, "write_file": 1, "search_files": 1,
+        "read_file": 2, "write_file": 1, "search_files": 1,
     }
-    assert revisions["attach_files"] == 1
+    assert revisions["attach_files"] == 2
     assert revisions["edit_file"] == revisions["list_files"] == 1
 
 
@@ -315,7 +317,7 @@ async def test_generic_text_detection_keeps_structured_text_attachment_hint(tmp_
     binding = create_model(protocol='openai', model="known-text", input_types=(f"mime:{mime}",))
     session = await LocalSandbox().open(root=tmp_path)
     try:
-        value = (await _tools(tmp_path, session, binding=binding)["read_file"].function(name, as_file=True)).return_value
+        value = (await _tools(tmp_path, session, binding=binding)["read_file"].function(name, as_file=True)).return_value[0]
         assert value["files"][0]["mime_type"] == mime
         assert "media_type" not in value["files"][0]
         assert value["files"][0]["type_source"] == "extension"

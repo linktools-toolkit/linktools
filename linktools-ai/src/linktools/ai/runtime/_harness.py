@@ -11,7 +11,7 @@ from typing import Any, cast, TYPE_CHECKING
 
 from linktools.core import environ
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, SystemPromptPart, UserPromptPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, SystemPromptPart, TextContent, ToolReturnPart, UserPromptPart
 from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters, StreamedResponse
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.settings import ModelSettings
@@ -25,9 +25,10 @@ from pydantic_ai_harness.planning import (
 
 from ..capability import AgentContext, ReferencedInputsCapability, ToolCallRetry
 from ..errors import AIError, ErrorCode
-from ..model import ModelBinding, ModelClientRequestRecorder, ReferencedContent, ReferencedInputModel
-from ..spec import CapabilityRef, ThinkingValue
+from ..model import ModelBinding, ModelClientRequestRecorder, ReferencedContent, ReferencedInputModel, model_input_content
+from ..spec import CapabilityRef
 from ._plan import PlanItem, RuntimePlanStore
+from ._user_content_codec import RetiredReferencedContent
 from ._message import project_provider_messages, without_history_system_prompts
 
 if TYPE_CHECKING:
@@ -72,42 +73,36 @@ class SummaryProviderModel(ReferencedInputModel):
             if any(
                 item.source not in available
                 for message in value if isinstance(message, ModelRequest)
-                for part in message.parts if isinstance(part, UserPromptPart) and not isinstance(part.content, str)
-                for item in part.content if isinstance(item, ReferencedContent)
+                for part in message.parts
+                for item in model_input_content(part) if isinstance(item, ReferencedContent)
             ):
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
                               safe_details={"reason": "referenced_input_source_mismatch"})
         super().validate_inputs(value)
 
     def project_messages(self, messages: list[ModelMessage]) -> list[ModelMessage]:
-        return project_provider_messages(messages)
-
-
-def validate_thinking_model(model: Model, thinking: ThinkingValue) -> None:
-    profile = model.profile
-    supports = bool(profile.get("supports_thinking", False))
-    always = bool(profile.get("thinking_always_enabled", False))
-    if thinking is False:
-        if always:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
-                          safe_details={"field": "thinking", "reason": "model_always_enabled"})
-        return
-    if not (supports or always):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
-                      safe_details={"field": "thinking", "reason": "model_not_supported"})
-
-
-class CandidateProviderModel(SummaryProviderModel):
-    """Validate the candidate chosen by SDK dispatch before provider IO."""
-
-    def prepare_request(
-        self, model_settings: ModelSettings | None,
-        model_request_parameters: ModelRequestParameters,
-    ) -> tuple[ModelSettings | None, ModelRequestParameters]:
-        thinking = (model_settings or {}).get("thinking", model_request_parameters.thinking)
-        if thinking is not None:
-            validate_thinking_model(self.wrapped, thinking)
-        return self.wrapped.prepare_request(model_settings, model_request_parameters)
+        projected = project_provider_messages(messages)
+        result = []
+        for message in projected:
+            if not isinstance(message, ModelRequest):
+                result.append(message)
+                continue
+            parts = []
+            for part in message.parts:
+                if not isinstance(part, ToolReturnPart):
+                    parts.append(part)
+                    continue
+                content = [
+                    item.content if (
+                        isinstance(item, RetiredReferencedContent)
+                        or isinstance(item, TextContent) and isinstance(item.metadata, dict)
+                        and item.metadata.get("source") == "linktools.attachment"
+                    ) else item
+                    for item in model_input_content(part)
+                ]
+                parts.append(replace(part, content=content if isinstance(part.content, list) else content[0]))
+            result.append(replace(message, parts=parts))
+        return result
 
 
 def prepare_input_retention(messages: list[ModelMessage]) -> None:
@@ -323,9 +318,7 @@ def _plan_item_id(index: int) -> str:
 __all__ = [
     "ReinjectRuntimeSystemPrompt",
     "SummaryProviderModel",
-    "CandidateProviderModel",
     "FallbackProviderModel",
     "prepare_input_retention",
-    "validate_thinking_model",
     "HarnessPlanStoreAdapter",
 ]

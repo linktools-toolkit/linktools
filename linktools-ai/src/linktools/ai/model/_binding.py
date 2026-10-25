@@ -8,9 +8,8 @@ import random
 from collections.abc import AsyncGenerator, Collection, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import InitVar, dataclass, field
-from typing import ClassVar
+from typing import ClassVar, cast
 
-from pydantic import TypeAdapter
 from urllib.parse import urlsplit, urlunsplit
 
 from linktools.core import environ
@@ -19,9 +18,8 @@ from pydantic_ai import exceptions as sdk_errors
 from pydantic_ai.models import Model, ModelMessage, ModelRequestContext, ModelRequestParameters, ModelResponse, ModelSettings, StreamedResponse, RunContext as PydanticRunContext
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.usage import RequestUsage
-from pydantic_ai.profiles import DEFAULT_PROFILE, merge_profile
 
-from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes, normalize_json_value
+from ..core import ImmutableJsonMapping, JsonValue
 from ..errors import AIError, ErrorCode
 from ._contract import ModelBinding
 from ._errors import _is_context_window_error, _is_quota_error
@@ -31,12 +29,13 @@ from ._client_request import ModelClientRequestRecorder
 
 _logger = environ.get_logger("ai.model.binding")
 
+# SDK operational controls are not durable model request semantics.
+_TRANSPORT_SETTINGS = frozenset({"timeout", "request_timeout", "max_retries", "extra_headers"})
+
 @dataclass(frozen=True, slots=True)
 class _ProviderModelBinding:
     api: ClassVar[str] = "openai"
     _provider: ClassVar[str] = "openai"
-    _profile_type: ClassVar[type]
-    _provider_type: ClassVar[type]
     model: str
     base_url: "str | None" = None
     api_key: "str | None" = field(default=None, repr=False, compare=False)
@@ -47,23 +46,27 @@ class _ProviderModelBinding:
     retry_backoff_factor: "int | float" = 2.0
     max_tokens: "int | None" = None
 
-    context_window: InitVar[int | None] = None
-    profile: InitVar[Mapping[str, JsonValue] | None] = None
-    _profile_overrides: ImmutableJsonMapping = field(init=False)
+    context_window: int | None = None
+    model_settings: Mapping[str, JsonValue] = field(default_factory=dict, repr=False)
     input_types: InitVar[Sequence[str]] = ()
     _input_mime_types: tuple[str, ...] = field(init=False)
 
-    def __post_init__(self, context_window: int | None, profile: Mapping[str, JsonValue] | None,
-                      input_types: Sequence[str]) -> None:
-        if profile is not None and not isinstance(profile, Mapping):
-            raise TypeError("profile must be a JSON mapping")
-        declared = dict(profile) if profile is not None else {}
-        if context_window is not None:
-            _validate_positive_integer("context_window", context_window)
-            declared["context_window"] = context_window
-        declared = normalize_json_value(declared)
-        object.__setattr__(self, "_profile_overrides", ImmutableJsonMapping(declared))
-        self._sdk_profile()
+    def __post_init__(self, input_types: Sequence[str]) -> None:
+        _validate_positive_integer("context_window", self.context_window)
+        if not isinstance(self.model_settings, Mapping):
+            raise TypeError("model_settings must be a JSON mapping")
+        settings: dict[str, JsonValue] = {}
+        if self.max_tokens is not None:
+            settings["max_tokens"] = self.max_tokens
+        if self.timeout is not None:
+            settings["timeout"] = self.timeout
+        settings.update(self.model_settings)
+        object.__setattr__(self, "model_settings", ImmutableJsonMapping(settings))
+        object.__setattr__(self, "max_tokens", settings.get("max_tokens"))
+        object.__setattr__(self, "timeout", settings.get("timeout"))
+        if settings.get("max_retries") is not None:
+            _validate_non_negative_integer("model_settings.max_retries", settings["max_retries"])
+        _validate_positive_number("model_settings.request_timeout", settings.get("request_timeout"))
         model = self.model.strip().removeprefix(f"{self.provider}:")
         if not model:
             raise ValueError("model binding is incomplete")
@@ -89,9 +92,8 @@ class _ProviderModelBinding:
 
     @property
     def contract(self) -> "dict[str, JsonValue]":
-        settings: dict[str, JsonValue] = {}
-        if self.max_tokens is not None:
-            settings["max_tokens"] = self.max_tokens
+        settings = {key: value for key, value in self.model_settings.items()
+                    if key not in _TRANSPORT_SETTINGS}
         result: dict[str, JsonValue] = {
             "provider": self.provider,
             "model_identity": self.model_identity,
@@ -100,25 +102,13 @@ class _ProviderModelBinding:
         result["input_mime_types"] = list(self._input_mime_types)
         if self.api != "openai":
             result["api"] = self.api
-        if self._profile_overrides:
-            result["profile"] = dict(self._profile_overrides)
+        if self.context_window is not None:
+            result["context_window"] = self.context_window
         return result
-
-    def thinking_control(self) -> Mapping[str, JsonValue]:
-        profile = merge_profile(DEFAULT_PROFILE, self._provider_type.model_profile(self.model) or {},
-                                self._sdk_profile() or {})
-        mode = "always_on" if profile.get("thinking_always_enabled") else (
-            "controllable" if profile.get("supports_thinking") else "undeclared"
-        )
-        return {"mode": mode, "enabled_by_default": bool(profile.get("thinking_enabled_by_default"))}
 
     def materialize(self) -> Model:
         try:
-            settings: ModelSettings = {}
-            if self.timeout is not None:
-                settings["timeout"] = self.timeout
-            if self.max_tokens is not None:
-                settings["max_tokens"] = self.max_tokens
+            settings = cast(ModelSettings, dict(self.model_settings))
 
             model = self._build_model(settings)
         except UserError as error:
@@ -146,14 +136,7 @@ class _ProviderModelBinding:
 
 
     def _sdk_profile(self) -> dict[str, object] | None:
-        if not self._profile_overrides:
-            return None
-        unknown = set(self._profile_overrides) - set(self._profile_type.__annotations__)
-        if unknown:
-            raise ValueError("profile contains unknown SDK keys: " + ", ".join(sorted(unknown)))
-        return TypeAdapter(self._profile_type).validate_json(
-            canonical_json_bytes(self._profile_overrides), strict=True,
-        )
+        return {"context_window": self.context_window} if self.context_window is not None else None
 
     def _build_model(self, settings: ModelSettings) -> Model:
         raise NotImplementedError
@@ -275,6 +258,11 @@ class _RetryingModel(WrapperModel):
             validate_provider_inputs(self._input_binding, request_context.messages)
         return await self.wrapped.compact_messages(request_context, instructions=instructions)
 
+    def _request_retries(self, settings: ModelSettings | None) -> int:
+        # A per-request SDK retry override owns retries; never multiply it by this loop.
+        sdk_retries = (settings or {}).get("max_retries", (self.settings or {}).get("max_retries"))
+        return 0 if sdk_retries is not None else self._max_retries
+
     async def _wait_for_retry(
         self, error: ModelAPIError, backoff: float,
     ) -> float:
@@ -306,6 +294,7 @@ class _RetryingModel(WrapperModel):
         if self._input_binding is not None:
             validate_provider_inputs(self._input_binding, messages)
         attempt = 0
+        max_retries = self._request_retries(model_settings)
         backoff = self._retry_delay
         while True:
             try:
@@ -315,7 +304,7 @@ class _RetryingModel(WrapperModel):
                     model_request_parameters,
                 )
             except ModelAPIError as error:
-                if attempt >= self._max_retries or not _retryable_model_error(error):
+                if attempt >= max_retries or not _retryable_model_error(error):
                     raise
                 attempt += 1
                 _logger.warning(
@@ -337,7 +326,7 @@ class _RetryingModel(WrapperModel):
             validate_provider_inputs(self._input_binding, messages)
         response = _RetryingStreamedResponse(
             self.wrapped, messages, model_settings, model_request_parameters, run_context,
-            max_retries=self._max_retries, initial_backoff=self._retry_delay,
+            max_retries=self._request_retries(model_settings), initial_backoff=self._retry_delay,
             retryable=lambda error: _retryable_model_error(error, allow_stream_retry=True),
             wait=self._wait_for_retry, recorder=ModelClientRequestRecorder.current(),
         )
