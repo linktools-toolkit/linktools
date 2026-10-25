@@ -565,7 +565,7 @@ class ModelClientRequestRef:
 
 @dataclass(frozen=True, slots=True)
 class StreamAttemptRecord:
-    """One completed provider stream; several successful segments may contribute.
+    """One completed SDK stream invocation; several successful segments may contribute.
 
     The logical interaction owns its canonical response; failed partials are
     independent trace evidence rather than conversation history.

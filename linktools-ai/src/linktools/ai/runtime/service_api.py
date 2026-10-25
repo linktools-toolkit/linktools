@@ -244,9 +244,10 @@ class ExecutionHistoryItem:
 
 @dataclass(frozen=True, slots=True)
 class ModelStreamAttemptItem:
-    """One-based provider stream within a logical model request.
+    """One observed SDK stream invocation within a logical model request.
 
-    SUCCEEDED means this transport segment completed, not that it alone owns
+    The sequence is one-based; native fallback can dispatch several providers
+    within one invocation. SUCCEEDED means this segment completed, not that it alone owns
     the logical response. Native continuation can complete several segments.
     Client request bounds select a zero-based, half-open range of the original
     client request array, not stream attempt identities. Only failed/cancelled

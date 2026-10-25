@@ -396,11 +396,20 @@ Supported SDK phase timeout and connection errors retain timeout/unavailable
 classification rather than becoming generic API failures. No message-text
 heuristics classify quota or infer the configured protocol.
 
-A stream is never replayed once entered, including when the SDK reports an
-`in_stream` failure before yielding its response object. These transport retries
-are distinct from Agent output/tool correction retries, task retries and host
-rate-limit admission. A logical request hook still runs once around potentially
-multiple HTTP attempts; it is not a physical-attempt quota hook.
+Before the first event reaches the consumer, an eligible transport failure can
+retry within the same policy. Once a partial preview has been exposed, retry
+requires a consumer that acknowledges replacement of that failed preview before
+new deltas arrive. Runtime's bundled Web and CLI consumers implement this boundary;
+a consumer without replacement support does not silently opt in. Native-tool or
+suspended continuation state prevents replay, even before the first event, because
+it may represent provider-owned work. Cancellation and consumer exit do not start
+another attempt.
+
+These transport retries are distinct from Agent output/tool correction retries,
+task retries and host rate-limit admission. A logical request hook still runs once
+around potentially multiple observed SDK stream invocations and HTTP dispatches;
+it is not a physical-attempt quota hook. Their sequence numbers are separate:
+native fallback may perform several provider dispatches within one SDK invocation.
 
 ## Trace and integrity boundaries
 
@@ -422,8 +431,9 @@ Passive capture observes the same stream consumed by the SDK and preserves nativ
 bytes, attempts and errors. Chat `[DONE]`, Responses completed/failed/incomplete/error,
 and Anthropic message_stop/error are protocol terminals. A terminal capture does not
 mean a successful model response. Cancellation or disconnection retains only the
-observed partial body; consumed streams are not replayed automatically. SDK retry is
-disabled in favor of the existing bounded model retry wrapper.
+observed partial body. Passive capture never initiates retries; replacement follows
+the bounded model policy and consumer contract above. Native provider SDK retries
+remain disabled.
 
 Passive timing and byte/chunk counts remain available when body capture is off;
 that mode does not buffer or parse request/response bodies. Per-attempt
