@@ -38,6 +38,14 @@ _SDK_MODEL_ATTEMPT = getattr(sdk_messages, "ModelRequestAttempt", None)
 T = TypeVar("T")
 
 
+class _StreamContextExit(BaseException):
+    """Internal wake-up for a suspended source, never a provider exception."""
+
+    def __init__(self, error: BaseException | None) -> None:
+        super().__init__()
+        self.error = error
+
+
 class _PullDeadline(Protocol):
     def iterate(self, iterator: AsyncIterator[T]) -> AsyncIterator[T]: ...
 
@@ -199,6 +207,8 @@ class _RetryingStreamedResponse(_PrimedStreamedResponse):
         self._attempt_committed = False
         self._cancel_requested = False
         self._consumer_error: BaseException | None = None
+        self._context_exiting = False
+        self._consumer_error_suppressed = False
         self._prior_usage: list[RequestUsage] = []
         self._prior_attempts: list[object] = []
         self._fallback_attempts: list[object] = []
@@ -246,9 +256,22 @@ class _RetryingStreamedResponse(_PrimedStreamedResponse):
             self._attempt_committed = True
             yield event
 
-    async def aclose(self, consumer_error: BaseException | None = None) -> None:
+    async def aclose(self, consumer_error: BaseException | None = None) -> bool:
+        if self._context_exiting:
+            return False
+        self._context_exiting = True
         self._consumer_error = consumer_error
-        await self._source_iterator.aclose()
+        try:
+            await self._source_iterator.athrow(_StreamContextExit(consumer_error))
+        except StopAsyncIteration:
+            pass
+        except BaseException as close_error:
+            if consumer_error is None or self._consumer_error_suppressed:
+                raise
+            if close_error is not consumer_error:
+                raise consumer_error from close_error
+            return False
+        return self._consumer_error_suppressed
 
     async def cancel(self) -> None:
         self._cancel_requested = True
@@ -340,12 +363,22 @@ class _RetryingStreamedResponse(_PrimedStreamedResponse):
                                 break
                             if self._prior_usage:
                                 self._check_known_limits(_known_usage(current.get()))
-                            yield event
+                            try:
+                                yield event
+                            except _StreamContextExit as context_exit:
+                                exit_error = context_exit.error
+                            else:
+                                continue
+                            # Leave the control handler before raising, so its signal
+                            # never becomes the caller's exception context.
+                            if exit_error is not None:
+                                raise exit_error
+                            break
                     except BaseException as error:
                         operation_error = error
                         if self._active_http_index is None and self._http_position() > start:
                             self._active_http_index = self._http_position() - 1
-                        if not isinstance(error, GeneratorExit):
+                        if not self._context_exiting and not isinstance(error, GeneratorExit):
                             self._observe_sdk("entry_error" if current is None else "iteration_error", error)
                         raise
             except BaseException as error:
@@ -358,10 +391,13 @@ class _RetryingStreamedResponse(_PrimedStreamedResponse):
                 retry = (
                     error is failure and isinstance(error, ModelAPIError)
                     and not isinstance(operation_error, GeneratorExit)
-                    and not self._cancel_requested and not exhausted
+                    and not self._context_exiting and not self._cancel_requested and not exhausted
                     and retry_index < self._max_retries and self._retryable(error)
                     and self._can_replace(partial)
                 )
+            if (self._context_exiting and self._consumer_error is not None
+                    and operation_error is self._consumer_error and failure is None):
+                self._consumer_error_suppressed = True
             partial = None if current is None else deepcopy(current.get())
             usage = _known_usage(partial)
             if retry:
@@ -370,7 +406,8 @@ class _RetryingStreamedResponse(_PrimedStreamedResponse):
                 except Exception as limit_error:
                     limit_error.__cause__ = failure
                     failure, retry = limit_error, False
-            status = ("SUCCEEDED" if failure is None else
+            status = ("CANCELLED" if failure is None and self._context_exiting and not exhausted else
+                      "SUCCEEDED" if failure is None else
                       "CANCELLED" if isinstance(failure, (asyncio.CancelledError, GeneratorExit)) else "FAILED")
             await self._observe(ModelStreamAttempt(
                 seq, status, started_at, datetime.now(timezone.utc), monotonic_ns() - started_ns,

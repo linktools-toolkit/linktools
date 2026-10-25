@@ -319,15 +319,14 @@ class _RetryingModel(WrapperModel):
             retryable=lambda error: _retryable_model_error(error, allow_stream_retry=True),
             wait=self._wait_for_retry, recorder=ModelClientRequestRecorder.current(),
         )
-        consumer_error: BaseException | None = None
         try:
             await response.prime()
             yield response
         except BaseException as error:
-            consumer_error = error
-            raise
-        finally:
-            await response.aclose(consumer_error)
+            if not await response.aclose(error):
+                raise
+        else:
+            await response.aclose()
 
 
 def _retryable_model_error(error: ModelAPIError, *, allow_stream_retry: bool = False) -> bool:
