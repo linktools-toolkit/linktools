@@ -177,11 +177,9 @@ class _LocalSandboxSession:
         self._root = root
         self._workspace = workspace if workspace is not None else Workspace(root, {})
         self._resources = {
-            resource.id: resource.source.resolve()
+            resource.id: (resource.source.resolve() if resource.source is not None else None, resource)
             for resource in resources
-            if resource.source is not None
         }
-        self._resource_ids = frozenset(resource.id for resource in resources)
         self._lock_root = lock_root or self._workspace.locks_root
         self._read_policy = read_policy
         self._allow_host_stdio_with_read_policy = allow_host_stdio_with_read_policy
@@ -203,18 +201,12 @@ class _LocalSandboxSession:
         self._ensure_open_sync()
         if not isinstance(resource_id, str):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if resource_id not in self._resource_ids:
+        if resource_id not in self._resources:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        source = self._resources.get(resource_id)
+        source, _resource = self._resources[resource_id]
         if source is None:
             return None
-        if (
-            self._read_policy is not None
-            and not self._read_policy.may_descend(
-                ".",
-                resource_key=resource_id,
-            )
-        ):
+        if not self._visible_read_path(".", resource_key=resource_id, directory=True):
             return None
         return str(source)
 
@@ -1261,9 +1253,22 @@ class _LocalSandboxSession:
         resource_key: str | None = None,
         directory: bool,
     ) -> bool:
-        if self._read_policy is None:
-            return True
         try:
+            resource = self._resources[resource_key][1] if resource_key is not None else None
+            if resource is not None and resource.files is not None:
+                if directory:
+                    prefix = "" if path == "." else path + "/"
+                    return any(
+                        member.startswith(prefix)
+                        and (self._read_policy is None or self._read_policy.allows(
+                            member, resource_key=resource_key,
+                        ))
+                        for member in resource.files
+                    )
+                if path not in resource.files:
+                    return False
+            if self._read_policy is None:
+                return True
             return (
                 self._read_policy.may_descend(path, resource_key=resource_key)
                 if directory
@@ -1289,8 +1294,8 @@ class _LocalSandboxSession:
             candidate = Path(path)
             resource_matches = tuple(
                 (key, source)
-                for key, source in self._resources.items()
-                if _inside_or_equal(source, candidate)
+                for key, (source, _resource) in self._resources.items()
+                if source is not None and _inside_or_equal(source, candidate)
             )
             if resource_matches:
                 resource_key, base = max(

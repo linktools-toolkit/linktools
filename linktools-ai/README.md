@@ -950,6 +950,14 @@ group = RuntimeFeatures(
 group.capability(WorkspaceCapability(workspace))
 ```
 
+When a `SandboxResource` declares `files`, file operations expose only those
+members permitted by the read policy, and directory listings expose only their
+permitted ancestors. A simultaneous `source` locates that set; it does not grant
+the neighboring files. A source-only resource still declares the directory.
+This constrains Sandbox file APIs, not trusted Local host processes. Applications
+needing additional resource files must declare them explicitly. Independent
+Workspace-relative grants retain their own policy.
+
 With a read-only policy, Bubblewrap mounts the Workspace read-only and never creates hidden-path mount points there. Provision its hidden directories (including `.linktools`) before opening the sandbox; a missing or unsafe mount point causes startup to fail with `SANDBOX_UNAVAILABLE`.
 
 ## 4. Agent selection and capability policy

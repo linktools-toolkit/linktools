@@ -51,7 +51,11 @@ class SandboxOperationRejected(AIError):
 
 @dataclass(frozen=True, slots=True)
 class SandboxResource:
-    """One read-only directory or set of existing files exposed to a session."""
+    """One read-only directory or set of existing files exposed to a session.
+
+    When files is supplied, source locates that set; it does not grant access
+    to other files in the directory. File access remains subject to read policy.
+    """
 
     id: str
     source: Path | None = None

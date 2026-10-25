@@ -36,6 +36,7 @@ from ._runtime_test_helpers import RuntimeUsageModels
 class _RecordingLocalSandbox:
     def __init__(self) -> None:
         self.opened: list[tuple[Path, tuple[SandboxResource, ...]]] = []
+        self.sessions: list[SandboxSession] = []
 
     async def open(
         self,
@@ -44,7 +45,9 @@ class _RecordingLocalSandbox:
         resources: tuple[SandboxResource, ...] = (),
     ) -> SandboxSession:
         self.opened.append((root, resources))
-        return await LocalSandbox().open(root=root, resources=resources)
+        session = await LocalSandbox().open(root=root, resources=resources)
+        self.sessions.append(session)
+        return session
 
 
 @pytest.mark.asyncio
@@ -184,6 +187,9 @@ async def test_sandbox_without_workspace_exposes_local_skill_resources(
         assert len(resources) == 1
         assert resources[0].files is not None
         assert resources[0].files["run.sh"] == script.resolve()
+        with pytest.raises(AIError) as closed:
+            await sandbox.sessions[0].read_text("anything.txt")
+        assert closed.value.code is ErrorCode.SANDBOX_SESSION_CLOSED
     finally:
         await store.close()
 
