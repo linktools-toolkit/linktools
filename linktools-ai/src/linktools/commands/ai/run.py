@@ -317,15 +317,14 @@ class _AttemptOutput:
         if not isinstance(index, int) or isinstance(index, bool) or index < 0 or not isinstance(start, bool):
             return
         if start:
-            previous = self.visible_part(request, index)
-            if previous is not None and any(value.text_chars for value in request.attempts.values()):
+            indices = {position for value in request.attempts.values() for position in value.parts}
+            visible = {position: part for position in indices if (part := self.visible_part(request, position)) is not None}
+            if any(position >= index for position in visible):
                 request.framed = True
-            if previous is not None and (previous.chars or request.framed):
-                label = f"run {key[1]} request {key[2]} part {index} UPDATED: prior {previous.kind} for this part is superseded; replacement follows"
-                if previous.kind == "text":
+                label = f"run {key[1]} request {key[2]} part {index} UPDATED: earlier preview may be superseded; committed response readback required"
+                if any(part.kind == "text" and part.chars for part in visible.values()):
                     self.boundary(label)
-                    request.framed = True
-                else:
+                elif any(part.chars for part in visible.values()):
                     _emit_event(self.event_console, "[thinking updated]", label, "cyan")
             attempt.parts[index] = _PartDisplay(kind, start=True)
         part = attempt.parts.setdefault(index, _PartDisplay(kind))

@@ -311,14 +311,18 @@ async def test_cli_part_update_preserves_other_successful_parts(monkeypatch: pyt
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("terminal", [False, True])
-@pytest.mark.parametrize(("readback", "head"), [("available", "old-head "), ("missing", "old-head "), ("error", "old-head "), ("other-request", "old-head "), ("available", "")])
-async def test_cli_final_readback_supersedes_all_earlier_preview_parts(monkeypatch: pytest.MonkeyPatch, terminal: bool, readback: str, head: str) -> None:
+@pytest.mark.parametrize(("readback", "head", "replacement"), [
+    ("available", "old-head ", "new-only"), ("missing", "old-head ", "new-only"),
+    ("error", "old-head ", "new-only"), ("other-request", "old-head ", "new-only"),
+    ("available", "", "new-only"), ("available", None, "new-only"), ("available", None, ""),
+])
+async def test_cli_final_readback_supersedes_all_earlier_preview_parts(monkeypatch: pytest.MonkeyPatch, terminal: bool, readback: str, head: str | None, replacement: str) -> None:
     stdout, stderr = output(monkeypatch, terminal)
-    items = [event("ASSISTANT_TEXT_DELTA", head, part_index=0, part_start=True),
-             event("ASSISTANT_TEXT_DELTA", "old-tail", part_index=1, part_start=True),
+    items = [event("ASSISTANT_TEXT_DELTA", head, part_index=0, part_start=True)] if head is not None else []
+    items += [event("ASSISTANT_TEXT_DELTA", "old-tail", part_index=1, part_start=True),
              event("MODEL_ATTEMPT_FINISHED", status="SUCCEEDED"),
              event("MODEL_ATTEMPT_STARTED", attempt=2, replaces_stream_attempt_seq=None),
-             event("ASSISTANT_TEXT_DELTA", "new-only", attempt=2, part_index=0, part_start=True),
+             event("ASSISTANT_TEXT_DELTA", replacement, attempt=2, part_index=0, part_start=True),
              event("MODEL_ATTEMPT_FINISHED", attempt=2, status="SUCCEEDED"),
              event("MODEL_REQUEST_FINISHED", attempt=2, status="SUCCEEDED"),
              event("EXECUTION_SUCCEEDED")]
@@ -328,18 +332,20 @@ async def test_cli_final_readback_supersedes_all_earlier_preview_parts(monkeypat
             assert kwargs == {"include_content": True, "agent_run_seq": 1, "model_request_seq": 1, "limit": 1}
             if readback == "error":
                 raise RuntimeError("synthetic reader failure")
-            return SimpleNamespace(items=[model_item("new-only", 2 if readback == "other-request" else 1)] if readback != "missing" else [])
+            return SimpleNamespace(items=[model_item(replacement, 2 if readback == "other-request" else 1)] if readback != "missing" else [])
 
     assert await run._stream_result(ReadbackExecution(items)) == 0
     value = plain(stdout.getvalue())
-    assert value.startswith(head + "old-tail\n")
+    assert value.startswith((head or "") + "old-tail\n")
     if head:
         assert "part 0 UPDATED" in value
+    if head is None:
+        assert "part 0 UPDATED" in value and "earlier preview may be superseded" in value
     assert "SUCCEEDED" in plain(stderr.getvalue()), "readback failure cannot change the execution verdict"
     if readback == "available":
         final = value.split("CANONICAL TEXT RESPONSE:", 1)[1]
         assert "all earlier preview text for this request is superseded" in final
-        assert "\nnew-only\n" in final and "old-tail" not in final and "old-head" not in final
+        assert f"\n{replacement}\n" in final and "old-tail" not in final and "old-head" not in final
         assert "COMPLETED: committed SDK text above" in final
     else:
         assert "FINAL UNAVAILABLE" in value and "COMPLETED" not in value
