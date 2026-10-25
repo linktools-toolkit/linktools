@@ -550,7 +550,7 @@ def _continuation_retry_features(same_id: bool, *, retry_delay: float = 5, fail_
     return features, model
 
 
-async def runtime_continuation_retry_events(same_id: bool = False):
+async def runtime_continuation_retry_events(same_id: bool = False, *, include_models: bool = False):
     """Real SDK/Runtime watch events for consumer contract replay, no network."""
     features, _ = _continuation_retry_features(same_id, retry_delay=0)
     async with Runtime.open("continuation-retry", storage=RuntimeStorage.in_memory(), features=features) as runtime:
@@ -558,7 +558,10 @@ async def runtime_continuation_retry_events(same_id: bool = False):
         observed = [item async for item in execution.watch(include_content=True)]
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status == "SUCCEEDED", result.error_code
-        return tuple(item.event for item in observed if hasattr(item, "event"))
+        events = tuple(item.event for item in observed if hasattr(item, "event"))
+        if include_models:
+            return events, (await execution.model_interactions(include_content=True)).items
+        return events
 
 
 @pytest.mark.asyncio
@@ -750,7 +753,7 @@ async def test_parallel_runs_and_consecutive_requests_keep_committed_message_pos
     assert sorted(used) == ["a", "b"] and calls == {"a": 3, "b": 3}
 
 
-async def runtime_empty_start_events():
+async def runtime_empty_start_events(*, include_models: bool = False):
     """Public SDK empty PartStart survives the actual Runtime watch pipeline."""
     class EmptyStart(CompletedStreamedResponse):
         async def _get_event_iterator(self):
@@ -765,11 +768,16 @@ async def runtime_empty_start_events():
     features = RuntimeFeatures("empty-start")
     features.model("default", _FixtureBinding(_RetryingModel(Streaming(), 1, 0)))
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
+    if include_models:
+        features.capability(TraceCapability(), scope="runtime")
     async with Runtime.open("empty-start", storage=RuntimeStorage.in_memory(), features=features) as runtime:
         execution = await runtime.agents.get().start("synthetic")
         observed = [item async for item in execution.watch(include_content=True)]
         assert (await execution.wait(timeout_seconds=10)).result.status == "SUCCEEDED"
-        return tuple(item.event for item in observed if hasattr(item, "event"))
+        events = tuple(item.event for item in observed if hasattr(item, "event"))
+        if include_models:
+            return events, (await execution.model_interactions(include_content=True)).items
+        return events
 
 
 @pytest.mark.asyncio
@@ -820,3 +828,13 @@ async def test_failed_continuation_retains_prior_success_only_as_interrupted_tra
         history = (await execution.transcript(include_content=True)).items
         assert "segment-one" not in str(history) and "discarded" not in str(history)
     assert model.calls == 3 and waits == [5]
+
+
+@pytest.mark.asyncio
+async def test_watch_helper_models_are_actual_canonical_query_results():
+    for helper in (runtime_continuation_retry_events, runtime_empty_start_events):
+        events, models = await helper(include_models=True)
+        assert events and len(models) == 1 and models[0].status == "SUCCEEDED"
+        assert models[0].response is not None
+        assert "discarded" not in str(models[0].response)
+        assert models[0].model_request_seq == 1 and models[0].agent_run_seq == 1
