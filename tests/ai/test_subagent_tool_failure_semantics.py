@@ -429,3 +429,41 @@ async def test_subagent_feedback_bounds_escaped_identity_values():
                                 context, tools["delegate_task"])
     assert len(raised.value.message) <= 2048
     assert "[omitted]" in raised.value.message and "Do not infer findings" in raised.value.message
+
+
+@pytest.mark.parametrize("indices", (
+    {"model_request_seq": 3, "stream_attempt_seq": 2, "stream_attempt_count": 2},
+    {"model_request_seq": True, "stream_attempt_seq": -1, "stream_attempt_count": 2 ** 100},
+))
+async def test_observed_stream_attempt_identity_survives_parent_receipt_without_claiming_exhaustion(indices):
+    from linktools.ai.runtime._tool import RuntimeToolOperationBridge
+    from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
+
+    async def delegate(ref, task, *, files, invocation_id):
+        raise AIError(ErrorCode.TOOL_EXECUTION_FAILED, safe_details={
+            "status": "FAILED", "error_code": "MODEL_API_ERROR", "execution_id": "child-execution",
+            "safe_error_details": {"reason": "connection_closed", "phase": "model_stream", **indices,
+                                   "body": "PRIVATE_BODY", "url": "https://private.invalid/?secret=PRIVATE"},
+        })
+    toolset = SubagentCapability((SubagentRef("agent", "child"),), delegate).get_toolset()
+    context = _context()
+    tools = await toolset.get_tools(context)
+    with pytest.raises(ToolCallFailed) as raised:
+        await toolset.call_tool("delegate_task", {"subagent_id": "child", "task": "inspect"},
+                               context, tools["delegate_task"])
+    message = raised.value.message
+    for key, value in indices.items():
+        if type(value) is int and 0 < value < 2 ** 63:
+            assert f'"{key}":{value}' in message
+        else:
+            assert f'"{key}":' not in message
+    assert "connection_closed" in message and "model_stream" in message
+    assert "exhaust" not in message and "PRIVATE" not in message
+    bridge = RuntimeToolOperationBridge(
+        None, InMemoryObjectStore(), namespace="failure-contract", tenant_id="tenant",
+        execution_id="parent", agent_run_id="run", binding_digest="a" * 64,
+        owner="worker", background_tasks=set(), payload_policy=PayloadPolicy(),
+    )
+    code, payload = await bridge._error_payload(raised.value)
+    restored = await bridge._decode_error(SimpleNamespace(error_code=code, error_payload=payload))
+    assert isinstance(restored, ToolCallFailed) and restored.message == message

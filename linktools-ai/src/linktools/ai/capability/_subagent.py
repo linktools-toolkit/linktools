@@ -254,6 +254,10 @@ class SubagentCapability(AbstractCapability[AgentContext[object]]):
             value = diagnostic_value(details.get(key))
             if value is not None:
                 projected[key] = value
+        for key in ("model_request_seq", "stream_attempt_seq", "stream_attempt_count"):
+            value = details.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and 0 < value < 2 ** 63:
+                projected[key] = value
         description = "was cancelled" if cancelled else f"failed with {code}"
         message = f"{subject} {description} and produced no result."
         if projected:
