@@ -66,7 +66,7 @@ class CheckpointPersistence:
             resolved = tuple([
                 (*projection[:3], await resolve_client_requests(
                     interaction.client_requests, RuntimeDomain.CHECKPOINT, include_bodies=False,
-                ))
+                ), None if interaction.stream_attempts is None else tuple(None for _ in interaction.stream_attempts))
                 for interaction, projection in zip(archived, projections, strict=True)
             ])
             missing = await archive.prepare_relocated_interactions(archived, resolved, prepared=prepared.archive)

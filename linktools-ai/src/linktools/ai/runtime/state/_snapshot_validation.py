@@ -324,7 +324,8 @@ def validate_snapshot_references(
             elif record.kind == "model_interaction":
                 interactions.append(_decode_enveloped_domain(record.data, ModelInteractionRecord))
     for interaction in interactions:
-        for context in (interaction.request_context, interaction.response_context):
+        for context in (interaction.request_context, interaction.response_context,
+                        *(attempt.response_context for attempt in interaction.stream_attempts or ())):
             if context is None:
                 continue
             for item in context.items:
@@ -749,6 +750,7 @@ def _expected_record(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         sort_key = agent_run_id
     elif isinstance(value, ModelInteractionRecord):
+        value.validate_storage_domain(domain)
         _require_anchor(
             namespace, tenant_id, domain, records, "agent_run", value.agent_run_id
         )
