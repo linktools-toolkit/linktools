@@ -203,6 +203,15 @@ if(process.argv[3]==='attempts') {
   emit('ASSISTANT_TEXT_DELTA',2,{model_request_seq:5,text:'',part_index:0,part_start:true});
   await until('empty part clears only its previous content',()=>active().some(item=>item.textContent.includes('keep B')) && active().every(item=>!item.textContent.includes('new A')));
   emit('MODEL_ATTEMPT_FINISHED',2,{model_request_seq:5,status:'SUCCEEDED'});emit('MODEL_REQUEST_FINISHED',2,{model_request_seq:5,status:'SUCCEEDED'});
+  emit('ASSISTANT_TEXT_DELTA',1,{model_request_seq:6,text:'stale snapshot',part_index:0,part_start:true});
+  emit('MODEL_ATTEMPT_FINISHED',1,{model_request_seq:6,status:'SUCCEEDED'});emit('MODEL_ATTEMPT_STARTED',2,{model_request_seq:6,replaces_stream_attempt_seq:null});
+  await until('successful prefix before cursor gap',()=>active().some(item=>item.textContent.includes('stale snapshot')));
+  emit('STREAM_RESET');emit('ASSISTANT_TEXT_DELTA',2,{model_request_seq:6,text:'disconnected tail',part_index:0,part_start:false});
+  await until('gap tail displayed separately',()=>active().some(item=>item.textContent.includes('disconnected tail') && item.textContent.includes('noncontiguous fragment')));
+  assert.ok(active().every(item=>!item.textContent.includes('stale snapshot')));
+  assert.ok(active().some(item=>item.textContent.includes('winning answer')),'completed logical responses survive another request gap');
+  assert.ok(failed().some(item=>item.textContent.includes('abandoned answer')),'gaps preserve failed attempt diagnostics');
+  emit('MODEL_ATTEMPT_FINISHED',2,{model_request_seq:6,status:'SUCCEEDED'});emit('MODEL_REQUEST_FINISHED',2,{model_request_seq:6,status:'SUCCEEDED'});
   emit('ASSISTANT_TEXT_DELTA',1,{model_request_seq:3,text:'cancelled partial'});emit('MODEL_ATTEMPT_FINISHED',1,{model_request_seq:3,status:'CANCELLED',retry_scheduled:false});
   await until('cancelled partial hidden from answer',()=>failed().some(item=>item.textContent.includes('CANCELLED') && item.textContent.includes('cancelled partial')));
   assert.ok(active().every(item=>!item.textContent.includes('cancelled partial')));
@@ -220,6 +229,18 @@ if(process.argv[3]==='attempts') {
   assert.equal(history.length,3);assert.equal(history[0].open,false);assert.match(history[0].textContent,/partial content is not an answer/);
   assert.match(history[0].textContent,/stored failed partial/);assert.doesNotMatch(history[1].textContent,/stored failed partial/);
   assert.match(node('conversation').textContent,/stored winner/);
+  for(const status of ['FAILED','CANCELLED']) {
+    detailResponses.set('/api/executions/a-run/models',{items:[{execution_id:'a-run',agent_run_seq:1,model_request_seq:1,status,model:{},content_included:true,request:{messages:[]},response:{parts:[{part_kind:'text',content:'completed prefix interrupted tail'}]},stream_attempts:[{stream_attempt_seq:1,status:'SUCCEEDED',response:null},{stream_attempt_seq:2,status,response:{parts:[{part_kind:'text',content:'interrupted tail'}]},retry_scheduled:false}]}],next_cursor:null});
+    await descendants(node('conversation')).find(item=>item.tagName==='BUTTON' && item.textContent==='Refresh requests').click();
+    const aggregate=descendants(node('conversation')).find(item=>item.tagName==='DETAILS' && item.children[0]?.textContent.startsWith('Incomplete SDK response'));
+    assert.ok(aggregate);assert.match(aggregate.children[0].textContent,new RegExp(status+'.*diagnostic aggregate, not a completed answer'));
+    assert.match(aggregate.textContent,/completed prefix interrupted tail/);
+    assert.ok(descendants(node('conversation')).some(item=>item.className==='native-status' && item.textContent===status));
+    const segments=descendants(node('conversation')).filter(item=>item.className==='stream-attempt-history');
+    assert.match(segments[0].textContent,/attempt 1 · SUCCEEDED/);assert.doesNotMatch(segments[0].textContent,/completed prefix|interrupted tail/);
+    assert.match(segments[1].textContent,new RegExp(status+'.*partial content is not an answer'));assert.match(segments[1].textContent,/interrupted tail/);
+    assert.ok(!descendants(node('conversation')).some(item=>item.tagName==='SUMMARY' && item.textContent==='SDK response'),'failed logical aggregates are never labeled as ordinary successful responses');
+  }
   await select('#session=b');assert.doesNotMatch(node('conversation').textContent,/winning answer|abandoned answer|stored failed partial/);
   console.log('Attempt UI isolates active answers, retains failed trace, reconnects and keeps historical selection separate');process.exit(0);
 }

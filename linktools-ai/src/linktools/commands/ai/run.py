@@ -218,6 +218,8 @@ class _RequestDisplay:
     current: int = 0
     finished: bool = False
     framed: bool = False
+    truncated: bool = False
+    gap_announced: bool = False
     attempts: dict[int, _AttemptDisplay] = field(default_factory=dict)
 
 
@@ -246,6 +248,10 @@ class _AttemptOutput:
 
     def identity(self, key: tuple[str, int, int], seq: int) -> str:
         return f"run {key[1]} request {key[2]} attempt {seq}"
+
+    def preview_gap(self, key: tuple[str, int, int], request: _RequestDisplay) -> None:
+        self.boundary(f"run {key[1]} request {key[2]} preview GAP: following output is not contiguous; no retry implied")
+        request.gap_announced = True
 
     def invalidate(self, key: tuple[str, int, int], request: _RequestDisplay, seq: int, status: str) -> None:
         attempt = request.attempts[seq]
@@ -302,13 +308,17 @@ class _AttemptOutput:
         event = item.event
         if event.event_type == "STREAM_RESET":
             for key, request in self.requests.items():
-                if key[0] != item.execution_id:
+                if key[0] != item.execution_id or request.finished:
                     continue
-                attempt = request.attempts.get(request.current)
-                if attempt is not None and attempt.status == "RUNNING":
+                request.truncated = True
+                request.gap_announced = False
+                visible = [value for value in request.attempts.values() if value.status in {"RUNNING", "SUCCEEDED"}]
+                if any(value.text_chars for value in visible):
+                    self.preview_gap(key, request)
+                for attempt in visible:
                     attempt.truncated = True
-                    if attempt.text_chars:
-                        self.boundary(f"{self.identity(key, request.current)} preview GAP: following output is not contiguous; no retry implied")
+                    for part in attempt.parts.values():
+                        part.chars = 0
             return True
         if event.event_type not in {
             "MODEL_ATTEMPT_STARTED", "MODEL_ATTEMPT_FINISHED", "MODEL_REQUEST_FINISHED",
@@ -342,7 +352,7 @@ class _AttemptOutput:
                 return True
             status = payload.get("status")
             if status == "SUCCEEDED":
-                truncated = any(value.truncated for value in request.attempts.values() if value.status in {"RUNNING", "SUCCEEDED"})
+                truncated = request.truncated or any(value.truncated for value in request.attempts.values() if value.status in {"RUNNING", "SUCCEEDED"})
                 if not request.finished and request.framed:
                     self.boundary(f"run {run} request {model_request} COMPLETED" + ("; preview is incomplete" if truncated else ""))
                 elif not request.finished and truncated:
@@ -358,6 +368,8 @@ class _AttemptOutput:
         elif seq == request.current and attempt.status == "RUNNING":
             value = payload.get("text")
             kind = "text" if event.event_type == "ASSISTANT_TEXT_DELTA" else "thinking"
+            if kind == "text" and isinstance(value, str) and value and request.truncated and not request.gap_announced:
+                self.preview_gap(key, request)
             if isinstance(value, str):
                 self.update_part(key, request, attempt, payload, kind, value)
             if request.framed and attempt.replaces is not None and not attempt.announced:

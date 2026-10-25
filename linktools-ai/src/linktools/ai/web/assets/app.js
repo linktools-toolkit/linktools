@@ -467,7 +467,7 @@ function renderLiveAttempts(live,wanted) {
     }
     const preview=streamResponsePreview(request),content=preview.text,thinking=preview.thinking;
     const status=request.status==='SUCCEEDED'?'COMPLETED RESPONSE':['FAILED','CANCELLED'].includes(request.status)?`INCOMPLETE RESPONSE · ${request.status}`:'LIVE RESPONSE · incomplete SDK display';
-    const label=`${status} · run ${request.agent_run_seq} · request ${request.model_request_seq}${preview.truncated?' · preview truncated':''}`;
+    const label=`${status} · run ${request.agent_run_seq} · request ${request.model_request_seq}${preview.truncated?' · preview GAP · noncontiguous fragment':''}`;
     if(node.label.textContent!==label)node.label.textContent=label;
     node.thinking.hidden=!thinking;if(node.thinkingBody.textContent!==thinking)node.thinkingBody.textContent=thinking;
     updateMarkdownMessage(node.body,content);node.body.hidden=!content;wanted.push(node);
@@ -729,7 +729,8 @@ function sdkMessages(container,item,key) {
   });
   const envelope=Object.fromEntries(Object.entries(request).filter(([name])=>name!=='messages'));
   if(Object.keys(envelope).length){const detail=readerDetail(key+':sdk-envelope','Instructions, tools & model settings','native-envelope');detail.append(element('pre','native-literal',json(envelope)));container.append(detail);}
-  if(item.response!=null)container.append(rawDetail(item.response,'SDK response'));
+  if(item.response!=null)container.append(rawDetail(item.response,['FAILED','CANCELLED'].includes(item.status)
+    ?`Incomplete SDK response · ${item.status} · diagnostic aggregate, not a completed answer`:'SDK response'));
 }
 function readerDetail(key,label,className) {
   const detail=element('details',className),summary=element('summary','',label);

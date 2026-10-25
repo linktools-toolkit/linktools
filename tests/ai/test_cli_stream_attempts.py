@@ -198,6 +198,31 @@ async def test_cli_preview_gap_is_not_an_attempt_retry(monkeypatch: pytest.Monke
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("terminal", [False, True])
+@pytest.mark.parametrize("started", [False, True])
+async def test_cli_gap_between_transports_separates_successful_prefix(monkeypatch: pytest.MonkeyPatch, terminal: bool, started: bool) -> None:
+    stdout, _ = output(monkeypatch, terminal)
+    items = [event("ASSISTANT_TEXT_DELTA", "completed other request", request=2),
+             event("MODEL_REQUEST_FINISHED", request=2, status="SUCCEEDED"),
+             event("ASSISTANT_TEXT_DELTA", "old snapshot", part_index=0, part_start=True),
+             event("MODEL_ATTEMPT_FINISHED", status="SUCCEEDED")]
+    if started:
+        items.append(event("MODEL_ATTEMPT_STARTED", attempt=2, replaces_stream_attempt_seq=None))
+    items += [event("STREAM_RESET", attempt=None),
+              event("ASSISTANT_TEXT_DELTA", "retained tail", attempt=2, part_index=0, part_start=False),
+              event("MODEL_ATTEMPT_FINISHED", attempt=2, status="SUCCEEDED"),
+              event("MODEL_REQUEST_FINISHED", attempt=2, status="SUCCEEDED"),
+              event("EXECUTION_SUCCEEDED")]
+    assert await run._stream_result(Execution(items)) == 0
+    value = plain(stdout.getvalue())
+    assert value.index("old snapshot") < value.index("request 1 preview GAP") < value.index("retained tail")
+    assert value.count("preview GAP") == 1
+    assert "request 2 preview GAP" not in value
+    assert "preview is incomplete" in value
+    assert "UPDATED" not in value and "INVALIDATED" not in value and "FAILED" not in value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", [False, True])
 @pytest.mark.parametrize("retry_initial", [False, True])
 async def test_cli_successful_continuation_preserves_previous_segments(monkeypatch: pytest.MonkeyPatch, terminal: bool, retry_initial: bool) -> None:
     stdout, _ = output(monkeypatch, terminal)
@@ -300,6 +325,33 @@ async def test_real_runtime_continuation_events_reach_cli_and_web(monkeypatch: p
                              str(root / "linktools-ai/src/linktools/ai/web/assets/console.js"), str(fixture),
                              "segment-two" if same_id else "segment-one segment-two"],
                             capture_output=True, text=True, timeout=20, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.asyncio
+async def test_real_runtime_empty_start_reaches_cli_and_web(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from .test_model_stream_retry import runtime_empty_start_events
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the Web projection replay")
+    observed = await runtime_empty_start_events()
+    deltas = [item.payload for item in observed if item.event_type == "ASSISTANT_TEXT_DELTA"]
+    assert [(item["text"], item["part_start"]) for item in deltas] == [("", True), ("winner", False)]
+    stdout, _ = output(monkeypatch)
+    items = [SimpleNamespace(depth=0, execution_id=item.execution_id, event=item) for item in observed]
+    execution = Execution(items)
+    execution.execution_id = items[0].execution_id
+    assert await run._stream_result(execution) == 0
+    assert stdout.getvalue() == "winner\n"
+    fixture = tmp_path / "empty-start-events.json"
+    wire = [{"execution_id":item.execution_id,"event":{"event_type":item.event_type,"payload":item.payload}}
+            for item in observed]
+    fixture.write_text(json.dumps(wire, default=dict))
+    root = Path(__file__).parents[2]
+    result = subprocess.run([node, str(Path(__file__).with_name("web_console_attempts.mjs")),
+                             str(root / "linktools-ai/src/linktools/ai/web/assets/console.js"), str(fixture),
+                             "winner", "empty-start"], capture_output=True, text=True, timeout=20, check=False)
     assert result.returncode == 0, result.stderr
 
 

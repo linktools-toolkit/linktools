@@ -38,7 +38,7 @@ export function streamAttemptText(attempt,kind='text') {
   return attempt[kind]+[...attempt.parts.values()].sort((a,b)=>a.index-b.index).filter(part=>part.kind===kind).map(part=>part.content).join('');
 }
 export function streamResponsePreview(request) {
-  const parts=new Map(),result={text:'',thinking:'',truncated:false};
+  const parts=new Map(),result={text:'',thinking:'',truncated:request.truncated || false};
   for(const attempt of [...request.attempts.values()].sort((a,b)=>a.seq-b.seq)) {
     if(attempt.status!=='SUCCEEDED' && !(attempt.seq===request.current && attempt.status==='RUNNING'))continue;
     result.text+=attempt.text;result.thinking+=attempt.thinking;result.truncated ||= attempt.truncated;
@@ -53,8 +53,12 @@ export function streamResponsePreview(request) {
 export function updateStreamAttempts(requests,item) {
   const {event_type:type,payload={}}=item.event;
   if(type==='STREAM_RESET') {
-    for(const request of requests.values())if(request.execution_id===item.execution_id)for(const attempt of request.attempts.values())if(attempt.status==='RUNNING'){
-      attempt.text='';attempt.thinking='';for(const part of attempt.parts.values())part.content='';attempt.truncated=true;
+    for(const request of requests.values())if(request.execution_id===item.execution_id && !request.finished){
+      request.truncated=true;
+      // A lost part-start may replace any earlier successful segment of this request.
+      for(const attempt of request.attempts.values())if(['RUNNING','SUCCEEDED'].includes(attempt.status)){
+        attempt.text='';attempt.thinking='';for(const part of attempt.parts.values())part.content='';attempt.truncated=true;
+      }
     }
     return false;
   }
