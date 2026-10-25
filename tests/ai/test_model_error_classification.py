@@ -28,9 +28,7 @@ from linktools.ai.model import create_model, model_binding_error
 def test_public_typed_model_failures_keep_category_and_retry_scope(
     category: str, in_stream: bool, expected: ErrorCode, retryable: bool,
 ) -> None:
-    error_type = getattr(sdk_errors, category, None)
-    if error_type is None:
-        pytest.skip(f"SDK has no public {category}")
+    error_type = getattr(sdk_errors, category)
     if category == "ModelRequestTimeout":
         error = error_type("fixture", 30)
     elif category == "ModelQuotaExceededError":
@@ -52,9 +50,7 @@ def test_public_typed_model_failures_keep_category_and_retry_scope(
 
 @pytest.mark.parametrize("status_code", (400, 429))
 def test_typed_quota_category_takes_precedence_over_http_status(status_code: int) -> None:
-    quota = getattr(sdk_errors, "ModelQuotaExceededError", None)
-    if quota is None:
-        pytest.skip("SDK has no public typed quota category")
+    quota = getattr(sdk_errors, "ModelQuotaExceededError")
     error = ModelHTTPError.for_category(quota, status_code=status_code, model_name="fixture")
 
     projected = model_binding_error(error)
@@ -187,11 +183,8 @@ async def test_public_responses_server_error_before_first_event_uses_transport_r
 
     projected = model_binding_error(caught.value)
     assert projected is not None
-    if hasattr(sdk_errors, "ModelServerError"):
-        assert caught.value.in_stream is True
-        assert projected.code is ErrorCode.MODEL_UNAVAILABLE
-    else:
-        assert projected.code is ErrorCode.MODEL_API_ERROR
+    assert caught.value.in_stream is True
+    assert projected.code is ErrorCode.MODEL_UNAVAILABLE
     assert projected.retryable is False
     assert len(sent) == 3
     assert all(client.is_closed for client in clients)

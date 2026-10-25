@@ -1,5 +1,8 @@
 # Model protocols and readable traces
 
+Use Python >= 3.11 with `pydantic-ai-slim>=2.59.0,<3.0.0` and
+`pydantic-ai-harness>=0.59.0`; Harness requires its matching SDK version.
+The `evaluation` extra uses the SDK's `evals` extra to select the matching evaluation package.
 Install only the provider adapters you use:
 
 ```shell
@@ -311,8 +314,8 @@ Fallback attempts remain distinct from logical model requests and physical HTTP
 order, available timing, diagnostics and usage through the existing model-history
 and interaction projection, subject to the existing redaction and content-omission
 policy. If all candidates fail, available facts are also exposed through the
-execution result's `safe_error_details["failed_attempts"]`. Older SDKs without those
-facts do not acquire synthetic attempts, timestamps or zero-valued usage. Reported attempt usage is an
+execution result's `safe_error_details["failed_attempts"]`. Missing facts do not
+acquire synthetic attempts, timestamps or zero-valued usage. Reported attempt usage is an
 observed subtotal only: missing usage remains unknown, so even a recorded subtotal
 is not proof of the complete token usage or cost of a failed fallback chain.
 Non-streaming requests retain the SDK's usage accounting. A streamed exhausted
@@ -385,7 +388,7 @@ do not change the model's semantic identity or contract.
 The SDK's public normalized `retry_after` is a lower bound for the current
 response only, even when it exceeds the local cap. A later response without
 that hint uses its own exponential base. Caller cancellation and the SDK's
-whole-request `request_timeout`, when supported, interrupt waiting; direct
+whole-request `request_timeout` interrupt waiting; direct
 Model calls without such a caller deadline have no implicit total-wait budget.
 
 Ordinary transient 429/408/409/5xx errors may retry. Known quota exhaustion is
@@ -394,12 +397,10 @@ structured `insufficient_quota` code on a model HTTP error, is rejected without
 retry. Overall request-deadline exhaustion also does not start a new attempt.
 The SDK's typed context-window overflow is also rejected without resending
 unchanged input. Typed rate-limit, unavailable, server, phase-timeout and
-connection errors retain their categories even without an HTTP status. These
-categories require SDK support: SDK 2.53 reduces some Responses error events
-and failed response bodies to an opaque `ModelAPIError`, losing the structured
-error code. Those errors keep the bounded generic retry behavior; LinkTools
-does not infer a permanent rejection from ambiguous message text or change the
-supported SDK minimum.
+connection errors retain their categories even without an HTTP status. The
+supported SDK minimum provides these public categories. A genuinely opaque
+`ModelAPIError` still keeps the bounded generic retry behavior; LinkTools does
+not infer a permanent rejection from ambiguous message text.
 
 Malformed Chat completion responses with no choices are rejected at the
 provider validation boundary as `MODEL_RESPONSE_INVALID`, not an internal

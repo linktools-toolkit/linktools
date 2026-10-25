@@ -13,13 +13,13 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol, TypeVar, cast
 from linktools.core import environ
-from pydantic_ai import messages as sdk_messages
 from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext
 from pydantic_ai.messages import (
     FinalResultEvent,
     ModelMessage,
+    ModelRequestAttempt,
     NativeToolCallPart,
     NativeToolReturnPart,
     FinishReason,
@@ -34,7 +34,6 @@ from ._client_request import ModelClientRequestRecorder
 from ._stream_attempt import ModelStreamAttempt
 
 _logger = environ.get_logger("ai.model.stream")
-_SDK_MODEL_ATTEMPT = getattr(sdk_messages, "ModelRequestAttempt", None)
 T = TypeVar("T")
 
 
@@ -153,11 +152,11 @@ class _PrimedStreamedResponse(StreamedResponse):
         self._response.metadata = value
 
     @property
-    def failed_attempts(self) -> list[object] | None:
-        return getattr(self._response, "failed_attempts", None)
+    def failed_attempts(self) -> list[ModelRequestAttempt] | None:
+        return self._response.failed_attempts
 
     @failed_attempts.setter
-    def failed_attempts(self, value: list[object] | None) -> None:
+    def failed_attempts(self, value: list[ModelRequestAttempt] | None) -> None:
         self._response.failed_attempts = value
 
     @property
@@ -210,11 +209,10 @@ class _RetryingStreamedResponse(_PrimedStreamedResponse):
         self._context_exiting = False
         self._consumer_error_suppressed = False
         self._prior_usage: list[RequestUsage] = []
-        self._prior_attempts: list[object] = []
-        self._fallback_attempts: list[object] = []
+        self._prior_attempts: list[ModelRequestAttempt] = []
+        self._fallback_attempts: list[ModelRequestAttempt] = []
         self._local_attempt_seq = 0
         self._active_http_index: int | None = None
-        self._legacy_usage_accounted = _SDK_MODEL_ATTEMPT is None and run_context is not None
         super().__init__(placeholder, self._iterate_attempts(parameters), None)
 
     async def prime(self) -> None:
@@ -232,7 +230,7 @@ class _RetryingStreamedResponse(_PrimedStreamedResponse):
             raise
 
     def known_failed_usage(self) -> RequestUsage | None:
-        usages = [] if self._legacy_usage_accounted else [*self._prior_usage]
+        usages = [*self._prior_usage]
         current = _known_usage(self._response.get())
         if current is not None:
             usages.append(current)
@@ -429,9 +427,8 @@ class _RetryingStreamedResponse(_PrimedStreamedResponse):
         if self._run_context is None or self._run_context.usage_limits is None:
             return
         provisional = deepcopy(self._run_context.usage)
-        if not self._legacy_usage_accounted:
-            for previous_usage in self._prior_usage:
-                provisional.incr(previous_usage)
+        for previous_usage in self._prior_usage:
+            provisional.incr(previous_usage)
         if current_usage is not None:
             provisional.incr(current_usage)
         self._run_context.usage_limits.check_tokens(provisional)
@@ -443,37 +440,26 @@ class _RetryingStreamedResponse(_PrimedStreamedResponse):
     ) -> None:
         if usage is not None:
             self._prior_usage.append(usage)
-            if self._legacy_usage_accounted:
-                self._run_context.usage.incr(usage)
-                if self._recorder is not None:
-                    self._recorder.record_unreturned_stream_usage(usage)
-        if _SDK_MODEL_ATTEMPT is not None:
-            self._prior_attempts.append(_SDK_MODEL_ATTEMPT(
-                model_name=self._model.model_name,
-                provider_name=None if response is None else response.provider_name,
-                outcome="error", error=f"{type(error).__module__}.{type(error).__qualname__}",
-                timestamp=started_at, duration=timedelta(microseconds=duration_ns / 1000), usage=usage,
-            ))
+        self._prior_attempts.append(ModelRequestAttempt(
+            model_name=self._model.model_name,
+            provider_name=None if response is None else response.provider_name,
+            outcome="error", error=f"{type(error).__module__}.{type(error).__qualname__}",
+            timestamp=started_at, duration=timedelta(microseconds=duration_ns / 1000), usage=usage,
+        ))
 
     @property
     def usage(self) -> RequestUsage:
-        result = deepcopy(self._response.usage)
-        if _SDK_MODEL_ATTEMPT is None and not self._legacy_usage_accounted:
-            if self._prior_usage:
-                result = _known_usage(self._response.get()) or result
-            for usage in self._prior_usage:
-                result.incr(usage)
-        return result
+        return deepcopy(self._response.usage)
 
     @property
-    def failed_attempts(self) -> list[object] | None:
+    def failed_attempts(self) -> list[ModelRequestAttempt] | None:
         attempts = [*self._fallback_attempts,
-                    *(getattr(self._response.get(), "failed_attempts", None) or ()),
+                    *(self._response.get().failed_attempts or ()),
                     *self._prior_attempts]
         return list({id(attempt): attempt for attempt in attempts}.values()) or None
 
     @failed_attempts.setter
-    def failed_attempts(self, value: list[object] | None) -> None:
+    def failed_attempts(self, value: list[ModelRequestAttempt] | None) -> None:
         # Native fallback prepends its attempts to this public list before writing it back.
         self._fallback_attempts = [
             item for item in value or ()
@@ -482,10 +468,7 @@ class _RetryingStreamedResponse(_PrimedStreamedResponse):
         self._response.failed_attempts = self._fallback_attempts or None
 
     def get(self) -> ModelResponse:
-        response = self._response.get()
-        if _SDK_MODEL_ATTEMPT is not None:
-            return replace(response, failed_attempts=self.failed_attempts)
-        return replace(response, usage=self.usage)
+        return replace(self._response.get(), failed_attempts=self.failed_attempts)
 
 
 def _known_usage(response: ModelResponse | None) -> RequestUsage | None:
@@ -499,7 +482,7 @@ def _known_usage(response: ModelResponse | None) -> RequestUsage | None:
     # from an explicitly reported zero on every supported SDK.
     if not positive and usage.cost is None:
         return None
-    # Price each billed attempt before any compatibility aggregation.
+    # Price each billed attempt before aggregation.
     if usage.cost is None and response.model_name:
         try:
             usage.cost = response.cost().total_price

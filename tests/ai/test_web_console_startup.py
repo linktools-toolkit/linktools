@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 from argparse import Namespace
 from urllib.error import URLError
@@ -19,14 +20,30 @@ from packaging.requirements import Requirement
 import yaml
 
 
-def test_sdk_dependency_requires_synthesized_tool_return_metadata() -> None:
+def test_sdk_dependencies_require_typed_errors_and_matching_optional_packages() -> None:
     source_root = Path(__file__).parents[2]
     config = yaml.safe_load((source_root / "linktools-ai/linktools.yml").read_text())
     requirements = {item.name: item for item in map(Requirement, config["dependencies"])}
     sdk = requirements["pydantic-ai-slim"]
-    assert "2.52.0" not in sdk.specifier
-    assert "2.53.0" in sdk.specifier
+    assert "2.58.0" not in sdk.specifier
+    assert "2.59.0" in sdk.specifier
     assert "3.0.0" not in sdk.specifier
+    harness = requirements["pydantic-ai-harness"]
+    assert "0.58.0" not in harness.specifier
+    assert "0.59.0" in harness.specifier
+    for extra, sdk_extra in (("openai", "openai"), ("anthropic", "anthropic"), ("evaluation", "evals")):
+        optional = {item.name: item for item in map(Requirement, config["optional-dependencies"][extra])}
+        assert optional["pydantic-ai-slim"].specifier == sdk.specifier
+        assert optional["pydantic-ai-slim"].extras == {sdk_extra}
+        assert "pydantic-evals" not in optional
+
+
+def test_ai_python_floor_leaves_other_package_platforms_unchanged() -> None:
+    from manage import get_modules
+
+    for name, module in get_modules().items():
+        project = tomllib.loads((Path(module["path"]) / "pyproject.toml").read_text())["project"]
+        assert project["requires-python"] == (">=3.11" if name == "linktools-ai" else ">=3.6")
 
 
 def test_development_install_selects_declared_optional_extras() -> None:

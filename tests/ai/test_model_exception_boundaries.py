@@ -33,9 +33,7 @@ def _project(error: Exception) -> AIError:
 @pytest.mark.parametrize("streaming", (False, True))
 @pytest.mark.parametrize("status", (None, 400, 429))
 async def test_typed_context_window_error_never_retries_unchanged_input(streaming: bool, status: int | None) -> None:
-    category = getattr(sdk_errors, "ModelContextWindowExceededError", None)
-    if category is None:
-        pytest.skip("SDK has no public context-window category")
+    category = getattr(sdk_errors, "ModelContextWindowExceededError")
     error = (category("fixture", "synthetic overflow") if status is None else
              ModelHTTPError.for_category(category, status_code=status, model_name="fixture"))
     provider = ScriptedProvider([error])
@@ -92,15 +90,9 @@ async def test_responses_context_category_uses_available_sdk_structure(
         with pytest.raises(ModelAPIError) as caught:
             await request(model, streaming)
     projected = model_binding_error(caught.value)
-    if hasattr(sdk_errors, "ModelContextWindowExceededError"):
-        assert len(sent) == 1
-        assert projected.code is ErrorCode.MODEL_REQUEST_REJECTED
-        assert projected.safe_details["reason"] == "context_window_exceeded"
-    else:
-        # SDK 2.53 drops the structured code; the binding cannot recover it safely.
-        assert len(sent) == 3
-        assert projected.code is ErrorCode.MODEL_API_ERROR
-        assert "reason" not in projected.safe_details
+    assert len(sent) == 1
+    assert projected.code is ErrorCode.MODEL_REQUEST_REJECTED
+    assert projected.safe_details["reason"] == "context_window_exceeded"
     assert all(client.is_closed for client in clients)
 
 
@@ -204,9 +196,7 @@ async def test_empty_output_keeps_sdk_validation_and_correction_budget(
 def test_typed_transient_failure_preserves_category_and_retry_hint(
     category: str, expected: ErrorCode, in_stream: bool,
 ) -> None:
-    error_type = getattr(sdk_errors, category, None)
-    if error_type is None:
-        pytest.skip("SDK has no public transient category")
+    error_type = getattr(sdk_errors, category)
     error = error_type("fixture", "synthetic failure", retry_after=17, in_stream=in_stream)
     projected = model_binding_error(error)
     assert projected.code is expected
@@ -241,10 +231,6 @@ async def test_nonstream_responses_failed_body_keeps_transient_category(
             await model.request([], None, ModelRequestParameters())
     assert len(sent) == 3
     projected = model_binding_error(caught.value)
-    if hasattr(sdk_errors, "ModelRateLimitError"):
-        assert projected.code is expected
-        assert projected.retryable is True
-    else:
-        assert projected.code is ErrorCode.MODEL_API_ERROR
-        assert projected.retryable is False
+    assert projected.code is expected
+    assert projected.retryable is True
     assert all(client.is_closed for client in clients)

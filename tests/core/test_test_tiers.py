@@ -176,7 +176,7 @@ def test_generated_ci_plan_supplies_execution_versions_and_options() -> None:
         [sys.executable, "-m", "scripts.check.matrix", json.dumps(["linktools", "linktools-ai"])],
         cwd=root, text=True,
     ))
-    assert plan["python-versions"] == ["3.10", "3.x"]
+    assert plan["python-versions"] == ["3.11", "3.x"]
     for check in plan["checks"]:
         options = shlex.split(check["pytest-args"])
         assert options[:2] == ["-n", "4"]

@@ -257,9 +257,8 @@ class _RetryingModel(WrapperModel):
     ) -> float:
         cap = max(self._retry_max_delay, self._retry_delay)
         wait = min(cap, backoff + random.uniform(0, backoff * 0.25))
-        # Older supported SDKs expose this only on ModelHTTPError. Read its
-        # public normalized value rather than interpreting provider bodies.
-        retry_after = getattr(error, "retry_after", None)
+        # Use the public normalized value rather than interpreting provider bodies.
+        retry_after = error.retry_after
         if (
             isinstance(retry_after, (int, float))
             and not isinstance(retry_after, bool)
@@ -330,12 +329,11 @@ class _RetryingModel(WrapperModel):
 
 
 def _retryable_model_error(error: ModelAPIError, *, allow_stream_retry: bool = False) -> bool:
-    # These public categories are absent from some supported SDK releases.
     # Do not reinterpret an explicit permanent failure or an expired deadline
     # as a transient HTTP status, including quota errors carried by HTTP 429.
-    if ((getattr(error, "in_stream", False) and not allow_stream_retry)
+    if ((error.in_stream and not allow_stream_retry)
         or _is_quota_error(error) or _is_context_window_error(error)
-        or isinstance(error, getattr(sdk_errors, "ModelRequestTimeout", ()))):
+        or isinstance(error, sdk_errors.ModelRequestTimeout)):
         return False
     if isinstance(error, ModelHTTPError):
         return error.status_code in {408, 409, 429} or 500 <= error.status_code < 600

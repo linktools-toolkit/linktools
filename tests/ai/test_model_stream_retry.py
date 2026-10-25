@@ -217,8 +217,6 @@ async def test_lookahead_preserves_exact_native_event_sequence(fallback: bool) -
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fallback", (False, True))
 async def test_request_deadline_survives_lookahead_and_native_fallback(fallback: bool) -> None:
-    if not hasattr(sdk_errors, "ModelRequestTimeout"):
-        pytest.skip("SDK has no public request_timeout deadline")
 
     async def stream(messages, info):
         yield "first "
@@ -465,8 +463,7 @@ async def test_runtime_exhausted_partial_is_trace_only_and_keeps_known_usage(mon
     async with Runtime.open("exhausted-partial", storage=RuntimeStorage.in_memory(), features=features) as runtime:
         execution = await runtime.agents.get().start("synthetic")
         result = (await execution.wait(timeout_seconds=10)).result
-        expected_code = "MODEL_UNAVAILABLE" if hasattr(sdk_errors, "ModelConnectionError") else "MODEL_API_ERROR"
-        assert result.status == "FAILED" and result.error_code == expected_code
+        assert result.status == "FAILED" and result.error_code == "MODEL_UNAVAILABLE"
         items = (await execution.model_interactions(include_content=True)).items
         assert len(items) == 1 and items[0].response is None
         assert [item.status for item in items[0].stream_attempts] == ["FAILED"] * 4
@@ -655,10 +652,7 @@ async def test_consumer_close_with_retryable_cleanup_error_never_redispatches(co
 @pytest.mark.asyncio
 async def test_native_fallback_known_usage_is_not_overwritten_by_stream_attempt_metrics():
     from decimal import Decimal
-    from pydantic_ai import messages as sdk_messages
     from pydantic_ai.usage import RequestUsage
-    if not hasattr(sdk_messages, "ModelRequestAttempt"):
-        pytest.skip("SDK does not expose native failed attempt usage")
     def rejected(messages, info):
         return ModelResponse([TextPart("rejected")], model_name="rejected",
                              usage=RequestUsage(input_tokens=7, output_tokens=1, cost=Decimal(".007")))

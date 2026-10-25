@@ -27,25 +27,25 @@ def model_binding_error(
         details = {"model_name": error.model_name, "reason": "context_window_exceeded"}
         if isinstance(error, ModelHTTPError):
             details["status_code"] = error.status_code
-    elif isinstance(error, getattr(sdk_errors, "ModelRequestTimeout", ())):
+    elif isinstance(error, sdk_errors.ModelRequestTimeout):
         code = ErrorCode.MODEL_TIMEOUT
         retryable = False
         details = {"model_name": error.model_name}
-    elif isinstance(error, getattr(sdk_errors, "ModelTimeoutError", ())):
+    elif isinstance(error, sdk_errors.ModelTimeoutError):
         code = ErrorCode.MODEL_TIMEOUT
         details = {"model_name": error.model_name}
         if error.phase is not None:
             details["phase"] = error.phase
-    elif isinstance(error, getattr(sdk_errors, "ModelConnectionError", ())):
+    elif isinstance(error, sdk_errors.ModelConnectionError):
         code = ErrorCode.MODEL_UNAVAILABLE
         details = {"model_name": error.model_name}
         if error.phase is not None:
             details["phase"] = error.phase
-    elif isinstance(error, getattr(sdk_errors, "ModelRateLimitError", ())):
+    elif isinstance(error, sdk_errors.ModelRateLimitError):
         code = ErrorCode.MODEL_RATE_LIMITED
         details = {"model_name": error.model_name}
-    elif (isinstance(error, getattr(sdk_errors, "ModelUnavailableError", ()))
-          or isinstance(error, getattr(sdk_errors, "ModelServerError", ()))):
+    elif (isinstance(error, sdk_errors.ModelUnavailableError)
+          or isinstance(error, sdk_errors.ModelServerError)):
         code = ErrorCode.MODEL_UNAVAILABLE
         details = {"model_name": error.model_name}
     elif isinstance(error, ModelHTTPError):
@@ -89,10 +89,10 @@ def model_binding_error(
     if isinstance(error, ModelAPIError):
         if isinstance(error, ModelHTTPError):
             details["status_code"] = error.status_code
-        retry_after = getattr(error, "retry_after", None)
+        retry_after = error.retry_after
         if isinstance(retry_after, (int, float, str)) and not isinstance(retry_after, bool):
             details["retry_after"] = retry_after
-        if getattr(error, "in_stream", False):
+        if error.in_stream:
             retryable = False
     return AIError(
         code,
@@ -104,12 +104,12 @@ def model_binding_error(
 
 def _is_context_window_error(error: Exception) -> bool:
     """Use the SDK's explicit category, not an ambiguous provider message."""
-    return isinstance(error, getattr(sdk_errors, "ModelContextWindowExceededError", ()))
+    return isinstance(error, sdk_errors.ModelContextWindowExceededError)
 
 
 def _is_quota_error(error: Exception) -> bool:
-    """Recognize explicit quota exhaustion, including older SDK HTTP errors."""
-    if isinstance(error, getattr(sdk_errors, "ModelQuotaExceededError", ())):
+    """Recognize explicit quota exhaustion, including structured model HTTP errors."""
+    if isinstance(error, sdk_errors.ModelQuotaExceededError):
         return True
     if not isinstance(error, ModelHTTPError) or not isinstance(error.body, Mapping):
         return False
