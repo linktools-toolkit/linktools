@@ -5,7 +5,7 @@
 import asyncio
 import math
 import random
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Collection, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import InitVar, dataclass, field
 from typing import ClassVar
@@ -156,6 +156,27 @@ class _ProviderModelBinding:
 
     def _build_model(self, settings: ModelSettings) -> Model:
         raise NotImplementedError
+
+    @classmethod
+    def prepare_output_tool_settings(
+        cls,
+        settings: ModelSettings | None,
+        parameters: ModelRequestParameters,
+        *,
+        unsupported_settings: Collection[str] = (),
+    ) -> ModelSettings | None:
+        """Default a resolved output-only request to one terminal tool call."""
+        if (
+            parameters.output_mode != "tool"
+            or parameters.allow_text_output
+            or parameters.function_tools
+            or parameters.native_tools
+            or len(parameters.output_tools) != 1
+            or "parallel_tool_calls" in (settings or {})
+            or "parallel_tool_calls" in unsupported_settings
+        ):
+            return settings
+        return {**(settings or {}), "parallel_tool_calls": False}
 
 def _validate_positive_number(name: str, value: "int | float | None") -> None:
     if value is None:

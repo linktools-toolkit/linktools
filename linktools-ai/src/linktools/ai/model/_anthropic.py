@@ -11,13 +11,23 @@ except ModuleNotFoundError as error:
         raise
     raise ImportError('Anthropic model adapters require pip install "linktools-ai[anthropic]"') from error
 from httpx2 import AsyncClient, Limits
-from pydantic_ai.models import Model, ModelSettings
+from pydantic_ai.models import Model, ModelRequestParameters, ModelSettings
 from pydantic_ai.profiles.anthropic import AnthropicModelProfile
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.providers.anthropic import AnthropicProvider
 
 from ._binding import _ProviderModelBinding
 from ._http import HttpClientOwner, capture_request, capture_response
+
+
+class _OutputOnlyAnthropicModel(AnthropicModel):
+    def prepare_request(
+        self, model_settings: ModelSettings | None, model_request_parameters: ModelRequestParameters,
+    ) -> tuple[ModelSettings | None, ModelRequestParameters]:
+        settings, parameters = super().prepare_request(model_settings, model_request_parameters)
+        return _ProviderModelBinding.prepare_output_tool_settings(
+            settings, parameters, unsupported_settings=getattr(self, "unsupported_settings", ()),
+        ), parameters
 
 
 class _CapturedAnthropicProvider(AnthropicProvider):
@@ -54,5 +64,5 @@ class _AnthropicModelBinding(_ProviderModelBinding):
 
     def _build_model(self, settings: ModelSettings) -> Model:
         provider = _CapturedAnthropicProvider(base_url=self.base_url, api_key=self.api_key)
-        return AnthropicModel(self.model, provider=provider, settings=settings or None,
-                              profile=self._sdk_profile())
+        return _OutputOnlyAnthropicModel(self.model, provider=provider, settings=settings or None,
+                                        profile=self._sdk_profile())

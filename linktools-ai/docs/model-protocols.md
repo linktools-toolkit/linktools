@@ -347,6 +347,22 @@ request value are distinct. Runtime validation remains authoritative. Returned
 `ThinkingPart` content stays visible independently of request control. Custom bindings
 without a `thinking_control()` projection report unknown control.
 
+## Output-only requests
+
+The built-in provider bindings default `parallel_tool_calls` to `False` only
+after the SDK has resolved a request to tool output with exactly one output
+tool, no ordinary function tools, no native tools and no free-text output.
+This avoids requesting parallel alternative terminal results; ordinary tool
+requests keep their existing parallel-call behavior. The policy follows the
+actual request shape, not an Agent name or a separate model route.
+
+Explicit SDK model or request settings, including `True`, take precedence.
+An SDK-declared unsupported setting is not added. Native structured/text output
+and externally supplied SDK models remain unchanged. This is a request default,
+not a new `AgentSpec` or `create_model` option, and it does not change retry or
+output-validation ownership. Compatible gateways must actually support and
+honor the provider field; no token reduction is inferred from the setting alone.
+
 ## Transport retries
 
 The model binding owns transport retries; native provider SDK retries remain

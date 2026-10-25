@@ -11,13 +11,41 @@ except ModuleNotFoundError as error:
     if error.name != "openai":
         raise
     raise ImportError('OpenAI model adapters require pip install "linktools-ai[openai]"') from error
-from pydantic_ai.models import Model, ModelSettings
+from pydantic_ai.models import Model, ModelRequestParameters, ModelSettings
 from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from ._binding import _ProviderModelBinding
 from ._http import HttpClientOwner, capture_request, capture_response
+
+
+class _OutputOnlyOpenAIChatModel(OpenAIChatModel):
+    def prepare_request(
+        self, model_settings: ModelSettings | None, model_request_parameters: ModelRequestParameters,
+    ) -> tuple[ModelSettings | None, ModelRequestParameters]:
+        settings, parameters = super().prepare_request(model_settings, model_request_parameters)
+        return _ProviderModelBinding.prepare_output_tool_settings(
+            settings, parameters,
+            unsupported_settings=(
+                *getattr(self, "unsupported_settings", ()),
+                *self.profile.get("openai_unsupported_model_settings", ()),
+            ),
+        ), parameters
+
+
+class _OutputOnlyOpenAIResponsesModel(OpenAIResponsesModel):
+    def prepare_request(
+        self, model_settings: ModelSettings | None, model_request_parameters: ModelRequestParameters,
+    ) -> tuple[ModelSettings | None, ModelRequestParameters]:
+        settings, parameters = super().prepare_request(model_settings, model_request_parameters)
+        return _ProviderModelBinding.prepare_output_tool_settings(
+            settings, parameters,
+            unsupported_settings=(
+                *getattr(self, "unsupported_settings", ()),
+                *self.profile.get("openai_unsupported_model_settings", ()),
+            ),
+        ), parameters
 
 
 class _CapturedOpenAIProvider(OpenAIProvider):
@@ -51,7 +79,7 @@ class _OpenAIModelBinding(_ProviderModelBinding):
     _profile_type = OpenAIModelProfile
     def _build_model(self, settings: ModelSettings) -> Model:
         provider = _CapturedOpenAIProvider(base_url=self.base_url, api_key=self.api_key)
-        model_type = OpenAIChatModel if self.api == "openai" else OpenAIResponsesModel
+        model_type = _OutputOnlyOpenAIChatModel if self.api == "openai" else _OutputOnlyOpenAIResponsesModel
         return model_type(self.model, provider=provider, settings=settings or None,
                           **({"profile": self._sdk_profile()} if self._profile_overrides else {}))
 
