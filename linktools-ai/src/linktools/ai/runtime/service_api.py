@@ -244,7 +244,12 @@ class ExecutionHistoryItem:
 
 @dataclass(frozen=True, slots=True)
 class ModelStreamAttemptItem:
-    """Observed stream attempt; successful content stays on its interaction."""
+    """One-based stream attempt within a logical model request.
+
+    Client request bounds select a zero-based, half-open range of the original
+    client request array, not stream attempt identities. Only failed/cancelled
+    partial content appears here; successful content stays on the interaction.
+    """
 
     stream_attempt_seq: int
     status: str
@@ -275,6 +280,9 @@ class ModelInteractionItem:
 
     With client_requests_included set, None means no capture was recorded;
     an empty tuple means the scope observed no supported client dispatch.
+    stream_attempts similarly distinguishes unobserved history (None) from an
+    observed scope without stream attempts (()). include_content controls all
+    SDK response bodies, including failed stream partials, but not metadata.
     """
 
     execution_id: str

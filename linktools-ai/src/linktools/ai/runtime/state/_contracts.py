@@ -616,7 +616,9 @@ class ModelInteractionRecord:
 
     client_requests is absent for uncaptured history; an empty tuple means the
     completed observation scope saw no client dispatch. Array positions belong
-    only to actual attempts within this logical request.
+    only to actual client dispatches within this logical request. Stream attempt
+    identities are separate; their partial response bodies are trace-only and
+    never become transcript messages or checkpoint working context.
     """
 
     agent_run_id: str
