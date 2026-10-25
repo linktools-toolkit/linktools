@@ -19,12 +19,15 @@ from pydantic_ai.messages import (
     BinaryContent,
     CompactionPart,
     FilePart,
+    InstructionId,
+    InstructionPart,
     ModelMessage,
     ModelRequest,
     ModelResponse,
     NativeToolCallPart,
     NativeToolReturnPart,
     RetryPromptPart,
+    SerializedInstructionId,
     SpeechPart,
     SystemPromptPart,
     TextContent,
@@ -40,6 +43,11 @@ try:
     from pydantic_ai.messages import RetryFeedbackPart, RetryInfo
 except ImportError:
     RetryFeedbackPart = RetryInfo = None
+
+try:
+    from pydantic_ai.messages import InstructionBaselinePart, InstructionDeltaPart, InstructionDigest
+except ImportError:
+    InstructionBaselinePart = InstructionDeltaPart = InstructionDigest = None
 
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
@@ -61,6 +69,7 @@ _TOOL_OUTCOMES = frozenset({"success", "failed", "denied", "interrupted", "retri
 _TOOL_RETRY_CAUSES = frozenset({"validation_error", "model_retry", "unknown_tool", "unavailable_tool"})
 _FEEDBACK_RETRY_CAUSES = frozenset({"validation_error", "model_retry", "no_output"})
 _ERROR_DETAILS_ADAPTER = TypeAdapter(list[ErrorDetails])
+_INSTRUCTION_ID_ADAPTER = TypeAdapter(SerializedInstructionId)
 _MODEL_REQUEST_ATTEMPT = getattr(sdk_messages, "ModelRequestAttempt", None)
 
 
@@ -459,6 +468,20 @@ def _encode_request_part(part: object) -> dict[str, JsonValue]:
             "tools_added": list(part.tools_added),
             "tool_call_id": part.tool_call_id,
         }
+    if InstructionBaselinePart is not None and isinstance(part, InstructionBaselinePart):
+        if not isinstance(part.instructions, list):
+            raise TypeError("instruction baseline must contain a list")
+        return {
+            "part_kind": "instruction-baseline",
+            "instructions": [_encode_instruction_block(block) for block in part.instructions],
+        }
+    if InstructionDeltaPart is not None and isinstance(part, InstructionDeltaPart):
+        return {
+            "part_kind": "instruction-delta",
+            "id": _encode_instruction_id(part.id),
+            "content": _optional_string(part.content),
+            "base_hash": None if part.base_hash is None else _instruction_hash(part.base_hash),
+        }
     if isinstance(part, SpeechPart):
         return _encode_speech_part(part)
     raise TypeError(f"unsupported model request part: {type(part).__name__}")
@@ -527,12 +550,113 @@ def _decode_request_part(value: object) -> object:
             tools_added=cast(list[str], tools),
             tool_call_id=_optional_string(part["tool_call_id"]),
         )
+    if kind == "instruction-baseline":
+        if InstructionBaselinePart is None:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        _require_keys(part, {"part_kind", "instructions"})
+        instructions = part["instructions"]
+        if not isinstance(instructions, list):
+            raise ValueError("instruction baseline must contain a list")
+        return InstructionBaselinePart(instructions=[_decode_instruction_block(block) for block in instructions])
+    if kind == "instruction-delta":
+        if InstructionDeltaPart is None:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        _require_keys(part, {"part_kind", "id", "content", "base_hash"})
+        return InstructionDeltaPart(
+            id=_decode_instruction_id(part["id"]),
+            content=_optional_string(part["content"]),
+            base_hash=None if part["base_hash"] is None else _instruction_hash(part["base_hash"]),
+        )
     if kind == "speech":
         speech = _decode_speech_part(part)
         if speech.speaker != "user":
             raise ValueError("request speech speaker is invalid")
         return speech
     raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+
+
+def _encode_instruction_block(block: object) -> dict[str, JsonValue]:
+    if isinstance(block, InstructionPart):
+        return {
+            "part_kind": "instruction",
+            "id": _encode_instruction_id(block.id),
+            "content": _required_string(block.content),
+            "dynamic": _instruction_dynamic(block.dynamic),
+            "on_change": _instruction_policy(block.on_change),
+            "name": _optional_string(block.name),
+        }
+    if InstructionDigest is not None and isinstance(block, InstructionDigest):
+        return {
+            "part_kind": "instruction-digest",
+            "id": _encode_instruction_id(block.id),
+            "dynamic": _instruction_dynamic(block.dynamic),
+            "content_hash": _instruction_hash(block.content_hash),
+        }
+    raise TypeError(f"unsupported instruction baseline block: {type(block).__name__}")
+
+
+def _decode_instruction_block(value: object) -> object:
+    block = _part_mapping(value)
+    kind = block.get("part_kind")
+    if kind == "instruction":
+        _require_keys(block, {"part_kind", "id", "content", "dynamic", "on_change", "name"})
+        return InstructionPart(
+            _required_string(block["content"]),
+            id=_decode_instruction_id(block["id"]),
+            dynamic=_instruction_dynamic(block["dynamic"]),
+            on_change=_instruction_policy(block["on_change"]),
+            name=_optional_string(block["name"]),
+        )
+    if kind == "instruction-digest":
+        if InstructionDigest is None:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        _require_keys(block, {"part_kind", "id", "dynamic", "content_hash"})
+        return InstructionDigest(
+            id=_decode_instruction_id(block["id"]),
+            dynamic=_instruction_dynamic(block["dynamic"]),
+            content_hash=_instruction_hash(block["content_hash"]),
+        )
+    raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+
+
+def _encode_instruction_id(value: InstructionId | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, InstructionId):
+        raise TypeError("instruction id must be an InstructionId")
+    encoded = str(value)
+    if _decode_instruction_id(encoded) != value:
+        raise ValueError("instruction id is invalid")
+    return encoded
+
+
+def _decode_instruction_id(value: object) -> InstructionId | None:
+    if value is None:
+        return None
+    encoded = _required_string(value)
+    result = _INSTRUCTION_ID_ADAPTER.validate_python(encoded)
+    # SDK readers replace unknown source namespaces with None; durable history must not lose them.
+    if result is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    return result
+
+
+def _instruction_dynamic(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError("instruction dynamic flag is invalid")
+    return value
+
+
+def _instruction_policy(value: object) -> str:
+    if not isinstance(value, str) or value not in {"rewrite", "append"}:
+        raise ValueError("instruction change policy is invalid")
+    return value
+
+
+def _instruction_hash(value: object) -> str:
+    if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise ValueError("instruction content hash is invalid")
+    return value
 
 
 def _encode_response_part(part: object) -> dict[str, JsonValue]:
