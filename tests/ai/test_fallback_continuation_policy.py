@@ -125,7 +125,9 @@ async def test_pinned_failure_uses_transport_budget_only_once(path: str, retries
                     async with model.request_stream([*messages, response], None, ModelRequestParameters()):
                         pytest.fail("failed continuation cannot enter a stream")
             assert failed.value is primary.error
-    assert calls == ["primary"] * (retries + 2)
+    # A suspended stream can have provider-side effects even before its next event.
+    # Non-stream request retry ownership is unchanged.
+    assert calls == ["primary"] * (retries + 2 if path == "request" else 2)
 
 
 @pytest.mark.asyncio

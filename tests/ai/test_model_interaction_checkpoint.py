@@ -112,8 +112,9 @@ async def test_checkpoint_preserves_live_request_until_terminal(
         assert [value.usage.input_tokens for value in archived] == [3, 6]
         assert [value.usage.output_tokens for value in archived] == [2, 4]
         resolved = await recovery.resolve_model_interactions(archived)
-        for sequence, (request_messages, response_messages, envelope, client_requests) in enumerate(resolved, 1):
+        for sequence, (request_messages, response_messages, envelope, client_requests, stream_responses) in enumerate(resolved, 1):
             assert client_requests is None
+            assert stream_responses is None
             assert request_messages[-1].parts[0].content == f"request-{sequence}"
             assert json.loads(envelope)["streaming"] is False
             if status == "SUCCEEDED":

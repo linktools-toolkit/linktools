@@ -181,10 +181,14 @@ class SharedStreamPublisher:
             if current is producer:
                 del self.producers[execution_id]
 
-    def delta(self, execution_id: str, event_type: str, content: str, truncated: bool) -> None:
+    def delta(
+        self, execution_id: str, event_type: str, content: str, truncated: bool,
+        position: Mapping[str, JsonValue] | None = None,
+    ) -> None:
         producer = self.producers.get(execution_id)
         if producer is not None:
-            producer.put({"kind": "delta", "type": str(event_type), "text": content, "truncated": truncated})
+            producer.put({"kind": "delta", "type": str(event_type), "text": content, "truncated": truncated,
+                          **({"position": dict(position)} if position is not None else {})})
 
     def event(self, execution_id: str, event_type: str, payload: JsonValue, durable_seq: int | None) -> None:
         producer = self.producers.get(execution_id)

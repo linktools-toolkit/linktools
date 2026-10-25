@@ -1,5 +1,8 @@
 # Model protocols and readable traces
 
+Use Python >= 3.11 with `pydantic-ai-slim>=2.59.0,<3.0.0` and
+`pydantic-ai-harness>=0.59.0`; Harness requires its matching SDK version.
+The `evaluation` extra uses the SDK's `evals` extra to select the matching evaluation package.
 Install only the provider adapters you use:
 
 ```shell
@@ -311,8 +314,8 @@ Fallback attempts remain distinct from logical model requests and physical HTTP
 order, available timing, diagnostics and usage through the existing model-history
 and interaction projection, subject to the existing redaction and content-omission
 policy. If all candidates fail, available facts are also exposed through the
-execution result's `safe_error_details["failed_attempts"]`. Older SDKs without those
-facts do not acquire synthetic attempts, timestamps or zero-valued usage. Reported attempt usage is an
+execution result's `safe_error_details["failed_attempts"]`. Missing facts do not
+acquire synthetic attempts, timestamps or zero-valued usage. Reported attempt usage is an
 observed subtotal only: missing usage remains unknown, so even a recorded subtotal
 is not proof of the complete token usage or cost of a failed fallback chain.
 Non-streaming requests retain the SDK's usage accounting. A streamed exhausted
@@ -347,6 +350,22 @@ request value are distinct. Runtime validation remains authoritative. Returned
 `ThinkingPart` content stays visible independently of request control. Custom bindings
 without a `thinking_control()` projection report unknown control.
 
+## Output-only requests
+
+The built-in provider bindings default `parallel_tool_calls` to `False` only
+after the SDK has resolved a request to tool output with exactly one output
+tool, no ordinary function tools, no native tools and no free-text output.
+This avoids requesting parallel alternative terminal results; ordinary tool
+requests keep their existing parallel-call behavior. The policy follows the
+actual request shape, not an Agent name or a separate model route.
+
+Explicit SDK model or request settings, including `True`, take precedence.
+An SDK-declared unsupported setting is not added. Native structured/text output
+and externally supplied SDK models remain unchanged. This is a request default,
+not a new `AgentSpec` or `create_model` option, and it does not change retry or
+output-validation ownership. Compatible gateways must actually support and
+honor the provider field; no token reduction is inferred from the setting alone.
+
 ## Transport retries
 
 The model binding owns transport retries; native provider SDK retries remain
@@ -369,22 +388,41 @@ do not change the model's semantic identity or contract.
 The SDK's public normalized `retry_after` is a lower bound for the current
 response only, even when it exceeds the local cap. A later response without
 that hint uses its own exponential base. Caller cancellation and the SDK's
-whole-request `request_timeout`, when supported, interrupt waiting; direct
+whole-request `request_timeout` interrupt waiting; direct
 Model calls without such a caller deadline have no implicit total-wait budget.
 
 Ordinary transient 429/408/409/5xx errors may retry. Known quota exhaustion is
 not a temporary rate limit: the SDK's public typed quota error, or its exact
 structured `insufficient_quota` code on a model HTTP error, is rejected without
 retry. Overall request-deadline exhaustion also does not start a new attempt.
-Supported SDK phase timeout and connection errors retain timeout/unavailable
-classification rather than becoming generic API failures. No message-text
-heuristics classify quota or infer the configured protocol.
+The SDK's typed context-window overflow is also rejected without resending
+unchanged input. Typed rate-limit, unavailable, server, phase-timeout and
+connection errors retain their categories even without an HTTP status. The
+supported SDK minimum provides these public categories. A genuinely opaque
+`ModelAPIError` still keeps the bounded generic retry behavior; LinkTools does
+not infer a permanent rejection from ambiguous message text.
 
-A stream is never replayed once entered, including when the SDK reports an
-`in_stream` failure before yielding its response object. These transport retries
-are distinct from Agent output/tool correction retries, task retries and host
-rate-limit admission. A logical request hook still runs once around potentially
-multiple HTTP attempts; it is not a physical-attempt quota hook.
+Malformed Chat completion responses with no choices are rejected at the
+provider validation boundary as `MODEL_RESPONSE_INVALID`, not an internal
+indexing error. Empty-stream EOF and output validation remain SDK response
+semantics rather than blanket transport retries. Valid empty responses can use
+the Agent's separate output-correction budget; token-limit exhaustion does not
+silently increase `max_tokens` or restart the request.
+
+Before the first event reaches the consumer, an eligible transport failure can
+retry within the same policy. Once a partial preview has been exposed, retry
+requires a consumer that acknowledges replacement of that failed preview before
+new deltas arrive. Runtime's bundled Web and CLI consumers implement this boundary;
+a consumer without replacement support does not silently opt in. Native-tool or
+suspended continuation state prevents replay, even before the first event, because
+it may represent provider-owned work. Cancellation and consumer exit do not start
+another attempt.
+
+These transport retries are distinct from Agent output/tool correction retries,
+task retries and host rate-limit admission. A logical request hook still runs once
+around potentially multiple observed SDK stream invocations and HTTP dispatches;
+it is not a physical-attempt quota hook. Their sequence numbers are separate:
+native fallback may perform several provider dispatches within one SDK invocation.
 
 ## Trace and integrity boundaries
 
@@ -406,8 +444,9 @@ Passive capture observes the same stream consumed by the SDK and preserves nativ
 bytes, attempts and errors. Chat `[DONE]`, Responses completed/failed/incomplete/error,
 and Anthropic message_stop/error are protocol terminals. A terminal capture does not
 mean a successful model response. Cancellation or disconnection retains only the
-observed partial body; consumed streams are not replayed automatically. SDK retry is
-disabled in favor of the existing bounded model retry wrapper.
+observed partial body. Passive capture never initiates retries; replacement follows
+the bounded model policy and consumer contract above. Native provider SDK retries
+remain disabled.
 
 Passive timing and byte/chunk counts remain available when body capture is off;
 that mode does not buffer or parse request/response bodies. Per-attempt

@@ -726,7 +726,8 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
         interactions = await archive.list_model_interactions(agent_run_id="run")
         assert [value.model_request_seq for value in interactions] == [1, 2]
         resolved = await archive.resolve_model_interactions(interactions)
-        second_request, second_resolved_response, _envelope, client_requests = resolved[1]
+        second_request, second_resolved_response, _envelope, client_requests, stream_responses = resolved[1]
+        assert stream_responses is None
         assert client_requests is None
         assert len(second_request) == 3
         assert isinstance(second_request[-1], ModelRequest)

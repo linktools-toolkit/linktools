@@ -111,7 +111,7 @@ async def test_original_attempts_round_trip_and_relocate_without_sdk_context(
         await source.sync_projection(run, events=(), checkpoints=(), interactions=records, execution_id="execution", archive=prepared)
         archived = await source.list_model_interactions(agent_run_id="run")
         resolved = await source.resolve_model_interactions(archived, include_client_requests=True)
-        assert resolved == [(None, None, None, requests)]
+        assert resolved == [(None, None, None, requests, None)]
         assert await source.resolve_model_interaction(archived[0], include_client_requests=True) == resolved[0]
         with pytest.raises(AIError) as raised:
             await source.sync_projection(
@@ -126,7 +126,7 @@ async def test_original_attempts_round_trip_and_relocate_without_sdk_context(
             request, body=None,
             response=replace(request.response, body=None) if request.response is not None else None,
         ) for request in requests)
-        expected = [(None, None, None, metadata)]
+        expected = [(None, None, None, metadata, None)]
         assert all(request.body is None for request in relocated[0].client_requests)
         assert relocated[0].model == record.model
         assert relocated[0].usage == record.usage
@@ -151,7 +151,7 @@ async def test_missing_capture_and_no_dispatch_remain_distinct_on_wire(requests)
         archive = storage.run_store.read_store(RuntimeDomain.TRACE)
         record, = await archive.prepare_interactions(AgentRunRecord("run"), (_staged(requests),), lambda _: b"{}", prepared=prepared)
         assert _decode_step_envelope(_encode_step_envelope(record)).client_requests == requests
-        assert await archive.resolve_model_interaction(record, include_client_requests=True) == (None, None, None, requests)
+        assert await archive.resolve_model_interaction(record, include_client_requests=True) == (None, None, None, requests, None)
         missing_capture_field = _encode_persisted_domain(record)
         del missing_capture_field["fields"]["client_requests"]
         with pytest.raises(AIError) as missing:
@@ -238,7 +238,7 @@ async def test_native_objects_survive_snapshot_and_follow_owner_cleanup(
     try:
         archive = restored.run_store.read_store(RuntimeDomain.TRACE)
         records = await archive.list_model_interactions(agent_run_id="run")
-        assert await archive.resolve_model_interactions(records, include_client_requests=True) == [(None, None, None, requests)]
+        assert await archive.resolve_model_interactions(records, include_client_requests=True) == [(None, None, None, requests, None)]
         references = tuple(set(iter_runtime_object_refs(_encode_persisted_domain(records[0]), default_domain=RuntimeDomain.TRACE)))
         await archive.release_agent_run("run", execution_id="execution")
         result = await restored.purge_unreferenced_objects(references, exclusive=Offline())
@@ -260,7 +260,7 @@ async def test_volatile_archive_and_staging_keep_original_attempt_views() -> Non
         assert records[0].client_requests[0].body.content.payload.kind == "inline"
         await archive.sync_projection(AgentRunRecord("run"), events=(), checkpoints=(), interactions=records, execution_id="execution", archive=prepared)
         resolved = await archive.resolve_model_interactions(records, include_client_requests=True)
-        assert resolved == [(None, None, None, requests)]
+        assert resolved == [(None, None, None, requests, None)]
         assert await archive.prepare_relocated_interactions(records, resolved, prepared=prepared) == records
     finally:
         await archive.close()
@@ -271,14 +271,14 @@ async def test_volatile_archive_and_staging_keep_original_attempt_views() -> Non
         staged = _staged(requests)
         await storage.run_store.register_agent_run(AgentRunRecord("run"))
         storage.run_store.stage_model_interaction(staged)
-        assert await storage.run_store.resolve_model_interaction(staged, include_client_requests=True) == (None, None, None, requests)
+        assert await storage.run_store.resolve_model_interaction(staged, include_client_requests=True) == (None, None, None, requests, None)
         from linktools.ai.runtime._transient_history import TransientExecutionHistoryStore
         source = storage.run_store.read_store(RuntimeDomain.TRACE)
         transient = TransientExecutionHistoryStore(source, storage.run_store)
         assert await transient.list_model_interactions(agent_run_id="run") == [staged]
-        assert await transient.resolve_model_interactions((staged,)) == [(None, None, None, None)]
+        assert await transient.resolve_model_interactions((staged,)) == [(None, None, None, None, None)]
         assert await transient.resolve_model_interactions((staged,), include_client_requests=True) == [
-            (None, None, None, requests),
+            (None, None, None, requests, None),
         ]
         with pytest.raises(AIError) as raised:
             await source.resolve_model_interaction(staged, include_client_requests=True)
@@ -335,7 +335,7 @@ async def test_sdk_projection_and_native_bytes_remain_separate(
             patch.setattr(objects, "open", reject_raw_open)
             assert await archive.list_model_interactions(agent_run_id="run") == list(records)
             assert await archive.resolve_model_interactions(records) == [
-                (sdk_request, sdk_response, b'{"streaming":true}', None),
+                (sdk_request, sdk_response, b'{"streaming":true}', None, None),
             ]
             assert (await archive.resolve_model_interaction(records[0]))[3] is None
             metadata = await resolve_client_requests(
@@ -343,7 +343,7 @@ async def test_sdk_projection_and_native_bytes_remain_separate(
             )
             checkpoint_archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
             relocated = await checkpoint_archive.prepare_relocated_interactions(
-                records, [(sdk_request, sdk_response, b'{"streaming":true}', metadata)],
+                records, [(sdk_request, sdk_response, b'{"streaming":true}', metadata, None)],
             prepared=prepared)
             assert relocated[0].client_requests[0].body is None
             assert relocated[0].client_requests[0].response.status_code == 429
@@ -355,7 +355,7 @@ async def test_sdk_projection_and_native_bytes_remain_separate(
                     records, await archive.resolve_model_interactions(records),
                 prepared=prepared)
         assert await archive.resolve_model_interactions(records, include_client_requests=True) == [
-            (sdk_request, sdk_response, b'{"streaming":true}', requests),
+            (sdk_request, sdk_response, b'{"streaming":true}', requests, None),
         ]
     finally:
         await storage.close()
@@ -409,7 +409,7 @@ async def test_interrupted_record_preserves_observed_incomplete_response() -> No
         loaded = await archive.list_model_interactions(agent_run_id="run")
         assert loaded[0].finished_at is None and loaded[0].usage is None
         assert await archive.resolve_model_interactions(loaded, include_client_requests=True) == [
-            (None, None, None, requests),
+            (None, None, None, requests, None),
         ]
         assert loaded[0].client_requests[0].response.complete is False
     finally:
@@ -456,7 +456,7 @@ async def test_recovery_preserves_existing_trace_bodies_without_reading_them(
         loaded = await trace.list_model_interactions(agent_run_id="run")
         assert loaded[0].client_requests == traced[0].client_requests
         assert await trace.resolve_model_interactions(loaded, include_client_requests=True) == [
-            (None, None, None, requests),
+            (None, None, None, requests, None),
         ]
     finally:
         await storage.close()

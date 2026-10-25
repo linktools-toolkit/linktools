@@ -7,7 +7,7 @@ import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import aclosing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from linktools.core import environ
@@ -79,6 +79,8 @@ _BOUNDARY_METADATA_FIELDS = {
         {
             "agent_run_seq",
             "message_seq",
+            "model_request_seq",
+            "stream_attempt_seq",
             "part_index",
             "part_type",
             "digest",
@@ -96,6 +98,8 @@ def project_event_payload(
     if event_type in {
         ExecutionEventType.MODEL_REQUEST_STARTED.value,
         ExecutionEventType.MODEL_REQUEST_FINISHED.value,
+        ExecutionEventType.MODEL_ATTEMPT_STARTED.value,
+        ExecutionEventType.MODEL_ATTEMPT_FINISHED.value,
     }:
         if not isinstance(payload, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -115,8 +119,23 @@ class ExecutionDelta:
     content: str
     stream_truncated: bool = False
     start_offset: int = 0
+    position: Mapping[str, JsonValue] | None = None
 
+    def __post_init__(self) -> None:
+        if self.position is not None:
+            if not isinstance(self.position, Mapping) or any(
+                key not in {"agent_run_seq", "model_request_seq", "stream_attempt_seq", "part_index", "part_start"}
+                or (type(value) is not bool if key == "part_start" else
+                    type(value) is not int or value < (0 if key == "part_index" else 1))
+                for key, value in self.position.items()
+            ):
+                raise ValueError("stream delta position is invalid")
+            object.__setattr__(self, "position", dict(self.position))
 
+    @property
+    def preview_span(self) -> int:
+        """Opaque preview position: empty part starts occupy one marker slot."""
+        return len(self.content) or int(bool(self.position and self.position.get("part_start")))
 
 
 @dataclass(slots=True)
@@ -191,7 +210,7 @@ class _LiveSubscription:
         if self._closed or self._replay_required:
             return False
         value = _bounded_delta(value, self._max_bytes)
-        if not value.content:
+        if not value.preview_span:
             self._truncated_pending = True
             return False
         value_size = len(value.content.encode("utf-8"))
@@ -201,7 +220,7 @@ class _LiveSubscription:
                 return False
         truncated = value.stream_truncated or self._truncated_pending
         self._truncated_pending = False
-        value = ExecutionDelta(value.execution_id, value.event_type, value.content, truncated, value.start_offset)
+        value = replace(value, stream_truncated=truncated)
         self._queue.append(value)
         self._queue_bytes += value_size
         self._wakeup.set()
@@ -315,7 +334,7 @@ class LiveExecutionEventBroker:
         for item in self._buffers.get(execution_id, ()):
             if not isinstance(item, ExecutionDelta):
                 continue
-            end = item.start_offset + len(item.content)
+            end = item.start_offset + item.preview_span
             if end <= offset:
                 continue
             if item.start_offset > offset:
@@ -327,20 +346,18 @@ class LiveExecutionEventBroker:
         return self._base_event_seqs.get(execution_id)
 
     def publish(self, delta: ExecutionDelta) -> None:
-        if self._shared is not None and delta.content:
-            self._shared.delta(delta.execution_id, delta.event_type, delta.content, delta.stream_truncated)
-        if not delta.content:
+        if self._shared is not None and delta.preview_span:
+            self._shared.delta(delta.execution_id, delta.event_type, delta.content, delta.stream_truncated, delta.position)
+        if not delta.preview_span:
             return
         if delta.execution_id in self._replay_required:
             self._truncated.add(delta.execution_id)
             return
         start = self._preview_offsets.get(delta.execution_id, 0)
-        self._preview_offsets[delta.execution_id] = start + len(delta.content)
-        delta = ExecutionDelta(
-            delta.execution_id, delta.event_type, delta.content, delta.stream_truncated, start,
-        )
+        self._preview_offsets[delta.execution_id] = start + delta.preview_span
+        delta = replace(delta, start_offset=start)
         delta = _bounded_delta(delta, self._max_bytes)
-        if not delta.content:
+        if not delta.preview_span:
             self._truncated.add(delta.execution_id)
             self._signal(delta.execution_id)
             return
@@ -349,7 +366,9 @@ class LiveExecutionEventBroker:
         size = len(delta.content.encode("utf-8"))
         if (self._last_type.get(execution_id) is delta.event_type and buffer
                 and isinstance(buffer[-1], ExecutionDelta)
-                and buffer[-1].start_offset + len(buffer[-1].content) == delta.start_offset):
+                and buffer[-1].position == delta.position
+                and not (delta.position and delta.position.get("part_start"))
+                and buffer[-1].start_offset + buffer[-1].preview_span == delta.start_offset):
             previous = buffer.pop()
             if not isinstance(previous, ExecutionDelta):
                 raise RuntimeError("live broker delta ordering is corrupt")
@@ -362,6 +381,7 @@ class LiveExecutionEventBroker:
                     or delta.stream_truncated
                     or execution_id in self._truncated,
                     previous.start_offset,
+                    delta.position,
                 ),
                 self._max_bytes,
             )
@@ -378,6 +398,7 @@ class LiveExecutionEventBroker:
                     delta.content,
                     delta.stream_truncated or execution_id in self._truncated,
                     delta.start_offset,
+                    delta.position,
                 )
             )
             self._buffer_bytes[execution_id] = self._buffer_bytes.get(execution_id, 0) + size
@@ -392,6 +413,7 @@ class LiveExecutionEventBroker:
             delta.content,
             delta.stream_truncated or execution_id in self._truncated,
             delta.start_offset,
+            delta.position,
         )
         for subscription in tuple(self._subscriptions.get(execution_id, ())):
             subscription.put_delta(published)
@@ -617,6 +639,7 @@ class LiveExecutionEventBroker:
                         item.content,
                         item.stream_truncated or execution_id in self._truncated,
                         item.start_offset,
+                        item.position,
                     )
                 )
             elif isinstance(item, _LiveEvent):
@@ -692,7 +715,7 @@ def _bounded_delta(delta: ExecutionDelta, max_bytes: int) -> ExecutionDelta:
             break
         parts.append(character)
         size += character_size
-    return ExecutionDelta(delta.execution_id, delta.event_type, "".join(parts), True, delta.start_offset)
+    return replace(delta, content="".join(parts), stream_truncated=True)
 
 
 class _ExecutionWorkerFailureProbe(Protocol):
@@ -899,6 +922,10 @@ class DefaultEventService:
             poll_backoff = 1.0
             async for item in _iterate_live(live):
                 if isinstance(item, _LiveReplayRequired):
+                    if preview_offset:
+                        yield SharedStreamEvent(
+                            execution_id, None, "STREAM_RESET", {"stream_truncated": True}, ("", 0),
+                        )
                     await _close_live(live)
                     if item.discard_uncommitted:
                         ephemeral_semantic_count = 0
@@ -918,7 +945,7 @@ class DefaultEventService:
                 if replay_cursor is not None:
                     if isinstance(item, ExecutionDelta):
                         poll_backoff = 1.0
-                        preview_offset = max(preview_offset, item.start_offset + len(item.content))
+                        preview_offset = max(preview_offset, item.start_offset + item.preview_span)
                         continue
                     while item.durable_seq is None:
                         if live.replay_required:
@@ -968,21 +995,25 @@ class DefaultEventService:
                     continue
                 if isinstance(item, ExecutionDelta):
                     poll_backoff = 1.0
-                    end = item.start_offset + len(item.content)
+                    end = item.start_offset + item.preview_span
                     if end <= preview_offset:
                         continue
                     if item.start_offset > preview_offset and not preview_reset:
                         yield SharedStreamEvent(
                             execution_id, None, "STREAM_RESET", {"stream_truncated": True}, ("", 0),
                         )
-                    text = item.content[max(0, preview_offset - item.start_offset):]
+                    skipped = max(0, preview_offset - item.start_offset)
+                    text = item.content[skipped:]
+                    position = dict(item.position or {})
+                    if skipped and "part_start" in position:
+                        position["part_start"] = False
                     preview_offset = end
                     preview_reset = False
                     yield SharedStreamEvent(
                         item.execution_id,
                         None,
                         item.event_type,
-                        {"text": text, "stream_truncated": item.stream_truncated},
+                        {"text": text, "stream_truncated": item.stream_truncated, **position},
                         (preview_epoch, preview_offset),
                     )
                     continue
@@ -1215,9 +1246,18 @@ class DefaultEventService:
                                 or not isinstance(record.get("truncated", False), bool)):
                             gap = True
                             break
+                        try:
+                            delta = ExecutionDelta(
+                                execution_id, delta_type, record["text"], record.get("truncated", False),
+                                position=record.get("position"),
+                            )
+                        except (TypeError, ValueError):
+                            gap = True
+                            break
                         yield SharedStreamEvent(
                             execution_id, None, delta_type.value,
-                            {"text": record["text"], "stream_truncated": record.get("truncated", False)},
+                            {"text": delta.content, "stream_truncated": delta.stream_truncated,
+                             **(delta.position or {})},
                             (identity, position),
                         )
                     elif kind == "event":

@@ -243,11 +243,51 @@ class ExecutionHistoryItem:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelStreamAttemptItem:
+    """One observed SDK stream invocation within a logical model request.
+
+    The sequence is one-based; native fallback can dispatch several providers
+    within one invocation. SUCCEEDED means this segment completed, not that it alone owns
+    the logical response. Native continuation can complete several segments.
+    Client request bounds select a zero-based, half-open range of the original
+    client request array, not stream attempt identities. Only failed/cancelled
+    partial content appears here; the canonical response stays on the interaction.
+    """
+
+    stream_attempt_seq: int
+    status: str
+    started_at: datetime
+    finished_at: datetime
+    duration_ns: int
+    client_request_start: int
+    client_request_end: int
+    response: JsonValue | None
+    usage: UsageMetrics | None
+    error_code: str | None
+    error_type: str | None
+    retry_scheduled: bool
+
+    def __post_init__(self) -> None:
+        if (self.stream_attempt_seq < 1 or self.duration_ns < 0
+            or self.client_request_start < 0 or self.client_request_end < self.client_request_start
+            or self.status not in {"SUCCEEDED", "FAILED", "CANCELLED"}
+            or self.status == "SUCCEEDED" and self.response is not None
+            or self.retry_scheduled and self.status != "FAILED"):
+            raise ValueError("model stream attempt item is invalid")
+        object.__setattr__(self, "response", deepcopy(self.response))
+
+
+@dataclass(frozen=True, slots=True)
 class ModelInteractionItem:
     """SDK projections and independently selected original client attempts.
 
     With client_requests_included set, None means no capture was recorded;
     an empty tuple means the scope observed no supported client dispatch.
+    stream_attempts similarly distinguishes unobserved history (None) from an
+    observed scope without stream attempts (()). include_content controls all
+    SDK response bodies, including failed stream partials, but not metadata.
+    A failed observed stream may retain an interrupted aggregate in response
+    as trace evidence. Status, not the presence of response, determines success.
     """
 
     execution_id: str
@@ -269,6 +309,7 @@ class ModelInteractionItem:
     finished_at: "datetime | None" = None
     client_requests: tuple[ModelClientRequest, ...] | None = None
     client_requests_included: bool = False
+    stream_attempts: tuple[ModelStreamAttemptItem, ...] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -303,6 +344,12 @@ class ModelInteractionItem:
             or self.error_code is not None
         ):
             raise ValueError("unfinished model interaction has terminal data")
+        if self.stream_attempts is not None and (
+            not isinstance(self.stream_attempts, tuple)
+            or any(not isinstance(value, ModelStreamAttemptItem) for value in self.stream_attempts)
+            or not self.content_included and any(value.response is not None for value in self.stream_attempts)
+        ):
+            raise ValueError("model stream attempt content is invalid")
         object.__setattr__(self, "model", deepcopy(dict(self.model)))
         object.__setattr__(self, "request", deepcopy(dict(self.request)))
         object.__setattr__(self, "response", deepcopy(self.response))
@@ -1398,6 +1445,7 @@ __all__ = [
     "ListExecutionRequest",
     "ListSessionRequest",
     "ModelInteractionItem",
+    "ModelStreamAttemptItem",
     "ModelInteractionReadBoundary",
     "ModelInteractionSubscription",
     "Page",

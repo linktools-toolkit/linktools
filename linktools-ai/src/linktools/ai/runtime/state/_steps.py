@@ -770,6 +770,11 @@ class RuntimeAgentRunStore(AgentRunStore):
                                 agent_run_id, value.request_envelope_digest,
                             ),
                             value.client_requests if include_client_requests else None,
+                            None if value.stream_attempts is None else tuple([
+                                None if not include_content or attempt.response_context is None
+                                else await resolve_projection(attempt.response_context)
+                                for attempt in value.stream_attempts
+                            ]),
                         )
                     )
                 return resolved_values
@@ -799,9 +804,13 @@ class RuntimeAgentRunStore(AgentRunStore):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 result: list[object] = []
                 for staged_value, value in zip(staged, resolved, strict=True):
-                    if not isinstance(value, tuple) or len(value) != 4:
+                    if not isinstance(value, tuple) or len(value) != 5:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    request, response, envelope, client_requests = value
+                    request, response, envelope, client_requests, stream_responses = value
+                    if staged_value.stream_attempts is not None and (
+                        stream_responses is None or len(stream_responses) != len(staged_value.stream_attempts)
+                    ):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     result.append(
                         (
                             request,
@@ -810,6 +819,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                             else None,
                             envelope,
                             client_requests if staged_value.client_requests is not None else None,
+                            stream_responses if staged_value.stream_attempts is not None else None,
                         )
                     )
                 return result
@@ -930,7 +940,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                     return tuple([
                         (*projection[:3], await resolve_client_requests(
                             interaction.client_requests, target, include_bodies=False,
-                        ))
+                        ), None if interaction.stream_attempts is None else tuple(None for _ in interaction.stream_attempts))
                         for interaction, projection in zip(interactions, projections, strict=True)
                     ])
 
@@ -2400,6 +2410,9 @@ def _interaction_semantic_header(
         interaction.duration_ns,
         interaction.usage,
         interaction.attachments,
+        None if interaction.stream_attempts is None else tuple(
+            replace(attempt, response_context=None) for attempt in interaction.stream_attempts
+        ),
     )
 
 

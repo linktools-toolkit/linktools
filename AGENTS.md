@@ -14,7 +14,7 @@ Repository-wide instructions for coding agents.
 
 ### Python
 
-- `linktools-ai` requires Python >= 3.10; all other packages support Python >= 3.6.
+- `linktools-ai` requires Python >= 3.11; all other packages support Python >= 3.6.
 - Every `.py` file starts with the standard shebang and UTF-8 header.
 - Public functions and methods have parameter and return annotations. Use `Any` only for genuinely untyped values.
 - In Python 3.6-compatible packages, quote annotations containing `|` or `[...]`. Annotation-only imports belong under `TYPE_CHECKING`; runtime-required names do not.

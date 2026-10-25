@@ -7,7 +7,10 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Protocol
 
+from linktools.core import environ
+
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
+from pydantic_ai.usage import UsageLimitExceeded
 from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models import Model, ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
@@ -15,12 +18,12 @@ from pydantic_ai.settings import ModelSettings
 from ..capability import TraceCapability
 from ..core import JsonValue, UsageMetrics
 from ..errors import AIError, ErrorCode
-from ..model import ModelClientRequest
+from ..model import ModelClientRequest, ModelStreamAttempt, model_binding_error
 from ._attachment import request_attachment_facts
 from ._journal import ModelRequestFact
 from ._message import freeze_model_messages
 from ._model_interaction import (
-    StagedContextProjection, StagedContextSpan, StagedModelInteraction, build_context_projection,
+    StagedContextProjection, StagedContextSpan, StagedModelInteraction, StagedStreamAttemptRecord, build_context_projection,
     build_inline_context_projection, model_identity, request_envelope,
 )
 from ._run_context import RunContextProjection
@@ -203,6 +206,7 @@ class ModelInteractionCapture:
         usage: object | None,
         client_requests: tuple[ModelClientRequest, ...] | None = None,
         response_message_index: int | None = None,
+        stream_attempts: tuple[ModelStreamAttempt, ...] | None = None,
     ) -> None:
         del model
         model_request_seq = fact.model_request_seq
@@ -248,7 +252,34 @@ class ModelInteractionCapture:
                 started_at=fact.started_at,
                 finished_at=fact.finished_at,
                 client_requests=client_requests,
+                stream_attempts=None if stream_attempts is None else tuple(
+                    self._stream_attempt(value) for value in stream_attempts
+                ),
             )
+        )
+
+    def _stream_attempt(self, attempt: ModelStreamAttempt) -> StagedStreamAttemptRecord:
+        error = attempt.error
+        projected = (model_binding_error(error) if isinstance(error, Exception) else None)
+        error_code = (error.code.value if isinstance(error, AIError) else
+                      ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED.value if isinstance(error, UsageLimitExceeded) else
+                      projected.code.value if projected is not None else
+                      ErrorCode.INTERNAL_ERROR.value if attempt.status == "FAILED" else None)
+        context = None
+        if attempt.status != "SUCCEEDED" and attempt.response is not None:
+            context = build_inline_context_projection(
+                freeze_model_messages((attempt.response,)),
+                lambda payload: self._staging_store.intern_payload(self._agent_run_id, payload),
+            )
+        return StagedStreamAttemptRecord(
+            stream_attempt_seq=attempt.stream_attempt_seq, status=attempt.status,
+            started_at=attempt.started_at, finished_at=attempt.finished_at,
+            duration_ns=attempt.duration_ns,
+            client_request_start=attempt.client_request_start, client_request_end=attempt.client_request_end,
+            response_context=context, usage=_usage_metrics(attempt.usage),
+            error_code=error_code, error_type=(None if error is None else
+                environ.logging.redact(f"{type(error).__module__}.{type(error).__qualname__}")),
+            retry_scheduled=attempt.retry_scheduled,
         )
 
 

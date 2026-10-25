@@ -194,7 +194,7 @@ async def test_trace_response_payload_storage_and_metadata_reads(
                 assert len(page.items) == 1
                 assert not page.items[0].content_included
                 assert page.items[0].request == {} and page.items[0].response is None
-                assert await archive.resolve_model_interactions(records, include_content=False) == [(None, None, None, None)]
+                assert await archive.resolve_model_interactions(records, include_content=False) == [(None, None, None, None, None)]
             opens: list[tuple[str, str]] = []
             with monkeypatch.context() as patch:
                 for label, source in sources.items():
@@ -465,7 +465,8 @@ async def test_interrupted_partial_response_shares_retained_transcript(
             response_ids = await content_archive.content_ids(block.root)
             transcript_ids = await _transcript_content_ids(archive, run_id)
             assert transcript_ids[1:2] == response_ids
-            request, response, envelope, requests = await archive.resolve_model_interaction(record)
+            request, response, envelope, requests, attempts = await archive.resolve_model_interaction(record)
+            assert attempts is None
             assert response[0].parts[0].content == content
             assert response[0].state == "interrupted"
             transcript = await archive.transcript_repository.load_messages(run_id)

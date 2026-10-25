@@ -78,6 +78,12 @@ class _LifecycleRecorder:
     def prepare_model_interaction(self, *args: object, **kwargs: object) -> None:
         pass
 
+    def observe_stream_attempt(self, fact: ModelRequestFact, attempt: object) -> None:
+        pass
+
+    def response_message_seq(self, model_request_seq: int) -> int | None:
+        return None
+
     async def commit_history_boundary(self) -> None:
         pass
 
@@ -92,8 +98,9 @@ class _LifecycleRecorder:
         duration_ns: int,
         usage: object | None,
         client_requests: object = None,
+        stream_attempts: object = None,
     ) -> None:
-        del model, response, duration_ns, client_requests
+        del model, response, duration_ns, client_requests, stream_attempts
         self.finish_calls[fact.model_request_seq] = (
             self.finish_calls.get(fact.model_request_seq, 0) + 1
         )

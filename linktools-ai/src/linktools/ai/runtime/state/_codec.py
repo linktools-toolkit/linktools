@@ -177,6 +177,7 @@ from ._contracts import (
     ModelClientRequestRef,
     ModelClientResponseRef,
     ModelInteractionRecord,
+    StreamAttemptRecord,
     OperationTerminalUpdate,
     PendingDeferredCall,
     PendingToolContinuation,
@@ -308,6 +309,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("model_client_request_ref", ModelClientRequestRef),
     ("model_client_response_ref", ModelClientResponseRef),
     ("model_interaction", ModelInteractionRecord),
+    ("stream_attempt", StreamAttemptRecord),
     ("execution_start_claim", ExecutionStartClaim),
     ("execution_start_unknown_commit", ExecutionStartUnknownCommit),
     ("execution_cancel_request_commit", ExecutionCancelRequestCommit),
@@ -1217,9 +1219,36 @@ def _decode_v1_model_client_request_ref(
     )
 
 
+def _encode_v1_model_interaction(
+    value: object, codec: "_VersionCodec", persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, ModelInteractionRecord):
+        raise TypeError("V1 model_interaction encoder received the wrong type")
+    return {
+        field.name: _encode_domain(getattr(value, field.name), codec, persisted=persisted)
+        for field in fields(value)
+        if field.name != "stream_attempts" or value.stream_attempts is not None
+    }
+
+
+def _decode_v1_model_interaction(
+    raw_fields: Mapping[str, object], codec: "_VersionCodec", persisted: bool,
+) -> ModelInteractionRecord:
+    declared = _dataclass_fields(ModelInteractionRecord)
+    missing = sorted(name for name in declared if name != "stream_attempts" and name not in raw_fields)
+    if missing:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR,
+                      safe_details={"wire_type": "model_interaction", "missing_fields": missing})
+    return ModelInteractionRecord(**{
+        name: _decode_domain(raw_fields.get(name), field_type, codec, persisted=persisted)
+        for name, (field_type, _init) in declared.items()
+    })
+
+
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
     {
         "error_diagnostics": _encode_v1_error_diagnostics,
+        "model_interaction": _encode_v1_model_interaction,
         "model_client_request_ref": _encode_v1_model_client_request_ref,
         "object_ref": _encode_v1_object_ref,
         "stored_payload": _encode_v1_stored_payload,
@@ -1235,6 +1264,7 @@ _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
 _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
     {
         "error_diagnostics": _decode_v1_error_diagnostics,
+        "model_interaction": _decode_v1_model_interaction,
         "model_client_request_ref": _decode_v1_model_client_request_ref,
         "object_ref": _decode_v1_object_ref,
         "stored_payload": _decode_v1_stored_payload,

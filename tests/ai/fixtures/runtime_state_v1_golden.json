@@ -78,6 +78,7 @@
     "model_client_request_ref",
     "model_client_response_ref",
     "model_interaction",
+    "stream_attempt",
     "execution_start_claim",
     "execution_start_unknown_commit",
     "execution_cancel_request_commit",

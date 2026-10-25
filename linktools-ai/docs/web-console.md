@@ -14,8 +14,9 @@ ai-web --project /path/to/project --model your-model
 python -m linktools ai web --project /path/to/project --model your-model
 ```
 
-The execution stack requires `pydantic-ai-slim>=2.53.0,<3.0.0`. After updating
-the checkout, rerun the install command in the same virtual environment as
+The execution stack requires Python >= 3.11, `pydantic-ai-slim>=2.59.0,<3.0.0`
+and `pydantic-ai-harness>=0.59.0`. Harness selects its matching SDK version.
+After updating the checkout, rerun the install command in the same virtual environment as
 `ai-web`; an existing editable install does not refresh dependency metadata
 until it is installed again. `--help` only exercises lightweight CLI discovery.
 

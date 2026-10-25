@@ -235,8 +235,6 @@ async def test_permanent_http_failures_do_not_wait_or_retry(
 async def test_known_quota_exhaustion_does_not_retry_as_temporary_429(
     recorded_waits: list[float], streaming: bool,
 ) -> None:
-    if not hasattr(sdk_errors, "ModelQuotaExceededError"):
-        pytest.skip("SDK has no public typed quota error")
     error = ModelHTTPError.for_category(sdk_errors.ModelQuotaExceededError,
                                         status_code=429, model_name="fixture")
     provider = ScriptedProvider([error])
@@ -250,8 +248,6 @@ async def test_known_quota_exhaustion_does_not_retry_as_temporary_429(
 async def test_expired_overall_request_deadline_never_restarts(
     recorded_waits: list[float], streaming: bool,
 ) -> None:
-    if not hasattr(sdk_errors, "ModelRequestTimeout"):
-        pytest.skip("SDK has no public request_timeout deadline")
     error = sdk_errors.ModelRequestTimeout("fixture", 30)
     provider = ScriptedProvider([error])
     with pytest.raises(sdk_errors.ModelRequestTimeout) as caught:
@@ -283,8 +279,6 @@ async def test_cancel_during_backoff_never_dispatches_another_attempt(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", (False, True))
 async def test_public_request_deadline_covers_all_backoff_waits(streaming: bool) -> None:
-    if not hasattr(sdk_errors, "ModelRequestTimeout"):
-        pytest.skip("SDK has no public request_timeout deadline")
     provider = ScriptedProvider([ModelHTTPError(429, "fixture") for _ in range(3)])
     model = _RetryingModel(provider, 3, 1)
 
@@ -416,8 +410,6 @@ async def test_public_binding_passes_custom_backoff_to_each_protocol(
 async def test_public_deadline_interrupts_server_wait_beyond_local_cap(
     monkeypatch: pytest.MonkeyPatch, streaming: bool,
 ) -> None:
-    if not hasattr(sdk_errors, "ModelRequestTimeout"):
-        pytest.skip("SDK has no public request_timeout deadline")
     sent = []
     clients = []
 

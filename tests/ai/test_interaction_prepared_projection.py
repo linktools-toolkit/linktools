@@ -74,7 +74,8 @@ async def test_prepared_projection_reuse_keeps_exact_request_and_response(
         assert actual.request_context.digest == expected.request_context.digest
         assert actual.response_context.digest == expected.response_context.digest
         await archive.sync_projection(run, events=(), checkpoints=(), interactions=(actual,), archive=bundle)
-        request, response, request_bytes, _ = await archive.resolve_model_interaction(actual)
+        request, response, request_bytes, _, attempts = await archive.resolve_model_interaction(actual)
+        assert attempts is None
         assert request == messages
         assert response == messages[-1:]
         assert request_bytes == envelope

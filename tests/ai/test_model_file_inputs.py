@@ -31,7 +31,10 @@ def test_exact_mime_allowlist_matches_and_default_rejects(mime: str) -> None:
     assert validate_model_input(_binding(mime), mime_type=mime) is None
     with pytest.raises(AIError) as raised:
         validate_model_input(_binding(), mime_type=mime)
-    assert raised.value.safe_details == {"reason": "model_input_not_supported", "mime_type": mime, "input_kind": "binary"}
+    assert raised.value.safe_details == {
+        "reason": "model_input_not_supported", "mime_type": mime, "input_kind": "binary",
+        "provider": "openai", "model_identity": "openai:gpt-file-test", "api": "openai",
+    }
 
 
 @pytest.mark.parametrize("pattern,mime", (("image/*", "image/png"), ("text/*", "text/csv"), ("application/*", "application/pdf")))

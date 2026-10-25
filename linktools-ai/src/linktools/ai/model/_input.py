@@ -65,9 +65,9 @@ def validate_model_input(
         raise AIError(ErrorCode.MODEL_CONFIG_INVALID, retryable=False,
                       safe_details={"reason": "model_input_contract_invalid"}) from error
     if mime_type not in rules and mime_type.split("/", 1)[0] + "/*" not in rules:
-        _input_error(mime_type, input_kind, "model_input_not_supported")
+        _input_error(binding, mime_type, input_kind, "model_input_not_supported")
     if _input_transport(binding, mime_type, input_kind) is None:
-        _input_error(mime_type, input_kind, "input_encoding_not_supported")
+        _input_error(binding, mime_type, input_kind, "input_encoding_not_supported")
 
 
 def validate_model_inputs(binding: "ModelBinding", value: object) -> None:
@@ -75,7 +75,7 @@ def validate_model_inputs(binding: "ModelBinding", value: object) -> None:
     for item in _file_inputs(value):
         if isinstance(item, ReferencedContent):
             if item.representation not in ("binary", "text"):
-                _input_error(item.media_type, "binary", "reference_representation_invalid")
+                _input_error(binding, item.media_type, "binary", "reference_representation_invalid")
             if item.representation == "text":
                 continue
             kind, size = "binary", item.ref.size
@@ -99,10 +99,10 @@ def validate_model_inputs(binding: "ModelBinding", value: object) -> None:
         validate_model_input(binding, mime_type, input_kind=kind, size=size)
         if binding.provider in {"openai", "anthropic"}:
             if isinstance(item, UploadedFile) and item.provider_name != binding.provider:
-                _input_error(mime_type, kind, "uploaded_file_provider_mismatch")
+                _input_error(binding, mime_type, kind, "uploaded_file_provider_mismatch")
             transport = _input_transport(binding, mime_type, kind)
             if isinstance(item, (BinaryContent, AudioUrl, DocumentUrl)) and transport is None:
-                _input_error(mime_type, kind, "input_encoding_not_supported")
+                _input_error(binding, mime_type, kind, "input_encoding_not_supported")
             if isinstance(item, BinaryContent) and transport == "text-inline":
                 try:
                     decoder = codecs.getincrementaldecoder("utf-8")()
@@ -110,12 +110,12 @@ def validate_model_inputs(binding: "ModelBinding", value: object) -> None:
                         decoder.decode(item.data[offset:offset + 65536])
                     decoder.decode(b"", final=True)
                 except UnicodeDecodeError:
-                    _input_error(mime_type, kind, "text_input_not_utf8")
+                    _input_error(binding, mime_type, kind, "text_input_not_utf8")
             if isinstance(item, ImageUrl) and item.force_download:
                 try:
                     item.format
                 except (KeyError, ValueError):
-                    _input_error(mime_type, kind, "input_encoding_not_supported")
+                    _input_error(binding, mime_type, kind, "input_encoding_not_supported")
 
 
 
@@ -149,9 +149,13 @@ def _input_transport(binding: "ModelBinding", mime_type: str, kind: str) -> str 
     # Custom bindings own their SDK encoding constraints.
     return "custom"
 
-def _input_error(mime_type: str, input_kind: str, reason: str) -> None:
-    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, retryable=False,
-                  safe_details={"reason": reason, "mime_type": mime_type, "input_kind": input_kind})
+def _input_error(binding: "ModelBinding", mime_type: str, input_kind: str, reason: str) -> None:
+    details = {"reason": reason, "mime_type": mime_type, "input_kind": input_kind}
+    api = binding.contract.get("api", "openai" if binding.provider == "openai" else None)
+    for name, value in (("provider", binding.provider), ("model_identity", binding.model_identity), ("api", api)):
+        if isinstance(value, str) and value:
+            details[name] = value if len(value) <= 128 and value.isprintable() and "://" not in value else "[omitted]"
+    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, retryable=False, safe_details=details)
 
 
 def _file_inputs(value: object) -> Iterator[BinaryContent | ImageUrl | AudioUrl | DocumentUrl | VideoUrl | UploadedFile | ReferencedContent]:

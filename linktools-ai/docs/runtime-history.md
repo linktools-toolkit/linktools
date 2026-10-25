@@ -271,10 +271,32 @@ imply success or a completed model output. `INTERRUPTED` identifies an abandoned
 running record recovered without an observed completion, so it has no invented
 response, completion time, or usage.
 
-Agent response capture reuses the same archive's canonical transcript range
-for model-interaction content, including received interrupted responses. This
-avoids storing another response body while keeping metadata-only reads free of
-body loads. Compaction and responses rejected by tool-call integrity checks
+Observed streamed model interactions expose `stream_attempts`. `None` means no
+attempt scope was observed (including older records); an empty tuple means an
+observed scope had no attempts. Each item has a one-based `stream_attempt_seq`,
+terminal status, timing, observed usage, and a zero-based half-open
+`client_request_start`/`client_request_end` range into the HTTP request array.
+An SDK invocation is not an HTTP count: native fallback can dispatch multiple
+providers within it. Several successful continuation segments can contribute to
+one logical response, so `SUCCEEDED` on an attempt is not a separate final answer.
+
+Failed or cancelled attempt bodies are diagnostic TRACE evidence, not conversation
+history. Successful attempts do not duplicate the logical response body. If a
+later continuation fails after an earlier successful segment, the logical
+interaction may retain the actual interrupted aggregate in TRACE, still marked
+failed or cancelled. Checkpoint and execution projections omit these failed
+observed-stream bodies, and `include_content=False` omits them from public reads.
+Known failed-attempt usage is retained without inventing zero for an unknown value.
+
+Live attempt previews are provisional. Bundled consumers use the committed logical
+response to correct affected previews at completion; if retained content is absent
+or cannot be read, they mark the final content unavailable rather than treating
+concatenated deltas as a verified answer. This does not change execution status or
+enable additional trace retention.
+
+Where response content belongs to the canonical transcript, agent response capture
+reuses that archive range. This avoids another response body while keeping
+metadata-only reads free of body loads. Compaction and responses rejected by tool-call integrity checks
 retain independent response evidence. Request settings and attempt metadata
 remain available. Original HTTP request/response bodies are recorded only with
 `TraceCapability(record_http_bodies=True)`; this diagnostic option can duplicate

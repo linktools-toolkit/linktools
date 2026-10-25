@@ -64,6 +64,8 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
         values = tuple(
             replace(value, request_context=None, request_envelope_digest=None)
             if self.runtime_domain is RuntimeDomain.TRACE and value.status == "RUNNING"
+            else replace(value, response_context=None)
+            if self.runtime_domain is not RuntimeDomain.TRACE and value.stream_attempts and value.status != "SUCCEEDED"
             else value
             for value in _validate_interaction_batch(run, interactions)
         )
@@ -115,6 +117,13 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
                 staged.finished_at,
                 staged.attachments,
                 await prepare_client_requests(staged.client_requests, self.runtime_domain),
+                None if staged.stream_attempts is None else tuple(
+                    attempt.to_durable(
+                        prepare_context(attempt.response_context)
+                        if self.runtime_domain is RuntimeDomain.TRACE and attempt.response_context is not None
+                        else None
+                    ) for attempt in staged.stream_attempts
+                ),
             )
             for staged in values
         ])
@@ -134,6 +143,7 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
         for interaction in interactions:
             if not isinstance(interaction, ModelInteractionRecord):
                 raise TypeError("model interaction is invalid")
+            interaction.validate_storage_domain(self.runtime_domain)
             if interaction.agent_run_id != run.agent_run_id or interaction.model_request_seq in seen:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             seen.add(interaction.model_request_seq)
@@ -286,6 +296,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         return await self._store.read(read)
 
     def _stored_interaction(self, value: ModelInteractionRecord) -> StoredRecord:
+        value.validate_storage_domain(self.runtime_domain)
         return StoredRecord(
             self._interaction_key(value.agent_run_id, value.model_request_seq),
             None,
@@ -304,6 +315,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         value = _decode_step(record.data)
         if not isinstance(value, ModelInteractionRecord):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        value.validate_storage_domain(self.runtime_domain)
         if (
             record.key_digest != self._interaction_key(value.agent_run_id, value.model_request_seq)
             or record.scope_digest is not None
