@@ -23,6 +23,7 @@ from linktools.ai.capability import TraceCapability
 from linktools.ai.model import ModelClientRequestRecorder, create_model
 from linktools.ai.model import _binding, _openai
 from linktools.ai.model._binding import _RetryingModel
+from linktools.ai.model._stream import _RetryingStreamedResponse
 from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
 
 
@@ -60,6 +61,7 @@ class _Source(httpx2.AsyncByteStream):
 def _model(
     monkeypatch: pytest.MonkeyPatch, chunks: Callable[[int], list[bytes | BaseException]],
     *, retries: int = 3, blocked: asyncio.Event | None = None,
+    retry_frames: list[int] | None = None,
 ):
     sources: list[_Source] = []
     depths: list[int] = []
@@ -67,10 +69,14 @@ def _model(
     def handle(request: httpx2.Request) -> httpx2.Response:
         frame = sys._getframe()
         depth = 0
+        retry_depth = 0
         while frame is not None:
             depth += 1
+            retry_depth += frame.f_code is _RetryingStreamedResponse._iterate_attempts.__code__
             frame = frame.f_back
         depths.append(depth)
+        if retry_frames is not None:
+            retry_frames.append(retry_depth)
         source = _Source(chunks(len(depths)), blocked=blocked)
         sources.append(source)
         return httpx2.Response(200, headers={"content-type": "text/event-stream"}, stream=source)
@@ -113,13 +119,16 @@ async def _consume(ctx, events) -> None:
 async def test_stream_disconnect_before_first_event_retries_without_accumulating_output(
     monkeypatch: pytest.MonkeyPatch, waits: list[float], prefix: bytes,
 ) -> None:
+    retry_frames: list[int] = []
     binding, sources, depths = _model(monkeypatch, lambda attempt: (
         [prefix, httpx2.RemoteProtocolError("synthetic disconnect")] if attempt <= 3 else [_SUCCESS]
-    ))
+    ), retry_frames=retry_frames)
     with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
         result = await Agent(binding.materialize()).run("synthetic", event_stream_handler=_consume)
     assert result.output == "winner"
-    assert len(depths) == 4 and len(set(depths)) == 1
+    # Await wrappers can unwind after the first suspension; retries must not add frames.
+    assert len(depths) == 4 and len(set(depths[1:])) == 1 and max(depths[1:]) <= depths[0]
+    assert retry_frames == [1] * 4
     assert waits == [5, 20, 80]
     assert all(source.closes == 1 for source in sources)
     assert [request.response.body for request in recorder.requests] == [prefix] * 3 + [_SUCCESS]
