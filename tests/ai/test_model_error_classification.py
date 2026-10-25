@@ -161,11 +161,9 @@ async def test_public_binding_distinguishes_quota_from_temporary_rate_limit(
 
 
 @pytest.mark.asyncio
-async def test_public_responses_first_error_event_never_replays_open_stream(
+async def test_public_responses_server_error_before_first_event_uses_transport_retry_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    if not hasattr(sdk_errors, "ModelServerError"):
-        pytest.skip("SDK does not expose typed in-stream provider failures")
     sent: list[httpx2.Request] = []
 
     def handle(request: httpx2.Request) -> httpx2.Response:
@@ -189,8 +187,11 @@ async def test_public_responses_first_error_event_never_replays_open_stream(
 
     projected = model_binding_error(caught.value)
     assert projected is not None
-    assert caught.value.in_stream is True
-    assert projected.code is ErrorCode.MODEL_UNAVAILABLE
+    if hasattr(sdk_errors, "ModelServerError"):
+        assert caught.value.in_stream is True
+        assert projected.code is ErrorCode.MODEL_UNAVAILABLE
+    else:
+        assert projected.code is ErrorCode.MODEL_API_ERROR
     assert projected.retryable is False
-    assert len(sent) == 1
+    assert len(sent) == 3
     assert all(client.is_closed for client in clients)

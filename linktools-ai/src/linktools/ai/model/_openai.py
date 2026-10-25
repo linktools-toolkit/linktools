@@ -11,6 +11,8 @@ except ModuleNotFoundError as error:
     if error.name != "openai":
         raise
     raise ImportError('OpenAI model adapters require pip install "linktools-ai[openai]"') from error
+from openai.types.chat import ChatCompletion
+from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.models import Model, ModelRequestParameters, ModelSettings
 from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
@@ -21,6 +23,13 @@ from ._http import HttpClientOwner, capture_request, capture_response
 
 
 class _OutputOnlyOpenAIChatModel(OpenAIChatModel):
+    def _validate_completion(self, response: ChatCompletion) -> ChatCompletion:
+        # The SDK's documented validation hook runs before its first-choice access.
+        response = super()._validate_completion(response)
+        if not response.choices:
+            raise UnexpectedModelBehavior("Chat completion returned no choices")
+        return response
+
     def prepare_request(
         self, model_settings: ModelSettings | None, model_request_parameters: ModelRequestParameters,
     ) -> tuple[ModelSettings | None, ModelRequestParameters]:

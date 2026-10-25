@@ -23,7 +23,7 @@ from pydantic_ai.profiles import DEFAULT_PROFILE, merge_profile
 from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ._contract import ModelBinding
-from ._errors import _is_quota_error
+from ._errors import _is_context_window_error, _is_quota_error
 from ._input import expand_input_types, validate_model_inputs
 from ._stream import _RetryingStreamedResponse
 from ._client_request import ModelClientRequestRecorder
@@ -333,7 +333,8 @@ def _retryable_model_error(error: ModelAPIError, *, allow_stream_retry: bool = F
     # These public categories are absent from some supported SDK releases.
     # Do not reinterpret an explicit permanent failure or an expired deadline
     # as a transient HTTP status, including quota errors carried by HTTP 429.
-    if ((getattr(error, "in_stream", False) and not allow_stream_retry) or _is_quota_error(error)
+    if ((getattr(error, "in_stream", False) and not allow_stream_retry)
+        or _is_quota_error(error) or _is_context_window_error(error)
         or isinstance(error, getattr(sdk_errors, "ModelRequestTimeout", ()))):
         return False
     if isinstance(error, ModelHTTPError):

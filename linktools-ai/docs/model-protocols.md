@@ -392,9 +392,21 @@ Ordinary transient 429/408/409/5xx errors may retry. Known quota exhaustion is
 not a temporary rate limit: the SDK's public typed quota error, or its exact
 structured `insufficient_quota` code on a model HTTP error, is rejected without
 retry. Overall request-deadline exhaustion also does not start a new attempt.
-Supported SDK phase timeout and connection errors retain timeout/unavailable
-classification rather than becoming generic API failures. No message-text
-heuristics classify quota or infer the configured protocol.
+The SDK's typed context-window overflow is also rejected without resending
+unchanged input. Typed rate-limit, unavailable, server, phase-timeout and
+connection errors retain their categories even without an HTTP status. These
+categories require SDK support: SDK 2.53 reduces some Responses error events
+and failed response bodies to an opaque `ModelAPIError`, losing the structured
+error code. Those errors keep the bounded generic retry behavior; LinkTools
+does not infer a permanent rejection from ambiguous message text or change the
+supported SDK minimum.
+
+Malformed Chat completion responses with no choices are rejected at the
+provider validation boundary as `MODEL_RESPONSE_INVALID`, not an internal
+indexing error. Empty-stream EOF and output validation remain SDK response
+semantics rather than blanket transport retries. Valid empty responses can use
+the Agent's separate output-correction budget; token-limit exhaustion does not
+silently increase `max_tokens` or restart the request.
 
 Before the first event reaches the consumer, an eligible transport failure can
 retry within the same policy. Once a partial preview has been exposed, retry
