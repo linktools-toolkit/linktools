@@ -97,8 +97,7 @@ class _Provider(TestModel):
 class _Response(CompletedStreamedResponse):
     def __init__(self, response: ModelResponse, parameters: ModelRequestParameters, fail: str | None) -> None:
         super().__init__(response, model_request_parameters=parameters)
-        if hasattr(response, "failed_attempts"):
-            self.failed_attempts = response.failed_attempts
+        self.failed_attempts = response.failed_attempts
         self.fail = fail
 
     async def _get_event_iterator(self) -> AsyncIterator[object]:
@@ -345,8 +344,6 @@ async def test_native_builtin_provider_uses_its_own_contract_and_omits_http_bodi
 async def test_custom_model_contract_does_not_allow_failed_attempt_body_retention(operation: str) -> None:
     from datetime import datetime, timedelta, timezone
 
-    if not hasattr(ModelResponse, "failed_attempts"):
-        pytest.skip("SDK does not expose failed attempt responses")
     from pydantic_ai.messages import ModelRequestAttempt
 
     attempt = ModelRequestAttempt(

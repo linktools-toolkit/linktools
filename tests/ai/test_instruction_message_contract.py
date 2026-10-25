@@ -14,16 +14,12 @@ import pytest
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import (
-    AgentInstructionSource, CapabilityInstructionSource, InstructionId, InstructionPart,
+    AgentInstructionSource, CapabilityInstructionSource, InstructionBaselinePart, InstructionDeltaPart,
+    InstructionDigest, InstructionId, InstructionPart,
     ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, ToolsetInstructionSource,
 )
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from pydantic_ai.toolsets import FunctionToolset
-
-try:
-    from pydantic_ai.messages import InstructionBaselinePart, InstructionDeltaPart, InstructionDigest
-except ImportError:
-    InstructionBaselinePart = InstructionDeltaPart = InstructionDigest = None
 
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus, canonical_json_bytes
@@ -33,7 +29,6 @@ from linktools.ai.runtime._message import decode_model_messages, encode_model_me
 
 _STAMP = datetime(2026, 10, 24, tzinfo=timezone.utc)
 _HASH = hashlib.sha256(b"original").hexdigest()
-_NEW_SDK = pytest.mark.skipif(InstructionBaselinePart is None, reason="SDK does not provide instruction windows")
 
 
 def _wire(part: dict[str, object]) -> bytes:
@@ -56,7 +51,6 @@ def _delta() -> dict[str, object]:
     return {"part_kind": "instruction-delta", "id": "capability:catalog:details", "content": "replacement", "base_hash": _HASH}
 
 
-@_NEW_SDK
 @pytest.mark.parametrize("source", [None, AgentInstructionSource(), ToolsetInstructionSource("tools"),
                                     CapabilityInstructionSource("catalog")])
 @pytest.mark.parametrize("name", [None, "details"])
@@ -83,17 +77,11 @@ def test_instruction_window_round_trip_preserves_order_identity_and_termination(
 
 @pytest.mark.parametrize("part", [_baseline(_block()), _baseline(_block(digest=True)), _delta(),
                                   {"part_kind": "instruction-baseline", "instructions": []}])
-def test_instruction_window_reader_requires_supported_sdk(part: dict[str, object]) -> None:
-    if InstructionBaselinePart is None:
-        with pytest.raises(AIError) as caught:
-            decode_model_messages(_wire(part))
-        assert caught.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
-    else:
-        restored, = decode_model_messages(_wire(part))
-        assert json.loads(encode_model_messages((restored,)))[0]["parts"] == [part]
+def test_instruction_window_reader_preserves_supported_parts(part: dict[str, object]) -> None:
+    restored, = decode_model_messages(_wire(part))
+    assert json.loads(encode_model_messages((restored,)))[0]["parts"] == [part]
 
 
-@_NEW_SDK
 @pytest.mark.parametrize("digest,field,value", [
     (False, "content", None), (False, "dynamic", 1), (False, "on_change", "unknown"),
     (False, "name", []), (False, "id", {}), (True, "dynamic", "false"),
@@ -105,7 +93,6 @@ def test_instruction_baseline_reader_rejects_malformed_known_fields(digest: bool
     assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-@_NEW_SDK
 @pytest.mark.parametrize("field,value", [("content", 7), ("base_hash", False), ("base_hash", "g" * 64), ("id", [])])
 def test_instruction_delta_reader_rejects_malformed_known_fields(field: str, value: object) -> None:
     with pytest.raises(AIError) as caught:
@@ -113,7 +100,6 @@ def test_instruction_delta_reader_rejects_malformed_known_fields(field: str, val
     assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-@_NEW_SDK
 @pytest.mark.parametrize("part", [
     {"part_kind": "instruction-baseline", "instructions": None}, _baseline(None),
     _baseline({key: value for key, value in _block().items() if key != "name"}),
@@ -126,7 +112,6 @@ def test_instruction_window_reader_requires_complete_shapes(part: dict[str, obje
     assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-@_NEW_SDK
 @pytest.mark.parametrize("part", [
     _baseline({**_block(), "part_kind": "future-instruction"}),
     _baseline({**_block(), "id": "future:catalog"}),
@@ -139,7 +124,6 @@ def test_instruction_reader_does_not_erase_unknown_blocks_or_source_namespaces(p
     assert caught.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
-@_NEW_SDK
 @pytest.mark.parametrize("invalid", ["unknown-block", "dynamic", "policy", "hash", "id"])
 def test_instruction_writer_rejects_invalid_values_instead_of_dropping_them(invalid: str) -> None:
     block = InstructionPart("original", id=InstructionId(AgentInstructionSource()), on_change="append")
@@ -181,7 +165,6 @@ class _ChangingInstructions(AbstractCapability):
         return instructions
 
 
-@_NEW_SDK
 @pytest.mark.asyncio
 async def test_native_deferred_two_request_writer_round_trips_real_baseline_digest_and_delta() -> None:
     state = {"text": "original"}
@@ -275,7 +258,6 @@ async def _runtime_deferred_session(root: str, resumed: bool, backend: str) -> N
             (Path(root) / "expected-context.json").write_bytes(encode_model_messages(context))
 
 
-@_NEW_SDK
 @pytest.mark.parametrize("backend", ["filesystem", "sqlite"])
 def test_runtime_fresh_process_reopen_retains_instructions_and_deferred_activation(tmp_path: Path, backend: str) -> None:
     script = ("import asyncio, sys; from tests.ai.test_instruction_message_contract import _runtime_deferred_session; "

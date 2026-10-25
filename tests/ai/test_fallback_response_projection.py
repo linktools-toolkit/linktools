@@ -9,8 +9,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-from pydantic_ai import RunContext, messages as sdk_messages
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai import RunContext
+from pydantic_ai.messages import ModelMessage, ModelRequestAttempt, ModelResponse, TextPart
 from pydantic_ai.models import CompletedStreamedResponse, Model, ModelRequestParameters, StreamedResponse
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import RequestUsage
@@ -20,13 +20,10 @@ from linktools.ai.runtime._metric_capability import PreparedRequestModel
 
 
 def _response(error: str) -> ModelResponse:
-    attempt_type = getattr(sdk_messages, "ModelRequestAttempt", None)
-    if attempt_type is None:
-        pytest.skip("installed SDK does not expose fallback attempt observations")
     return ModelResponse(
         parts=[TextPart("partial")], model_name="accepted", state="incomplete",
         usage=RequestUsage(input_tokens=11, output_tokens=5, cost=Decimal("0.005")),
-        failed_attempts=[attempt_type(
+        failed_attempts=[ModelRequestAttempt(
             model_name="rejected", provider_name="provider", outcome="error", error=error,
             timestamp=datetime(2026, 10, 23, 12, 30, tzinfo=timezone.utc),
             duration=timedelta(milliseconds=3),

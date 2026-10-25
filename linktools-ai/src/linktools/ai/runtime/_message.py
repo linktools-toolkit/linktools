@@ -9,20 +9,23 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 from pydantic import TypeAdapter
 from pydantic_core import ErrorDetails
 from pydantic_ai import RequestUsage
-from pydantic_ai import messages as sdk_messages
 from pydantic_ai.messages import (
     BinaryContent,
     CompactionPart,
     FilePart,
+    InstructionBaselinePart,
+    InstructionDeltaPart,
+    InstructionDigest,
     InstructionId,
     InstructionPart,
     ModelMessage,
     ModelRequest,
+    ModelRequestAttempt,
     ModelResponse,
     NativeToolCallPart,
     NativeToolReturnPart,
@@ -44,11 +47,6 @@ try:
 except ImportError:
     RetryFeedbackPart = RetryInfo = None
 
-try:
-    from pydantic_ai.messages import InstructionBaselinePart, InstructionDeltaPart, InstructionDigest
-except ImportError:
-    InstructionBaselinePart = InstructionDeltaPart = InstructionDigest = None
-
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..model import ReferencedContent, project_model_attempts, project_model_response_attempts
@@ -56,9 +54,6 @@ from ._attachment import binary_attachment_text, has_binary_attachment_metadata
 from ._user_content_codec import decode_user_content_item, encode_user_content_item
 from ._json_snapshot import stable_json_snapshot
 from ._tool_return_codec import decode_tool_return_content, encode_tool_return_content
-
-if TYPE_CHECKING:
-    from pydantic_ai.messages import ModelRequestAttempt
 
 _MESSAGE_VERSION = 1
 _TOOL_KINDS = frozenset({"tool-search", "capability-load"})
@@ -70,7 +65,6 @@ _TOOL_RETRY_CAUSES = frozenset({"validation_error", "model_retry", "unknown_tool
 _FEEDBACK_RETRY_CAUSES = frozenset({"validation_error", "model_retry", "no_output"})
 _ERROR_DETAILS_ADAPTER = TypeAdapter(list[ErrorDetails])
 _INSTRUCTION_ID_ADAPTER = TypeAdapter(SerializedInstructionId)
-_MODEL_REQUEST_ATTEMPT = getattr(sdk_messages, "ModelRequestAttempt", None)
 
 
 @dataclass
@@ -250,16 +244,16 @@ def model_response_usage(response: ModelResponse) -> RequestUsage:
     """Project known billed usage without mutating or recounting SDK run usage."""
     result = RequestUsage()
     result.incr(response.usage)
-    attempts = model_attempts_usage(getattr(response, "failed_attempts", None))
+    attempts = model_attempts_usage(response.failed_attempts)
     if attempts is not None:
         result.incr(attempts)
     return result
 
 
-def _model_request_attempt(attempt: object) -> "ModelRequestAttempt":
-    if _MODEL_REQUEST_ATTEMPT is None or not isinstance(attempt, _MODEL_REQUEST_ATTEMPT):
+def _model_request_attempt(attempt: object) -> ModelRequestAttempt:
+    if not isinstance(attempt, ModelRequestAttempt):
         raise TypeError("model request attempt is invalid")
-    return cast("ModelRequestAttempt", attempt)
+    return attempt
 
 
 def freeze_model_messages(
@@ -320,7 +314,7 @@ def _encode_message(message: ModelMessage) -> dict[str, JsonValue]:
             "metadata": _encode_optional_mapping(message.metadata),
             "state": message.state,
         }
-        attempts = getattr(message, "failed_attempts", None)
+        attempts = message.failed_attempts
         if attempts is not None:
             result["failed_attempts"] = _encode_model_attempts(attempts)
         return result
@@ -468,14 +462,14 @@ def _encode_request_part(part: object) -> dict[str, JsonValue]:
             "tools_added": list(part.tools_added),
             "tool_call_id": part.tool_call_id,
         }
-    if InstructionBaselinePart is not None and isinstance(part, InstructionBaselinePart):
+    if isinstance(part, InstructionBaselinePart):
         if not isinstance(part.instructions, list):
             raise TypeError("instruction baseline must contain a list")
         return {
             "part_kind": "instruction-baseline",
             "instructions": [_encode_instruction_block(block) for block in part.instructions],
         }
-    if InstructionDeltaPart is not None and isinstance(part, InstructionDeltaPart):
+    if isinstance(part, InstructionDeltaPart):
         return {
             "part_kind": "instruction-delta",
             "id": _encode_instruction_id(part.id),
@@ -551,16 +545,12 @@ def _decode_request_part(value: object) -> object:
             tool_call_id=_optional_string(part["tool_call_id"]),
         )
     if kind == "instruction-baseline":
-        if InstructionBaselinePart is None:
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         _require_keys(part, {"part_kind", "instructions"})
         instructions = part["instructions"]
         if not isinstance(instructions, list):
             raise ValueError("instruction baseline must contain a list")
         return InstructionBaselinePart(instructions=[_decode_instruction_block(block) for block in instructions])
     if kind == "instruction-delta":
-        if InstructionDeltaPart is None:
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         _require_keys(part, {"part_kind", "id", "content", "base_hash"})
         return InstructionDeltaPart(
             id=_decode_instruction_id(part["id"]),
@@ -585,7 +575,7 @@ def _encode_instruction_block(block: object) -> dict[str, JsonValue]:
             "on_change": _instruction_policy(block.on_change),
             "name": _optional_string(block.name),
         }
-    if InstructionDigest is not None and isinstance(block, InstructionDigest):
+    if isinstance(block, InstructionDigest):
         return {
             "part_kind": "instruction-digest",
             "id": _encode_instruction_id(block.id),
@@ -608,8 +598,6 @@ def _decode_instruction_block(value: object) -> object:
             name=_optional_string(block["name"]),
         )
     if kind == "instruction-digest":
-        if InstructionDigest is None:
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         _require_keys(block, {"part_kind", "id", "dynamic", "content_hash"})
         return InstructionDigest(
             id=_decode_instruction_id(block["id"]),
@@ -1031,8 +1019,6 @@ def _encode_model_attempts(attempts: Sequence[object]) -> JsonValue:
 def _decode_model_attempts(value: object) -> list[object]:
     if not isinstance(value, list):
         raise ValueError("model request attempts must be a list")
-    if _MODEL_REQUEST_ATTEMPT is None:
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     attempts: list[object] = []
     for item in value:
         if not isinstance(item, Mapping):
@@ -1053,7 +1039,7 @@ def _decode_model_attempts(value: object) -> list[object]:
         timestamp = _required_datetime(item["timestamp"])
         if timestamp.tzinfo is None:
             raise ValueError("model request attempt timestamp must include a timezone")
-        attempts.append(_MODEL_REQUEST_ATTEMPT(
+        attempts.append(ModelRequestAttempt(
             model_name=_required_string(item["model_name"]),
             provider_name=_optional_string(item["provider_name"]),
             outcome=outcome,
