@@ -19,10 +19,85 @@ export function eventKey(item) {
   const event=item.event, payload=event.payload || {};
   const key=[item.execution_id,event.event_type];
   if (['MODEL_REQUEST_STARTED','MODEL_REQUEST_FINISHED'].includes(event.event_type)) key.push(payload.agent_run_seq,payload.model_request_seq);
+  else if (['MODEL_ATTEMPT_STARTED','MODEL_ATTEMPT_FINISHED'].includes(event.event_type)) key.push(payload.agent_run_seq,payload.model_request_seq,payload.stream_attempt_seq);
   else if (['TOOL_CALL_STARTED','TOOL_CALL_FINISHED'].includes(event.event_type)) key.push(payload.agent_run_seq,payload.call_id);
-  else if (event.event_type==='ASSISTANT_PART_COMPLETED') key.push(payload.agent_run_seq,payload.message_seq,payload.part_index);
+  else if (event.event_type==='ASSISTANT_PART_COMPLETED') {
+    if(streamAttemptIdentity(item))key.push(payload.agent_run_seq,payload.model_request_seq,payload.stream_attempt_seq,payload.part_index);
+    else key.push(payload.agent_run_seq,payload.message_seq,payload.part_index);
+  }
   else key.push(event.durable_seq);
   return JSON.stringify(key);
+}
+export function streamAttemptIdentity(item) {
+  const payload=item.event.payload || {};
+  if(![payload.agent_run_seq,payload.model_request_seq,payload.stream_attempt_seq].every(value=>Number.isInteger(value) && value>0))return null;
+  return {key:modelKey({...payload,execution_id:item.execution_id}),execution_id:item.execution_id,
+    agent_run_seq:payload.agent_run_seq,model_request_seq:payload.model_request_seq,stream_attempt_seq:payload.stream_attempt_seq};
+}
+export function streamAttemptText(attempt,kind='text') {
+  return attempt[kind]+[...attempt.parts.values()].sort((a,b)=>a.index-b.index).filter(part=>part.kind===kind).map(part=>part.content).join('');
+}
+export function streamResponsePreview(request) {
+  const parts=new Map(),result={text:'',thinking:'',truncated:request.truncated || false};
+  for(const attempt of [...request.attempts.values()].sort((a,b)=>a.seq-b.seq)) {
+    if(attempt.status!=='SUCCEEDED' && !(attempt.seq===request.current && attempt.status==='RUNNING'))continue;
+    result.text+=attempt.text;result.thinking+=attempt.thinking;result.truncated ||= attempt.truncated;
+    for(const part of attempt.parts.values()) {
+      const previous=parts.get(part.index);
+      parts.set(part.index,part.start || !previous?{...part}:{...part,content:previous.content+part.content});
+    }
+  }
+  for(const part of [...parts.values()].sort((a,b)=>a.index-b.index))result[part.kind]+=part.content;
+  return result;
+}
+export function updateStreamAttempts(requests,item) {
+  const {event_type:type,payload={}}=item.event;
+  if(type==='STREAM_RESET') {
+    for(const request of requests.values())if(request.execution_id===item.execution_id && !request.finished){
+      request.truncated=true;
+      // A lost part-start may replace any earlier successful segment of this request.
+      for(const attempt of request.attempts.values())if(['RUNNING','SUCCEEDED'].includes(attempt.status)){
+        attempt.text='';attempt.thinking='';for(const part of attempt.parts.values())part.content='';attempt.truncated=true;
+      }
+    }
+    return false;
+  }
+  if(['EXECUTION_FAILED','EXECUTION_CANCELLED'].includes(type)) {
+    for(const request of requests.values())if(request.execution_id===item.execution_id){
+      if(!request.finished)request.status=type.slice('EXECUTION_'.length);
+      for(const attempt of request.attempts.values())if(attempt.status==='RUNNING')attempt.status=type.slice('EXECUTION_'.length);
+    }
+    return false;
+  }
+  if(!['MODEL_ATTEMPT_STARTED','MODEL_ATTEMPT_FINISHED','MODEL_REQUEST_FINISHED','ASSISTANT_TEXT_DELTA','ASSISTANT_THINKING_DELTA'].includes(type))return false;
+  const identity=streamAttemptIdentity(item);if(!identity)return false;
+  let request=requests.get(identity.key);
+  if(!request){request={key:identity.key,execution_id:identity.execution_id,agent_run_seq:identity.agent_run_seq,model_request_seq:identity.model_request_seq,current:0,finished:false,attempts:new Map()};requests.set(identity.key,request);}
+  const seq=identity.stream_attempt_seq;
+  if(request.finished && !request.attempts.has(seq))return true;
+  let attempt=request.attempts.get(seq);
+  if(!attempt){
+    attempt={seq,status:'RUNNING',text:'',thinking:'',parts:new Map(),truncated:false};request.attempts.set(seq,attempt);
+  }
+  if(seq>request.current)request.current=seq;
+  if(type==='MODEL_ATTEMPT_FINISHED' && attempt.status==='RUNNING') {
+    if(['SUCCEEDED','FAILED','CANCELLED'].includes(payload.status))attempt.status=payload.status;
+    attempt.error_code=payload.error_code;
+  } else if(type==='MODEL_REQUEST_FINISHED') {
+    if(seq!==request.current)return true;
+    if(attempt.status==='RUNNING' && ['SUCCEEDED','FAILED','CANCELLED'].includes(payload.status))attempt.status=payload.status;
+    request.finished=true;request.status=payload.status;
+  } else if(type.endsWith('_DELTA') && seq===request.current && attempt.status==='RUNNING' && typeof payload.text==='string') {
+    const kind=type==='ASSISTANT_TEXT_DELTA'?'text':'thinking';
+    if(Number.isInteger(payload.part_index) && payload.part_index>=0 && typeof payload.part_start==='boolean') {
+      const previous=attempt.parts.get(payload.part_index);
+      attempt.parts.set(payload.part_index,{index:payload.part_index,kind,
+        start:payload.part_start || previous?.start || false,
+        content:payload.part_start || !previous?payload.text:previous.content+payload.text});
+    } else attempt[kind]+=payload.text;
+    attempt.truncated ||= payload.stream_truncated===true;
+  }
+  return true;
 }
 export function upsertModel(items, item) {
   const key = modelKey(item), previous = items.get(key);

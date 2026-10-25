@@ -237,10 +237,10 @@ async def test_raw_only_volatile_reads_do_not_require_sdk_checkpoint_or_payload(
         ))
         assert await archive.resolve_model_interactions(
             (pending_sdk,), include_client_requests=True, include_content=False,
-        ) == [(None, None, None, original)]
+        ) == [(None, None, None, original, None)]
         assert await archive.resolve_model_interaction(
             pending_sdk, include_client_requests=True, include_content=False,
-        ) == (None, None, None, original)
+        ) == (None, None, None, original, None)
         with pytest.raises(AIError) as caught:
             await archive.resolve_model_interaction(pending_sdk)
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -261,10 +261,10 @@ async def test_raw_only_volatile_reads_do_not_require_sdk_checkpoint_or_payload(
         )
         assert await transient.resolve_model_interactions(
             (staged,), include_client_requests=True, include_content=False,
-        ) == [(None, None, None, original)]
+        ) == [(None, None, None, original, None)]
         assert await storage.run_store.resolve_model_interaction(
             staged, include_client_requests=True, include_content=False,
-        ) == (None, None, None, original)
+        ) == (None, None, None, original, None)
         with pytest.raises(AIError) as caught:
             await transient.resolve_model_interactions((staged,))
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

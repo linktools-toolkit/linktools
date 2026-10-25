@@ -54,6 +54,7 @@ def _binding(
     handler: Callable[..., object],
     *,
     retries: int = 0,
+    context_window: int | None = None,
 ) -> tuple[ModelBinding, list[_ObservedHttpClient]]:
     clients: list[_ObservedHttpClient] = []
 
@@ -68,7 +69,7 @@ def _binding(
     registry = create_model(protocol='openai',
         model="gpt-4o", base_url="https://capture.invalid/v1",
         api_key="connection-secret-never-captured", max_retries=retries,
-        retry_delay=0,
+        retry_delay=0, context_window=context_window,
     )
     return registry, clients
 

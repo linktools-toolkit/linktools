@@ -947,6 +947,7 @@ class InMemoryStepArchive(StagingAgentRunStore):
                 tuple[ModelMessage, ...] | None,
                 bytes | None,
                 tuple[ModelClientRequest, ...] | None,
+                tuple[tuple[ModelMessage, ...] | None, ...] | None,
             ]
         ],
         *, prepared: PreparedArchive | None = None,
@@ -969,12 +970,15 @@ class InMemoryStepArchive(StagingAgentRunStore):
             )
 
         values: list[ModelInteractionRecord] = []
-        for interaction, (request, response, envelope, client_requests) in zip(
+        for interaction, (request, response, envelope, client_requests, stream_responses) in zip(
             interactions,
             resolved,
             strict=True,
         ):
             if (interaction.client_requests is None) != (client_requests is None):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if ((interaction.stream_attempts is None) != (stream_responses is None)
+                or stream_responses is not None and len(stream_responses) != len(interaction.stream_attempts)):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             values.append(
                 replace(
@@ -985,10 +989,19 @@ class InMemoryStepArchive(StagingAgentRunStore):
                         self._runtime_domain,
                     ),
                     response_context=(
-                        None if response is None else inline_context(response)
+                        None if response is None or (
+                            self._runtime_domain is not RuntimeDomain.TRACE
+                            and interaction.stream_attempts and interaction.status != "SUCCEEDED"
+                        ) else inline_context(response)
                     ),
                     client_requests=await prepare_client_requests(
                         client_requests, self._runtime_domain,
+                    ),
+                    stream_attempts=None if interaction.stream_attempts is None else tuple(
+                        replace(attempt, response_context=(
+                            inline_context(partial)
+                            if self._runtime_domain is RuntimeDomain.TRACE and partial is not None else None
+                        )) for attempt, partial in zip(interaction.stream_attempts, stream_responses, strict=True)
                     ),
                 )
             )
@@ -1003,14 +1016,18 @@ class InMemoryStepArchive(StagingAgentRunStore):
     ) -> tuple[
         tuple[ModelMessage, ...] | None, tuple[ModelMessage, ...] | None,
         bytes | None, tuple[ModelClientRequest, ...] | None,
+        tuple[tuple[ModelMessage, ...] | None, ...] | None,
     ]:
         if not isinstance(interaction, ModelInteractionRecord):
             raise TypeError("model interaction is invalid")
+        interaction.validate_storage_domain(self._runtime_domain)
         client_requests = await resolve_client_requests(
             interaction.client_requests, self._runtime_domain,
         ) if include_client_requests else None
         if not include_content or interaction.request_context is None or interaction.request_envelope is None:
-            return None, None, None, client_requests
+            return None, None, None, client_requests, (
+                None if interaction.stream_attempts is None else tuple(None for _ in interaction.stream_attempts)
+            )
         checkpoint = await self.latest_checkpoint(
             agent_run_id=interaction.agent_run_id,
             include_interrupted=True,
@@ -1043,7 +1060,11 @@ class InMemoryStepArchive(StagingAgentRunStore):
             if interaction.response_context is None
             else resolve(interaction.response_context)
         )
-        return resolve(interaction.request_context), response, envelope, client_requests
+        stream_responses = None if interaction.stream_attempts is None else tuple(
+            None if attempt.response_context is None else resolve(attempt.response_context)
+            for attempt in interaction.stream_attempts
+        )
+        return resolve(interaction.request_context), response, envelope, client_requests, stream_responses
 
     async def resolve_model_interactions(
         self,
@@ -1268,6 +1289,7 @@ class StateStepArchive(AgentRunStore):
                 tuple[ModelMessage, ...] | None,
                 bytes | None,
                 tuple[ModelClientRequest, ...] | None,
+                tuple[tuple[ModelMessage, ...] | None, ...] | None,
             ]
         ],
         *, prepared: PreparedArchive,
@@ -1279,12 +1301,15 @@ class StateStepArchive(AgentRunStore):
             return await self._history.prepare_model_projection(messages, prepared)
 
         values: list[ModelInteractionRecord] = []
-        for interaction, (request, response, envelope, client_requests) in zip(
+        for interaction, (request, response, envelope, client_requests, stream_responses) in zip(
             interactions,
             resolved,
             strict=True,
         ):
             if (interaction.client_requests is None) != (client_requests is None):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if ((interaction.stream_attempts is None) != (stream_responses is None)
+                or stream_responses is not None and len(stream_responses) != len(interaction.stream_attempts)):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             values.append(
                 replace(
@@ -1299,12 +1324,21 @@ class StateStepArchive(AgentRunStore):
                     ),
                     response_context=(
                         None
-                        if response is None
+                        if response is None or (
+                            self._runtime_domain is not RuntimeDomain.TRACE
+                            and interaction.stream_attempts and interaction.status != "SUCCEEDED"
+                        )
                         else await archived_context(response)
                     ),
                     client_requests=await prepare_client_requests(
                         client_requests, self._runtime_domain, self._history,
                     ),
+                    stream_attempts=None if interaction.stream_attempts is None else tuple([
+                        replace(attempt, response_context=(
+                            await archived_context(partial)
+                            if self._runtime_domain is RuntimeDomain.TRACE and partial is not None else None
+                        )) for attempt, partial in zip(interaction.stream_attempts, stream_responses, strict=True)
+                    ]),
                 )
             )
         return tuple(values)
@@ -1318,14 +1352,18 @@ class StateStepArchive(AgentRunStore):
     ) -> tuple[
         tuple[ModelMessage, ...] | None, tuple[ModelMessage, ...] | None,
         bytes | None, tuple[ModelClientRequest, ...] | None,
+        tuple[tuple[ModelMessage, ...] | None, ...] | None,
     ]:
         if not isinstance(interaction, ModelInteractionRecord):
             raise TypeError("model interaction is invalid")
+        interaction.validate_storage_domain(self._runtime_domain)
         client_requests = await resolve_client_requests(
             interaction.client_requests, self._runtime_domain, self._history,
         ) if include_client_requests else None
         if not include_content or interaction.request_context is None or interaction.request_envelope is None:
-            return None, None, None, client_requests
+            return None, None, None, client_requests, (
+                None if interaction.stream_attempts is None else tuple(None for _ in interaction.stream_attempts)
+            )
         request = await self._history.load_projected_context(
             interaction.agent_run_id,
             interaction.request_context,
@@ -1341,7 +1379,12 @@ class StateStepArchive(AgentRunStore):
         envelope = await self._history.read_payload(
             interaction.request_envelope.payload
         )
-        return request.model_messages(), response, envelope, client_requests
+        stream_responses = None if interaction.stream_attempts is None else tuple([
+            None if attempt.response_context is None else (await self._history.load_projected_context(
+                interaction.agent_run_id, attempt.response_context,
+            )).model_messages() for attempt in interaction.stream_attempts
+        ])
+        return request.model_messages(), response, envelope, client_requests, stream_responses
 
     async def resolve_model_interactions(
         self,
@@ -1359,6 +1402,8 @@ class StateStepArchive(AgentRunStore):
         if any(not isinstance(value, ModelInteractionRecord) for value in values):
             raise TypeError("model interaction is invalid")
         records = tuple(value for value in values if isinstance(value, ModelInteractionRecord))
+        for record in records:
+            record.validate_storage_domain(self._runtime_domain)
         projections = tuple(
             projection
             for record in records
@@ -1369,6 +1414,8 @@ class StateStepArchive(AgentRunStore):
                     if record.response_context is None
                     else (record.response_context,)
                 ),
+                *(attempt.response_context for attempt in record.stream_attempts or ()
+                  if attempt.response_context is not None),
             )
         )
         contexts = await self._history.load_projected_contexts(
@@ -1383,7 +1430,8 @@ class StateStepArchive(AgentRunStore):
                 record.client_requests, self._runtime_domain, self._history,
             ) if include_client_requests else None
             if not include_content or record.request_context is None or record.request_envelope is None:
-                result.append((None, None, None, client_requests))
+                result.append((None, None, None, client_requests,
+                               None if record.stream_attempts is None else tuple(None for _ in record.stream_attempts)))
                 continue
             request = contexts[context_index].model_messages()
             context_index += 1
@@ -1396,7 +1444,17 @@ class StateStepArchive(AgentRunStore):
                 envelopes[digest] = await self._history.read_payload(
                     record.request_envelope.payload
                 )
-            result.append((request, response, envelopes[digest], client_requests))
+            stream_responses = None
+            if record.stream_attempts is not None:
+                partials = []
+                for attempt in record.stream_attempts:
+                    partial = None
+                    if attempt.response_context is not None:
+                        partial = contexts[context_index].model_messages()
+                        context_index += 1
+                    partials.append(partial)
+                stream_responses = tuple(partials)
+            result.append((request, response, envelopes[digest], client_requests, stream_responses))
         return result
 
     async def prepare_interactions(
@@ -1415,6 +1473,8 @@ class StateStepArchive(AgentRunStore):
         values = tuple(
             replace(value, request_context=None, request_envelope_digest=None)
             if self._runtime_domain is RuntimeDomain.TRACE and value.status == "RUNNING"
+            else replace(value, response_context=None)
+            if self._runtime_domain is not RuntimeDomain.TRACE and value.stream_attempts and value.status != "SUCCEEDED"
             else value
             for value in interactions
         )
@@ -1438,6 +1498,8 @@ class StateStepArchive(AgentRunStore):
                     if interaction.response_context is None
                     else (interaction.response_context,)
                 ),
+                *(attempt.response_context for attempt in interaction.stream_attempts or ()
+                  if attempt.response_context is not None),
             ):
                 for item in projection.items:
                     if isinstance(item, StagedContextSpan):
@@ -1470,7 +1532,8 @@ class StateStepArchive(AgentRunStore):
             # Cold replay must verify retained bytes before reusing their immutable roots.
             await self._history.load_projected_contexts(run.agent_run_id, tuple(
                 projection for value in existing
-                for projection in (value.request_context, value.response_context)
+                for projection in (value.request_context, value.response_context,
+                                   *(attempt.response_context for attempt in value.stream_attempts or ()))
                 if projection is not None
             ))
             stored_interactions = {value.model_request_seq: value for value in existing}
@@ -1541,6 +1604,13 @@ class StateStepArchive(AgentRunStore):
                     await prepare_client_requests(
                         staged.client_requests, self._runtime_domain, self._history,
                     ),
+                    None if staged.stream_attempts is None else tuple([
+                        attempt.to_durable(
+                            await prepare_context(attempt.response_context, extend=False)
+                            if self._runtime_domain is RuntimeDomain.TRACE and attempt.response_context is not None
+                            else None
+                        ) for attempt in staged.stream_attempts
+                    ]),
                 )
             )
         return tuple(result)

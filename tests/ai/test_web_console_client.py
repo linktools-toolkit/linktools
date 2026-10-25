@@ -97,9 +97,20 @@ def test_web_dom_interactions_ignore_stale_work_and_preserve_mutation_identity()
     root = Path(__file__).parents[2]
     script = Path(__file__).with_name("web_console_dom.mjs")
     assets = root / "linktools-ai/src/linktools/ai/web/assets"
-    for mode in ("writable", "readonly", "workspace", "races", "navigation", "native", "sdk", "protocols", "diagnostics", "thinking", "guided", "details", "minimal", "resume", "streaming"):
+    for mode in ("writable", "readonly", "workspace", "races", "navigation", "native", "sdk", "protocols", "diagnostics", "thinking", "guided", "details", "minimal", "resume", "streaming", "attempts"):
         result = subprocess.run([node, str(script), str(assets), mode], capture_output=True, text=True, timeout=20, check=False)
         assert result.returncode == 0, result.stderr
+
+
+def test_web_stream_attempts_preserve_request_and_replay_boundaries() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the optional Web client tests")
+    root = Path(__file__).parents[2]
+    script = Path(__file__).with_name("web_console_attempts.mjs")
+    source = root / "linktools-ai/src/linktools/ai/web/assets/console.js"
+    result = subprocess.run([node, str(script), str(source)], capture_output=True, text=True, timeout=20, check=False)
+    assert result.returncode == 0, result.stderr
 
 
 def test_web_messages_render_safe_markdown_and_stored_input() -> None:

@@ -203,7 +203,9 @@ async def test_native_error_echoes_of_referenced_bytes_are_omitted_from_safe_dia
     assert "close_finished_ns" in attempt.diagnostics
     error = failed.value
     assert error.code is ErrorCode.MODEL_REQUEST_REJECTED
-    assert error.safe_details == {"content_omission_reason": _REASON, "status_code": 400}
+    assert error.safe_details == {
+        "content_omission_reason": _REASON, "status_code": 400, "model_name": _MODEL,
+    }
     assert error.diagnostics.content_omission_reason == _REASON
     assert error.diagnostics.exception_message == f"[content omitted: {_REASON}]"
     assert "ModelHTTPError" in error.diagnostics.traceback

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Vendor-neutral Subagent discovery and delegation capability."""
 
+import json
 from collections.abc import Mapping, Sequence
 from typing import Protocol
 
@@ -101,7 +102,7 @@ class SubagentCapability(AbstractCapability[AgentContext[object]]):
                 ) from error
             except AIError as error:
                 if error.code is ErrorCode.TOOL_EXECUTION_FAILED:
-                    raise ToolCallFailed(_subagent_failure_message(error)) from error
+                    raise ToolCallFailed(self._failure_message(error, subagent_id=subagent_id)) from error
                 if error.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID:
                     raise ToolCallRetry(
                         "The requested subagent id is not available. Call "
@@ -125,10 +126,7 @@ class SubagentCapability(AbstractCapability[AgentContext[object]]):
                             "workspace file paths or omit files and retry."
                         )
                     else:
-                        message = (
-                            "The delegate_task arguments are invalid. Correct them and "
-                            "retry."
-                        )
+                        raise ToolCallFailed(self._failure_message(error, subagent_id=subagent_id)) from error
                     raise ToolCallRetry(message) from error
                 raise
 
@@ -225,34 +223,47 @@ class SubagentCapability(AbstractCapability[AgentContext[object]]):
         return result
 
 
-def _subagent_failure_message(error: AIError) -> str:
-    subagent_id = error.safe_details.get("subagent_id")
-    subject = (
-        f"Subagent {subagent_id!r}"
-        if isinstance(subagent_id, str) and subagent_id
-        else "The delegated subagent"
-    )
-    status = error.safe_details.get("status")
-    if status == "CANCELLED":
-        return (
-            f"{subject} was cancelled and produced no result. Continue from the "
-            "parent context without its result."
-        )
-    raw_code = error.safe_details.get("error_code")
-    if isinstance(raw_code, str):
+    @classmethod
+    def _failure_message(cls, error: AIError, *, subagent_id: str) -> str:
+        def diagnostic_value(value: object) -> str | None:
+            if not isinstance(value, str) or not value:
+                return None
+            if not value.isprintable() or "://" in value or len(json.dumps(value, ensure_ascii=False)) > 130:
+                return "[omitted]"
+            return value
+
+        outer = error.safe_details
+        identity = diagnostic_value(outer.get("subagent_id", subagent_id))
+        subject = f"Subagent {identity!r}" if identity is not None else "The delegated subagent"
+        cancelled = outer.get("status") == "CANCELLED"
+        raw_code = outer.get("error_code", error.code.value)
         try:
-            code = ErrorCode(raw_code)
-        except ValueError:
-            pass
-        else:
-            return (
-                f"{subject} failed with {code.value} and produced no result. Continue "
-                "from the parent context using this failure reason."
-            )
-    return (
-        f"{subject} failed and produced no result. Continue from the parent context "
-        "without its result."
-    )
+            code = ErrorCode(raw_code).value
+        except (TypeError, ValueError):
+            code = ErrorCode.TOOL_EXECUTION_FAILED.value
+        details = outer.get("safe_error_details", outer)
+        details = details if isinstance(details, Mapping) else {}
+        projected = {}
+        execution_id = diagnostic_value(outer.get("execution_id"))
+        if execution_id is not None:
+            projected["execution_id"] = execution_id
+        # These fields are owner-authored diagnostics, not arbitrary exception
+        # text. Even this projection must not forward URLs or unbounded values.
+        for key in ("reason", "mime_type", "input_kind", "field", "phase",
+                    "provider", "api", "model_identity", "model_name"):
+            value = diagnostic_value(details.get(key))
+            if value is not None:
+                projected[key] = value
+        for key in ("model_request_seq", "stream_attempt_seq", "stream_attempt_count"):
+            value = details.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and 0 < value < 2 ** 63:
+                projected[key] = value
+        description = "was cancelled" if cancelled else f"failed with {code}"
+        message = f"{subject} {description} and produced no result."
+        if projected:
+            message += " Details: " + json.dumps(projected, ensure_ascii=False, separators=(",", ":")) + "."
+        return (message + " Do not infer findings or claim completion from this missing result. "
+                "If the task depends on this work, resolve or report the failure.")
 
 
 __all__ = ["SUBAGENT_CAPABILITY_ID", "SubagentCapability", "SubagentDelegate"]

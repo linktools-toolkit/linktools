@@ -1,11 +1,11 @@
-import {terminal, modelKey, eventKey, upsertModel, mergePage, readSSE, metricValue, duration, modelLabel, usageLabel, promptLayers, clientAttemptKey, clientBodyBytes, clientBodyText} from './console.js';
+import {terminal, modelKey, eventKey, upsertModel, mergePage, readSSE, metricValue, duration, modelLabel, usageLabel, promptLayers, clientAttemptKey, clientBodyBytes, clientBodyText, updateStreamAttempts, streamAttemptText, streamResponsePreview} from './console.js';
 import {renderMarkdown, inputPresentation, capturedRequest} from './message.js';
 
 const $ = id => document.getElementById(id);
 const state = {config:null, view:'sessions', drafts:new Map(), conversationExecution:null, browserExecution:null, filters:new Map(), list:[], listCursor:null, listSessionReads:new Map(), session:null, turns:[], turnCursor:null, hasEarlierTurns:false, timelineError:'',focusComposerSession:null,
   execution:null, executionGeneration:0, observedExecution:null, observedInfo:null, observationGeneration:0, observationReadGeneration:0, tab:'models', traceSelection:null, conversationMode:'chat', nativeTimeline:null, readerSelection:null, readerRaw:false, readerHttp:false, readerCache:null, readerExpanded:new Set(), details:[], detailCursor:null, models:new Map(), events:new Map(),
   generation:0, refreshGeneration:0, sessionReadGeneration:0, sessionAppliedGeneration:0, listGeneration:0, detailGeneration:0, metricsGeneration:0, stream:null, cursor:null,
-  liveText:'', liveThinking:'', liveActivityOpen:false, pending:new Map(), actionsPending:new Set(), pendingForks:new Map(), recoveryReadbackId:null, endReadbackId:null, cancellationNoticeId:null, noticeRevision:0, selectedSession:null, selectedExecution:null};
+  liveText:'', liveThinking:'', liveAttempts:new Map(), liveActivityOpen:false, pending:new Map(), actionsPending:new Set(), pendingForks:new Map(), recoveryReadbackId:null, endReadbackId:null, cancellationNoticeId:null, noticeRevision:0, selectedSession:null, selectedExecution:null};
 const json = value => JSON.stringify(value, null, 2);
 const text = value => typeof value === 'string' ? value : json(value);
 const short = value => value ? String(value).slice(0, 12) : '—';
@@ -333,7 +333,7 @@ function restoreDraft(sessionId) {
 async function openSelection(sessionId, executionId, {preserveInspector=false}={}) {
   const preserveObservation=Boolean(sessionId && sessionId===state.selectedSession);saveDraft();
   const generation=++state.generation,focusComposer=state.focusComposerSession===sessionId;state.focusComposerSession=null;
-  if(!preserveObservation){stopStream(); ++state.observationGeneration; state.observedExecution=null;state.observedInfo=null; state.cursor=null; state.liveText=''; state.liveThinking=''; state.liveActivityOpen=false;state.models.clear(); state.events.clear();}
+  if(!preserveObservation){stopStream(); ++state.observationGeneration; state.observedExecution=null;state.observedInfo=null; state.cursor=null; state.liveText=''; state.liveThinking='';state.liveAttempts.clear(); state.liveActivityOpen=false;state.models.clear(); state.events.clear();}
   state.selectedSession=sessionId || null; state.selectedExecution=executionId || null;
   restoreDraft(state.selectedSession);
   state.nativeTimeline=null;
@@ -436,6 +436,72 @@ function scheduleLiveRender() {
   if(Math.min(liveRenderCost,previousLiveRenderCost)>liveFrameBudget)liveRenderTimer=setTimeout(frame,60-liveFrameBudget);
   else frame();
 }
+function acceptLiveResponse(item) {
+  const request=state.liveAttempts.get(modelKey(item));
+  if(!request || item.status!=='SUCCEEDED' || item.content_included!==true || !Array.isArray(item.response?.parts))return false;
+  request.canonicalResponse=item.response;request.canonicalError=null;request.finished=true;request.status='SUCCEEDED';
+  for(const attempt of request.attempts.values())if(['RUNNING','SUCCEEDED'].includes(attempt.status)){
+    attempt.text='';attempt.thinking='';attempt.parts.clear();
+  }
+  scheduleLiveRender();return true;
+}
+async function readLiveResponse(request,force=false) {
+  if(request.canonicalResponse || request.canonicalPending || request.canonicalError && !force)return;
+  request.canonicalPending=true;request.canonicalError=null;scheduleLiveRender();
+  const generation=state.observationGeneration;
+  const current=()=>generation===state.observationGeneration && state.liveAttempts.get(request.key)===request;
+  try {
+    const params=new URLSearchParams({include_content:'true',limit:'1',agent_run_seq:request.agent_run_seq,model_request_seq:request.model_request_seq});
+    const page=await api(`/api/executions/${enc(request.execution_id)}/models?${params}`);
+    if(!current())return;
+    const item=page.items.find(item=>modelKey(item)===request.key);
+    if(!item || !acceptLiveResponse(item))request.canonicalError='Committed response content unavailable';
+  } catch(error) {if(current())request.canonicalError='Committed response read unavailable';}
+  finally {if(current()){request.canonicalPending=false;scheduleLiveRender();}}
+}
+function renderLiveAttempts(live,wanted) {
+  live.attemptNodes ||= new Map();const retained=new Set();
+  for(const request of state.liveAttempts.values()) {
+    if(request.execution_id!==state.observedExecution)continue;
+    const attempts=[...request.attempts.values()].sort((a,b)=>a.seq-b.seq);
+    for(const attempt of attempts.filter(item=>['FAILED','CANCELLED'].includes(item.status))) {
+      const key=request.key+':'+attempt.seq;retained.add(key);
+      let node=live.attemptNodes.get(key);
+      if(!node) {
+        node=element('details','tool-message failed-attempt');node.open=attempt.expanded || false;
+        node.ontoggle=()=>{if(node.isConnected)attempt.expanded=node.open;};
+        node.label=element('summary');node.body=element('pre');node.thinking=element('pre');node.append(node.label,node.thinking,node.body);
+        live.attemptNodes.set(key,node);
+      }
+      node.label.textContent=`${attempt.status} · run ${request.agent_run_seq} · request ${request.model_request_seq} · attempt ${attempt.seq} · partial content is not an answer`;
+      const content=streamAttemptText(attempt),thinking=streamAttemptText(attempt,'thinking');
+      if(node.body.textContent!==content)node.body.textContent=content;
+      if(node.thinking.textContent!==thinking)node.thinking.textContent=thinking;
+      node.body.hidden=!content;node.thinking.hidden=!thinking;wanted.push(node);
+    }
+    const contributing=attempts.filter(item=>item.status==='SUCCEEDED' || item.seq===request.current && item.status==='RUNNING');
+    if(!contributing.length)continue;
+    const key=request.key+':response';retained.add(key);
+    let node=live.attemptNodes.get(key);
+    if(!node) {
+      node=element('section','stream-attempt');node.label=element('div','message-label');
+      node.thinking=element('details','tool-message');node.thinkingBody=element('pre');node.thinking.append(element('summary','','Thinking · SDK display'),node.thinkingBody);
+      node.body=markdownMessage('');node.append(node.label,node.thinking,node.body);live.attemptNodes.set(key,node);
+    }
+    const preview=streamResponsePreview(request),canonical=request.canonicalResponse;
+    const responseText=kind=>canonical.parts.filter(part=>part.part_kind===kind && typeof part.content==='string').map(part=>part.content).join('');
+    const content=canonical?responseText('text'):request.status==='SUCCEEDED'?'':preview.text;
+    const thinking=canonical?responseText('thinking'):request.status==='SUCCEEDED'?'':preview.thinking;
+    const status=canonical?'COMPLETED MODEL RESPONSE · committed SDK text':request.status==='SUCCEEDED'?`MODEL REQUEST SUCCEEDED · ${request.canonicalError || 'awaiting committed response'}`:['FAILED','CANCELLED'].includes(request.status)?`INCOMPLETE RESPONSE · ${request.status}`:'LIVE RESPONSE · incomplete SDK display';
+    const label=`${status} · run ${request.agent_run_seq} · request ${request.model_request_seq}${!canonical && preview.truncated?' · preview GAP · noncontiguous fragment':''}`;
+    if(node.label.textContent!==label)node.label.textContent=label;
+    node.thinking.hidden=!thinking;if(node.thinkingBody.textContent!==thinking)node.thinkingBody.textContent=thinking;
+    if(!node.reload){node.reload=button('Load committed response',()=>readLiveResponse(request,true));node.append(node.reload);}
+    node.reload.hidden=request.status!=='SUCCEEDED' || Boolean(canonical);node.reload.disabled=Boolean(request.canonicalPending);
+    updateMarkdownMessage(node.body,content);node.body.hidden=!content;wanted.push(node);
+  }
+  for(const key of live.attemptNodes.keys())if(!retained.has(key))live.attemptNodes.delete(key);
+}
 function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
   cancelLiveRender();const started=performance.now();
   try {
@@ -456,13 +522,14 @@ function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
     if(live.liveLabel.textContent!==label)live.liveLabel.textContent=label;
     wanted.push(live.liveLabel,live.markdownMessage);
   }
+  renderLiveAttempts(live,wanted);
   const events=[...state.events.values()].slice(-12);
   if(!live.activityEvents || events.length!==live.activityEvents.length || events.some((item,index)=>item!==live.activityEvents[index])) {
   live.activityEvents=events;live.activityFocusNodes=new Map();live.activityNodes=[];
   const activity=element('details','tool-message');activity.id='live-activity';activity.open=state.liveActivityOpen;
   activity.ontoggle=()=>{if($('live-activity')===activity)state.liveActivityOpen=activity.open;};
   const attention=item=>['EXECUTION_START_UNKNOWN','EXECUTION_RECOVERY_REQUIRED','EXECUTION_FAILED','CANCEL_REQUESTED','EXECUTION_CANCELLED','APPROVAL_REQUESTED','EXTERNAL_REQUESTED'].includes(item.event.event_type)
-    || ['MODEL_REQUEST_FINISHED','TOOL_CALL_FINISHED'].includes(item.event.event_type) && ['FAILED','CANCELLED'].includes(item.event.payload?.status);
+    || ['MODEL_ATTEMPT_FINISHED','MODEL_REQUEST_FINISHED','TOOL_CALL_FINISHED'].includes(item.event.event_type) && ['FAILED','CANCELLED'].includes(item.event.payload?.status);
   const ordinary=events.filter(item=>!attention(item)).length;
   const summary=element('summary','',`Activity · ${ordinary} recent events`);summary.dataset.liveFocus='summary';activity.append(summary);
   if(ordinary)live.activityFocusNodes.set('summary',summary);
@@ -487,7 +554,10 @@ function observedInfo(info, readGeneration=state.observationReadGeneration) {
   if(info.execution_id!==state.observedExecution)return info;
   const previous=state.observedInfo;
   if(previous && readGeneration!==state.observationReadGeneration)return previous;
-  state.observedInfo=info;return info;
+  state.observedInfo=info;
+  if(['FAILED','CANCELLED'].includes(info.status))updateStreamAttempts(state.liveAttempts,{execution_id:info.execution_id,event:{event_type:'EXECUTION_'+info.status}});
+  if(terminal(info.status))for(const request of state.liveAttempts.values())if(request.execution_id===info.execution_id && request.status==='SUCCEEDED')readLiveResponse(request);
+  return info;
 }
 async function selectExecution(id, generation=state.generation) {
   const executionGeneration=++state.executionGeneration,selectionChanged=id!==state.selectedExecution;
@@ -660,6 +730,14 @@ function nativeMessages(container,projection,key,api) {
 }
 function sdkMessages(container,item,key) {
   container.append(element('p','source-note','Model input captured at SDK preparation, reconstructed from retained context. Message and part order are preserved; instructions and tools remain separate SDK fields, not invented provider messages.'));
+  for(const attempt of item.stream_attempts || []) {
+    const failed=attempt.status!=='SUCCEEDED';
+    const detail=readerDetail(key+':stream:'+attempt.stream_attempt_seq,`Model stream attempt ${attempt.stream_attempt_seq} · ${attempt.status}${failed?' · partial content is not an answer':' · successful segment; logical response below'}`,'stream-attempt-history');
+    const metadata=Object.fromEntries(Object.entries(attempt).filter(([name])=>name!=='response'));
+    detail.append(properties(metadata));
+    if(failed)detail.append(attempt.response!=null?rawDetail(attempt.response,'Failed SDK partial response'):element('p','muted','Partial response not retained or not included.'));
+    container.append(detail);
+  }
   const request=item.request;
   if(item.content_included===false || !Array.isArray(request?.messages)){
     container.append(element('p','muted',item.status==='RUNNING'?'Model input is not committed yet.':'No retained SDK model input is available.'));return;
@@ -680,7 +758,8 @@ function sdkMessages(container,item,key) {
   });
   const envelope=Object.fromEntries(Object.entries(request).filter(([name])=>name!=='messages'));
   if(Object.keys(envelope).length){const detail=readerDetail(key+':sdk-envelope','Instructions, tools & model settings','native-envelope');detail.append(element('pre','native-literal',json(envelope)));container.append(detail);}
-  if(item.response!=null)container.append(rawDetail(item.response,'SDK response'));
+  if(item.response!=null)container.append(rawDetail(item.response,['FAILED','CANCELLED'].includes(item.status)
+    ?`Incomplete SDK response · ${item.status} · diagnostic aggregate, not a completed answer`:'SDK response'));
 }
 function readerDetail(key,label,className) {
   const detail=element('details',className),summary=element('summary','',label);
@@ -801,7 +880,7 @@ async function loadNativeTimeline(more=false,refresh=false) {
       if(!current())return;
       incoming.push(...page.items);cursor=page.next_cursor || null;
     } while(refresh && cursor && incoming.length<target);
-    view.items=mergeNativeItems(view.items,incoming);view.cursor=cursor;
+    view.items=mergeNativeItems(view.items,incoming);view.cursor=cursor;incoming.forEach(acceptLiveResponse);
     incoming.filter(item=>item.status!=='RUNNING').forEach(item=>view.pending.delete(modelKey(item)));
   } catch(error) {if(current())view.error=error.message;}
   finally {if(current()){view.loading=false;view.error ||= [...view.pending.values()].map(request=>request.error).filter(Boolean).join('\n');renderNativeViews();if(view.pending.size)scheduleNativeRefresh();}}
@@ -839,7 +918,7 @@ async function refreshNativeRequests(view,generation) {
         const page=await api(`/api/executions/${enc(item.execution_id)}/models?${params}`);
         if(!current())return;
         if(!page.items.some(value=>modelKey(value)===key))throw new Error('Model request record is no longer available');
-        view.items=mergeNativeItems(view.items,page.items);
+        view.items=mergeNativeItems(view.items,page.items);page.items.forEach(acceptLiveResponse);
         if(view.pending.get(key)===request)view.pending.delete(key);
       } catch(error){
         if(!current())return;
@@ -972,7 +1051,7 @@ async function refreshSelected() {
       if(payload.timeline){state.turns=mergePage(state.turns,payload.timeline.items,item=>item.execution_id);if(!state.hasEarlierTurns)state.turnCursor=payload.timeline.next_cursor;}
       else{state.turnCursor=null;state.hasEarlierTurns=false;}
       const selected=state.turns.find(item=>item.execution_id===state.observedExecution);
-      if(payload.timeline && selected?.conversation_committed){state.liveText='';state.liveThinking='';state.events.clear();}
+      if(payload.timeline && selected?.conversation_committed){state.liveText='';state.liveThinking='';state.liveAttempts.clear();state.events.clear();}
       renderConversation();setDisabled();
     }
   }
@@ -1007,7 +1086,7 @@ async function syncObservation({refresh=false}={}) {
   if(state.view==='executions' && !id)return;
   if(id!==state.observedExecution) {
     stopStream();++state.observationGeneration;state.observedExecution=id || null;state.observedInfo=null;
-    state.cursor=null;state.liveText='';state.liveThinking='';state.liveActivityOpen=false;state.models.clear();state.events.clear();renderLive();
+    state.cursor=null;state.liveText='';state.liveThinking='';state.liveAttempts.clear();state.liveActivityOpen=false;state.models.clear();state.events.clear();renderLive();
   }
   if(!id)return;
   const generation=state.observationGeneration,view=state.view;
@@ -1041,7 +1120,7 @@ async function refreshObservation(id, generation) {
     state.timelineError=payload.timeline_error || '';renderSessionHeader();
     if(payload.timeline){state.turns=mergePage(state.turns,payload.timeline.items,item=>item.execution_id);if(!state.hasEarlierTurns)state.turnCursor=payload.timeline.next_cursor;}
     const turn=state.turns.find(item=>item.execution_id===id);
-    if(payload.timeline && turn?.conversation_committed){state.liveText='';state.liveThinking='';state.events.clear();}
+    if(payload.timeline && turn?.conversation_committed){state.liveText='';state.liveThinking='';state.liveAttempts.clear();state.events.clear();}
     renderConversation();renderList();
   }
   if(state.cancellationNoticeId===id && terminal(info.status)) {
@@ -1082,15 +1161,20 @@ async function watchExecution(id,generation) {
         if(envelope.cursor)state.cursor=envelope.cursor;
         if(envelope.type==='model') {
           const previous=state.models.get(modelKey(item.item));upsertModel(state.models,item.item);
+          const request=state.liveAttempts.get(modelKey(item.item));
+          if(!acceptLiveResponse(item.item) && request && item.visibility==='durable_history' && item.item.status==='SUCCEEDED'){
+            request.status='SUCCEEDED';request.finished=true;readLiveResponse(request);
+          }
           if(item.item.status!=='RUNNING' && (!previous || previous.status==='RUNNING') && (id===state.selectedExecution || item.item.execution_id===state.selectedExecution))scheduleNativeRefresh(item.item);
           if(state.tab==='overview' && id===state.selectedExecution)renderOverview();
         }
         else {
           const event=item.event,payload=event.payload || {};
+          const attemptHandled=item.depth===0 && updateStreamAttempts(state.liveAttempts,item);
           if(item.depth===0 && event.event_type==='STREAM_RESET'){state.liveText='';state.liveThinking='';}
-          else if(item.depth===0 && event.event_type==='ASSISTANT_TEXT_DELTA')state.liveText+=payload.text || '';
-          else if(item.depth===0 && event.event_type==='ASSISTANT_THINKING_DELTA')state.liveThinking+=payload.text || '';
-          else if(!event.event_type.endsWith('_DELTA')) {
+          else if(!attemptHandled && item.depth===0 && event.event_type==='ASSISTANT_TEXT_DELTA')state.liveText+=payload.text || '';
+          else if(!attemptHandled && item.depth===0 && event.event_type==='ASSISTANT_THINKING_DELTA')state.liveThinking+=payload.text || '';
+          if(!event.event_type.endsWith('_DELTA')) {
             state.events.set(eventKey(item),item);
             if(state.events.size>100)state.events.delete(state.events.keys().next().value);
           }

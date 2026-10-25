@@ -176,7 +176,7 @@ def test_generated_ci_plan_supplies_execution_versions_and_options() -> None:
         [sys.executable, "-m", "scripts.check.matrix", json.dumps(["linktools", "linktools-ai"])],
         cwd=root, text=True,
     ))
-    assert plan["python-versions"] == ["3.10", "3.x"]
+    assert plan["python-versions"] == ["3.11", "3.x"]
     for check in plan["checks"]:
         options = shlex.split(check["pytest-args"])
         assert options[:2] == ["-n", "4"]
@@ -197,6 +197,20 @@ def test_generated_ci_plan_supplies_execution_versions_and_options() -> None:
     assert jobs["python"]["strategy"]["matrix"]["python-version"] == "${{ fromJSON(needs.discover.outputs.plan).python-versions }}"
     assert jobs["python"]["strategy"]["fail-fast"] is False
     assert jobs["coverage"]["name"] == "Python checks passed"
+
+
+def test_shared_ci_interpreters_match_the_execution_floor() -> None:
+    root = Path(__file__).resolve().parents[2]
+    for name in ("python-check.yml", "python-publish.yml"):
+        workflow = yaml.safe_load((root / ".github/workflows" / name).read_text())
+        versions = [
+            step["with"]["python-version"]
+            for job in workflow["jobs"].values()
+            for step in job.get("steps", ())
+            if step.get("uses", "").startswith("actions/setup-python@")
+        ]
+        assert "3.11" in versions
+        assert all(version == "3.11" or "matrix.python-version" in version for version in versions)
 
 
 def test_runtime_ci_output_keeps_failures_without_per_case_progress(

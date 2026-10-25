@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
@@ -18,9 +18,11 @@ from pydantic_ai.models import Model, ModelRequestParameters, StreamedResponse
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext
+from pydantic_ai.usage import RequestUsage
 from linktools.core import environ
 
 from ..core import ImmutableJsonMapping, JsonValue
+from ._stream_attempt import ModelStreamAttempt
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +125,10 @@ class ModelClientRequestRecorder:
     and authorization remain the caller's responsibility.
     """
 
-    def __init__(self, *, record_http_bodies: bool = False) -> None:
+    def __init__(
+        self, *, record_http_bodies: bool = False,
+        stream_attempt_observer: Callable[[ModelStreamAttempt], Awaitable[None]] | None = None,
+    ) -> None:
         if not isinstance(record_http_bodies, bool):
             raise ValueError("record_http_bodies must be a boolean")
         self.record_http_bodies = record_http_bodies
@@ -131,6 +136,47 @@ class ModelClientRequestRecorder:
         self._entries: list[_ClientRequestEntry] = []
         self._token: Token[ModelClientRequestRecorder | None] | None = None
         self._entered = False
+        self._stream_attempt_observer = stream_attempt_observer
+        self._stream_attempts: list[ModelStreamAttempt] = []
+        self._stream_attempt_seq = 0
+        self._unreturned_stream_usage: RequestUsage | None = None
+
+    @classmethod
+    def current(cls) -> ModelClientRequestRecorder | None:
+        """The open logical request scope, if one is bound in this task."""
+        capture = _current_capture.get()
+        return capture if capture is not None and capture._token is not None else None
+
+    @property
+    def unreturned_stream_usage(self) -> RequestUsage | None:
+        """Known usage billed before any response reached the SDK response ledger."""
+        return self._unreturned_stream_usage
+
+    def record_unreturned_stream_usage(self, usage: RequestUsage) -> None:
+        if self._unreturned_stream_usage is None:
+            self._unreturned_stream_usage = RequestUsage()
+        self._unreturned_stream_usage.incr(usage)
+
+    @property
+    def supports_stream_replacement(self) -> bool:
+        """Whether the host has an awaited attempt lifecycle consumer."""
+        return self._stream_attempt_observer is not None
+
+    @property
+    def stream_attempts(self) -> tuple[ModelStreamAttempt, ...] | None:
+        """Ended stream attempts; None means no stream scope was observed."""
+        return tuple(self._stream_attempts) if self._stream_attempt_seq else None
+
+    def next_stream_attempt_seq(self) -> int:
+        self._stream_attempt_seq += 1
+        return self._stream_attempt_seq
+
+    async def observe_stream_attempt(self, attempt: ModelStreamAttempt) -> None:
+        """Publish control boundaries in order; observer failures are not swallowed."""
+        if attempt.status != "RUNNING":
+            self._stream_attempts.append(attempt)
+        if self._stream_attempt_observer is not None:
+            await self._stream_attempt_observer(attempt)
 
     @property
     def requests(self) -> tuple[ModelClientRequest, ...]:
@@ -202,7 +248,8 @@ class ModelClientRequestRecorder:
         return _ClientRecordingModel(model, self)
 
     @contextmanager
-    def _bind(self) -> Iterator[None]:
+    def bind(self) -> Iterator[None]:
+        """Bind this open scope for one transport operation in the current task."""
         token = _current_capture.set(self)
         try:
             yield
@@ -237,7 +284,7 @@ class _ClientRecordingModel(WrapperModel):
         self, messages: list[ModelMessage], model_settings: ModelSettings | None,
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
-        with self._recorder._bind():
+        with self._recorder.bind():
             return await self.wrapped.request(messages, model_settings, model_request_parameters)
 
     @asynccontextmanager
@@ -249,7 +296,7 @@ class _ClientRecordingModel(WrapperModel):
         async with AsyncExitStack() as stack:
             # Client dispatch happens while opening the stream. Keep token reset
             # in this task; the SDK may close the stream from another task.
-            with self._recorder._bind():
+            with self._recorder.bind():
                 response = await stack.enter_async_context(self.wrapped.request_stream(
                     messages, model_settings, model_request_parameters, run_context,
                 ))

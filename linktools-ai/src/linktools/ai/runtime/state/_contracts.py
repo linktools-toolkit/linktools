@@ -564,12 +564,65 @@ class ModelClientRequestRef:
 
 
 @dataclass(frozen=True, slots=True)
+class StreamAttemptRecord:
+    """One completed SDK stream invocation; several successful segments may contribute.
+
+    The logical interaction owns its canonical response; failed partials are
+    independent trace evidence rather than conversation history.
+    """
+
+    stream_attempt_seq: int
+    status: str
+    started_at: datetime
+    finished_at: datetime
+    duration_ns: int
+    client_request_start: int
+    client_request_end: int
+    response_context: ContextProjection | None
+    usage: UsageMetrics | None
+    error_code: str | None
+    error_type: str | None
+    retry_scheduled: bool
+
+    def __post_init__(self) -> None:
+        if (
+            any(isinstance(value, bool) or not isinstance(value, int) for value in (
+                self.stream_attempt_seq, self.duration_ns,
+                self.client_request_start, self.client_request_end,
+            ))
+            or self.stream_attempt_seq < 1 or self.duration_ns < 0
+            or self.client_request_start < 0 or self.client_request_end < self.client_request_start
+            or self.status not in {"SUCCEEDED", "FAILED", "CANCELLED"}
+            or not isinstance(self.started_at, datetime) or self.started_at.tzinfo is None
+            or not isinstance(self.finished_at, datetime) or self.finished_at.tzinfo is None
+            or self.finished_at < self.started_at
+            or not isinstance(self.retry_scheduled, bool)
+            or self.retry_scheduled and self.status != "FAILED"
+            or self.status == "SUCCEEDED" and (
+                self.response_context is not None or self.error_code is not None or self.error_type is not None
+            )
+            or self.status == "FAILED" and not self.error_code
+            or self.error_code is not None and not isinstance(self.error_code, str)
+            or self.error_type is not None and not isinstance(self.error_type, str)
+            or self.usage is not None and not isinstance(self.usage, UsageMetrics)
+        ):
+            raise ValueError("stream attempt is invalid")
+        if self.response_context is not None and (
+            not isinstance(self.response_context, ContextProjection)
+            or any(isinstance(item, TranscriptSpanRef) for item in self.response_context.items)
+        ):
+            raise ValueError("failed stream response must be independent of the transcript")
+
+
+@dataclass(frozen=True, slots=True)
 class ModelInteractionRecord:
     """Canonical lifecycle of one admitted logical model request.
 
     client_requests is absent for uncaptured history; an empty tuple means the
     completed observation scope saw no client dispatch. Array positions belong
-    only to actual attempts within this logical request.
+    only to actual client dispatches within this logical request. Stream attempt
+    identities are separate; their partial response bodies are trace-only and
+    never become transcript messages or checkpoint working context.
     """
 
     agent_run_id: str
@@ -589,6 +642,7 @@ class ModelInteractionRecord:
     finished_at: datetime | None
     attachments: tuple[Mapping[str, JsonValue], ...] = ()
     client_requests: tuple[ModelClientRequestRef, ...] | None = None
+    stream_attempts: tuple[StreamAttemptRecord, ...] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -639,12 +693,37 @@ class ModelInteractionRecord:
             raise ValueError("model response context needs prepared request context")
         if self.status == "FAILED" and not self.error_code:
             raise ValueError("failed model interaction needs an error code")
+        if self.stream_attempts is not None:
+            if self.status in {"RUNNING", "INTERRUPTED"}:
+                raise ValueError("unfinished model interaction cannot have stream attempts")
+            if not isinstance(self.stream_attempts, tuple) or any(
+                not isinstance(value, StreamAttemptRecord) for value in self.stream_attempts
+            ):
+                raise TypeError("stream attempts are invalid")
+            previous_end = 0
+            for sequence, attempt in enumerate(self.stream_attempts, 1):
+                if (
+                    attempt.stream_attempt_seq != sequence
+                    or attempt.client_request_start < previous_end
+                    or attempt.client_request_end > len(self.client_requests or ())
+                    or attempt.response_context is not None and self.request_context is None
+                ):
+                    raise ValueError("stream attempt sequence or client range is invalid")
+                previous_end = attempt.client_request_end
         object.__setattr__(self, "model", dict(self.model))
         object.__setattr__(
             self,
             "attachments",
             tuple(_normalize_model_attachment_fact(value) for value in self.attachments),
         )
+
+    def validate_storage_domain(self, domain: RuntimeDomain) -> None:
+        """Failed response bodies belong only to the trace retention domain."""
+        if domain is not RuntimeDomain.TRACE and (
+            any(attempt.response_context is not None for attempt in self.stream_attempts or ())
+            or self.stream_attempts and self.status != "SUCCEEDED" and self.response_context is not None
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     def validate_successor(self, successor: "ModelInteractionRecord") -> None:
         """Reject identity drift, request rewrites, and changes after completion."""
@@ -2227,6 +2306,7 @@ __all__ = [
     "ModelClientRequestRef",
     "ModelClientResponseRef",
     "ModelInteractionRecord",
+    "StreamAttemptRecord",
     "ExecutionStartClaim",
     "ExecutionStartReservation",
     "ExecutionStartReservationResult",

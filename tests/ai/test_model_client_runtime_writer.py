@@ -20,7 +20,6 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import Principal, RunBudget, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelClientRequest, ModelClientRequestRecorder
-from linktools.ai.model import _openai
 from linktools.ai.runtime import Execution, ExecutionInputContext, Runtime, RuntimeStorage
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
 from linktools.ai.runtime.state import RuntimeDomain
@@ -100,13 +99,7 @@ async def test_runtime_records_compaction_and_agent_dispatches_separately(
         received.append(response.content)
         return response
 
-    models, _clients = _binding(monkeypatch, handler)
-    chat_model = _openai.OpenAIChatModel
-
-    def small_model(*args: Any, **kwargs: Any) -> Any:
-        return chat_model(*args, profile={"context_window": 1000}, **kwargs)
-
-    monkeypatch.setattr(_openai, "OpenAIChatModel", small_model)
+    models, _clients = _binding(monkeypatch, handler, context_window=1000)
     history = []
     for index in range(20):
         history.extend((

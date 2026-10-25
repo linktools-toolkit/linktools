@@ -1,6 +1,6 @@
 # linktools-ai
 
-`linktools-ai` provides the Agent runtime layer for LinkTools. The public composition model is intentionally small:
+`linktools-ai` requires Python >= 3.11 and provides the Agent runtime layer for LinkTools. The public composition model is intentionally small:
 
 ```text
 namespace
@@ -913,7 +913,7 @@ It is an execution boundary, not an operating-system security boundary. On Linux
 `BubblewrapSandbox` is an explicit deployment choice. It requires a non-root
 user, usable unprivileged namespaces, `bwrap >= 0.12.0`, and a trusted
 read-only runtime rootfs containing the same LinkTools build and Python >=
-3.10. It has no automatic Local fallback. Bubblewrap isolates Session
+3.11. It has no automatic Local fallback. Bubblewrap isolates Session
 file/command execution and sandboxed MCP stdio. The host Agent, model
 requests, and Python custom tools remain outside it. A restricted MCP process
 sees the selected execution root under its configured read policy and its own

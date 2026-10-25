@@ -5,7 +5,7 @@
 import asyncio
 import math
 import random
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Collection, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import InitVar, dataclass, field
 from typing import ClassVar
@@ -24,8 +24,10 @@ from pydantic_ai.profiles import DEFAULT_PROFILE, merge_profile
 from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ._contract import ModelBinding
-from ._errors import _is_quota_error
+from ._errors import _is_context_window_error, _is_quota_error
 from ._input import expand_input_types, validate_model_inputs, validate_provider_inputs
+from ._stream import _RetryingStreamedResponse
+from ._client_request import ModelClientRequestRecorder
 
 _logger = environ.get_logger("ai.model.binding")
 
@@ -156,6 +158,27 @@ class _ProviderModelBinding:
     def _build_model(self, settings: ModelSettings) -> Model:
         raise NotImplementedError
 
+    @classmethod
+    def prepare_output_tool_settings(
+        cls,
+        settings: ModelSettings | None,
+        parameters: ModelRequestParameters,
+        *,
+        unsupported_settings: Collection[str] = (),
+    ) -> ModelSettings | None:
+        """Default a resolved output-only request to one terminal tool call."""
+        if (
+            parameters.output_mode != "tool"
+            or parameters.allow_text_output
+            or parameters.function_tools
+            or parameters.native_tools
+            or len(parameters.output_tools) != 1
+            or "parallel_tool_calls" in (settings or {})
+            or "parallel_tool_calls" in unsupported_settings
+        ):
+            return settings
+        return {**(settings or {}), "parallel_tool_calls": False}
+
 def _validate_positive_number(name: str, value: "int | float | None") -> None:
     if value is None:
         return
@@ -257,9 +280,8 @@ class _RetryingModel(WrapperModel):
     ) -> float:
         cap = max(self._retry_max_delay, self._retry_delay)
         wait = min(cap, backoff + random.uniform(0, backoff * 0.25))
-        # Older supported SDKs expose this only on ModelHTTPError. Read its
-        # public normalized value rather than interpreting provider bodies.
-        retry_after = getattr(error, "retry_after", None)
+        # Use the public normalized value rather than interpreting provider bodies.
+        retry_after = error.retry_after
         if (
             isinstance(retry_after, (int, float))
             and not isinstance(retry_after, bool)
@@ -267,6 +289,7 @@ class _RetryingModel(WrapperModel):
             and retry_after >= 0
         ):
             wait = max(wait, retry_after)
+        _logger.warning("model request retry backoff: model=%s delay_seconds=%s", self.model_name, wait)
         await asyncio.sleep(wait)
         if backoff == 0:
             return 0
@@ -312,42 +335,28 @@ class _RetryingModel(WrapperModel):
     ) -> AsyncGenerator[StreamedResponse, None]:
         if self._input_binding is not None:
             validate_provider_inputs(self._input_binding, messages)
-        attempt = 0
-        backoff = self._retry_delay
-        while True:
-            entered = False
-            try:
-                async with self.wrapped.request_stream(
-                    messages,
-                    model_settings,
-                    model_request_parameters,
-                    run_context,
-                ) as response:
-                    entered = True
-                    yield response
-                return
-            except ModelAPIError as error:
-                if (
-                    entered
-                    or attempt >= self._max_retries
-                    or not _retryable_model_error(error)
-                ):
-                    raise
-                attempt += 1
-                _logger.warning(
-                    "retrying streamed model request: model=%s attempt=%s",
-                    self.model_name,
-                    attempt,
-                )
-                backoff = await self._wait_for_retry(error, backoff)
+        response = _RetryingStreamedResponse(
+            self.wrapped, messages, model_settings, model_request_parameters, run_context,
+            max_retries=self._max_retries, initial_backoff=self._retry_delay,
+            retryable=lambda error: _retryable_model_error(error, allow_stream_retry=True),
+            wait=self._wait_for_retry, recorder=ModelClientRequestRecorder.current(),
+        )
+        try:
+            await response.prime()
+            yield response
+        except BaseException as error:
+            if not await response.aclose(error):
+                raise
+        else:
+            await response.aclose()
 
 
-def _retryable_model_error(error: ModelAPIError) -> bool:
-    # These public categories are absent from some supported SDK releases.
+def _retryable_model_error(error: ModelAPIError, *, allow_stream_retry: bool = False) -> bool:
     # Do not reinterpret an explicit permanent failure or an expired deadline
     # as a transient HTTP status, including quota errors carried by HTTP 429.
-    if (getattr(error, "in_stream", False) or _is_quota_error(error)
-        or isinstance(error, getattr(sdk_errors, "ModelRequestTimeout", ()))):
+    if ((error.in_stream and not allow_stream_retry)
+        or _is_quota_error(error) or _is_context_window_error(error)
+        or isinstance(error, sdk_errors.ModelRequestTimeout)):
         return False
     if isinstance(error, ModelHTTPError):
         return error.status_code in {408, 409, 429} or 500 <= error.status_code < 600

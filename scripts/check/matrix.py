@@ -8,7 +8,7 @@ import typing
 
 from manage import get_modules, load_project_checks
 
-PYTHON_VERSIONS = ("3.10", "3.x")
+PYTHON_VERSIONS = ("3.11", "3.x")
 
 
 def package_checks(packages: "typing.Iterable[str]") -> "typing.List[typing.Dict[str, str]]":

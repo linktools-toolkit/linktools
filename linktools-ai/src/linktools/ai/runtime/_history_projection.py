@@ -53,6 +53,7 @@ from .service_api import (
     ExecutionHistoryItem,
     ExecutionTraceItem,
     ModelInteractionItem,
+    ModelStreamAttemptItem,
     ModelInteractionReadBoundary,
     ModelInteractionSubscription,
     SessionHistoryItem,
@@ -1183,10 +1184,11 @@ class StepExecutionHistoryReader:
         request: dict[str, JsonValue] = {}
         response: JsonValue | None = None
         client_requests = None
+        stream_responses = None
         if include_content or include_client_requests:
-            if not isinstance(resolved, tuple) or len(resolved) != 4:
+            if not isinstance(resolved, tuple) or len(resolved) != 5:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            request_messages, response_messages, envelope_raw, resolved_client_requests = resolved
+            request_messages, response_messages, envelope_raw, resolved_client_requests, stream_responses = resolved
             if include_client_requests:
                 client_requests = resolved_client_requests
             if include_content and request_messages is None and interaction.request_context is not None:
@@ -1217,6 +1219,24 @@ class StepExecutionHistoryReader:
             if response_messages is not None:
                 projected = project_public_messages(response_messages)
                 response = projected[0] if len(projected) == 1 else projected
+        stream_attempts = None
+        if interaction.stream_attempts is not None:
+            if include_content and (stream_responses is None or len(stream_responses) != len(interaction.stream_attempts)):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            stream_attempts = []
+            for index, attempt in enumerate(interaction.stream_attempts):
+                partial = None
+                if include_content and stream_responses[index] is not None:
+                    projected = project_public_messages(stream_responses[index])
+                    partial = projected[0] if len(projected) == 1 else projected
+                stream_attempts.append(ModelStreamAttemptItem(
+                    stream_attempt_seq=attempt.stream_attempt_seq, status=attempt.status,
+                    started_at=attempt.started_at, finished_at=attempt.finished_at, duration_ns=attempt.duration_ns,
+                    client_request_start=attempt.client_request_start, client_request_end=attempt.client_request_end,
+                    response=partial, usage=attempt.usage, error_code=attempt.error_code,
+                    error_type=attempt.error_type, retry_scheduled=attempt.retry_scheduled,
+                ))
+            stream_attempts = tuple(stream_attempts)
         return ModelInteractionItem(
             execution_id=execution_id,
             agent_run_seq=agent_run_seq,
@@ -1237,6 +1257,7 @@ class StepExecutionHistoryReader:
             client_requests_included=include_client_requests,
             started_at=interaction.started_at,
             finished_at=interaction.finished_at,
+            stream_attempts=stream_attempts,
         )
 
     async def _tool_call_metadata(

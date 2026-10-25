@@ -30,6 +30,7 @@ from ._response import project_model_attempts, project_model_response_attempts
 
 if TYPE_CHECKING:
     from pydantic_ai.messages import ModelRequestAttempt
+    from ._stream import _PullDeadline
 
 
 class ReferencedInputModel(WrapperModel):
@@ -245,13 +246,16 @@ class _ReferencedStreamedResponse(StreamedResponse):
         self._response = response
         self._safe_error = safe_error
         self._content_omission_reason = content_omission_reason
-        self._iterator: AsyncIterator[ModelResponseStreamEvent] | None = None
         super().__init__(model_request_parameters=response.model_request_parameters)
 
     def __aiter__(self) -> AsyncIterator[ModelResponseStreamEvent]:
-        if self._iterator is None:
-            self._iterator = self._get_event_iterator()
-        return self._iterator
+        # Already-processed events share the SDK cache used by native fallback.
+        if self._event_iterator is None:
+            self._event_iterator = self._get_event_iterator()
+        return self._event_iterator
+
+    def _enforce_request_deadline(self, deadline: _PullDeadline) -> None:
+        self._event_iterator = deadline.iterate(self.__aiter__())
 
     async def _get_event_iterator(self) -> AsyncIterator[ModelResponseStreamEvent]:
         try:
