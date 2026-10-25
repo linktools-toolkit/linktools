@@ -1,11 +1,11 @@
-import {terminal, modelKey, eventKey, upsertModel, mergePage, readSSE, metricValue, duration, modelLabel, usageLabel, promptLayers, clientAttemptKey, clientBodyBytes, clientBodyText} from './console.js';
+import {terminal, modelKey, eventKey, upsertModel, mergePage, readSSE, metricValue, duration, modelLabel, usageLabel, promptLayers, clientAttemptKey, clientBodyBytes, clientBodyText, updateStreamAttempts} from './console.js';
 import {renderMarkdown, inputPresentation, capturedRequest} from './message.js';
 
 const $ = id => document.getElementById(id);
 const state = {config:null, view:'sessions', drafts:new Map(), conversationExecution:null, browserExecution:null, filters:new Map(), list:[], listCursor:null, listSessionReads:new Map(), session:null, turns:[], turnCursor:null, hasEarlierTurns:false, timelineError:'',focusComposerSession:null,
   execution:null, executionGeneration:0, observedExecution:null, observedInfo:null, observationGeneration:0, observationReadGeneration:0, tab:'models', traceSelection:null, conversationMode:'chat', nativeTimeline:null, readerSelection:null, readerRaw:false, readerHttp:false, readerCache:null, readerExpanded:new Set(), details:[], detailCursor:null, models:new Map(), events:new Map(),
   generation:0, refreshGeneration:0, sessionReadGeneration:0, sessionAppliedGeneration:0, listGeneration:0, detailGeneration:0, metricsGeneration:0, stream:null, cursor:null,
-  liveText:'', liveThinking:'', liveActivityOpen:false, pending:new Map(), actionsPending:new Set(), pendingForks:new Map(), recoveryReadbackId:null, endReadbackId:null, cancellationNoticeId:null, noticeRevision:0, selectedSession:null, selectedExecution:null};
+  liveText:'', liveThinking:'', liveAttempts:new Map(), liveActivityOpen:false, pending:new Map(), actionsPending:new Set(), pendingForks:new Map(), recoveryReadbackId:null, endReadbackId:null, cancellationNoticeId:null, noticeRevision:0, selectedSession:null, selectedExecution:null};
 const json = value => JSON.stringify(value, null, 2);
 const text = value => typeof value === 'string' ? value : json(value);
 const short = value => value ? String(value).slice(0, 12) : '—';
@@ -333,7 +333,7 @@ function restoreDraft(sessionId) {
 async function openSelection(sessionId, executionId, {preserveInspector=false}={}) {
   const preserveObservation=Boolean(sessionId && sessionId===state.selectedSession);saveDraft();
   const generation=++state.generation,focusComposer=state.focusComposerSession===sessionId;state.focusComposerSession=null;
-  if(!preserveObservation){stopStream(); ++state.observationGeneration; state.observedExecution=null;state.observedInfo=null; state.cursor=null; state.liveText=''; state.liveThinking=''; state.liveActivityOpen=false;state.models.clear(); state.events.clear();}
+  if(!preserveObservation){stopStream(); ++state.observationGeneration; state.observedExecution=null;state.observedInfo=null; state.cursor=null; state.liveText=''; state.liveThinking='';state.liveAttempts.clear(); state.liveActivityOpen=false;state.models.clear(); state.events.clear();}
   state.selectedSession=sessionId || null; state.selectedExecution=executionId || null;
   restoreDraft(state.selectedSession);
   state.nativeTimeline=null;
@@ -436,6 +436,36 @@ function scheduleLiveRender() {
   if(Math.min(liveRenderCost,previousLiveRenderCost)>liveFrameBudget)liveRenderTimer=setTimeout(frame,60-liveFrameBudget);
   else frame();
 }
+function renderLiveAttempts(live,wanted) {
+  live.attemptNodes ||= new Map();const retained=new Set();
+  for(const request of state.liveAttempts.values()) {
+    if(request.execution_id!==state.observedExecution)continue;
+    for(const attempt of request.attempts.values()) {
+      const failed=['FAILED','CANCELLED'].includes(attempt.status),key=request.key+':'+attempt.seq;
+      retained.add(key);
+      let node=live.attemptNodes.get(key);
+      if(!node || node.failed!==failed) {
+        node=element(failed?'details':'section',failed?'tool-message failed-attempt':'stream-attempt');node.failed=failed;
+        if(failed){node.open=attempt.expanded || false;node.ontoggle=()=>{if(node.isConnected)attempt.expanded=node.open;};}
+        node.label=element(failed?'summary':'div',failed?'':'message-label');node.append(node.label);
+        node.thinking=element('details','tool-message');node.thinkingBody=element('pre');node.thinking.append(element('summary','','Thinking · SDK display'),node.thinkingBody);
+        node.body=failed?element('pre'):markdownMessage('');node.append(node.thinking,node.body);
+        live.attemptNodes.set(key,node);
+      }
+      const identity=`run ${request.agent_run_seq} · request ${request.model_request_seq} · attempt ${attempt.seq}`;
+      const label=failed?`${attempt.status} · ${identity} · partial content is not an answer`:
+        `${attempt.status==='SUCCEEDED'?'COMPLETED RESPONSE':'LIVE RESPONSE · incomplete SDK display'} · ${identity}${attempt.truncated?' · preview truncated':''}`;
+      if(node.label.textContent!==label)node.label.textContent=label;
+      node.thinking.hidden=!attempt.thinking;
+      if(node.thinkingBody.textContent!==attempt.thinking)node.thinkingBody.textContent=attempt.thinking;
+      if(failed){if(node.body.textContent!==attempt.text)node.body.textContent=attempt.text;}
+      else updateMarkdownMessage(node.body,attempt.text);
+      node.body.hidden=!attempt.text;
+      wanted.push(node);
+    }
+  }
+  for(const key of live.attemptNodes.keys())if(!retained.has(key))live.attemptNodes.delete(key);
+}
 function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
   cancelLiveRender();const started=performance.now();
   try {
@@ -456,12 +486,13 @@ function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
     if(live.liveLabel.textContent!==label)live.liveLabel.textContent=label;
     wanted.push(live.liveLabel,live.markdownMessage);
   }
+  renderLiveAttempts(live,wanted);
   const events=[...state.events.values()].slice(-12);
   if(!live.activityEvents || events.length!==live.activityEvents.length || events.some((item,index)=>item!==live.activityEvents[index])) {
   live.activityEvents=events;live.activityFocusNodes=new Map();live.activityNodes=[];
   const activity=element('details','tool-message');activity.id='live-activity';activity.open=state.liveActivityOpen;
   activity.ontoggle=()=>{if($('live-activity')===activity)state.liveActivityOpen=activity.open;};
-  const attention=item=>['EXECUTION_START_UNKNOWN','EXECUTION_RECOVERY_REQUIRED','EXECUTION_FAILED','CANCEL_REQUESTED','EXECUTION_CANCELLED','APPROVAL_REQUESTED','EXTERNAL_REQUESTED'].includes(item.event.event_type)
+  const attention=item=>['MODEL_ATTEMPT_FAILED','EXECUTION_START_UNKNOWN','EXECUTION_RECOVERY_REQUIRED','EXECUTION_FAILED','CANCEL_REQUESTED','EXECUTION_CANCELLED','APPROVAL_REQUESTED','EXTERNAL_REQUESTED'].includes(item.event.event_type)
     || ['MODEL_REQUEST_FINISHED','TOOL_CALL_FINISHED'].includes(item.event.event_type) && ['FAILED','CANCELLED'].includes(item.event.payload?.status);
   const ordinary=events.filter(item=>!attention(item)).length;
   const summary=element('summary','',`Activity · ${ordinary} recent events`);summary.dataset.liveFocus='summary';activity.append(summary);
@@ -487,7 +518,9 @@ function observedInfo(info, readGeneration=state.observationReadGeneration) {
   if(info.execution_id!==state.observedExecution)return info;
   const previous=state.observedInfo;
   if(previous && readGeneration!==state.observationReadGeneration)return previous;
-  state.observedInfo=info;return info;
+  state.observedInfo=info;
+  if(['FAILED','CANCELLED'].includes(info.status))updateStreamAttempts(state.liveAttempts,{execution_id:info.execution_id,event:{event_type:'EXECUTION_'+info.status}});
+  return info;
 }
 async function selectExecution(id, generation=state.generation) {
   const executionGeneration=++state.executionGeneration,selectionChanged=id!==state.selectedExecution;
@@ -660,6 +693,14 @@ function nativeMessages(container,projection,key,api) {
 }
 function sdkMessages(container,item,key) {
   container.append(element('p','source-note','Model input captured at SDK preparation, reconstructed from retained context. Message and part order are preserved; instructions and tools remain separate SDK fields, not invented provider messages.'));
+  for(const attempt of item.stream_attempts || []) {
+    const failed=attempt.status!=='SUCCEEDED';
+    const detail=readerDetail(key+':stream:'+attempt.stream_attempt_seq,`Model stream attempt ${attempt.stream_attempt_seq} · ${attempt.status}${failed?' · partial content is not an answer':' · winning response below'}`,'stream-attempt-history');
+    const metadata=Object.fromEntries(Object.entries(attempt).filter(([name])=>name!=='response'));
+    detail.append(properties(metadata));
+    if(failed)detail.append(attempt.response!=null?rawDetail(attempt.response,'Failed SDK partial response'):element('p','muted','Partial response not retained or not included.'));
+    container.append(detail);
+  }
   const request=item.request;
   if(item.content_included===false || !Array.isArray(request?.messages)){
     container.append(element('p','muted',item.status==='RUNNING'?'Model input is not committed yet.':'No retained SDK model input is available.'));return;
@@ -972,7 +1013,7 @@ async function refreshSelected() {
       if(payload.timeline){state.turns=mergePage(state.turns,payload.timeline.items,item=>item.execution_id);if(!state.hasEarlierTurns)state.turnCursor=payload.timeline.next_cursor;}
       else{state.turnCursor=null;state.hasEarlierTurns=false;}
       const selected=state.turns.find(item=>item.execution_id===state.observedExecution);
-      if(payload.timeline && selected?.conversation_committed){state.liveText='';state.liveThinking='';state.events.clear();}
+      if(payload.timeline && selected?.conversation_committed){state.liveText='';state.liveThinking='';state.liveAttempts.clear();state.events.clear();}
       renderConversation();setDisabled();
     }
   }
@@ -1007,7 +1048,7 @@ async function syncObservation({refresh=false}={}) {
   if(state.view==='executions' && !id)return;
   if(id!==state.observedExecution) {
     stopStream();++state.observationGeneration;state.observedExecution=id || null;state.observedInfo=null;
-    state.cursor=null;state.liveText='';state.liveThinking='';state.liveActivityOpen=false;state.models.clear();state.events.clear();renderLive();
+    state.cursor=null;state.liveText='';state.liveThinking='';state.liveAttempts.clear();state.liveActivityOpen=false;state.models.clear();state.events.clear();renderLive();
   }
   if(!id)return;
   const generation=state.observationGeneration,view=state.view;
@@ -1041,7 +1082,7 @@ async function refreshObservation(id, generation) {
     state.timelineError=payload.timeline_error || '';renderSessionHeader();
     if(payload.timeline){state.turns=mergePage(state.turns,payload.timeline.items,item=>item.execution_id);if(!state.hasEarlierTurns)state.turnCursor=payload.timeline.next_cursor;}
     const turn=state.turns.find(item=>item.execution_id===id);
-    if(payload.timeline && turn?.conversation_committed){state.liveText='';state.liveThinking='';state.events.clear();}
+    if(payload.timeline && turn?.conversation_committed){state.liveText='';state.liveThinking='';state.liveAttempts.clear();state.events.clear();}
     renderConversation();renderList();
   }
   if(state.cancellationNoticeId===id && terminal(info.status)) {
@@ -1087,10 +1128,11 @@ async function watchExecution(id,generation) {
         }
         else {
           const event=item.event,payload=event.payload || {};
+          const attemptHandled=item.depth===0 && updateStreamAttempts(state.liveAttempts,item);
           if(item.depth===0 && event.event_type==='STREAM_RESET'){state.liveText='';state.liveThinking='';}
-          else if(item.depth===0 && event.event_type==='ASSISTANT_TEXT_DELTA')state.liveText+=payload.text || '';
-          else if(item.depth===0 && event.event_type==='ASSISTANT_THINKING_DELTA')state.liveThinking+=payload.text || '';
-          else if(!event.event_type.endsWith('_DELTA')) {
+          else if(!attemptHandled && item.depth===0 && event.event_type==='ASSISTANT_TEXT_DELTA')state.liveText+=payload.text || '';
+          else if(!attemptHandled && item.depth===0 && event.event_type==='ASSISTANT_THINKING_DELTA')state.liveThinking+=payload.text || '';
+          if(!event.event_type.endsWith('_DELTA')) {
             state.events.set(eventKey(item),item);
             if(state.events.size>100)state.events.delete(state.events.keys().next().value);
           }

@@ -19,10 +19,59 @@ export function eventKey(item) {
   const event=item.event, payload=event.payload || {};
   const key=[item.execution_id,event.event_type];
   if (['MODEL_REQUEST_STARTED','MODEL_REQUEST_FINISHED'].includes(event.event_type)) key.push(payload.agent_run_seq,payload.model_request_seq);
+  else if (['MODEL_ATTEMPT_STARTED','MODEL_ATTEMPT_FAILED'].includes(event.event_type)) key.push(payload.agent_run_seq,payload.model_request_seq,payload.stream_attempt_seq);
   else if (['TOOL_CALL_STARTED','TOOL_CALL_FINISHED'].includes(event.event_type)) key.push(payload.agent_run_seq,payload.call_id);
-  else if (event.event_type==='ASSISTANT_PART_COMPLETED') key.push(payload.agent_run_seq,payload.message_seq,payload.part_index);
+  else if (event.event_type==='ASSISTANT_PART_COMPLETED') {
+    if(streamAttemptIdentity(item))key.push(payload.agent_run_seq,payload.model_request_seq,payload.stream_attempt_seq,payload.part_index);
+    else key.push(payload.agent_run_seq,payload.message_seq,payload.part_index);
+  }
   else key.push(event.durable_seq);
   return JSON.stringify(key);
+}
+export function streamAttemptIdentity(item) {
+  const payload=item.event.payload || {};
+  if(![payload.agent_run_seq,payload.model_request_seq,payload.stream_attempt_seq].every(value=>Number.isInteger(value) && value>0))return null;
+  return {key:modelKey({execution_id:item.execution_id,...payload}),execution_id:item.execution_id,
+    agent_run_seq:payload.agent_run_seq,model_request_seq:payload.model_request_seq,stream_attempt_seq:payload.stream_attempt_seq};
+}
+export function updateStreamAttempts(requests,item) {
+  const {event_type:type,payload={}}=item.event;
+  if(type==='STREAM_RESET') {
+    for(const request of requests.values())if(request.execution_id===item.execution_id)for(const attempt of request.attempts.values())if(attempt.status==='RUNNING'){
+      attempt.text='';attempt.thinking='';attempt.truncated=true;
+    }
+    return false;
+  }
+  if(['EXECUTION_FAILED','EXECUTION_CANCELLED'].includes(type)) {
+    for(const request of requests.values())if(request.execution_id===item.execution_id)for(const attempt of request.attempts.values())if(attempt.status==='RUNNING')attempt.status=type.slice('EXECUTION_'.length);
+    return false;
+  }
+  if(!['MODEL_ATTEMPT_STARTED','MODEL_ATTEMPT_FAILED','MODEL_REQUEST_FINISHED','ASSISTANT_TEXT_DELTA','ASSISTANT_THINKING_DELTA'].includes(type))return false;
+  const identity=streamAttemptIdentity(item);if(!identity)return false;
+  let request=requests.get(identity.key);
+  if(!request){request={key:identity.key,execution_id:identity.execution_id,agent_run_seq:identity.agent_run_seq,model_request_seq:identity.model_request_seq,current:0,finished:false,attempts:new Map()};requests.set(identity.key,request);}
+  const seq=identity.stream_attempt_seq;
+  if(request.finished && !request.attempts.has(seq))return true;
+  let attempt=request.attempts.get(seq);
+  if(!attempt){
+    attempt={seq,status:seq<request.current?'FAILED':'RUNNING',text:'',thinking:'',truncated:false};request.attempts.set(seq,attempt);
+  }
+  if(seq>request.current) {
+    const previous=request.attempts.get(request.current);
+    if(previous?.status==='RUNNING')previous.status='FAILED';
+    request.current=seq;
+  }
+  if(type==='MODEL_ATTEMPT_FAILED' && attempt.status!=='SUCCEEDED') {
+    attempt.status=payload.status==='CANCELLED'?'CANCELLED':'FAILED';attempt.error_code=payload.error_code;
+  } else if(type==='MODEL_REQUEST_FINISHED') {
+    if(seq!==request.current)return true;
+    if(['SUCCEEDED','FAILED','CANCELLED'].includes(payload.status))attempt.status=payload.status;
+    if(seq===request.current)request.finished=true;
+  } else if(type.endsWith('_DELTA') && seq===request.current && attempt.status==='RUNNING' && typeof payload.text==='string') {
+    attempt[type==='ASSISTANT_TEXT_DELTA'?'text':'thinking']+=payload.text;
+    attempt.truncated ||= payload.stream_truncated===true;
+  }
+  return true;
 }
 export function upsertModel(items, item) {
   const key = modelKey(item), previous = items.get(key);

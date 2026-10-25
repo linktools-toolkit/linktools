@@ -5,6 +5,7 @@
 import asyncio
 import json
 from argparse import Namespace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from rich import get_console
@@ -25,7 +26,7 @@ from ._common import (
 )
 
 if TYPE_CHECKING:
-    from linktools.ai.runtime import Execution, ExecutionResult, Runtime
+    from linktools.ai.runtime import Execution, ExecutionResult, ExecutionTreeEvent, Runtime
     from linktools.cli import CommandParser
 
 _logger = environ.get_logger("commands.ai.run")
@@ -116,17 +117,27 @@ async def _stream_result(execution: "Execution[object]") -> int:
     error_code: object = None
     safe_details: object = {}
     succeeded = False
-    wrote_text = False
+    output = _AttemptOutput(console, event_console)
 
-    async for item in execution.watch(include_content=True):
+    async def items():
+        try:
+            async for item in execution.watch(include_content=True):
+                yield item
+        except BaseException:
+            output.finish("INTERRUPTED")
+            output.close_line()
+            raise
+
+    async for item in items():
         if item.depth != 0:
             continue
         event = item.event
+        if output.consume(item):
+            continue
         if event.event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value:
             text = event.payload.get("text") if isinstance(event.payload, dict) else None
             if isinstance(text, str):
-                console.print(Text(text), end="", soft_wrap=True)
-                wrote_text = True
+                output.write_text(text)
         elif event.event_type == ExecutionDeltaType.ASSISTANT_THINKING_DELTA.value:
             _emit_event(
                 event_console,
@@ -156,6 +167,7 @@ async def _stream_result(execution: "Execution[object]") -> int:
             ExecutionEventType.EXECUTION_CANCELLED.value,
         }:
             status = event.event_type.removeprefix("EXECUTION_")
+            output.finish(status)
             if isinstance(event.payload, dict):
                 error_code = event.payload.get("error_code")
                 safe_details = event.payload.get("safe_error_details", {})
@@ -165,8 +177,9 @@ async def _stream_result(execution: "Execution[object]") -> int:
                 error_code = event.payload.get("error_code")
                 safe_details = event.payload.get("safe_error_details", {})
 
-    if wrote_text:
-        console.print()
+    if not succeeded:
+        output.finish(status)
+    output.close_line()
     if not succeeded:
         raise CommandError(
             _failure_message(execution.execution_id, status, error_code, safe_details)
@@ -179,6 +192,130 @@ async def _stream_result(execution: "Execution[object]") -> int:
     summary.append(execution.execution_id, style="dim")
     event_console.print(summary)
     return 0
+
+
+@dataclass
+class _AttemptDisplay:
+    status: str = "RUNNING"
+    text_chars: int = 0
+    thinking: bool = False
+    announced: bool = False
+    truncated: bool = False
+
+
+@dataclass
+class _RequestDisplay:
+    current: int = 0
+    finished: bool = False
+    framed: bool = False
+    attempts: dict[int, _AttemptDisplay] = field(default_factory=dict)
+
+
+class _AttemptOutput:
+    """Keep streamed bytes, but visibly invalidate partial answers in the same stream."""
+
+    def __init__(self, console: Console, event_console: Console) -> None:
+        self.console = console
+        self.event_console = event_console
+        self.requests: dict[tuple[str, int, int], _RequestDisplay] = {}
+        self.line_open = False
+
+    def write_text(self, value: str) -> None:
+        self.console.print(Text(value), end="", soft_wrap=True)
+        self.line_open = True
+
+    def close_line(self) -> None:
+        if self.line_open:
+            self.console.print()
+            self.line_open = False
+
+    def boundary(self, label: str) -> None:
+        self.close_line()
+        # Plain text on pipes, styled on terminals; neither claims to erase emitted bytes.
+        self.console.print(Text(f"[{label}]", style="yellow"), soft_wrap=True)
+
+    def identity(self, key: tuple[str, int, int], seq: int) -> str:
+        return f"run {key[1]} request {key[2]} attempt {seq}"
+
+    def invalidate(self, key: tuple[str, int, int], request: _RequestDisplay, seq: int, status: str) -> None:
+        attempt = request.attempts[seq]
+        if attempt.status != "RUNNING":
+            return
+        attempt.status = status
+        if attempt.text_chars:
+            request.framed = True
+            self.boundary(
+                f"{self.identity(key, seq)} {status}: partial output INVALIDATED; "
+                "not a completed answer"
+            )
+        if attempt.thinking:
+            _emit_event(self.event_console, "[thinking invalidated]", self.identity(key, seq), "yellow")
+
+    def finish(self, status: str) -> None:
+        for key, request in self.requests.items():
+            for seq in request.attempts:
+                self.invalidate(key, request, seq, status)
+
+    def consume(self, item: "ExecutionTreeEvent") -> bool:
+        event = item.event
+        if event.event_type == "STREAM_RESET":
+            for key, request in self.requests.items():
+                if key[0] != item.execution_id:
+                    continue
+                attempt = request.attempts.get(request.current)
+                if attempt is not None and attempt.status == "RUNNING":
+                    attempt.truncated = True
+                    if attempt.text_chars:
+                        self.boundary(f"{self.identity(key, request.current)} preview GAP: following output is not contiguous; no retry implied")
+            return True
+        if event.event_type not in {
+            "MODEL_ATTEMPT_STARTED", "MODEL_ATTEMPT_FAILED", "MODEL_REQUEST_FINISHED",
+            "ASSISTANT_TEXT_DELTA", "ASSISTANT_THINKING_DELTA",
+        } or not isinstance(event.payload, dict):
+            return False
+        payload = event.payload
+        values = tuple(payload.get(name) for name in ("agent_run_seq", "model_request_seq", "stream_attempt_seq"))
+        if not all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in values):
+            return False
+        run, model_request, seq = values
+        key = (item.execution_id, run, model_request)
+        request = self.requests.setdefault(key, _RequestDisplay())
+        if request.finished and seq not in request.attempts:
+            return True
+        attempt = request.attempts.setdefault(seq, _AttemptDisplay(status="FAILED" if seq < request.current else "RUNNING"))
+        if seq > request.current:
+            if request.current:
+                self.invalidate(key, request, request.current, "FAILED")
+            request.current = seq
+        if event.event_type == "MODEL_ATTEMPT_FAILED":
+            self.invalidate(key, request, seq, "CANCELLED" if payload.get("status") == "CANCELLED" else "FAILED")
+        elif event.event_type == "MODEL_REQUEST_FINISHED":
+            if seq != request.current:
+                return True
+            status = payload.get("status")
+            if status == "SUCCEEDED":
+                if attempt.status != "SUCCEEDED" and request.framed:
+                    self.boundary(f"{self.identity(key, seq)} COMPLETED" + ("; preview is incomplete" if attempt.truncated else ""))
+                elif attempt.status != "SUCCEEDED" and attempt.truncated and attempt.text_chars:
+                    self.boundary(f"{self.identity(key, seq)} model completed; preview is incomplete")
+                attempt.status = "SUCCEEDED"
+            elif status in {"FAILED", "CANCELLED"}:
+                self.invalidate(key, request, seq, status)
+            if seq == request.current:
+                request.finished = True
+        elif seq == request.current and attempt.status == "RUNNING":
+            if request.framed and not attempt.announced:
+                self.boundary(f"{self.identity(key, seq)} begins; replacement output follows")
+                attempt.announced = True
+            value = payload.get("text")
+            if event.event_type == "ASSISTANT_TEXT_DELTA" and isinstance(value, str):
+                self.write_text(value)
+                attempt.text_chars += len(value)
+                attempt.truncated |= payload.get("stream_truncated") is True
+            elif event.event_type == "ASSISTANT_THINKING_DELTA" and isinstance(value, str):
+                _emit_event(self.event_console, "[thinking]", value, "cyan")
+                attempt.thinking = True
+        return True
 
 
 def _emit_event(console: Console, label: str, value: str, style: str) -> None:
