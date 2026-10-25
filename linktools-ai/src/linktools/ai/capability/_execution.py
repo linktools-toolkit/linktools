@@ -72,6 +72,10 @@ class ExecutionCapability(AbstractCapability[AgentContext[object]]):
         bound._retain_history = retain_history
         return bound
 
+    def for_agent(self, agent: object) -> ExecutionCapability:
+        self._bound_service()
+        return self
+
     def _bound_service(self) -> AbstractCapability[AgentContext[object]]:
         if self._service is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)

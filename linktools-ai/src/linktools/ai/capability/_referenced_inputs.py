@@ -26,7 +26,9 @@ class ReferencedInputsCapability(AbstractCapability[AgentContext[AppT]], Generic
     must not contain multiple loaders for that same source. It owns temporary
     download files and removes them on success, failure and cancellation before
     returning.
-    Runtime borrows the callback; it neither creates nor deletes provider files.
+    Runtime and materialized native CapabilityContributions borrow the callback;
+    neither creates nor deletes provider files. Mounting this callback alone
+    does not install provider hydration; ``load`` remains an explicit read.
     """
 
     def __init__(

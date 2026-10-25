@@ -72,6 +72,9 @@ from ..asset import AssetMaterializer, AssetStoreReader, AssetVersionRef
 from ..capability import (
     AgentContext,
     CapabilityContribution,
+    RunCallbacks,
+    RunCallbackScope,
+    bind_run_callbacks,
     PydanticToolControlCapability,
     ReferencedInputsCapability,
     SkillCapability,
@@ -111,7 +114,6 @@ from ..workspace import (
 from ._budget import RunBudgetContext, RunBudgetCapability
 from ._tool_metrics import ToolMetricContext
 from ._capabilities import compose_platform_capabilities, runtime_feature_leaves
-from ._run_callbacks import RunCallbacks, RunCallbackScope, bind_run_callbacks
 from ._agent_run_recorder import AgentRunRecorder
 from .state._steps import RuntimeAgentRunStore
 from ._compaction import CompactionPolicy

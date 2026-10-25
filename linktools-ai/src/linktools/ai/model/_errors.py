@@ -5,7 +5,10 @@
 from collections.abc import Mapping
 
 from pydantic_ai import exceptions as sdk_errors
-from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
+from pydantic_ai.exceptions import (
+    ContentFilterError, FallbackExceptionGroup, ModelAPIError, ModelHTTPError,
+    RunCancelled, UnexpectedModelBehavior,
+)
 
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
@@ -89,6 +92,52 @@ def model_binding_error(
     )
 
 
+def model_request_error(
+    error: Exception, *, content_omission_reason: str | None,
+    code: ErrorCode | None = None, safe_details: Mapping[str, JsonValue] | None = None,
+) -> Exception:
+    """Omit provider input echoes before failures reach an observer.
+
+    Callers may add their own already-safe request facts and classification.
+    Original provider messages, bodies, causes and arbitrary AIError details are
+    never copied into the public envelope when input retention is disabled.
+    """
+    if isinstance(error, RunCancelled):
+        return error
+    if content_omission_reason is None and not safe_details and code is None:
+        return error
+    diagnostics = (
+        error.diagnostics
+        if isinstance(error, AIError) and error.diagnostics is not None
+        and error.diagnostics.content_omission_reason == content_omission_reason
+        else ErrorDiagnostics.from_exception(error, content_omission_reason=content_omission_reason)
+    )
+    provider = model_binding_error(error, diagnostics=diagnostics)
+    classified = provider if provider is not None else error
+    details: dict[str, JsonValue] = dict(safe_details or {})
+    if content_omission_reason is not None:
+        details["content_omission_reason"] = content_omission_reason
+    if isinstance(classified, AIError):
+        status = classified.safe_details.get("status_code")
+        if type(status) is int:
+            details["status_code"] = status
+    if code is None:
+        if isinstance(classified, AIError):
+            code = classified.code
+        elif isinstance(classified, ContentFilterError):
+            code = ErrorCode.MODEL_CONTENT_FILTERED
+        elif isinstance(classified, UnexpectedModelBehavior):
+            code = ErrorCode.MODEL_RESPONSE_INVALID
+        elif isinstance(classified, FallbackExceptionGroup):
+            code = ErrorCode.MODEL_API_ERROR
+        else:
+            code = ErrorCode.INTERNAL_ERROR
+    return AIError(
+        code, retryable=classified.retryable if isinstance(classified, AIError) else False,
+        safe_details=details, diagnostics=diagnostics,
+    )
+
+
 def _is_quota_error(error: Exception) -> bool:
     """Recognize explicit quota exhaustion, including older SDK HTTP errors."""
     if isinstance(error, getattr(sdk_errors, "ModelQuotaExceededError", ())):
@@ -112,4 +161,4 @@ def _http_error_code(status_code: int) -> ErrorCode:
     return ErrorCode.MODEL_API_ERROR
 
 
-__all__ = ["model_binding_error"]
+__all__ = ["model_binding_error", "model_request_error"]

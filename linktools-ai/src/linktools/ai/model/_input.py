@@ -119,6 +119,14 @@ def validate_model_inputs(binding: "ModelBinding", value: object) -> None:
 
 
 
+def validate_provider_inputs(binding: "ModelBinding", value: object) -> None:
+    """Reject descriptors which have not passed the authorized hydration boundary."""
+    validate_model_inputs(binding, value)
+    if any(isinstance(item, ReferencedContent) for item in _file_inputs(value)):
+        raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING, retryable=False,
+                      safe_details={"reason": "referenced_input_not_materialized"})
+
+
 def _input_transport(binding: "ModelBinding", mime_type: str, kind: str) -> str | None:
     contract = binding.contract
     api = contract.get("api", "openai" if binding.provider == "openai" else None)
@@ -181,4 +189,4 @@ def _mime_type(value: str, *, allow_family: bool = False) -> str:
     return value
 
 
-__all__ = ["validate_model_input", "validate_model_inputs"]
+__all__ = ["validate_model_input", "validate_model_inputs", "validate_provider_inputs"]

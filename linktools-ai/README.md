@@ -396,10 +396,64 @@ paths rather than assuming an arbitrary native toolset is managed automatically.
 Capability names do not imply one execution mode. `AssetCapability` is consumed
 during declaration capture, not native execution hooks. Session, Execution,
 Checkpoint, Trace, and ToolResponses capabilities configure Runtime services.
-`ToolResultsCapability` and automatic `ReferencedInputsCapability` hydration are
-Runtime extension points; simply adding them to a native Agent does not install
-Runtime's provider or settlement boundary. Explicit `ReferencedInputsCapability.load()`
+Unbound host declarations do not supply those services to a native Agent: pure
+capture/configuration declarations are rejected rather than silently ignored;
+Execution, Checkpoint, and Trace require their public service bindings.
+
+Use each existing `CapabilityContribution` to materialize independent native
+result/input behavior. Bare `ToolResultsCapability` and `ReferencedInputsCapability`
+are callback contracts, not automatic SDK execution boundaries. The model is
+supplied separately, never to a capability:
+
+```python
+from linktools.ai.capability import CapabilityContribution
+
+projection = CapabilityContribution.from_opaque(
+    "capability", "projection", projector, revision=1,
+)
+inputs = CapabilityContribution.from_opaque(
+    "capability", "documents", authorized_inputs, revision=2,
+)
+agent = Agent(
+    model=model_binding.materialize(),
+    capabilities=[
+        PydanticToolControlCapability(),
+        projection.materialize_capability(),
+        inputs.materialize_capability(),
+        SkillCapability(skills, sources),
+    ],
+)
+```
+
+`materialize_capability()` accepts Agent-scoped capability declarations, not
+Tool/Agent/Skill/MCP authoring declarations or Runtime-scoped configuration.
+References use the exact `CapabilityRef("capability", "documents", 2)` above.
+The SDK alone owns composition, activation, `for_run`, and cleanup. Tool results
+are projected once after a raw success, before native success observers; an error
+recovered by an SDK hook is not a raw success. Projection failure is not permission
+to repeat an already-completed tool. Runtime reuses these callbacks at its original
+pre-receipt boundary and does not install a second native projection path.
+
+Referenced input is loaded only into an ephemeral provider view. History keeps
+the descriptor and summary, while provider errors and retained attempt errors
+omit input bodies. Built-in `ModelBinding.materialize()` models carry their input
+contract. A custom materialized model must supply the public `ModelInputValidator`
+contract; the open `ModelBinding` protocol alone does not prove input permission.
+An unknown actual model or an unsupported native fallback composition fails before
+loading or provider IO when references are present. Ordinary capabilities without
+references remain usable with ordinary native models. Model overrides do not borrow
+the previous model's permissions. Explicit `ReferencedInputsCapability.load()`
 remains available for authorized reads and integrity checks.
+
+A bound Workspace enforces its own `WorkspacePolicy` for native tool calls.
+`ask` uses the SDK's `DeferredToolRequests` / `DeferredToolResults` approval flow;
+callers must include deferred requests in the Agent output type when needed.
+`deny` rejects before a sandbox operation and does not affect unrelated business
+tools. A custom `wrap_toolset` takes responsibility for the complete execution
+boundary, including authorization; Runtime supplies its admitted boundary there
+instead of applying both native and Runtime policy paths. Workspace policy does
+not turn an unrelated native MCP transport into an OS sandbox or authorize all
+other file-reading tools.
 
 The creator retains resource ownership. Public standalone adapters borrow their
 sources, delegates, and open sessions; they do not close those dependencies.

@@ -8,7 +8,6 @@ import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
-from types import MappingProxyType
 from typing import Any, Literal, Protocol, TYPE_CHECKING
 
 from pydantic_ai.exceptions import (
@@ -28,6 +27,7 @@ from ..capability import (
     is_tool_effect_policy,
     ToolCallFailed,
     ToolCallRetry,
+    ToolResultsCapability,
     tool_class_from_metadata,
     tool_effect_policy_from_metadata,
     tool_path_fields_from_metadata,
@@ -47,7 +47,7 @@ from ._tool_metrics import (
 
 
 if TYPE_CHECKING:
-    from ._run_callbacks import RunCallbacks
+    from ..capability import RunCallbacks
 
 
 class RepositoryInstructionBoundary(Protocol):
@@ -321,18 +321,9 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                     # Give projections the existing file occurrence to preserve;
                     # equal bytes alone do not identify a particular occurrence.
                     result = bind_tool_return_attachments(name, call_id, result)
-                try:
-                    # Preserve validated Python values; projection is not another
-                    # argument codec or authorization boundary.
-                    arguments = MappingProxyType(dict(args))
-                    for capability in processors:
-                        result = await capability.process_tool_result(
-                            ctx.deps, tool.tool_def, arguments, result,
-                        )
-                except Exception as error:
-                    # The tool already returned; projection signals cannot
-                    # establish that an external effect is safe to repeat.
-                    raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+                result = await ToolResultsCapability.process_results(
+                    processors, ctx.deps, tool.tool_def, args, result,
+                )
             return result
 
         if descriptor.effect_owner == "none":

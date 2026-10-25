@@ -9,6 +9,7 @@ from pydantic_ai.capabilities import AbstractCapability
 
 from ..asset import AssetStoreReader, AssetVersionRef
 from ._context import AgentContext
+from ..errors import AIError, ErrorCode
 
 AppT = TypeVar("AppT")
 
@@ -43,6 +44,10 @@ class ToolResponsesCapability(AbstractCapability[AgentContext[AppT]], Generic[Ap
 
     def __init__(self, fixture: ToolResponseFixture) -> None:
         self._fixture = fixture
+
+    def for_agent(self, agent: object) -> "ToolResponsesCapability[AppT]":
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                      safe_details={"reason": "response_fixture_requires_host"})
 
     @property
     def fixture(self) -> ToolResponseFixture:

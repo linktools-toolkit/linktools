@@ -67,7 +67,7 @@ from ._mcp_transport import _create_mcp_transport
 from ._tool_response_fixture import _FixtureToolset, _ToolResponseManifest
 
 if TYPE_CHECKING:
-    from ._run_callbacks import RunCallbacks
+    from ..capability import RunCallbacks
 
 _logger = environ.get_logger("ai.runtime.mcp")
 _MCP_TOOL_METADATA = tool_metadata(

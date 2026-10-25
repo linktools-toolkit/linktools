@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, cast
 
-from linktools.core import environ
 from pydantic import TypeAdapter
 from pydantic_core import ErrorDetails
 from pydantic_ai import RequestUsage
@@ -44,7 +43,7 @@ except ImportError:
 
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
-from ..model import ReferencedContent
+from ..model import ReferencedContent, project_model_attempts, project_model_response_attempts
 from ._attachment import binary_attachment_text, has_binary_attachment_metadata
 from ._user_content_codec import decode_user_content_item, encode_user_content_item
 from ._json_snapshot import stable_json_snapshot
@@ -212,44 +211,11 @@ def encode_model_messages(messages: Sequence[ModelMessage]) -> bytes:
     return canonical_json_bytes([_encode_message(message) for message in messages])
 
 
-def project_model_response_attempts(
-    response: ModelResponse, *, content_omission_reason: str | None = None,
-) -> ModelResponse:
-    """Apply request retention to attempt diagnostics without changing SDK values.
-
-    The request owner supplies omission before history or public projection is
-    captured. A standalone history codec cannot infer the originating request's
-    retention policy. Ordinary diagnostics retain their redacted message.
-    """
-    if content_omission_reason is not None and (
-        not isinstance(content_omission_reason, str) or not content_omission_reason.strip()
-    ):
-        raise ValueError("content omission reason must be nonempty")
-    attempts = getattr(response, "failed_attempts", None)
-    if attempts is None:
-        return response
-    projected = _project_model_attempts(attempts, content_omission_reason=content_omission_reason)
-    return replace(response, failed_attempts=projected) if projected != attempts else response
-
-
-def _project_model_attempts(
-    attempts: Sequence[object], *, content_omission_reason: str | None,
-) -> list[object]:
-    projected = []
-    for value in attempts:
-        attempt = _model_request_attempt(value)
-        error = None if content_omission_reason is not None else (
-            environ.logging.redact(attempt.error) if attempt.error is not None else None
-        )
-        projected.append(replace(attempt, error=error) if error != attempt.error else attempt)
-    return projected
-
-
 def model_attempts_details(
     attempts: Sequence[object], *, content_omission_reason: str | None = None,
 ) -> JsonValue:
     """Reuse the durable attempt shape for terminal failure diagnostics."""
-    return _encode_model_attempts(_project_model_attempts(
+    return _encode_model_attempts(project_model_attempts(
         attempts, content_omission_reason=content_omission_reason,
     ))
 

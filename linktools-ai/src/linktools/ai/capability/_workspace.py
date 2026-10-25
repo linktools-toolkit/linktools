@@ -16,7 +16,8 @@ from linktools.core import environ
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import BinaryContent, InstructionPart, ToolReturn, UserContent
-from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
+from pydantic_ai.tools import RunContext, ToolDefinition
+from pydantic_ai.toolsets import AbstractToolset, ApprovalRequiredToolset, FunctionToolset, ToolsetTool, WrapperToolset
 
 from ..core import PromptLimits
 from ..model import ModelBinding, validate_model_input, validate_model_inputs
@@ -26,10 +27,11 @@ from ..workspace import (
     SandboxSession,
     Workspace,
     WorkspacePolicy,
+    ToolPermissionPolicy,
 )
 from ._context import AgentContext
-from ._tool_signal import ToolCallRetry
-from ._tool_metadata import tool_effect_policy_from_metadata, tool_metadata
+from ._tool_signal import ToolCallFailed, ToolCallRetry
+from ._tool_metadata import tool_class_from_metadata, tool_effect_policy_from_metadata, tool_metadata
 
 _ResultT = TypeVar("_ResultT")
 
@@ -783,11 +785,33 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
             )
 
 
-class WorkspaceCapability(AbstractCapability[AgentContext[object]]):
-    """Expose selected Workspace tools through a Runtime-owned sandbox session.
+@dataclass
+class _WorkspacePermissionToolset(WrapperToolset[AgentContext[object]]):
+    policy: ToolPermissionPolicy
 
-    Register at Runtime scope. Agent tool selection controls visibility, while
-    Workspace path access and sandbox ownership remain Runtime facilities.
+    def requires_approval(
+        self, ctx: RunContext[AgentContext[object]], tool: ToolDefinition, arguments: dict[str, Any],
+    ) -> bool:
+        return self.policy.decide(
+            tool_name=tool.name, tool_class=tool_class_from_metadata(tool.metadata),
+        ) == "ask"
+
+    async def call_tool(
+        self, name: str, tool_args: dict[str, Any], ctx: RunContext[AgentContext[object]],
+        tool: ToolsetTool[AgentContext[object]],
+    ) -> Any:
+        if self.policy.decide(
+            tool_name=tool.tool_def.name, tool_class=tool_class_from_metadata(tool.tool_def.metadata),
+        ) == "deny":
+            raise ToolCallFailed("Workspace policy does not allow this tool.")
+        return await super().call_tool(name, tool_args, ctx, tool)
+
+
+class WorkspaceCapability(AbstractCapability[AgentContext[object]]):
+    """Expose selected tools through a caller-owned sandbox session.
+
+    Native bindings enforce the Workspace tool policy. Runtime supplies its own
+    admitted execution boundary; both borrow, rather than close, the session.
     """
 
     id: str | None = "runtime.workspace"
@@ -819,7 +843,11 @@ class WorkspaceCapability(AbstractCapability[AgentContext[object]]):
             AbstractToolset[AgentContext[object]],
         ] | None = None,
     ) -> "WorkspaceCapability":
-        """Build isolated per-run tools without modifying this declaration."""
+        """Build tools without modifying this declaration or owning the session.
+
+        A supplied wrap_toolset owns the execution boundary, including policy
+        enforcement. Without one, the native SDK handles this Workspace policy.
+        """
         selected_limits = PromptLimits() if limits is None else limits
         if not isinstance(selected_limits, PromptLimits):
             raise TypeError("limits must be PromptLimits")
@@ -837,7 +865,16 @@ class WorkspaceCapability(AbstractCapability[AgentContext[object]]):
                 tuple(item.name for item in workspace_tool_declarations() if item.name in selected),
                 session, self.workspace.policy, selected_limits, model_binding=model_binding,
             )
-            bound._toolset = toolset if wrap_toolset is None else wrap_toolset(toolset)
+            policy = self.workspace.policy.tool_permissions
+            if wrap_toolset is not None:
+                bound._toolset = wrap_toolset(toolset)
+            elif policy.default == "allow" and all(rule.decision == "allow" for rule in policy.rules):
+                bound._toolset = toolset
+            else:
+                permissions = _WorkspacePermissionToolset(toolset, policy)
+                bound._toolset = ApprovalRequiredToolset(
+                    permissions, approval_required_func=permissions.requires_approval,
+                )
         return bound
 
     def get_instructions(self) -> InstructionPart | None:

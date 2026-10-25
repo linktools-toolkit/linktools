@@ -30,7 +30,7 @@ from linktools.ai.core import ExecutionStatus, ToolOperationStatus, service_prin
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ReferencedContent
 from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
-from linktools.ai.runtime._run_callbacks import RunCallbacks
+from linktools.ai.capability import RunCallbacks
 from linktools.ai.spec import AgentSpec, CapabilityRef, MCPServerSpec
 from linktools.ai.storage import StorageEntryRevision, StorageOverlay
 from linktools.ai.workspace import Workspace

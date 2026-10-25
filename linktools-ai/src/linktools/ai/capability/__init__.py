@@ -5,6 +5,7 @@
 from ._persistence import CheckpointCapability, TraceCapability
 from ._tool_responses import ToolResponseFixture, ToolResponsesCapability
 from ._tool_results import ToolResultsCapability
+from ._run_callbacks import RunCallbacks, RunCallbackScope, bind_run_callbacks
 from ._referenced_inputs import ReferencedInputsCapability
 from ._asset import AssetCapability
 from ._context import AgentContext
@@ -69,6 +70,7 @@ __all__ = [
     "CheckpointCapability", "TraceCapability",
     "ToolResponsesCapability",
     "ToolResultsCapability",
+    "RunCallbacks", "RunCallbackScope", "bind_run_callbacks",
     "AssetCapability",
     "WorkspaceCapability",
     "ToolClass",

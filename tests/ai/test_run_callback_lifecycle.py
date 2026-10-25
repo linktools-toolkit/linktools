@@ -18,7 +18,7 @@ from linktools.ai.capability import AgentContext, ReferencedInputsCapability, To
 from linktools.ai.core import ExecutionStatus, service_principal
 from linktools.ai.model import ReferencedContent
 from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
-from linktools.ai.runtime._run_callbacks import RunCallbacks, bind_run_callbacks
+from linktools.ai.capability import RunCallbacks, bind_run_callbacks
 from linktools.ai.spec import CapabilityRef
 from linktools.ai.storage import StorageEntryRevision
 
@@ -281,7 +281,7 @@ async def test_deferred_callbacks_follow_native_loading_and_returned_run_shape(s
         return "original"
     from pydantic_ai.toolsets import FunctionToolset
     from linktools.ai.runtime._harness import SummaryProviderModel
-    from linktools.ai.runtime._run_callbacks import RunCallbackScope
+    from linktools.ai.capability import RunCallbackScope
     from linktools.ai.runtime._tool_boundary import BoundaryToolset, ManagedToolDescriptor
     from ._runtime_test_helpers import tool_run_context, tool_with_metadata
     callbacks, context = RunCallbacks(), tool_run_context()

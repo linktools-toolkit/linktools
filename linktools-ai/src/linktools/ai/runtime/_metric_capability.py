@@ -41,7 +41,10 @@ from ..capability import AgentContext
 from ._trace_capture import record_http_bodies_enabled
 from ..core import ExecutionEventType, JsonValue
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..model import ModelClientRequest, ModelClientRequestRecorder, model_binding_error
+from ..model import (
+    ModelClientRequest, ModelClientRequestRecorder, model_binding_error,
+    model_request_error as project_model_request_error,
+)
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ._budget import RunBudgetContext
 from ._journal import ModelRequestFact, ModelRequestJournal, await_request_handoff
@@ -1239,17 +1242,7 @@ def model_request_error(
     group = _fallback_error(error)
     if content_omission_reason is None and group is None:
         return error
-    diagnostics = (
-        error.diagnostics
-        if isinstance(error, AIError) and error.diagnostics is not None
-        and error.diagnostics.content_omission_reason == content_omission_reason
-        else ErrorDiagnostics.from_exception(error, content_omission_reason=content_omission_reason)
-    )
-    provider = model_binding_error(error, diagnostics=diagnostics)
-    classified = provider if provider is not None else error
     details: dict[str, JsonValue] = {}
-    if content_omission_reason is not None:
-        details["content_omission_reason"] = content_omission_reason
     attempts = getattr(group, "attempts", None)
     if attempts is not None:
         details["failed_attempts"] = model_attempts_details(
@@ -1258,14 +1251,9 @@ def model_request_error(
         if fact is not None:
             details["model_request_seq"] = fact.model_request_seq
             details["purpose"] = fact.purpose
-    if isinstance(classified, AIError):
-        status = classified.safe_details.get("status_code")
-        if type(status) is int:
-            details["status_code"] = status
-    return AIError(
-        ErrorCode(_model_error_code(classified)),
-        retryable=classified.retryable if isinstance(classified, AIError) else False,
-        safe_details=details, diagnostics=diagnostics,
+    return project_model_request_error(
+        error, content_omission_reason=content_omission_reason,
+        code=ErrorCode(_model_error_code(error)), safe_details=details,
     )
 
 

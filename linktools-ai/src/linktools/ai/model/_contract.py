@@ -25,9 +25,24 @@ class ModelBinding(Protocol):
         """Build a model whose async context must be owned by the caller.
 
         Expected configuration failures raise AIError. SDK providers retain
-        ownership rules for any externally supplied clients.
+        ownership rules for any externally supplied clients. Native referenced
+        input requires ModelInputValidator on the returned model or its public
+        SDK wrapper chain; implementing this binding Protocol alone does not
+        establish a contract for an arbitrary materialized model.
         """
         ...
+
+
+@runtime_checkable
+class ModelInputValidator(Protocol):
+    """The actual materialized model's input permission and encoding contract.
+
+    A custom model may implement this operation explicitly. Merely implementing
+    ModelBinding or accepting SDK content types does not establish permission.
+    Validation must not load references or mutate caller-owned input.
+    """
+
+    def validate_inputs(self, value: object) -> None: ...
 
 
 @runtime_checkable
@@ -46,4 +61,4 @@ def model_thinking_control(binding: ModelBinding) -> Mapping[str, JsonValue]:
     return {"mode": "unknown", "enabled_by_default": None}
 
 
-__all__ = ["ModelBinding", "model_thinking_control"]
+__all__ = ["ModelBinding", "ModelInputValidator", "model_thinking_control"]

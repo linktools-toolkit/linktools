@@ -16,15 +16,16 @@ from urllib.parse import urlsplit, urlunsplit
 from linktools.core import environ
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UserError
 from pydantic_ai import exceptions as sdk_errors
-from pydantic_ai.models import Model, ModelMessage, ModelRequestParameters, ModelResponse, ModelSettings, StreamedResponse, RunContext as PydanticRunContext
+from pydantic_ai.models import Model, ModelMessage, ModelRequestContext, ModelRequestParameters, ModelResponse, ModelSettings, StreamedResponse, RunContext as PydanticRunContext
 from pydantic_ai.models.wrapper import WrapperModel
+from pydantic_ai.usage import RequestUsage
 from pydantic_ai.profiles import DEFAULT_PROFILE, merge_profile
 
 from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ._contract import ModelBinding
 from ._errors import _is_quota_error
-from ._input import expand_input_types, validate_model_inputs
+from ._input import expand_input_types, validate_model_inputs, validate_provider_inputs
 
 _logger = environ.get_logger("ai.model.binding")
 
@@ -229,6 +230,28 @@ class _RetryingModel(WrapperModel):
         self._retry_backoff_factor = retry_backoff_factor
         self._input_binding = input_binding
 
+    def validate_inputs(self, value: object) -> None:
+        """Validate against the immutable contract that built this provider."""
+        if self._input_binding is None:
+            raise AIError(ErrorCode.MODEL_CONFIG_INVALID, retryable=False,
+                          safe_details={"reason": "model_input_contract_unknown"})
+        validate_model_inputs(self._input_binding, value)
+
+    async def count_tokens(
+        self, messages: list[ModelMessage], model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+    ) -> RequestUsage:
+        if self._input_binding is not None:
+            validate_provider_inputs(self._input_binding, messages)
+        return await self.wrapped.count_tokens(messages, model_settings, model_request_parameters)
+
+    async def compact_messages(
+        self, request_context: ModelRequestContext, *, instructions: str | None = None,
+    ) -> ModelResponse:
+        if self._input_binding is not None:
+            validate_provider_inputs(self._input_binding, request_context.messages)
+        return await self.wrapped.compact_messages(request_context, instructions=instructions)
+
     async def _wait_for_retry(
         self, error: ModelAPIError, backoff: float,
     ) -> float:
@@ -258,7 +281,7 @@ class _RetryingModel(WrapperModel):
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
         if self._input_binding is not None:
-            validate_model_inputs(self._input_binding, messages)
+            validate_provider_inputs(self._input_binding, messages)
         attempt = 0
         backoff = self._retry_delay
         while True:
@@ -288,7 +311,7 @@ class _RetryingModel(WrapperModel):
         run_context: "PydanticRunContext[object] | None" = None,
     ) -> AsyncGenerator[StreamedResponse, None]:
         if self._input_binding is not None:
-            validate_model_inputs(self._input_binding, messages)
+            validate_provider_inputs(self._input_binding, messages)
         attempt = 0
         backoff = self._retry_delay
         while True:
