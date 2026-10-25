@@ -113,7 +113,7 @@ def _projected_parts(
             values.append(
                 (
                     "tool_result",
-                    _payload_content(payload),
+                    _tool_content(part, payload),
                     part.tool_name,
                     part.tool_call_id,
                 )
@@ -176,6 +176,20 @@ def _serialized_parts(message: ModelMessage) -> tuple[dict[str, JsonValue], ...]
 
 def _payload_content(payload: Mapping[str, JsonValue]) -> JsonValue:
     return payload.get("content")
+
+
+def _tool_content(part: ToolReturnPart, payload: Mapping[str, JsonValue]) -> JsonValue:
+    values = part.content if isinstance(part.content, list) else [part.content]
+    raw = _payload_content(payload)
+    serialized = raw if isinstance(raw, list) else [raw]
+    result: list[JsonValue] = []
+    for index, item in enumerate(values):
+        if isinstance(item, (ReferencedContent, TextContent, BinaryContent, ImageUrl,
+                             AudioUrl, DocumentUrl, VideoUrl, UploadedFile)):
+            result.append(_user_content(UserPromptPart([item]), payload)[0])
+        else:
+            result.append(serialized[index])
+    return result if isinstance(part.content, list) else result[0]
 
 
 def _user_content(part: UserPromptPart, payload: Mapping[str, JsonValue]) -> JsonValue:

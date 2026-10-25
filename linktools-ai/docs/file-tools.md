@@ -135,14 +135,16 @@ structured input metadata, never from parsing arbitrary user text.
 
 Workspace `inspect_file` facts and current `read_file`/`attach_files` result
 entries use `mime_type`; extension hints use `extension_mime_type`.
-`read_file` retains `input_index` and `sha256` where applicable. `attach_files`
-uses behavior revision 2 for its renamed output field. Old stored tool results
-remain readable without rewriting their fields. SDK content retains its
+`read_file` retains `input_index` and `sha256` where applicable. `read_file` and
+`attach_files` use behavior revision 2: when files are returned, the native tool
+result is `[metadata, *files]`. Text-only results retain their metadata object.
+Old stored tool results remain readable without rewriting their fields. SDK content retains its
 `media_type` field at the adapter boundary.
 Runtime binding adds the existing attachment identifier to each new `read_file`
-file entry. These tool results already
-carry the metadata, so the SDK-added user content contains only the binary, not a
-second copy of the metadata text.
+file entry. These tool results already carry the metadata; the files stay in the
+same native tool result, associated with its `tool_call_id`, rather than becoming
+extra user content. Each provider uses its SDK's native tool-result mapping (and
+its standard fallback when that protocol cannot carry files inside a tool result).
 
 After a complete response, active context retains the existing metadata and
 removes only the binary content blocks, omitting the resulting empty user content
@@ -228,15 +230,22 @@ Files API upload. No additional retry or external-tool replay is introduced.
 Token counting, compaction and recovery may call the loader again. It must be a
 read-only, repeatable exact-version read, not a one-shot external side effect.
 
-A business tool can return `ToolReturn(return_value=metadata, content=[reference])`.
-Only `content` carries consumable attachment references. Native return values and
-JSON mappings/sequences reject that input type in `return_value`; arbitrary return
+A business tool returns `ToolReturn(return_value=[metadata, reference])` to keep
+an attachment in its native tool result. A direct reference return is also
+supported. Reference items must be direct results or top-level list items, matching
+the SDK's native multimodal result shape; references hidden in JSON mappings or
+nested sequences are rejected rather than silently serialized as text.
+`ToolReturn(content=[reference])` remains an explicit request for additional user
+content; Runtime does not move it into a neighboring tool result. Arbitrary return
 objects retain their ordinary JSON-snapshot contract. A descriptor-like snapshot
 is plain result data, never promoted into a readable or recoverable attachment.
-Persisted reference-bearing returns cannot introduce executable tools.
-After a complete logical model response,
-the active context retains ordinary metadata text plus the original descriptor in
-its metadata, and no longer hydrates that occurrence. This is not an automatic
+Persisted reference-bearing returns cannot introduce executable tools. Native
+results participate in the same MIME checks, byte budgets and safe trace policy
+as user inputs, including parallel tool results.
+After a complete logical model response, the active context retains ordinary
+summary text and the original descriptor in its durable metadata, and no longer
+hydrates that occurrence. SDK serialization and provider messages expose only
+the summary, not descriptor fields or loader reconstruction parameters. This is not an automatic
 semantic content summary. Pending or interrupted references remain recoverable.
 
 Even with `TraceCapability(record_http_bodies=True)`, a request containing a

@@ -376,9 +376,6 @@ class _FixtureBinding:
     def materialize(self):
         return self.model
 
-    def thinking_control(self):
-        return {"mode": "undeclared", "enabled_by_default": False}
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ("text", "tools", "output"))

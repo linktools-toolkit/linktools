@@ -143,9 +143,9 @@ async def test_attach_files_preserves_duplicate_attachment_occurrences(tmp_path:
         "size": 3,
         "sha256": "8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c",
     }
-    assert result.return_value == {"files": [expected, expected]}
-    assert result.content is not None
-    binary = [item for item in result.content if isinstance(item, BinaryContent)]
+    assert result.return_value[0] == {"files": [expected, expected]}
+    assert result.content is None
+    binary = [item for item in result.return_value[1:] if isinstance(item, BinaryContent)]
     assert len(binary) == 2
     assert all(item.media_type == "image/png" for item in binary)
     assert binary[0].identifier != binary[1].identifier
@@ -169,7 +169,7 @@ async def test_attach_files_keeps_workspace_paths_out_of_extra_text(tmp_path: Pa
     )
 
     assert isinstance(result, ToolReturn)
-    assert result.return_value == {
+    assert result.return_value[0] == {
         "files": [
             {
                 "path": path,
@@ -179,8 +179,8 @@ async def test_attach_files_keeps_workspace_paths_out_of_extra_text(tmp_path: Pa
             }
         ]
     }
-    assert result.content is not None
-    binary = [item for item in result.content if isinstance(item, BinaryContent)]
+    assert result.content is None
+    binary = [item for item in result.return_value[1:] if isinstance(item, BinaryContent)]
     assert len(binary) == 1
     assert "\n" not in binary[0].identifier
 
@@ -240,3 +240,38 @@ async def test_attach_files_rejects_unknown_image_before_read(
 
     assert session.canonicalized == ["evidence.png"]
     assert session.reads == []
+
+
+def test_native_file_results_keep_parallel_attachment_provenance() -> None:
+    from pydantic_ai.messages import ModelRequest, ToolReturnPart, UserPromptPart
+    from linktools.ai.runtime._attachment import (
+        bind_tool_return_attachments, has_binary_attachment_metadata,
+        request_attachment_facts,
+    )
+
+    receipt = {"files": [{"path": "one.png", "mime_type": "image/png", "size": 3,
+                           "sha256": "8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c"}]}
+    parts = []
+    for call_id in ("first", "second"):
+        result = bind_tool_return_attachments("attach_files", call_id, ToolReturn(
+            return_value=[receipt, BinaryContent(b"png", media_type="image/png")],
+            content="explicit extra user text",
+        ))
+        assert result.content == "explicit extra user text"
+        parts.append(ToolReturnPart("attach_files", result.return_value, tool_call_id=call_id))
+    original = BinaryContent(b"png", media_type="image/png", identifier="ordinary-user")
+    request = ModelRequest(parts=[*parts, UserPromptPart([original])])
+    accepted: set[str] = set()
+    facts = request_attachment_facts([request], (), accepted_attachment_ids=accepted)
+    assert [(fact["fact"], fact["call_id"]) for fact in facts] == [
+        ("accepted", "first"), ("included_in_request", "first"),
+        ("accepted", "second"), ("included_in_request", "second"),
+    ]
+    assert parts[0].content[1].identifier != parts[1].content[1].identifier
+    assert has_binary_attachment_metadata(parts[0].content[1], request)
+    assert has_binary_attachment_metadata(parts[1].content[1], request)
+    assert not has_binary_attachment_metadata(original, request)
+    again = request_attachment_facts([request], (), accepted_attachment_ids=accepted)
+    assert [(fact["fact"], fact["call_id"]) for fact in again] == [
+        ("included_in_request", "first"), ("included_in_request", "second"),
+    ]

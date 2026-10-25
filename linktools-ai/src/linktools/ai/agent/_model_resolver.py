@@ -12,7 +12,7 @@ from pydantic_ai.models import Model
 
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
-from ..model import ModelBinding, model_thinking_control
+from ..model import ModelBinding
 
 
 @runtime_checkable
@@ -105,9 +105,6 @@ class _LazyModelBinding:
     @property
     def contract(self) -> Mapping[str, JsonValue]:
         return self._resolve().contract
-
-    def thinking_control(self) -> Mapping[str, JsonValue]:
-        return model_thinking_control(self._resolve())
 
     def materialize(self) -> Model:
         return self._resolve().materialize()

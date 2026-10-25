@@ -426,7 +426,6 @@ async def test_session_metadata_is_readable_without_loading_unavailable_timeline
                 "metadata": {"title": "Readable metadata"}, "history_quality": "complete",
             },
             "timeline": None,
-            "thinking_control": {"mode": "unknown", "enabled_by_default": None},
         }
 
         history.allow_timeline = True

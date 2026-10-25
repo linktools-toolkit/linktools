@@ -126,7 +126,7 @@ class AgentTaskInput(Mapping[str, JsonValue]):
             or not isinstance(parameters, Mapping)
             or not isinstance(files, list)
             or not isinstance(planning, bool)
-            or not isinstance(thinking, (bool, str))
+            or (thinking is not None and not isinstance(thinking, (bool, str)))
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:

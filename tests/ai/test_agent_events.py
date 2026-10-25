@@ -17,19 +17,16 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     ToolCallPart,
 )
-from pydantic_ai.models.test import TestModel
 
 from linktools.ai.core import ExecutionDeltaType, ExecutionEventType
-from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.errors import ErrorCode
 from linktools.ai.runtime._agent_executor import (
     DurableBoundary,
     LiveDelta,
     _event_stream_capability,
     _map_event,
-    _thinking_capability,
 )
 from linktools.ai.runtime._event import ExecutionDelta
-from linktools.ai.runtime._harness import validate_thinking_model
 from linktools.ai.runtime._tool_return_codec import tool_return_content_digest
 
 
@@ -117,39 +114,15 @@ async def test_event_stream_forwarding_uses_native_capability() -> None:
     ]
 
 
-def test_thinking_uses_native_capability_with_request_model_validation() -> None:
-    capability = _thinking_capability("high")
-    assert isinstance(capability, Thinking)
-    assert capability.id == "linktools.ai.thinking"
-    assert capability.effort == "high"
-    assert capability.get_model_settings() == {"thinking": "high"}
-
-    supported = TestModel(
-        profile={"supports_thinking": True, "thinking_always_enabled": False}
-    )
-    validate_thinking_model(supported, "high")
-
-    unsupported = TestModel(
-        profile={"supports_thinking": False, "thinking_always_enabled": False}
-    )
-    with pytest.raises(AIError) as unsupported_error:
-        validate_thinking_model(unsupported, True)
-    assert unsupported_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
-    assert unsupported_error.value.safe_details == {
-        "field": "thinking",
-        "reason": "model_not_supported",
-    }
-
-    always_on = TestModel(
-        profile={"supports_thinking": True, "thinking_always_enabled": True}
-    )
-    with pytest.raises(AIError) as always_on_error:
-        validate_thinking_model(always_on, False)
-    assert always_on_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
-    assert always_on_error.value.safe_details == {
-        "field": "thinking",
-        "reason": "model_always_enabled",
-    }
+@pytest.mark.parametrize("effort", (None, False, True, "minimal", "low", "medium", "high", "xhigh", "max"))
+def test_thinking_values_round_trip_to_native_capability(effort) -> None:
+    from linktools.ai.spec import AgentSpec, AgentSpecCodec
+    spec = AgentSpec("thinking", thinking=effort)
+    codec = AgentSpecCodec()
+    restored = codec.decode(codec.encode(spec))
+    assert restored.thinking == effort
+    if effort is not None:
+        assert Thinking(effort=restored.thinking).get_model_settings() == {"thinking": effort}
 
 
 @pytest.mark.parametrize(

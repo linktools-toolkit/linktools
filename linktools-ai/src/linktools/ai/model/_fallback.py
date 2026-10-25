@@ -40,7 +40,7 @@ class FallbackBinding:
     A failed pinned continuation cannot rewind and replay the candidate chain.
     The contract describes candidate model semantics, not callable
     implementation identity. Each candidate still owns its input constraints
-    and thinking profile.
+    and SDK thinking settings.
     """
 
     bindings: tuple[ModelBinding, ...]

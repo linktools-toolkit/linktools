@@ -12,7 +12,7 @@ from typing import Any, cast, TYPE_CHECKING
 from linktools.core import environ
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import FallbackExceptionGroup
-from pydantic_ai.messages import BinaryContent, ModelMessage, ModelRequest, ModelResponse, SystemPromptPart, UserPromptPart
+from pydantic_ai.messages import BinaryContent, ModelMessage, ModelRequest, ModelResponse, SystemPromptPart, TextContent, ToolReturnPart, UserPromptPart
 from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters, StreamedResponse
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.settings import ModelSettings
@@ -28,10 +28,11 @@ from pydantic_ai_harness.planning import (
 from ..capability import AgentContext, ReferencedInputsCapability, ToolCallRetry
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding, ModelClientRequestRecorder, ReferencedContent, validate_model_inputs
-from ..spec import CapabilityRef, ThinkingValue
+from ..spec import CapabilityRef
 from ._plan import PlanItem, RuntimePlanStore
-from ._message import project_provider_messages, without_history_system_prompts
+from ._message import model_input_content, project_provider_messages, without_history_system_prompts
 from ._metric_capability import model_request_error
+from ._user_content_codec import RetiredReferencedContent
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -62,20 +63,18 @@ class SummaryProviderModel(WrapperModel):
             validate_model_inputs(self._binding, projected)
         references = [
             item for message in projected if isinstance(message, ModelRequest)
-            for part in message.parts if isinstance(part, UserPromptPart)
-            and not isinstance(part.content, str)
-            for item in part.content if isinstance(item, ReferencedContent)
+            for part in message.parts
+            for item in model_input_content(part) if isinstance(item, ReferencedContent)
         ]
-        if not references:
-            return projected
         sources = self._referenced_inputs() if callable(self._referenced_inputs) else self._referenced_inputs
-        if not sources or self._context is None or self._binding is None:
+        if references and (not sources or self._context is None or self._binding is None):
             raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING,
                           safe_details={"reason": "referenced_inputs_unavailable"})
         if any(item.source not in sources for item in references):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
                           safe_details={"reason": "referenced_input_source_mismatch"})
-        ModelClientRequestRecorder.omit_current_http_bodies("referenced_content_lifecycle")
+        if references:
+            ModelClientRequestRecorder.omit_current_http_bodies("referenced_content_lifecycle")
         result: list[ModelMessage] = []
         for message in projected:
             if not isinstance(message, ModelRequest):
@@ -83,11 +82,12 @@ class SummaryProviderModel(WrapperModel):
                 continue
             parts = []
             for part in message.parts:
-                if not isinstance(part, UserPromptPart) or isinstance(part.content, str):
+                if (not isinstance(part, (UserPromptPart, ToolReturnPart))
+                    or isinstance(part, UserPromptPart) and isinstance(part.content, str)):
                     parts.append(part)
                     continue
                 content = []
-                for item in part.content:
+                for item in model_input_content(part):
                     if isinstance(item, ReferencedContent):
                         data = await sources[item.source].load(self._context, item)
                         if item.representation == "text":
@@ -98,10 +98,20 @@ class SummaryProviderModel(WrapperModel):
                                               safe_details={"reason": "text_input_not_utf8"}) from None
                         else:
                             item = BinaryContent(data, media_type=item.media_type, identifier=item.identifier)
+                    elif (isinstance(part, ToolReturnPart) and (
+                        isinstance(item, RetiredReferencedContent)
+                        or isinstance(item, TextContent) and isinstance(item.metadata, dict)
+                        and item.metadata.get("source") == "linktools.attachment"
+                    )):
+                        # Durable retirement metadata must never become native result text.
+                        item = item.content
                     content.append(item)
-                parts.append(replace(part, content=content))
+                value = (content if isinstance(part, UserPromptPart) or isinstance(part.content, list)
+                         else content[0])
+                parts.append(replace(part, content=value))
             result.append(replace(message, parts=parts))
-        validate_model_inputs(self._binding, result)
+        if self._binding is not None:
+            validate_model_inputs(self._binding, result)
         return result
 
     async def request(
@@ -159,8 +169,8 @@ class SummaryProviderModel(WrapperModel):
         return "referenced_content_lifecycle" if any(
             isinstance(item, ReferencedContent)
             for message in messages if isinstance(message, ModelRequest)
-            for part in message.parts if isinstance(part, UserPromptPart) and not isinstance(part.content, str)
-            for item in part.content
+            for part in message.parts
+            for item in model_input_content(part)
         ) else None
 
     @asynccontextmanager
@@ -173,33 +183,6 @@ class SummaryProviderModel(WrapperModel):
             await self._provider_messages(messages), model_settings, model_request_parameters, run_context,
         ) as response:
             yield response
-
-
-def validate_thinking_model(model: Model, thinking: ThinkingValue) -> None:
-    profile = model.profile
-    supports = bool(profile.get("supports_thinking", False))
-    always = bool(profile.get("thinking_always_enabled", False))
-    if thinking is False:
-        if always:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
-                          safe_details={"field": "thinking", "reason": "model_always_enabled"})
-        return
-    if not (supports or always):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
-                      safe_details={"field": "thinking", "reason": "model_not_supported"})
-
-
-class CandidateProviderModel(SummaryProviderModel):
-    """Validate the candidate chosen by SDK dispatch before provider IO."""
-
-    def prepare_request(
-        self, model_settings: ModelSettings | None,
-        model_request_parameters: ModelRequestParameters,
-    ) -> tuple[ModelSettings | None, ModelRequestParameters]:
-        thinking = (model_settings or {}).get("thinking", model_request_parameters.thinking)
-        if thinking is not None:
-            validate_thinking_model(self.wrapped, thinking)
-        return self.wrapped.prepare_request(model_settings, model_request_parameters)
 
 
 def prepare_input_retention(messages: list[ModelMessage]) -> None:
@@ -415,9 +398,7 @@ def _plan_item_id(index: int) -> str:
 __all__ = [
     "ReinjectRuntimeSystemPrompt",
     "SummaryProviderModel",
-    "CandidateProviderModel",
     "FallbackProviderModel",
     "prepare_input_retention",
-    "validate_thinking_model",
     "HarnessPlanStoreAdapter",
 ]

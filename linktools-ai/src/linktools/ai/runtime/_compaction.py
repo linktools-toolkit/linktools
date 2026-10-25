@@ -38,6 +38,7 @@ from pydantic_ai_harness.compaction import (
 )
 
 from ._trace_capture import record_http_bodies_enabled
+from ._attachment import file_tool_result_metadata
 from ..core import PromptLimits
 from ..errors import AIError, ErrorCode
 from ..model import ModelClientRequest, ModelClientRequestRecorder, ReferencedContent
@@ -47,7 +48,7 @@ from ._journal import ModelRequestFact, ModelRequestJournal, await_request_hando
 from ._harness import SummaryProviderModel, prepare_input_retention
 from ._metric_capability import model_request_error
 from ._message import (
-    SummaryPromptPart, binary_content_usage, project_transient_binary_content, project_model_response_attempts,
+    SummaryPromptPart, model_input_content, binary_content_usage, project_transient_binary_content, project_model_response_attempts,
 )
 
 _KEEP_COMPLETED_PAIRS = 3
@@ -597,9 +598,7 @@ class CompactionCapability(AbstractCapability[None]):
             if not isinstance(message, ModelRequest):
                 continue
             for part in message.parts:
-                if not isinstance(part, UserPromptPart) or isinstance(part.content, str):
-                    continue
-                for item in part.content:
+                for item in model_input_content(part):
                     if isinstance(item, ReferencedContent) and item.representation == "text":
                         pending_text_growth += max(0, item.ref.size - len(item.content))
         # Unconsumed text bodies are absent from the SDK's descriptor-only
@@ -647,7 +646,7 @@ def _validate_pending_binary_content(
         for part in message.parts:
             if not isinstance(part, ToolReturnPart) or part.tool_name != "read_file":
                 continue
-            value = part.content
+            value = file_tool_result_metadata(part.content)
             if not isinstance(value, Mapping) or not isinstance(value.get("texts"), list):
                 continue
             output_bytes += len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
@@ -677,18 +676,19 @@ def _deduplicate_text_entries(
         parts = []
         changed = False
         for part in reversed(message.parts):
+            value = file_tool_result_metadata(part.content) if isinstance(part, ToolReturnPart) else None
             if (
                 not isinstance(part, ToolReturnPart)
                 or policies.get(part.tool_name) != _UNIFIED_READ_POLICY
-                or not isinstance(part.content, Mapping)
-                or not isinstance(part.content.get("texts"), list)
+                or value is None
+                or not isinstance(value.get("texts"), list)
             ):
                 parts.append(part)
                 continue
             texts = []
             keys: set[str] = set()
             text_changed = False
-            for entry in part.content["texts"]:
+            for entry in value["texts"]:
                 key = _text_read_key(entry)
                 if key is not None:
                     keys.add(key)
@@ -699,7 +699,9 @@ def _deduplicate_text_entries(
                     texts.append(entry)
             seen.update(keys)
             if text_changed:
-                parts.append(replace(part, content={**part.content, "texts": texts}))
+                receipt = {**value, "texts": texts}
+                content = [receipt, *part.content[1:]] if isinstance(part.content, list) else receipt
+                parts.append(replace(part, content=content))
                 changed = True
             else:
                 parts.append(part)

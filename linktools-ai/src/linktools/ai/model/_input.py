@@ -123,8 +123,7 @@ def _input_transport(binding: "ModelBinding", mime_type: str, kind: str) -> str 
     contract = binding.contract
     api = contract.get("api", "openai" if binding.provider == "openai" else None)
     if api == "openai":
-        return openai_input_transport(mime_type, kind, binding.model_identity.removeprefix("openai:"),
-                                      contract.get("profile"))
+        return openai_input_transport(mime_type, kind, binding.model_identity.removeprefix("openai:"))
     if api == "openai-responses":
         if kind in {"uploaded", "image-url"}:
             return "file-block"
