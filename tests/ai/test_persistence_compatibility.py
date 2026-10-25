@@ -57,7 +57,7 @@ def _load_json(name: str) -> object:
 def _binding_fixture_value() -> AgentBindingContract:
     output = bind_output()
     return AgentBindingContract(
-        agent_spec=AgentSpec("runtime-persistence-v1", tool_retries=10000, output_retries=3),
+        agent_spec=AgentSpec("runtime-persistence-v1", thinking=False, tool_retries=10000, output_retries=3),
         model_contract={"route_id": "default", "model_identity": "fixture:model"},
         selected=(),
         subagents=(),

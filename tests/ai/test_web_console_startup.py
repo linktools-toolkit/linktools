@@ -25,12 +25,12 @@ def test_sdk_dependencies_require_typed_errors_and_matching_optional_packages() 
     config = yaml.safe_load((source_root / "linktools-ai/linktools.yml").read_text())
     requirements = {item.name: item for item in map(Requirement, config["dependencies"])}
     sdk = requirements["pydantic-ai-slim"]
-    assert "2.58.0" not in sdk.specifier
-    assert "2.59.0" in sdk.specifier
+    assert "2.60.0" not in sdk.specifier
+    assert "2.61.0" in sdk.specifier
     assert "3.0.0" not in sdk.specifier
     harness = requirements["pydantic-ai-harness"]
-    assert "0.58.0" not in harness.specifier
-    assert "0.59.0" in harness.specifier
+    assert "0.60.0" not in harness.specifier
+    assert "0.61.0" in harness.specifier
     for extra, sdk_extra in (("openai", "openai"), ("anthropic", "anthropic"), ("evaluation", "evals")):
         optional = {item.name: item for item in map(Requirement, config["optional-dependencies"][extra])}
         assert optional["pydantic-ai-slim"].specifier == sdk.specifier
