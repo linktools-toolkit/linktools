@@ -224,3 +224,30 @@ async def test_failed_partial_survives_snapshot_and_owned_cleanup(tmp_path: Path
         assert (await restored.purge_unreferenced_objects(refs, exclusive=Offline())).deleted == refs
     finally:
         await restored.close()
+
+
+@pytest.mark.asyncio
+async def test_successful_continuation_segments_share_one_canonical_response() -> None:
+    staged, payloads, request, response, partial = _staged()
+    failed, succeeded = staged.stream_attempts
+    first = replace(succeeded, stream_attempt_seq=1, client_request_start=0, client_request_end=0,
+                    usage=UsageMetrics(1, 0, 5, 2))
+    staged = replace(staged, stream_attempts=(first, replace(failed, stream_attempt_seq=2),
+                                             replace(succeeded, stream_attempt_seq=3)),
+                     usage=UsageMetrics(3, 0, 26, 10))
+    state = RuntimeState(RuntimeStorage.in_memory())
+    await state.initialize(namespace="stream-observation", tenant_id="tenant")
+    await state.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
+    try:
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        prepared = PreparedArchive()
+        record, = await archive.prepare_interactions(_run(), (staged,), payloads.__getitem__, prepared=prepared)
+        await archive.sync_projection(_run(), events=(), checkpoints=(), interactions=(record,),
+                                     execution_id="execution", archive=prepared)
+        recovered = _decode_step_envelope(_encode_step_envelope(record))
+        assert [attempt.status for attempt in recovered.stream_attempts] == ["SUCCEEDED", "FAILED", "SUCCEEDED"]
+        resolved = await archive.resolve_model_interaction(recovered)
+        assert resolved == (request, response, b'{"streaming":true}', None, (None, partial, None))
+        assert recovered.usage == UsageMetrics(3, 0, 26, 10)
+    finally:
+        await state.close()

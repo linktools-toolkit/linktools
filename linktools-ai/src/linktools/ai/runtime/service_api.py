@@ -244,11 +244,13 @@ class ExecutionHistoryItem:
 
 @dataclass(frozen=True, slots=True)
 class ModelStreamAttemptItem:
-    """One-based stream attempt within a logical model request.
+    """One-based provider stream within a logical model request.
 
+    SUCCEEDED means this transport segment completed, not that it alone owns
+    the logical response. Native continuation can complete several segments.
     Client request bounds select a zero-based, half-open range of the original
     client request array, not stream attempt identities. Only failed/cancelled
-    partial content appears here; successful content stays on the interaction.
+    partial content appears here; the canonical response stays on the interaction.
     """
 
     stream_attempt_seq: int

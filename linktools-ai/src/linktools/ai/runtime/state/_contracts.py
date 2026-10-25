@@ -565,7 +565,11 @@ class ModelClientRequestRef:
 
 @dataclass(frozen=True, slots=True)
 class StreamAttemptRecord:
-    """One completed stream attempt; only failed partials own response content."""
+    """One completed provider stream; several successful segments may contribute.
+
+    The logical interaction owns its canonical response; failed partials are
+    independent trace evidence rather than conversation history.
+    """
 
     stream_attempt_seq: int
     status: str
@@ -702,7 +706,6 @@ class ModelInteractionRecord:
                     attempt.stream_attempt_seq != sequence
                     or attempt.client_request_start < previous_end
                     or attempt.client_request_end > len(self.client_requests or ())
-                    or attempt.status == "SUCCEEDED" and sequence != len(self.stream_attempts)
                     or attempt.response_context is not None and self.request_context is None
                 ):
                     raise ValueError("stream attempt sequence or client range is invalid")

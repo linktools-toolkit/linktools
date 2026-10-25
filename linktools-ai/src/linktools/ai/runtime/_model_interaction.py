@@ -232,7 +232,6 @@ class StagedModelInteraction:
                     attempt.stream_attempt_seq != sequence
                     or attempt.client_request_start < previous_end
                     or attempt.client_request_end > len(self.client_requests or ())
-                    or attempt.status == "SUCCEEDED" and sequence != len(self.stream_attempts)
                     or attempt.response_context is not None and self.request_context is None
                 ):
                     raise ValueError("stream attempt sequence or client range is invalid")
