@@ -199,6 +199,20 @@ def test_generated_ci_plan_supplies_execution_versions_and_options() -> None:
     assert jobs["coverage"]["name"] == "Python checks passed"
 
 
+def test_shared_ci_interpreters_match_the_execution_floor() -> None:
+    root = Path(__file__).resolve().parents[2]
+    for name in ("python-check.yml", "python-publish.yml"):
+        workflow = yaml.safe_load((root / ".github/workflows" / name).read_text())
+        versions = [
+            step["with"]["python-version"]
+            for job in workflow["jobs"].values()
+            for step in job.get("steps", ())
+            if step.get("uses", "").startswith("actions/setup-python@")
+        ]
+        assert "3.11" in versions
+        assert all(version == "3.11" or "matrix.python-version" in version for version in versions)
+
+
 def test_runtime_ci_output_keeps_failures_without_per_case_progress(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
