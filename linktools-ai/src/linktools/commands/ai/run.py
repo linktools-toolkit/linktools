@@ -180,6 +180,8 @@ async def _stream_result(execution: "Execution[object]") -> int:
 
     if not succeeded:
         output.finish(status)
+    else:
+        await output.read_completed(execution)
     output.close_line()
     if not succeeded:
         raise CommandError(
@@ -220,6 +222,7 @@ class _RequestDisplay:
     framed: bool = False
     truncated: bool = False
     gap_announced: bool = False
+    succeeded: bool = False
     attempts: dict[int, _AttemptDisplay] = field(default_factory=dict)
 
 
@@ -252,6 +255,28 @@ class _AttemptOutput:
     def preview_gap(self, key: tuple[str, int, int], request: _RequestDisplay) -> None:
         self.boundary(f"run {key[1]} request {key[2]} preview GAP: following output is not contiguous; no retry implied")
         request.gap_announced = True
+
+    async def read_completed(self, execution: "Execution[object]") -> None:
+        for key, request in self.requests.items():
+            if not request.succeeded or not (request.framed or request.truncated):
+                continue
+            label = f"run {key[1]} request {key[2]}"
+            try:
+                page = await execution.model_interactions(include_content=True, agent_run_seq=key[1], model_request_seq=key[2], limit=1)
+                item = next((item for item in page.items if (item.execution_id, item.agent_run_seq, item.model_request_seq) == key), None)
+                response = item.response if item is not None and item.status == "SUCCEEDED" and item.content_included else None
+                parts = response.get("parts") if isinstance(response, Mapping) else None
+                if not isinstance(parts, (list, tuple)):
+                    self.boundary(f"{label} FINAL UNAVAILABLE: earlier output is preview only, not a completed answer")
+                    continue
+                self.boundary(f"{label} CANONICAL TEXT RESPONSE: all earlier preview text for this request is superseded")
+                for part in parts:
+                    if isinstance(part, Mapping) and part.get("part_kind") == "text" and isinstance(part.get("content"), str):
+                        self.write_text(part["content"])
+                self.close_line()
+                self.boundary(f"{label} COMPLETED: committed SDK text above")
+            except Exception:
+                self.boundary(f"{label} FINAL UNAVAILABLE: committed response read failed; earlier output is preview only, not a completed answer")
 
     def invalidate(self, key: tuple[str, int, int], request: _RequestDisplay, seq: int, status: str) -> None:
         attempt = request.attempts[seq]
@@ -293,7 +318,9 @@ class _AttemptOutput:
             return
         if start:
             previous = self.visible_part(request, index)
-            if previous is not None and previous.chars:
+            if previous is not None and any(value.text_chars for value in request.attempts.values()):
+                request.framed = True
+            if previous is not None and (previous.chars or request.framed):
                 label = f"run {key[1]} request {key[2]} part {index} UPDATED: prior {previous.kind} for this part is superseded; replacement follows"
                 if previous.kind == "text":
                     self.boundary(label)
@@ -352,11 +379,10 @@ class _AttemptOutput:
                 return True
             status = payload.get("status")
             if status == "SUCCEEDED":
+                request.succeeded = True
                 truncated = request.truncated or any(value.truncated for value in request.attempts.values() if value.status in {"RUNNING", "SUCCEEDED"})
-                if not request.finished and request.framed:
-                    self.boundary(f"run {run} request {model_request} COMPLETED" + ("; preview is incomplete" if truncated else ""))
-                elif not request.finished and truncated:
-                    self.boundary(f"run {run} request {model_request} model completed; preview is incomplete")
+                if not request.finished and (request.framed or truncated):
+                    self.boundary(f"run {run} request {model_request} model succeeded; preview is incomplete until committed response readback")
                 if attempt.status == "RUNNING":
                     attempt.status = "SUCCEEDED"
             elif status in {"FAILED", "CANCELLED"}:

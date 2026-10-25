@@ -10,6 +10,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
+from collections.abc import Sequence
 
 import pytest
 from rich.console import Console
@@ -43,11 +44,22 @@ def plain(value: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", value)
 
 
+def model_item(text: str, request: int = 1) -> SimpleNamespace:
+    return SimpleNamespace(execution_id="execution", agent_run_seq=1, model_request_seq=request,
+                           status="SUCCEEDED", content_included=True,
+                           response={"parts": [{"part_kind": "text", "content": text}]})
+
+
 class Execution:
     execution_id = "execution"
 
-    def __init__(self, events: list[SimpleNamespace]) -> None:
+    def __init__(self, events: list[SimpleNamespace], models: Sequence[object] = ()) -> None:
         self.events = events
+        self.models = models
+
+    async def model_interactions(self, *, include_content: bool, agent_run_seq: int, model_request_seq: int, limit: int) -> SimpleNamespace:
+        assert include_content and limit == 1
+        return SimpleNamespace(items=tuple(item for item in self.models if item.agent_run_seq == agent_run_seq and item.model_request_seq == model_request_seq))
 
     async def watch(self, *, include_content: bool):
         assert include_content
@@ -82,6 +94,9 @@ async def test_cli_retries_invalidate_partial_on_stdout_before_replacement(monke
     class GatedExecution:
         execution_id = "execution"
 
+        async def model_interactions(self, **kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(items=[model_item("winner")])
+
         async def watch(self, *, include_content: bool):
             assert include_content
             yield event("MODEL_ATTEMPT_STARTED")
@@ -109,7 +124,7 @@ async def test_cli_retries_invalidate_partial_on_stdout_before_replacement(monke
         await asyncio.gather(task, return_exceptions=True)
     value = plain(stdout.getvalue())
     assert value.count("INVALIDATED") == 2
-    assert value.count("winner") == 1
+    assert value.count("winner") == 2
     assert value.index("old-partial") < value.index("attempt 1 FAILED") < value.index("attempt 2 begins") < value.index("second-partial")
     assert value.index("attempt 2 FAILED") < value.index("attempt 3 begins") < value.index("winner") < value.index("request 1 COMPLETED")
     assert "old-partialsecond-partialwinner" not in value
@@ -158,8 +173,8 @@ async def test_cli_ignores_old_attempts_and_does_not_clear_other_requests(monkey
     assert "stale" not in value and "child" not in value
     assert "request 1 attempt 1 FAILED" not in value
     assert value.count("INVALIDATED") == 1
-    assert value.count("COMPLETED") == 1
-    assert "replacement" in value and value.endswith("new-run\n")
+    assert "COMPLETED" not in value and "FINAL UNAVAILABLE" in value
+    assert "replacement" in value and "new-run\n" in value
 
 
 @pytest.mark.asyncio
@@ -212,7 +227,7 @@ async def test_cli_gap_between_transports_separates_successful_prefix(monkeypatc
               event("MODEL_ATTEMPT_FINISHED", attempt=2, status="SUCCEEDED"),
               event("MODEL_REQUEST_FINISHED", attempt=2, status="SUCCEEDED"),
               event("EXECUTION_SUCCEEDED")]
-    assert await run._stream_result(Execution(items)) == 0
+    assert await run._stream_result(Execution(items, [model_item("canonical after gap")])) == 0
     value = plain(stdout.getvalue())
     assert value.index("old snapshot") < value.index("request 1 preview GAP") < value.index("retained tail")
     assert value.count("preview GAP") == 1
@@ -239,7 +254,7 @@ async def test_cli_successful_continuation_preserves_previous_segments(monkeypat
               event("MODEL_ATTEMPT_FINISHED", attempt=seq + 1, status="SUCCEEDED"),
               event("MODEL_REQUEST_FINISHED", attempt=seq + 1, status="SUCCEEDED"),
               event("EXECUTION_SUCCEEDED")]
-    assert await run._stream_result(Execution(items)) == 0
+    assert await run._stream_result(Execution(items, [model_item("prefix suffix")])) == 0
     value = plain(stdout.getvalue())
     assert "prefix suffix" in value
     assert f"attempt {seq + 1} begins" not in value
@@ -295,6 +310,42 @@ async def test_cli_part_update_preserves_other_successful_parts(monkeypatch: pyt
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", [False, True])
+@pytest.mark.parametrize(("readback", "head"), [("available", "old-head "), ("missing", "old-head "), ("error", "old-head "), ("other-request", "old-head "), ("available", "")])
+async def test_cli_final_readback_supersedes_all_earlier_preview_parts(monkeypatch: pytest.MonkeyPatch, terminal: bool, readback: str, head: str) -> None:
+    stdout, stderr = output(monkeypatch, terminal)
+    items = [event("ASSISTANT_TEXT_DELTA", head, part_index=0, part_start=True),
+             event("ASSISTANT_TEXT_DELTA", "old-tail", part_index=1, part_start=True),
+             event("MODEL_ATTEMPT_FINISHED", status="SUCCEEDED"),
+             event("MODEL_ATTEMPT_STARTED", attempt=2, replaces_stream_attempt_seq=None),
+             event("ASSISTANT_TEXT_DELTA", "new-only", attempt=2, part_index=0, part_start=True),
+             event("MODEL_ATTEMPT_FINISHED", attempt=2, status="SUCCEEDED"),
+             event("MODEL_REQUEST_FINISHED", attempt=2, status="SUCCEEDED"),
+             event("EXECUTION_SUCCEEDED")]
+
+    class ReadbackExecution(Execution):
+        async def model_interactions(self, **kwargs: object) -> SimpleNamespace:
+            assert kwargs == {"include_content": True, "agent_run_seq": 1, "model_request_seq": 1, "limit": 1}
+            if readback == "error":
+                raise RuntimeError("synthetic reader failure")
+            return SimpleNamespace(items=[model_item("new-only", 2 if readback == "other-request" else 1)] if readback != "missing" else [])
+
+    assert await run._stream_result(ReadbackExecution(items)) == 0
+    value = plain(stdout.getvalue())
+    assert value.startswith(head + "old-tail\n")
+    if head:
+        assert "part 0 UPDATED" in value
+    assert "SUCCEEDED" in plain(stderr.getvalue()), "readback failure cannot change the execution verdict"
+    if readback == "available":
+        final = value.split("CANONICAL TEXT RESPONSE:", 1)[1]
+        assert "all earlier preview text for this request is superseded" in final
+        assert "\nnew-only\n" in final and "old-tail" not in final and "old-head" not in final
+        assert "COMPLETED: committed SDK text above" in final
+    else:
+        assert "FINAL UNAVAILABLE" in value and "COMPLETED" not in value
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("same_id", [False, True])
 async def test_real_runtime_continuation_events_reach_cli_and_web(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, same_id: bool) -> None:
     from .test_model_stream_retry import runtime_continuation_retry_events
@@ -302,15 +353,18 @@ async def test_real_runtime_continuation_events_reach_cli_and_web(monkeypatch: p
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required for the Web projection replay")
-    observed = await runtime_continuation_retry_events(same_id)
+    observed, models = await runtime_continuation_retry_events(same_id, include_models=True)
     stdout, _ = output(monkeypatch)
     items = [SimpleNamespace(depth=0, execution_id=item.execution_id, event=item) for item in observed]
-    execution = Execution(items)
+    execution = Execution(items, models)
     execution.execution_id = items[0].execution_id
     assert await run._stream_result(execution) == 0
     value = stdout.getvalue()
     assert value.count("INVALIDATED") == 1
     assert "attempt 2 FAILED" not in value
+    canonical = value.split("CANONICAL TEXT RESPONSE:", 1)[1]
+    expected = "".join(part["content"] for part in models[0].response["parts"] if part["part_kind"] == "text")
+    assert f"\n{expected}\n" in canonical and "discarded" not in canonical
     if same_id:
         assert value.index("segment-one") < value.index("part 0 UPDATED") < value.index("segment-two")
         assert "segment-one segment-two" not in value
@@ -335,12 +389,12 @@ async def test_real_runtime_empty_start_reaches_cli_and_web(monkeypatch: pytest.
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required for the Web projection replay")
-    observed = await runtime_empty_start_events()
+    observed, models = await runtime_empty_start_events(include_models=True)
     deltas = [item.payload for item in observed if item.event_type == "ASSISTANT_TEXT_DELTA"]
     assert [(item["text"], item["part_start"]) for item in deltas] == [("", True), ("winner", False)]
     stdout, _ = output(monkeypatch)
     items = [SimpleNamespace(depth=0, execution_id=item.execution_id, event=item) for item in observed]
-    execution = Execution(items)
+    execution = Execution(items, models)
     execution.execution_id = items[0].execution_id
     assert await run._stream_result(execution) == 0
     assert stdout.getvalue() == "winner\n"

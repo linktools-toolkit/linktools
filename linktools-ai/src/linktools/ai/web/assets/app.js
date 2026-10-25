@@ -436,6 +436,29 @@ function scheduleLiveRender() {
   if(Math.min(liveRenderCost,previousLiveRenderCost)>liveFrameBudget)liveRenderTimer=setTimeout(frame,60-liveFrameBudget);
   else frame();
 }
+function acceptLiveResponse(item) {
+  const request=state.liveAttempts.get(modelKey(item));
+  if(!request || item.status!=='SUCCEEDED' || item.content_included!==true || !Array.isArray(item.response?.parts))return false;
+  request.canonicalResponse=item.response;request.canonicalError=null;request.finished=true;request.status='SUCCEEDED';
+  for(const attempt of request.attempts.values())if(['RUNNING','SUCCEEDED'].includes(attempt.status)){
+    attempt.text='';attempt.thinking='';attempt.parts.clear();
+  }
+  scheduleLiveRender();return true;
+}
+async function readLiveResponse(request,force=false) {
+  if(request.canonicalResponse || request.canonicalPending || request.canonicalError && !force)return;
+  request.canonicalPending=true;request.canonicalError=null;scheduleLiveRender();
+  const generation=state.observationGeneration;
+  const current=()=>generation===state.observationGeneration && state.liveAttempts.get(request.key)===request;
+  try {
+    const params=new URLSearchParams({include_content:'true',limit:'1',agent_run_seq:request.agent_run_seq,model_request_seq:request.model_request_seq});
+    const page=await api(`/api/executions/${enc(request.execution_id)}/models?${params}`);
+    if(!current())return;
+    const item=page.items.find(item=>modelKey(item)===request.key);
+    if(!item || !acceptLiveResponse(item))request.canonicalError='Committed response content unavailable';
+  } catch(error) {if(current())request.canonicalError='Committed response read unavailable';}
+  finally {if(current()){request.canonicalPending=false;scheduleLiveRender();}}
+}
 function renderLiveAttempts(live,wanted) {
   live.attemptNodes ||= new Map();const retained=new Set();
   for(const request of state.liveAttempts.values()) {
@@ -465,11 +488,16 @@ function renderLiveAttempts(live,wanted) {
       node.thinking=element('details','tool-message');node.thinkingBody=element('pre');node.thinking.append(element('summary','','Thinking · SDK display'),node.thinkingBody);
       node.body=markdownMessage('');node.append(node.label,node.thinking,node.body);live.attemptNodes.set(key,node);
     }
-    const preview=streamResponsePreview(request),content=preview.text,thinking=preview.thinking;
-    const status=request.status==='SUCCEEDED'?'COMPLETED RESPONSE':['FAILED','CANCELLED'].includes(request.status)?`INCOMPLETE RESPONSE · ${request.status}`:'LIVE RESPONSE · incomplete SDK display';
-    const label=`${status} · run ${request.agent_run_seq} · request ${request.model_request_seq}${preview.truncated?' · preview GAP · noncontiguous fragment':''}`;
+    const preview=streamResponsePreview(request),canonical=request.canonicalResponse;
+    const responseText=kind=>canonical.parts.filter(part=>part.part_kind===kind && typeof part.content==='string').map(part=>part.content).join('');
+    const content=canonical?responseText('text'):request.status==='SUCCEEDED'?'':preview.text;
+    const thinking=canonical?responseText('thinking'):request.status==='SUCCEEDED'?'':preview.thinking;
+    const status=canonical?'COMPLETED MODEL RESPONSE · committed SDK text':request.status==='SUCCEEDED'?`MODEL REQUEST SUCCEEDED · ${request.canonicalError || 'awaiting committed response'}`:['FAILED','CANCELLED'].includes(request.status)?`INCOMPLETE RESPONSE · ${request.status}`:'LIVE RESPONSE · incomplete SDK display';
+    const label=`${status} · run ${request.agent_run_seq} · request ${request.model_request_seq}${!canonical && preview.truncated?' · preview GAP · noncontiguous fragment':''}`;
     if(node.label.textContent!==label)node.label.textContent=label;
     node.thinking.hidden=!thinking;if(node.thinkingBody.textContent!==thinking)node.thinkingBody.textContent=thinking;
+    if(!node.reload){node.reload=button('Load committed response',()=>readLiveResponse(request,true));node.append(node.reload);}
+    node.reload.hidden=request.status!=='SUCCEEDED' || Boolean(canonical);node.reload.disabled=Boolean(request.canonicalPending);
     updateMarkdownMessage(node.body,content);node.body.hidden=!content;wanted.push(node);
   }
   for(const key of live.attemptNodes.keys())if(!retained.has(key))live.attemptNodes.delete(key);
@@ -528,6 +556,7 @@ function observedInfo(info, readGeneration=state.observationReadGeneration) {
   if(previous && readGeneration!==state.observationReadGeneration)return previous;
   state.observedInfo=info;
   if(['FAILED','CANCELLED'].includes(info.status))updateStreamAttempts(state.liveAttempts,{execution_id:info.execution_id,event:{event_type:'EXECUTION_'+info.status}});
+  if(terminal(info.status))for(const request of state.liveAttempts.values())if(request.execution_id===info.execution_id && request.status==='SUCCEEDED')readLiveResponse(request);
   return info;
 }
 async function selectExecution(id, generation=state.generation) {
@@ -851,7 +880,7 @@ async function loadNativeTimeline(more=false,refresh=false) {
       if(!current())return;
       incoming.push(...page.items);cursor=page.next_cursor || null;
     } while(refresh && cursor && incoming.length<target);
-    view.items=mergeNativeItems(view.items,incoming);view.cursor=cursor;
+    view.items=mergeNativeItems(view.items,incoming);view.cursor=cursor;incoming.forEach(acceptLiveResponse);
     incoming.filter(item=>item.status!=='RUNNING').forEach(item=>view.pending.delete(modelKey(item)));
   } catch(error) {if(current())view.error=error.message;}
   finally {if(current()){view.loading=false;view.error ||= [...view.pending.values()].map(request=>request.error).filter(Boolean).join('\n');renderNativeViews();if(view.pending.size)scheduleNativeRefresh();}}
@@ -889,7 +918,7 @@ async function refreshNativeRequests(view,generation) {
         const page=await api(`/api/executions/${enc(item.execution_id)}/models?${params}`);
         if(!current())return;
         if(!page.items.some(value=>modelKey(value)===key))throw new Error('Model request record is no longer available');
-        view.items=mergeNativeItems(view.items,page.items);
+        view.items=mergeNativeItems(view.items,page.items);page.items.forEach(acceptLiveResponse);
         if(view.pending.get(key)===request)view.pending.delete(key);
       } catch(error){
         if(!current())return;
@@ -1132,6 +1161,10 @@ async function watchExecution(id,generation) {
         if(envelope.cursor)state.cursor=envelope.cursor;
         if(envelope.type==='model') {
           const previous=state.models.get(modelKey(item.item));upsertModel(state.models,item.item);
+          const request=state.liveAttempts.get(modelKey(item.item));
+          if(!acceptLiveResponse(item.item) && request && item.visibility==='durable_history' && item.item.status==='SUCCEEDED'){
+            request.status='SUCCEEDED';request.finished=true;readLiveResponse(request);
+          }
           if(item.item.status!=='RUNNING' && (!previous || previous.status==='RUNNING') && (id===state.selectedExecution || item.item.execution_id===state.selectedExecution))scheduleNativeRefresh(item.item);
           if(state.tab==='overview' && id===state.selectedExecution)renderOverview();
         }
