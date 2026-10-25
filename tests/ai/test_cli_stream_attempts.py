@@ -4,8 +4,12 @@
 
 import asyncio
 import io
+import json
 import re
-from types import SimpleNamespace
+import shutil
+import subprocess
+from pathlib import Path
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 from rich.console import Console
@@ -61,6 +65,7 @@ async def test_cli_normal_stream_output_is_unchanged(monkeypatch: pytest.MonkeyP
         event("ASSISTANT_TEXT_DELTA", "hello ", attempt=attempt),
         event("ASSISTANT_THINKING_DELTA", "thought", attempt=attempt),
         event("ASSISTANT_TEXT_DELTA", "world", attempt=attempt),
+        event("MODEL_ATTEMPT_FINISHED", attempt=attempt, status="SUCCEEDED"),
         event("MODEL_REQUEST_FINISHED", attempt=attempt, status="SUCCEEDED"),
         event("EXECUTION_SUCCEEDED"),
     ])) == 0
@@ -83,10 +88,10 @@ async def test_cli_retries_invalidate_partial_on_stdout_before_replacement(monke
             yield event("ASSISTANT_TEXT_DELTA", "old-partial")
             first_visible.set()
             await release.wait()
-            yield event("MODEL_ATTEMPT_FAILED", status="FAILED", retry_scheduled=True)
+            yield event("MODEL_ATTEMPT_FINISHED", status="FAILED", retry_scheduled=True)
             yield event("MODEL_ATTEMPT_STARTED", attempt=2, replaces_stream_attempt_seq=1)
             yield event("ASSISTANT_TEXT_DELTA", "second-partial", attempt=2)
-            yield event("MODEL_ATTEMPT_FAILED", attempt=2, status="FAILED", retry_scheduled=True)
+            yield event("MODEL_ATTEMPT_FINISHED", attempt=2, status="FAILED", retry_scheduled=True)
             yield event("MODEL_ATTEMPT_STARTED", attempt=3, replaces_stream_attempt_seq=2)
             yield event("ASSISTANT_TEXT_DELTA", "winner", attempt=3)
             yield event("MODEL_REQUEST_FINISHED", attempt=3, status="SUCCEEDED")
@@ -106,7 +111,7 @@ async def test_cli_retries_invalidate_partial_on_stdout_before_replacement(monke
     assert value.count("INVALIDATED") == 2
     assert value.count("winner") == 1
     assert value.index("old-partial") < value.index("attempt 1 FAILED") < value.index("attempt 2 begins") < value.index("second-partial")
-    assert value.index("attempt 2 FAILED") < value.index("attempt 3 begins") < value.index("winner") < value.index("attempt 3 COMPLETED")
+    assert value.index("attempt 2 FAILED") < value.index("attempt 3 begins") < value.index("winner") < value.index("request 1 COMPLETED")
     assert "old-partialsecond-partialwinner" not in value
     if not terminal:
         assert "\x1b" not in value
@@ -119,7 +124,7 @@ async def test_cli_terminal_attempt_is_not_a_completed_answer(monkeypatch: pytes
     with pytest.raises(CommandError):
         await run._stream_result(Execution([
             event("ASSISTANT_TEXT_DELTA", "uncommitted"),
-            event("MODEL_ATTEMPT_FAILED", status=status, retry_scheduled=False),
+            event("MODEL_ATTEMPT_FINISHED", status=status, retry_scheduled=False),
             event("MODEL_REQUEST_FINISHED", status=status),
             event("EXECUTION_" + status),
         ]))
@@ -138,12 +143,12 @@ async def test_cli_ignores_old_attempts_and_does_not_clear_other_requests(monkey
         event("MODEL_ATTEMPT_STARTED", attempt=2, request=2),
         event("MODEL_ATTEMPT_STARTED", request=2),
         event("ASSISTANT_TEXT_DELTA", "stale", request=2),
-        event("MODEL_ATTEMPT_FAILED", request=2, status="FAILED"),
+        event("MODEL_ATTEMPT_FINISHED", request=2, status="FAILED"),
         event("MODEL_REQUEST_FINISHED", request=2, status="SUCCEEDED"),
         event("ASSISTANT_TEXT_DELTA", "child", depth=1, execution="child"),
         event("ASSISTANT_TEXT_DELTA", "replacement", attempt=2, request=2),
         event("MODEL_REQUEST_FINISHED", attempt=2, request=2, status="SUCCEEDED"),
-        event("MODEL_ATTEMPT_FAILED", attempt=2, request=2, status="FAILED"),
+        event("MODEL_ATTEMPT_FINISHED", attempt=2, request=2, status="FAILED"),
         event("ASSISTANT_TEXT_DELTA", "new-run", agent_run=2),
         event("MODEL_REQUEST_FINISHED", agent_run=2, status="SUCCEEDED"),
         event("EXECUTION_SUCCEEDED"),
@@ -163,7 +168,7 @@ async def test_cli_failed_attempt_without_text_adds_no_stdout_noise(monkeypatch:
     assert await run._stream_result(Execution([
         event("MODEL_ATTEMPT_STARTED"),
         event("ASSISTANT_THINKING_DELTA", "partial thought"),
-        event("MODEL_ATTEMPT_FAILED", status="FAILED", retry_scheduled=True),
+        event("MODEL_ATTEMPT_FINISHED", status="FAILED", retry_scheduled=True),
         event("MODEL_ATTEMPT_STARTED", attempt=2),
         event("ASSISTANT_TEXT_DELTA", "answer", attempt=2),
         event("MODEL_REQUEST_FINISHED", attempt=2, status="SUCCEEDED"),
@@ -192,7 +197,115 @@ async def test_cli_preview_gap_is_not_an_attempt_retry(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
-async def test_cli_interrupt_marks_visible_attempt_unconfirmed(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("terminal", [False, True])
+@pytest.mark.parametrize("retry_initial", [False, True])
+async def test_cli_successful_continuation_preserves_previous_segments(monkeypatch: pytest.MonkeyPatch, terminal: bool, retry_initial: bool) -> None:
+    stdout, _ = output(monkeypatch, terminal)
+    seq = 2 if retry_initial else 1
+    items = [event("MODEL_ATTEMPT_STARTED")]
+    if retry_initial:
+        items += [event("ASSISTANT_TEXT_DELTA", "discard"),
+                  event("MODEL_ATTEMPT_FINISHED", status="FAILED", retry_scheduled=True),
+                  event("MODEL_ATTEMPT_STARTED", attempt=seq, replaces_stream_attempt_seq=1)]
+    items += [event("ASSISTANT_TEXT_DELTA", "prefix ", attempt=seq, part_index=0, part_start=True),
+              event("MODEL_ATTEMPT_FINISHED", attempt=seq, status="SUCCEEDED"),
+              event("MODEL_ATTEMPT_STARTED", attempt=seq + 1, replaces_stream_attempt_seq=None),
+              event("ASSISTANT_TEXT_DELTA", "suffix", attempt=seq + 1, part_index=1, part_start=True),
+              event("MODEL_ATTEMPT_FINISHED", attempt=seq + 1, status="SUCCEEDED"),
+              event("MODEL_REQUEST_FINISHED", attempt=seq + 1, status="SUCCEEDED"),
+              event("EXECUTION_SUCCEEDED")]
+    assert await run._stream_result(Execution(items)) == 0
+    value = plain(stdout.getvalue())
+    assert "prefix suffix" in value
+    assert f"attempt {seq + 1} begins" not in value
+    assert f"attempt {seq} FAILED" not in value
+    if retry_initial:
+        assert value.count("INVALIDATED") == 1
+        assert value.count("COMPLETED") == 1
+    else:
+        assert value == "prefix suffix\n"
+
+
+@pytest.mark.asyncio
+async def test_cli_failed_continuation_does_not_invalidate_successful_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    stdout, _ = output(monkeypatch)
+    with pytest.raises(CommandError):
+        await run._stream_result(Execution([
+            event("ASSISTANT_TEXT_DELTA", "completed prefix "),
+            event("MODEL_ATTEMPT_FINISHED", status="SUCCEEDED"),
+            event("MODEL_ATTEMPT_STARTED", attempt=2, replaces_stream_attempt_seq=None),
+            event("ASSISTANT_TEXT_DELTA", "partial suffix", attempt=2),
+            event("MODEL_ATTEMPT_FINISHED", attempt=2, status="FAILED", retry_scheduled=False),
+            event("MODEL_REQUEST_FINISHED", attempt=2, status="FAILED"),
+            event("EXECUTION_FAILED"),
+        ]))
+    value = stdout.getvalue()
+    assert value.startswith("completed prefix partial suffix\n")
+    assert "attempt 1 FAILED" not in value
+    assert "attempt 2 FAILED" in value and "14 streamed text characters INVALIDATED" in value
+    assert value.count("logical response incomplete") == 1
+    assert "COMPLETED" not in value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement", ["updated ", ""])
+async def test_cli_part_update_preserves_other_successful_parts(monkeypatch: pytest.MonkeyPatch, replacement: str) -> None:
+    stdout, _ = output(monkeypatch)
+    items = [event("ASSISTANT_TEXT_DELTA", "old ", part_index=0, part_start=True),
+             event("ASSISTANT_TEXT_DELTA", "keep", part_index=1, part_start=True),
+             event("MODEL_ATTEMPT_FINISHED", status="SUCCEEDED"),
+             event("MODEL_ATTEMPT_STARTED", attempt=2, replaces_stream_attempt_seq=None),
+             event("ASSISTANT_TEXT_DELTA", replacement, attempt=2, part_index=0, part_start=True),
+             event("MODEL_ATTEMPT_FINISHED", attempt=2, status="SUCCEEDED"),
+             event("MODEL_REQUEST_FINISHED", attempt=2, status="SUCCEEDED"),
+             event("EXECUTION_SUCCEEDED")]
+    for item in items:
+        item.event.payload = MappingProxyType(item.event.payload)
+    assert await run._stream_result(Execution(items)) == 0
+    value = stdout.getvalue()
+    assert value.startswith("old keep\n")
+    assert "part 0 UPDATED" in value and "part 1 UPDATED" not in value
+    assert "INVALIDATED" not in value and "FAILED" not in value
+    assert value.count("keep") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("same_id", [False, True])
+async def test_real_runtime_continuation_events_reach_cli_and_web(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, same_id: bool) -> None:
+    from .test_model_stream_retry import runtime_continuation_retry_events
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the Web projection replay")
+    observed = await runtime_continuation_retry_events(same_id)
+    stdout, _ = output(monkeypatch)
+    items = [SimpleNamespace(depth=0, execution_id=item.execution_id, event=item) for item in observed]
+    execution = Execution(items)
+    execution.execution_id = items[0].execution_id
+    assert await run._stream_result(execution) == 0
+    value = stdout.getvalue()
+    assert value.count("INVALIDATED") == 1
+    assert "attempt 2 FAILED" not in value
+    if same_id:
+        assert value.index("segment-one") < value.index("part 0 UPDATED") < value.index("segment-two")
+        assert "segment-one segment-two" not in value
+    else:
+        assert "segment-one segment-two" in value and "UPDATED" not in value
+    wire = [{"execution_id":item.execution_id,"event":{"event_type":item.event_type,"payload":item.payload}}
+            for item in observed]
+    fixture = tmp_path / "stream-events.json"
+    fixture.write_text(json.dumps(wire, default=dict))
+    root = Path(__file__).parents[2]
+    result = subprocess.run([node, str(Path(__file__).with_name("web_console_attempts.mjs")),
+                             str(root / "linktools-ai/src/linktools/ai/web/assets/console.js"), str(fixture),
+                             "segment-two" if same_id else "segment-one segment-two"],
+                            capture_output=True, text=True, timeout=20, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("closed_segment", [False, True])
+async def test_cli_interrupt_marks_visible_attempt_unconfirmed(monkeypatch: pytest.MonkeyPatch, closed_segment: bool) -> None:
     stdout, _ = output(monkeypatch)
     waiting = asyncio.Event()
 
@@ -202,6 +315,8 @@ async def test_cli_interrupt_marks_visible_attempt_unconfirmed(monkeypatch: pyte
         async def watch(self, *, include_content: bool):
             assert include_content
             yield event("ASSISTANT_TEXT_DELTA", "partial")
+            if closed_segment:
+                yield event("MODEL_ATTEMPT_FINISHED", status="SUCCEEDED")
             waiting.set()
             await asyncio.Event().wait()
 
@@ -211,5 +326,9 @@ async def test_cli_interrupt_marks_visible_attempt_unconfirmed(monkeypatch: pyte
     with pytest.raises(asyncio.CancelledError):
         await task
     assert "INTERRUPTED" in stdout.getvalue()
-    assert "INVALIDATED" in stdout.getvalue()
+    if closed_segment:
+        assert "logical response incomplete" in stdout.getvalue()
+        assert "INVALIDATED" not in stdout.getvalue()
+    else:
+        assert "INVALIDATED" in stdout.getvalue()
     assert "COMPLETED" not in stdout.getvalue()

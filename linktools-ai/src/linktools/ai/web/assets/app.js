@@ -1,4 +1,4 @@
-import {terminal, modelKey, eventKey, upsertModel, mergePage, readSSE, metricValue, duration, modelLabel, usageLabel, promptLayers, clientAttemptKey, clientBodyBytes, clientBodyText, updateStreamAttempts} from './console.js';
+import {terminal, modelKey, eventKey, upsertModel, mergePage, readSSE, metricValue, duration, modelLabel, usageLabel, promptLayers, clientAttemptKey, clientBodyBytes, clientBodyText, updateStreamAttempts, streamAttemptText, streamResponsePreview} from './console.js';
 import {renderMarkdown, inputPresentation, capturedRequest} from './message.js';
 
 const $ = id => document.getElementById(id);
@@ -440,29 +440,37 @@ function renderLiveAttempts(live,wanted) {
   live.attemptNodes ||= new Map();const retained=new Set();
   for(const request of state.liveAttempts.values()) {
     if(request.execution_id!==state.observedExecution)continue;
-    for(const attempt of request.attempts.values()) {
-      const failed=['FAILED','CANCELLED'].includes(attempt.status),key=request.key+':'+attempt.seq;
-      retained.add(key);
+    const attempts=[...request.attempts.values()].sort((a,b)=>a.seq-b.seq);
+    for(const attempt of attempts.filter(item=>['FAILED','CANCELLED'].includes(item.status))) {
+      const key=request.key+':'+attempt.seq;retained.add(key);
       let node=live.attemptNodes.get(key);
-      if(!node || node.failed!==failed) {
-        node=element(failed?'details':'section',failed?'tool-message failed-attempt':'stream-attempt');node.failed=failed;
-        if(failed){node.open=attempt.expanded || false;node.ontoggle=()=>{if(node.isConnected)attempt.expanded=node.open;};}
-        node.label=element(failed?'summary':'div',failed?'':'message-label');node.append(node.label);
-        node.thinking=element('details','tool-message');node.thinkingBody=element('pre');node.thinking.append(element('summary','','Thinking · SDK display'),node.thinkingBody);
-        node.body=failed?element('pre'):markdownMessage('');node.append(node.thinking,node.body);
+      if(!node) {
+        node=element('details','tool-message failed-attempt');node.open=attempt.expanded || false;
+        node.ontoggle=()=>{if(node.isConnected)attempt.expanded=node.open;};
+        node.label=element('summary');node.body=element('pre');node.thinking=element('pre');node.append(node.label,node.thinking,node.body);
         live.attemptNodes.set(key,node);
       }
-      const identity=`run ${request.agent_run_seq} · request ${request.model_request_seq} · attempt ${attempt.seq}`;
-      const label=failed?`${attempt.status} · ${identity} · partial content is not an answer`:
-        `${attempt.status==='SUCCEEDED'?'COMPLETED RESPONSE':'LIVE RESPONSE · incomplete SDK display'} · ${identity}${attempt.truncated?' · preview truncated':''}`;
-      if(node.label.textContent!==label)node.label.textContent=label;
-      node.thinking.hidden=!attempt.thinking;
-      if(node.thinkingBody.textContent!==attempt.thinking)node.thinkingBody.textContent=attempt.thinking;
-      if(failed){if(node.body.textContent!==attempt.text)node.body.textContent=attempt.text;}
-      else updateMarkdownMessage(node.body,attempt.text);
-      node.body.hidden=!attempt.text;
-      wanted.push(node);
+      node.label.textContent=`${attempt.status} · run ${request.agent_run_seq} · request ${request.model_request_seq} · attempt ${attempt.seq} · partial content is not an answer`;
+      const content=streamAttemptText(attempt),thinking=streamAttemptText(attempt,'thinking');
+      if(node.body.textContent!==content)node.body.textContent=content;
+      if(node.thinking.textContent!==thinking)node.thinking.textContent=thinking;
+      node.body.hidden=!content;node.thinking.hidden=!thinking;wanted.push(node);
     }
+    const contributing=attempts.filter(item=>item.status==='SUCCEEDED' || item.seq===request.current && item.status==='RUNNING');
+    if(!contributing.length)continue;
+    const key=request.key+':response';retained.add(key);
+    let node=live.attemptNodes.get(key);
+    if(!node) {
+      node=element('section','stream-attempt');node.label=element('div','message-label');
+      node.thinking=element('details','tool-message');node.thinkingBody=element('pre');node.thinking.append(element('summary','','Thinking · SDK display'),node.thinkingBody);
+      node.body=markdownMessage('');node.append(node.label,node.thinking,node.body);live.attemptNodes.set(key,node);
+    }
+    const preview=streamResponsePreview(request),content=preview.text,thinking=preview.thinking;
+    const status=request.status==='SUCCEEDED'?'COMPLETED RESPONSE':['FAILED','CANCELLED'].includes(request.status)?`INCOMPLETE RESPONSE · ${request.status}`:'LIVE RESPONSE · incomplete SDK display';
+    const label=`${status} · run ${request.agent_run_seq} · request ${request.model_request_seq}${preview.truncated?' · preview truncated':''}`;
+    if(node.label.textContent!==label)node.label.textContent=label;
+    node.thinking.hidden=!thinking;if(node.thinkingBody.textContent!==thinking)node.thinkingBody.textContent=thinking;
+    updateMarkdownMessage(node.body,content);node.body.hidden=!content;wanted.push(node);
   }
   for(const key of live.attemptNodes.keys())if(!retained.has(key))live.attemptNodes.delete(key);
 }
@@ -492,8 +500,8 @@ function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
   live.activityEvents=events;live.activityFocusNodes=new Map();live.activityNodes=[];
   const activity=element('details','tool-message');activity.id='live-activity';activity.open=state.liveActivityOpen;
   activity.ontoggle=()=>{if($('live-activity')===activity)state.liveActivityOpen=activity.open;};
-  const attention=item=>['MODEL_ATTEMPT_FAILED','EXECUTION_START_UNKNOWN','EXECUTION_RECOVERY_REQUIRED','EXECUTION_FAILED','CANCEL_REQUESTED','EXECUTION_CANCELLED','APPROVAL_REQUESTED','EXTERNAL_REQUESTED'].includes(item.event.event_type)
-    || ['MODEL_REQUEST_FINISHED','TOOL_CALL_FINISHED'].includes(item.event.event_type) && ['FAILED','CANCELLED'].includes(item.event.payload?.status);
+  const attention=item=>['EXECUTION_START_UNKNOWN','EXECUTION_RECOVERY_REQUIRED','EXECUTION_FAILED','CANCEL_REQUESTED','EXECUTION_CANCELLED','APPROVAL_REQUESTED','EXTERNAL_REQUESTED'].includes(item.event.event_type)
+    || ['MODEL_ATTEMPT_FINISHED','MODEL_REQUEST_FINISHED','TOOL_CALL_FINISHED'].includes(item.event.event_type) && ['FAILED','CANCELLED'].includes(item.event.payload?.status);
   const ordinary=events.filter(item=>!attention(item)).length;
   const summary=element('summary','',`Activity · ${ordinary} recent events`);summary.dataset.liveFocus='summary';activity.append(summary);
   if(ordinary)live.activityFocusNodes.set('summary',summary);
@@ -695,7 +703,7 @@ function sdkMessages(container,item,key) {
   container.append(element('p','source-note','Model input captured at SDK preparation, reconstructed from retained context. Message and part order are preserved; instructions and tools remain separate SDK fields, not invented provider messages.'));
   for(const attempt of item.stream_attempts || []) {
     const failed=attempt.status!=='SUCCEEDED';
-    const detail=readerDetail(key+':stream:'+attempt.stream_attempt_seq,`Model stream attempt ${attempt.stream_attempt_seq} · ${attempt.status}${failed?' · partial content is not an answer':' · winning response below'}`,'stream-attempt-history');
+    const detail=readerDetail(key+':stream:'+attempt.stream_attempt_seq,`Model stream attempt ${attempt.stream_attempt_seq} · ${attempt.status}${failed?' · partial content is not an answer':' · successful segment; logical response below'}`,'stream-attempt-history');
     const metadata=Object.fromEntries(Object.entries(attempt).filter(([name])=>name!=='response'));
     detail.append(properties(metadata));
     if(failed)detail.append(attempt.response!=null?rawDetail(attempt.response,'Failed SDK partial response'):element('p','muted','Partial response not retained or not included.'));

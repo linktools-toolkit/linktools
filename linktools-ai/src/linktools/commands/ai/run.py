@@ -5,6 +5,7 @@
 import asyncio
 import json
 from argparse import Namespace
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -135,7 +136,7 @@ async def _stream_result(execution: "Execution[object]") -> int:
         if output.consume(item):
             continue
         if event.event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value:
-            text = event.payload.get("text") if isinstance(event.payload, dict) else None
+            text = event.payload.get("text") if isinstance(event.payload, Mapping) else None
             if isinstance(text, str):
                 output.write_text(text)
         elif event.event_type == ExecutionDeltaType.ASSISTANT_THINKING_DELTA.value:
@@ -168,12 +169,12 @@ async def _stream_result(execution: "Execution[object]") -> int:
         }:
             status = event.event_type.removeprefix("EXECUTION_")
             output.finish(status)
-            if isinstance(event.payload, dict):
+            if isinstance(event.payload, Mapping):
                 error_code = event.payload.get("error_code")
                 safe_details = event.payload.get("safe_error_details", {})
         elif event.event_type == ExecutionEventType.EXECUTION_RECOVERY_REQUIRED.value:
             status = ExecutionStatus.RECOVERY_REQUIRED.value
-            if isinstance(event.payload, dict):
+            if isinstance(event.payload, Mapping):
                 error_code = event.payload.get("error_code")
                 safe_details = event.payload.get("safe_error_details", {})
 
@@ -195,12 +196,21 @@ async def _stream_result(execution: "Execution[object]") -> int:
 
 
 @dataclass
+class _PartDisplay:
+    kind: str
+    chars: int = 0
+    start: bool = False
+
+
+@dataclass
 class _AttemptDisplay:
     status: str = "RUNNING"
     text_chars: int = 0
     thinking: bool = False
     announced: bool = False
     truncated: bool = False
+    replaces: int | None = None
+    parts: dict[int, _PartDisplay] = field(default_factory=dict)
 
 
 @dataclass
@@ -245,7 +255,8 @@ class _AttemptOutput:
         if attempt.text_chars:
             request.framed = True
             self.boundary(
-                f"{self.identity(key, seq)} {status}: partial output INVALIDATED; "
+                f"{self.identity(key, seq)} {status}: this attempt's "
+                f"{attempt.text_chars} streamed text characters INVALIDATED; "
                 "not a completed answer"
             )
         if attempt.thinking:
@@ -255,6 +266,37 @@ class _AttemptOutput:
         for key, request in self.requests.items():
             for seq in request.attempts:
                 self.invalidate(key, request, seq, status)
+            if not request.finished and any(value.status == "SUCCEEDED" and value.text_chars for value in request.attempts.values()):
+                self.boundary(f"run {key[1]} request {key[2]} {status}: logical response incomplete; completed segments are not a final answer")
+            request.finished = True
+
+    def visible_part(self, request: _RequestDisplay, index: int) -> _PartDisplay | None:
+        result = None
+        for seq, attempt in sorted(request.attempts.items()):
+            if attempt.status != "SUCCEEDED" and not (seq == request.current and attempt.status == "RUNNING"):
+                continue
+            part = attempt.parts.get(index)
+            if part is not None:
+                result = _PartDisplay(part.kind, part.chars + (result.chars if result and not part.start else 0), part.start)
+        return result
+
+    def update_part(self, key: tuple[str, int, int], request: _RequestDisplay,
+                    attempt: _AttemptDisplay, payload: Mapping[str, object], kind: str, text: str) -> None:
+        index, start = payload.get("part_index"), payload.get("part_start")
+        if not isinstance(index, int) or isinstance(index, bool) or index < 0 or not isinstance(start, bool):
+            return
+        if start:
+            previous = self.visible_part(request, index)
+            if previous is not None and previous.chars:
+                label = f"run {key[1]} request {key[2]} part {index} UPDATED: prior {previous.kind} for this part is superseded; replacement follows"
+                if previous.kind == "text":
+                    self.boundary(label)
+                    request.framed = True
+                else:
+                    _emit_event(self.event_console, "[thinking updated]", label, "cyan")
+            attempt.parts[index] = _PartDisplay(kind, start=True)
+        part = attempt.parts.setdefault(index, _PartDisplay(kind))
+        part.chars += len(text)
 
     def consume(self, item: "ExecutionTreeEvent") -> bool:
         event = item.event
@@ -269,9 +311,9 @@ class _AttemptOutput:
                         self.boundary(f"{self.identity(key, request.current)} preview GAP: following output is not contiguous; no retry implied")
             return True
         if event.event_type not in {
-            "MODEL_ATTEMPT_STARTED", "MODEL_ATTEMPT_FAILED", "MODEL_REQUEST_FINISHED",
+            "MODEL_ATTEMPT_STARTED", "MODEL_ATTEMPT_FINISHED", "MODEL_REQUEST_FINISHED",
             "ASSISTANT_TEXT_DELTA", "ASSISTANT_THINKING_DELTA",
-        } or not isinstance(event.payload, dict):
+        } or not isinstance(event.payload, Mapping):
             return False
         payload = event.payload
         values = tuple(payload.get(name) for name in ("agent_run_seq", "model_request_seq", "stream_attempt_seq"))
@@ -282,39 +324,54 @@ class _AttemptOutput:
         request = self.requests.setdefault(key, _RequestDisplay())
         if request.finished and seq not in request.attempts:
             return True
-        attempt = request.attempts.setdefault(seq, _AttemptDisplay(status="FAILED" if seq < request.current else "RUNNING"))
+        attempt = request.attempts.setdefault(seq, _AttemptDisplay())
         if seq > request.current:
-            if request.current:
-                self.invalidate(key, request, request.current, "FAILED")
             request.current = seq
-        if event.event_type == "MODEL_ATTEMPT_FAILED":
-            self.invalidate(key, request, seq, "CANCELLED" if payload.get("status") == "CANCELLED" else "FAILED")
+        if event.event_type == "MODEL_ATTEMPT_STARTED":
+            replaces = payload.get("replaces_stream_attempt_seq")
+            if isinstance(replaces, int) and not isinstance(replaces, bool) and 0 < replaces < seq:
+                attempt.replaces = replaces
+        elif event.event_type == "MODEL_ATTEMPT_FINISHED":
+            status = payload.get("status")
+            if status == "SUCCEEDED" and attempt.status == "RUNNING":
+                attempt.status = "SUCCEEDED"
+            elif status in {"FAILED", "CANCELLED"}:
+                self.invalidate(key, request, seq, status)
         elif event.event_type == "MODEL_REQUEST_FINISHED":
             if seq != request.current:
                 return True
             status = payload.get("status")
             if status == "SUCCEEDED":
-                if attempt.status != "SUCCEEDED" and request.framed:
-                    self.boundary(f"{self.identity(key, seq)} COMPLETED" + ("; preview is incomplete" if attempt.truncated else ""))
-                elif attempt.status != "SUCCEEDED" and attempt.truncated and attempt.text_chars:
-                    self.boundary(f"{self.identity(key, seq)} model completed; preview is incomplete")
-                attempt.status = "SUCCEEDED"
+                truncated = any(value.truncated for value in request.attempts.values() if value.status in {"RUNNING", "SUCCEEDED"})
+                if not request.finished and request.framed:
+                    self.boundary(f"run {run} request {model_request} COMPLETED" + ("; preview is incomplete" if truncated else ""))
+                elif not request.finished and truncated:
+                    self.boundary(f"run {run} request {model_request} model completed; preview is incomplete")
+                if attempt.status == "RUNNING":
+                    attempt.status = "SUCCEEDED"
             elif status in {"FAILED", "CANCELLED"}:
                 self.invalidate(key, request, seq, status)
+                if not request.finished and any(value.status == "SUCCEEDED" and value.text_chars for value in request.attempts.values()):
+                    self.boundary(f"run {run} request {model_request} {status}: logical response incomplete; completed segments are not a final answer")
             if seq == request.current:
                 request.finished = True
         elif seq == request.current and attempt.status == "RUNNING":
-            if request.framed and not attempt.announced:
+            value = payload.get("text")
+            kind = "text" if event.event_type == "ASSISTANT_TEXT_DELTA" else "thinking"
+            if isinstance(value, str):
+                self.update_part(key, request, attempt, payload, kind, value)
+            if request.framed and attempt.replaces is not None and not attempt.announced:
                 self.boundary(f"{self.identity(key, seq)} begins; replacement output follows")
                 attempt.announced = True
-            value = payload.get("text")
             if event.event_type == "ASSISTANT_TEXT_DELTA" and isinstance(value, str):
-                self.write_text(value)
+                if value or payload.get("part_start") is not True:
+                    self.write_text(value)
                 attempt.text_chars += len(value)
                 attempt.truncated |= payload.get("stream_truncated") is True
             elif event.event_type == "ASSISTANT_THINKING_DELTA" and isinstance(value, str):
-                _emit_event(self.event_console, "[thinking]", value, "cyan")
-                attempt.thinking = True
+                if value or payload.get("part_start") is not True:
+                    _emit_event(self.event_console, "[thinking]", value, "cyan")
+                attempt.thinking |= bool(value)
         return True
 
 
@@ -327,7 +384,7 @@ def _emit_event(console: Console, label: str, value: str, style: str) -> None:
 
 
 def _tool_event_text(payload: object) -> str:
-    if not isinstance(payload, dict):
+    if not isinstance(payload, Mapping):
         return ""
     name = payload.get("tool_name")
     call_id = payload.get("call_id")
@@ -395,7 +452,7 @@ def _result_payload(result: "ExecutionResult") -> dict[str, object]:
 
 
 def _payload_text(payload: object) -> str:
-    if not isinstance(payload, dict):
+    if not isinstance(payload, Mapping):
         return ""
     if isinstance(payload.get("text"), str):
         return payload["text"]
