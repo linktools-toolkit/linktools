@@ -989,7 +989,10 @@ class InMemoryStepArchive(StagingAgentRunStore):
                         self._runtime_domain,
                     ),
                     response_context=(
-                        None if response is None else inline_context(response)
+                        None if response is None or (
+                            self._runtime_domain is not RuntimeDomain.TRACE
+                            and interaction.stream_attempts and interaction.status != "SUCCEEDED"
+                        ) else inline_context(response)
                     ),
                     client_requests=await prepare_client_requests(
                         client_requests, self._runtime_domain,
@@ -1321,7 +1324,10 @@ class StateStepArchive(AgentRunStore):
                     ),
                     response_context=(
                         None
-                        if response is None
+                        if response is None or (
+                            self._runtime_domain is not RuntimeDomain.TRACE
+                            and interaction.stream_attempts and interaction.status != "SUCCEEDED"
+                        )
                         else await archived_context(response)
                     ),
                     client_requests=await prepare_client_requests(
@@ -1467,6 +1473,8 @@ class StateStepArchive(AgentRunStore):
         values = tuple(
             replace(value, request_context=None, request_envelope_digest=None)
             if self._runtime_domain is RuntimeDomain.TRACE and value.status == "RUNNING"
+            else replace(value, response_context=None)
+            if self._runtime_domain is not RuntimeDomain.TRACE and value.stream_attempts and value.status != "SUCCEEDED"
             else value
             for value in interactions
         )

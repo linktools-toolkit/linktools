@@ -719,8 +719,9 @@ class ModelInteractionRecord:
 
     def validate_storage_domain(self, domain: RuntimeDomain) -> None:
         """Failed response bodies belong only to the trace retention domain."""
-        if domain is not RuntimeDomain.TRACE and any(
-            attempt.response_context is not None for attempt in self.stream_attempts or ()
+        if domain is not RuntimeDomain.TRACE and (
+            any(attempt.response_context is not None for attempt in self.stream_attempts or ())
+            or self.stream_attempts and self.status != "SUCCEEDED" and self.response_context is not None
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 

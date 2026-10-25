@@ -90,6 +90,77 @@ def _staged(*, large: bool = False):
     return interaction, payloads, request, winner, partial
 
 
+def _interrupted(status: str, *, large: bool = False):
+    interaction, payloads, request, response, partial = _staged(large=large)
+    failed, succeeded = interaction.stream_attempts
+    response = (replace(response[0], parts=[*response[0].parts, *partial[0].parts], state="interrupted"),)
+
+    def intern(raw: bytes) -> tuple[str, int]:
+        digest = hashlib.sha256(raw).hexdigest()
+        payloads[digest] = raw
+        return digest, len(raw)
+
+    interaction = replace(
+        interaction, status=status, error_code=ErrorCode.MODEL_API_ERROR.value,
+        response_context=build_inline_context_projection(response, intern),
+        stream_attempts=(
+            replace(succeeded, stream_attempt_seq=1, client_request_start=0, client_request_end=1),
+            replace(failed, stream_attempt_seq=2, client_request_start=1, client_request_end=2,
+                    status="CANCELLED" if status == "CANCELLED" else "FAILED",
+                    response_context=None, retry_scheduled=False),
+        ),
+    )
+    return interaction, payloads, request, response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("status", ("FAILED", "CANCELLED"))
+async def test_interrupted_stream_aggregate_stays_trace_only(
+    tmp_path: Path, backend: str, status: str,
+) -> None:
+    staged, payloads, _, response = _interrupted(status)
+    run = _run()
+    state = RuntimeState(_storage(backend, tmp_path))
+    await state.initialize(namespace="stream-observation", tenant_id="tenant")
+    await state.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
+    try:
+        trace = state.run_store.read_store(RuntimeDomain.TRACE)
+        checkpoint = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        prepared = PreparedArchive()
+        records = await trace.prepare_interactions(run, (staged,), payloads.__getitem__, prepared=prepared)
+        record, = records
+        await trace.sync_projection(run, events=(), checkpoints=(), interactions=records,
+                                    execution_id="execution", archive=prepared)
+        resolved = await trace.resolve_model_interactions(records, include_client_requests=True)
+        assert resolved[0][1] == response
+        assert all(attempt.response_context is None for attempt in record.stream_attempts)
+        with pytest.raises(AIError) as rejected:
+            record.validate_storage_domain(RuntimeDomain.CHECKPOINT)
+        assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        for projected in (
+            await checkpoint.prepare_interactions(run, (staged,), payloads.__getitem__, prepared=prepared),
+            await checkpoint.prepare_relocated_interactions(records, resolved, prepared=prepared),
+        ):
+            assert projected[0].response_context is None
+            assert projected[0].usage == staged.usage
+            projected[0].validate_storage_domain(RuntimeDomain.CHECKPOINT)
+            await checkpoint.sync_projection(run, events=(), checkpoints=(), interactions=projected,
+                                             execution_id="execution", archive=prepared)
+            read = await checkpoint.resolve_model_interactions(projected, include_client_requests=True)
+            assert read[0][1] is None
+            restored = await trace.prepare_relocated_interactions(projected, read, prepared=prepared)
+            assert restored[0].response_context is None
+        assert [message async for message in trace.iter_messages(agent_run_id=_RUN)] == []
+        legacy = replace(staged, model_request_seq=2, stream_attempts=None)
+        old = await checkpoint.prepare_interactions(run, (legacy,), payloads.__getitem__, prepared=prepared)
+        await checkpoint.sync_projection(run, events=(), checkpoints=(), interactions=old,
+                                         execution_id="execution", archive=prepared)
+        assert (await checkpoint.resolve_model_interactions(old))[0][1] == response
+    finally:
+        await state.close()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
 async def test_stream_attempts_round_trip_relocate_and_omit_content(tmp_path: Path, backend: str) -> None:
@@ -184,8 +255,16 @@ async def test_old_missing_attempts_and_observed_empty_remain_distinct(observed:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
-async def test_failed_partial_survives_snapshot_and_owned_cleanup(tmp_path: Path, backend: str) -> None:
-    staged, payloads, request, winner, partial = _staged(large=True)
+@pytest.mark.parametrize("interrupted", (None, "FAILED", "CANCELLED"))
+async def test_failed_partial_survives_snapshot_and_owned_cleanup(
+    tmp_path: Path, backend: str, interrupted: str | None,
+) -> None:
+    if interrupted:
+        staged, payloads, request, winner = _interrupted(interrupted, large=True)
+        attempt_responses = (None, None)
+    else:
+        staged, payloads, request, winner, partial = _staged(large=True)
+        attempt_responses = (partial, None)
     state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="stream-observation", tenant_id="tenant")
     await state.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
@@ -217,7 +296,7 @@ async def test_failed_partial_survives_snapshot_and_owned_cleanup(tmp_path: Path
         archive = restored.run_store.read_store(RuntimeDomain.TRACE)
         records = await archive.list_model_interactions(agent_run_id=_RUN)
         resolved = await archive.resolve_model_interactions(records)
-        assert resolved == [(request, winner, b'{"streaming":true}', None, (partial, None))]
+        assert resolved == [(request, winner, b'{"streaming":true}', None, attempt_responses)]
         assert [message async for message in archive.iter_messages(agent_run_id=_RUN)] == []
         refs = await _object_refs(restored)
         await archive.release_agent_run(_RUN, execution_id="execution")

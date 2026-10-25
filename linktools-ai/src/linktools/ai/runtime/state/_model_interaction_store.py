@@ -64,6 +64,8 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
         values = tuple(
             replace(value, request_context=None, request_envelope_digest=None)
             if self.runtime_domain is RuntimeDomain.TRACE and value.status == "RUNNING"
+            else replace(value, response_context=None)
+            if self.runtime_domain is not RuntimeDomain.TRACE and value.stream_attempts and value.status != "SUCCEEDED"
             else value
             for value in _validate_interaction_batch(run, interactions)
         )

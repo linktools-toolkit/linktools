@@ -285,6 +285,8 @@ class ModelInteractionItem:
     stream_attempts similarly distinguishes unobserved history (None) from an
     observed scope without stream attempts (()). include_content controls all
     SDK response bodies, including failed stream partials, but not metadata.
+    A failed observed stream may retain an interrupted aggregate in response
+    as trace evidence. Status, not the presence of response, determines success.
     """
 
     execution_id: str
