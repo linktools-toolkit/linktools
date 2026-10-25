@@ -41,7 +41,7 @@ from ..capability import AgentContext
 from ._trace_capture import record_http_bodies_enabled
 from ..core import ExecutionEventType, JsonValue
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..model import ModelClientRequest, ModelClientRequestRecorder, model_binding_error
+from ..model import ModelClientRequest, ModelClientRequestRecorder, ModelStreamAttempt, model_binding_error
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ._budget import RunBudgetContext
 from ._journal import ModelRequestFact, ModelRequestJournal, await_request_handoff
@@ -60,6 +60,9 @@ _StreamObserver = Callable[[str, BaseException | None], None]
 
 
 class ModelInteractionRecorder(Protocol):
+    def observe_stream_attempt(self, fact: ModelRequestFact, attempt: ModelStreamAttempt) -> None: ...
+    def response_message_seq(self, model_request_seq: int) -> int | None: ...
+
     async def commit_history_boundary(self) -> None: ...
 
     def begin_model_interaction(
@@ -97,6 +100,7 @@ class ModelInteractionRecorder(Protocol):
         duration_ns: int,
         usage: object | None,
         client_requests: tuple[ModelClientRequest, ...] | None = None,
+        stream_attempts: tuple[ModelStreamAttempt, ...] | None = None,
     ) -> None: ...
 
     async def record_model_event(
@@ -505,6 +509,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             safe_error = model_request_error(
                 error, content_omission_reason=recorder.body_omission_reason if recorder else None,
                 fact=self._journal.latest_for_step(ctx.run_step),
+                stream_attempts=None if recorder is None else recorder.stream_attempts,
             )
             self._provider_errors.setdefault(request_sequence, safe_error)
             if safe_error is not error:
@@ -513,7 +518,8 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         def stream_observed(event: str, error: BaseException | None) -> None:
             nonlocal stream_attempt_index
             recorder = self._client_recorders.get(request_sequence) if request_sequence is not None else None
-            if recorder is None:
+            if recorder is None or recorder.stream_attempts is not None:
+                # The retry adapter observes each SDK stream against its own HTTP range.
                 return
             if event in {"entered", "entry_error"}:
                 stream_attempt_index = len(recorder.requests) - 1
@@ -551,8 +557,32 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             output_retry_index=None if ctx.retry <= 0 else ctx.retry,
         )
         model_request_seq = fact.model_request_seq
+        async def stream_attempt_observed(attempt: ModelStreamAttempt) -> None:
+            if self._interaction_recorder is not None:
+                self._interaction_recorder.observe_stream_attempt(fact, attempt)
+            if self._event_sink is None:
+                return
+            event_type = (ExecutionEventType.MODEL_ATTEMPT_STARTED if attempt.status == "RUNNING"
+                          else ExecutionEventType.MODEL_ATTEMPT_FINISHED)
+            payload: dict[str, JsonValue] = {
+                "execution_id": self._execution_id, "agent_run_seq": self._agent_run_seq,
+                "model_request_seq": fact.model_request_seq,
+                "stream_attempt_seq": attempt.stream_attempt_seq, "status": attempt.status,
+                "replaces_stream_attempt_seq": attempt.replaces_stream_attempt_seq,
+                "retry_scheduled": attempt.retry_scheduled,
+                "started_at": attempt.started_at.isoformat(),
+                "finished_at": None if attempt.finished_at is None else attempt.finished_at.isoformat(),
+                "duration_ns": attempt.duration_ns,
+                "error_code": None if attempt.error is None else _model_error_code(attempt.error),
+                "error_type": None if attempt.error is None else environ.logging.redact(
+                    f"{type(attempt.error).__module__}.{type(attempt.error).__qualname__}"),
+                "usage": _event_usage(None, usage=attempt.usage),
+            }
+            await self._event_sink(event_type, payload)
+
         with ModelClientRequestRecorder(
             record_http_bodies=record_http_bodies_enabled(ctx.capabilities.values()),
+            stream_attempt_observer=stream_attempt_observed,
         ) as client_recorder:
             self._client_recorders[model_request_seq] = client_recorder
             try:
@@ -649,6 +679,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                                 interrupted = await self._complete_request(
                                     fact, run_context, selected_model, status="FAILED", response=partial,
                                     error_code=_model_error_code(observed_error), usage=usage, phase="failed",
+                                    usage_includes_unreturned=True,
                                 )
                                 if interrupted:
                                     raise asyncio.CancelledError
@@ -689,6 +720,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 except Exception as error:
                     safe_error = model_request_error(
                         error, content_omission_reason=client_recorder.body_omission_reason, fact=fact,
+                        stream_attempts=client_recorder.stream_attempts,
                     )
                     interrupted = await self._complete_request(
                         fact,
@@ -957,6 +989,14 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             "error_code": error_code,
             "usage": _event_usage(response, usage=usage),
         }
+        client_recorder = self._client_recorders.get(fact.model_request_seq)
+        attempts = None if client_recorder is None else client_recorder.stream_attempts
+        if phase != "started" and attempts:
+            payload["stream_attempt_seq"] = attempts[-1].stream_attempt_seq
+            if phase == "completed" and self._interaction_recorder is not None:
+                message_seq = self._interaction_recorder.response_message_seq(fact.model_request_seq)
+                if message_seq is not None:
+                    payload["message_seq"] = message_seq
         try:
             await self._event_sink(event_type, payload)
         except (asyncio.CancelledError, RunCancelled, AIError):
@@ -979,8 +1019,14 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         usage: RequestUsage | RunUsage | None,
         phase: str,
         client_requests: tuple[ModelClientRequest, ...] | None = None,
+        usage_includes_unreturned: bool = False,
     ) -> bool:
         model = self._prepared_models.get(fact.model_request_seq, model)
+        client_recorder = self._client_recorders.get(fact.model_request_seq)
+        unreturned = None if client_recorder is None else client_recorder.unreturned_stream_usage
+        if not usage_includes_unreturned and unreturned is not None:
+            usage = copy(usage) if usage is not None else RequestUsage()
+            usage.incr(unreturned)
         finished = self._journal.finish(fact.model_request_seq, status=status)
         self._finish_request(
             finished,
@@ -1092,6 +1138,8 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             duration_ns=fact.duration_ns or 0,
             usage=usage,
             client_requests=client_requests,
+            stream_attempts=(self._client_recorders[fact.model_request_seq].stream_attempts
+                             if fact.model_request_seq in self._client_recorders else None),
         )
 
     def _capture_model(
@@ -1232,12 +1280,13 @@ def _failed_attempt_usage(error: BaseException | None) -> RequestUsage | None:
 
 def model_request_error(
     error: Exception, *, content_omission_reason: str | None, fact: ModelRequestFact | None = None,
+    stream_attempts: tuple[ModelStreamAttempt, ...] | None = None,
 ) -> Exception:
     """Apply request retention without attributing consumer errors to transport."""
     if isinstance(error, RunCancelled):
         return error
     group = _fallback_error(error)
-    if content_omission_reason is None and group is None:
+    if content_omission_reason is None and group is None and not stream_attempts:
         return error
     diagnostics = (
         error.diagnostics
@@ -1259,9 +1308,14 @@ def model_request_error(
             details["model_request_seq"] = fact.model_request_seq
             details["purpose"] = fact.purpose
     if isinstance(classified, AIError):
-        status = classified.safe_details.get("status_code")
-        if type(status) is int:
-            details["status_code"] = status
+        for key in ("model_name", "phase", "reason", "status_code", "retry_after"):
+            if key in classified.safe_details:
+                details[key] = classified.safe_details[key]
+    if stream_attempts:
+        details["stream_attempt_seq"] = stream_attempts[-1].stream_attempt_seq
+        details["stream_attempt_count"] = len(stream_attempts)
+        if fact is not None:
+            details["model_request_seq"] = fact.model_request_seq
     return AIError(
         ErrorCode(_model_error_code(classified)),
         retryable=classified.retryable if isinstance(classified, AIError) else False,

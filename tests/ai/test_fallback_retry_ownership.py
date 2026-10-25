@@ -134,7 +134,7 @@ async def test_cancellation_during_candidate_backoff_stops_retry_and_fallback(mo
 
 
 @pytest.mark.asyncio
-async def test_committed_stream_error_does_not_retry_or_fall_back() -> None:
+async def test_runtime_partial_retry_stays_with_original_candidate() -> None:
     calls: list[str] = []
 
     async def primary(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
@@ -158,7 +158,7 @@ async def test_committed_stream_error_does_not_retry_or_fall_back() -> None:
         execution = await runtime.agents.get().start("synthetic")
         assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.FAILED
         assert len((await execution.model_interactions()).items) == 1
-    assert calls == ["primary"]
+    assert calls == ["primary"] * 3
 
 
 class _Count(BaseModel):

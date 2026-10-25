@@ -25,6 +25,8 @@ from ..errors import AIError, ErrorCode
 from ._contract import ModelBinding
 from ._errors import _is_quota_error
 from ._input import expand_input_types, validate_model_inputs
+from ._stream import _RetryingStreamedResponse
+from ._client_request import ModelClientRequestRecorder
 
 _logger = environ.get_logger("ai.model.binding")
 
@@ -244,6 +246,7 @@ class _RetryingModel(WrapperModel):
             and retry_after >= 0
         ):
             wait = max(wait, retry_after)
+        _logger.warning("model request retry backoff: model=%s delay_seconds=%s", self.model_name, wait)
         await asyncio.sleep(wait)
         if backoff == 0:
             return 0
@@ -289,41 +292,28 @@ class _RetryingModel(WrapperModel):
     ) -> AsyncGenerator[StreamedResponse, None]:
         if self._input_binding is not None:
             validate_model_inputs(self._input_binding, messages)
-        attempt = 0
-        backoff = self._retry_delay
-        while True:
-            entered = False
-            try:
-                async with self.wrapped.request_stream(
-                    messages,
-                    model_settings,
-                    model_request_parameters,
-                    run_context,
-                ) as response:
-                    entered = True
-                    yield response
-                return
-            except ModelAPIError as error:
-                if (
-                    entered
-                    or attempt >= self._max_retries
-                    or not _retryable_model_error(error)
-                ):
-                    raise
-                attempt += 1
-                _logger.warning(
-                    "retrying streamed model request: model=%s attempt=%s",
-                    self.model_name,
-                    attempt,
-                )
-                backoff = await self._wait_for_retry(error, backoff)
+        response = _RetryingStreamedResponse(
+            self.wrapped, messages, model_settings, model_request_parameters, run_context,
+            max_retries=self._max_retries, initial_backoff=self._retry_delay,
+            retryable=lambda error: _retryable_model_error(error, allow_stream_retry=True),
+            wait=self._wait_for_retry, recorder=ModelClientRequestRecorder.current(),
+        )
+        consumer_error: BaseException | None = None
+        try:
+            await response.prime()
+            yield response
+        except BaseException as error:
+            consumer_error = error
+            raise
+        finally:
+            await response.aclose(consumer_error)
 
 
-def _retryable_model_error(error: ModelAPIError) -> bool:
+def _retryable_model_error(error: ModelAPIError, *, allow_stream_retry: bool = False) -> bool:
     # These public categories are absent from some supported SDK releases.
     # Do not reinterpret an explicit permanent failure or an expired deadline
     # as a transient HTTP status, including quota errors carried by HTTP 429.
-    if (getattr(error, "in_stream", False) or _is_quota_error(error)
+    if ((getattr(error, "in_stream", False) and not allow_stream_retry) or _is_quota_error(error)
         or isinstance(error, getattr(sdk_errors, "ModelRequestTimeout", ()))):
         return False
     if isinstance(error, ModelHTTPError):

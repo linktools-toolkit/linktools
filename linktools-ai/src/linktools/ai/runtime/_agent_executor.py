@@ -157,6 +157,7 @@ _PLAN_SAFE_FRAMEWORK_TOOL_KINDS = frozenset({"capability-load", "tool-search"})
 class LiveDelta:
     event_type: ExecutionDeltaType
     content: str
+    position: Mapping[str, JsonValue] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1299,20 +1300,25 @@ def _event_stream_capability(
     ) -> None:
         async for event in events:
             emission = _map_event(event)
-            position: dict[str, JsonValue] = {"agent_run_seq": agent_run_seq}
+            position: dict[str, JsonValue] = {"agent_run_seq": agent_run_seq, **recorder.stream_position}
+            if isinstance(event, (PartStartEvent, PartDeltaEvent, PartEndEvent)):
+                position["part_index"] = event.index
             if isinstance(event, PartStartEvent):
                 recorder.stage_response_part(event.part, event.index, complete=False)
             elif isinstance(event, PartDeltaEvent):
                 recorder.stage_response_delta(event.delta, event.index)
             elif isinstance(event, PartEndEvent):
-                position["message_seq"] = recorder.stage_response_part(
-                    event.part, event.index
-                )
+                message_seq = recorder.stage_response_part(event.part, event.index)
+                if "stream_attempt_seq" not in position:
+                    position["message_seq"] = message_seq
                 position["part_index"] = event.index
             elif isinstance(event, FunctionToolCallEvent):
                 await recorder.record_tool_start(event.part, _ctx.run_step)
             elif isinstance(event, FunctionToolResultEvent):
                 await recorder.record_tool_result_boundary(event.part, _ctx.run_step)
+            if isinstance(emission, LiveDelta) and "stream_attempt_seq" in position:
+                position["part_start"] = isinstance(event, PartStartEvent)
+                emission = LiveDelta(emission.event_type, emission.content, position)
             if isinstance(emission, DurableBoundary):
                 emission = DurableBoundary(
                     emission.event_type, {**emission.payload, **position}
@@ -1363,13 +1369,11 @@ def _map_event(event: object) -> "AgentEmission | None":
     if (
         isinstance(event, PartStartEvent)
         and isinstance(event.part, TextPart)
-        and event.part.content
     ):
         return LiveDelta(ExecutionDeltaType.ASSISTANT_TEXT_DELTA, event.part.content)
     if (
         isinstance(event, PartStartEvent)
         and isinstance(event.part, ThinkingPart)
-        and event.part.content
     ):
         return LiveDelta(
             ExecutionDeltaType.ASSISTANT_THINKING_DELTA, event.part.content

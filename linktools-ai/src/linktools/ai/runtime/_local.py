@@ -3638,6 +3638,7 @@ class LocalExecutionBackend:
                             current.execution_id,
                             emission.event_type,
                             emission.content,
+                            position=emission.position,
                         )
                     )
                     return

@@ -7,6 +7,7 @@ from pydantic_ai.messages import AudioMediaType, DocumentMediaType, ImageMediaTy
 from ._contract import ModelBinding, model_thinking_control
 from ._client_request import ModelClientRequest, ModelClientRequestRecorder, ModelClientResponse
 from ._errors import model_binding_error
+from ._stream_attempt import ModelStreamAttempt
 from ._factory import create_model
 from ._fallback import FallbackBinding
 from ._input import validate_model_input, validate_model_inputs
@@ -28,6 +29,6 @@ __all__ = [
     "AudioMediaType", "DocumentMediaType", "ImageMediaType", "VideoMediaType",
     "model_thinking_control",
     "ModelBinding", "FallbackBinding", "create_model", "model_binding_error",
-    "ModelClientRequest", "ModelClientRequestRecorder", "ModelClientResponse",
+    "ModelClientRequest", "ModelClientRequestRecorder", "ModelClientResponse", "ModelStreamAttempt",
     "validate_model_input", "validate_model_inputs",
 ]

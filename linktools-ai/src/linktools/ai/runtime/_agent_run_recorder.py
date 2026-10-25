@@ -28,7 +28,7 @@ from pydantic_ai.settings import ModelSettings
 
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
-from ..model import ModelClientRequest
+from ..model import ModelClientRequest, ModelStreamAttempt
 from ._transcript_staging import StagedTranscript
 from ._journal import (
     DURATION_NS_METADATA_KEY,
@@ -102,6 +102,29 @@ class AgentRunRecorder:
         )
         self._transcript_messages: list[ModelMessage] = []
         self._pending_parts: dict[str, ModelMessage] = {}
+        self._stream_position: dict[str, int] = {}
+        self._last_response_position: tuple[int, int] | None = None
+
+    @property
+    def stream_position(self) -> Mapping[str, int]:
+        return dict(self._stream_position)
+
+    def observe_stream_attempt(self, fact: ModelRequestFact, attempt: ModelStreamAttempt) -> None:
+        if attempt.status == "RUNNING":
+            self._stream_position = {
+                "model_request_seq": fact.model_request_seq,
+                "stream_attempt_seq": attempt.stream_attempt_seq,
+            }
+        elif attempt.status in {"FAILED", "CANCELLED"}:
+            # These previews belong to the failed attempt, not the next canonical message.
+            self._pending_parts = {
+                key: value for key, value in self._pending_parts.items()
+                if not isinstance(value, ModelResponse)
+            }
+
+    def response_message_seq(self, model_request_seq: int) -> int | None:
+        position = self._last_response_position
+        return position[1] if position is not None and position[0] == model_request_seq else None
 
     @property
     def agent_run_id(self) -> str:
@@ -541,6 +564,7 @@ class AgentRunRecorder:
         model_id: str | None = None,
         source_messages: Sequence[ModelMessage] | None = None,
     ) -> None:
+        self._stream_position = {}
         self.model_interactions.begin_model_interaction(
             fact, model, messages, model_settings, parameters, streaming, model_id, source_messages,
         )
@@ -571,6 +595,7 @@ class AgentRunRecorder:
         duration_ns: int,
         usage: object | None,
         client_requests: tuple[ModelClientRequest, ...] | None = None,
+        stream_attempts: tuple[ModelStreamAttempt, ...] | None = None,
     ) -> None:
         response_message_index = None
         response_error = None
@@ -581,7 +606,12 @@ class AgentRunRecorder:
             except AIError as error:
                 # Invalid tool calls remain inspectable without entering the transcript.
                 response_error = error
-        if status in {"FAILED", "CANCELLED"} and fact.purpose == "agent":
+        if status in {"FAILED", "CANCELLED"} and stream_attempts is not None:
+            # A failed continuation may still contain earlier completed segments.
+            # Keep the SDK aggregate as interrupted trace, never as agent history.
+            response = (replace(response, state="interrupted") if response is not None
+                        and any(attempt.status == "SUCCEEDED" for attempt in stream_attempts) else None)
+        if status in {"FAILED", "CANCELLED"} and fact.purpose == "agent" and stream_attempts is None:
             if response is None and self._pending_parts:
                 first = next(iter(self._pending_parts.values()))
                 if isinstance(first, ModelResponse):
@@ -595,7 +625,7 @@ class AgentRunRecorder:
         self.model_interactions.finish_model_interaction(
             fact, model=model, response=response, status=status, error_code=error_code,
             duration_ns=duration_ns, usage=usage, client_requests=client_requests,
-            response_message_index=response_message_index,
+            response_message_index=response_message_index, stream_attempts=stream_attempts,
         )
         if response_error is not None:
             raise response_error
@@ -625,6 +655,7 @@ class AgentRunRecorder:
         self.append_transcript_message(response)
         captured = (len(self._transcript_messages) - 1, tuple(replayed_indices))
         self._model_responses[fact.model_request_seq] = captured
+        self._last_response_position = (fact.model_request_seq, captured[0] + 1)
         return captured
 
     def model_request_seq_for_tool_call(self, tool_call_id: str) -> int | None:
