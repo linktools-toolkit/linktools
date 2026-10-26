@@ -225,7 +225,6 @@ async def test_raw_cannot_replace_native_output_contract(
     ('openai', 'openai_logprobs', 'logprobs'),
     ('openai', 'openai_prediction', 'prediction'),
     ('openai', 'openai_text_verbosity', 'verbosity'),
-    ('openai', 'openai_continuous_usage_stats', 'stream_options'),
     ('openai', 'max_tokens', 'max_completion_tokens'),
     ('openai-responses', 'temperature', 'temperature'),
     ('openai-responses', 'top_p', 'top_p'),
@@ -248,6 +247,7 @@ async def test_raw_cannot_replace_native_output_contract(
     ('openai-responses', 'openai_truncation', 'truncation'),
     ('openai-responses', 'openai_context_management', 'context_management'),
     ('openai-responses', 'openai_background', 'background'),
+    ('openai-responses', 'openai_logprobs', 'include'),
     ('openai-responses', 'openai_include_code_execution_outputs', 'include'),
     ('openai-responses', 'openai_include_web_search_sources', 'include'),
     ('openai-responses', 'openai_include_file_search_results', 'include'),
@@ -287,6 +287,7 @@ def test_sdk_setting_owners_have_explicit_protocol_classification() -> None:
             "max_tokens",  # Both native token aliases are checked explicitly.
             "openai_cache_instructions",  # Changes request messages.
             "openai_include_raw_annotations",  # Response parsing only.
+            "openai_continuous_usage_stats",  # Streaming request owns stream_options.
             "top_k",  # Unsupported by this adapter.
         }),
         (OpenAIResponsesModelSettings, _RESPONSES_REQUEST_SETTING_FIELDS, {
@@ -294,7 +295,7 @@ def test_sdk_setting_owners_have_explicit_protocol_classification() -> None:
             "openai_previous_response_id", "openai_conversation_id",
             "openai_include_raw_annotations",  # Response parsing only.
             # Unsupported inherited Chat settings do not own a Responses wire object.
-            "openai_continuous_usage_stats", "openai_logprobs", "openai_prediction",
+            "openai_continuous_usage_stats", "openai_prediction",
             "frequency_penalty", "logit_bias", "presence_penalty", "seed", "stop_sequences", "top_k",
         }),
     )
@@ -529,3 +530,103 @@ async def test_anthropic_compaction_history_keeps_native_context_management_owne
             )
             assert sent[-1].get("context_management") == expected
             assert sent[-1]["vendor_flag"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("model_name,logprobs,conflict", [
+    ("unregistered-model-alias", False, False),
+    ("unregistered-model-alias", True, True),
+    ("gpt-5", False, True),
+])
+async def test_responses_include_keeps_explicit_and_profile_derived_owners(
+    monkeypatch: pytest.MonkeyPatch, streaming: bool, model_name: str, logprobs: bool, conflict: bool,
+) -> None:
+    sent = []
+    _capture(monkeypatch, "openai-responses", sent)
+    settings = {"extra_body": {"include": ["vendor.extension"], "vendor_flag": False}}
+    if logprobs:
+        settings["openai_logprobs"] = True
+    binding = create_model(protocol="openai-responses", model=model_name, api_key="mock-only", max_retries=0,
+                           model_settings=settings)
+    async with binding.materialize() as model:
+        if conflict:
+            with pytest.raises(AIError) as raised:
+                await _request(model, None, streaming)
+            assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
+            assert raised.value.safe_details["field"] == "include"
+            assert sent == []
+        else:
+            await _request(model, None, streaming)
+            assert sent[-1]["include"] == ["vendor.extension"]
+            assert sent[-1]["vendor_flag"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_responses_native_logprobs_preserves_encrypted_reasoning_include(
+    monkeypatch: pytest.MonkeyPatch, streaming: bool,
+) -> None:
+    sent = []
+    _capture(monkeypatch, "openai-responses", sent)
+    binding = create_model(protocol="openai-responses", model="gpt-5", api_key="mock-only", max_retries=0,
+                           model_settings={"openai_logprobs": True, "extra_body": {"vendor_flag": False}})
+    async with binding.materialize() as model:
+        await _request(model, None, streaming)
+    assert set(sent[-1]["include"]) >= {"reasoning.encrypted_content", "message.output_text.logprobs"}
+    assert sent[-1]["vendor_flag"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("per_request", [False, True])
+async def test_chat_stream_options_are_owned_only_during_streaming(
+    monkeypatch: pytest.MonkeyPatch, streaming: bool, per_request: bool,
+) -> None:
+    sent = []
+    _capture(monkeypatch, "openai", sent)
+    raw = {"extra_body": {"stream_options": {"include_usage": False, "vendor_flag": True}}}
+    binding = create_model(protocol="openai", model="fixture", api_key="mock-only", max_retries=0,
+                           model_settings={} if per_request else raw)
+    async with binding.materialize() as model:
+        if streaming:
+            with pytest.raises(AIError) as raised:
+                await _request(model, raw if per_request else None, streaming)
+            assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
+            assert raised.value.safe_details == {"field": "stream_options", "owner": "model_request"}
+            assert sent == []
+        else:
+            await _request(model, raw if per_request else None, streaming)
+            assert sent[-1]["stream_options"] == raw["extra_body"]["stream_options"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("continuous", [False, True])
+async def test_chat_native_stream_usage_options_remain_supported(
+    monkeypatch: pytest.MonkeyPatch, continuous: bool,
+) -> None:
+    sent = []
+    _capture(monkeypatch, "openai", sent)
+    binding = create_model(protocol="openai", model="fixture", api_key="mock-only", max_retries=0,
+                           model_settings={"openai_continuous_usage_stats": continuous})
+    async with binding.materialize() as model:
+        await _request(model, None, True)
+    assert sent[-1]["stream_options"] == {"include_usage": True, **({"continuous_usage_stats": True} if continuous else {})}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_raw_parallel_calls_may_override_output_only_default(
+    monkeypatch: pytest.MonkeyPatch, streaming: bool,
+) -> None:
+    from pydantic_ai.tools import ToolDefinition
+
+    sent = []
+    _capture(monkeypatch, "openai", sent)
+    binding = create_model(protocol="openai", model="fixture", api_key="mock-only", max_retries=0,
+                           model_settings={"extra_body": {"parallel_tool_calls": True}})
+    parameters = ModelRequestParameters(output_mode="tool", allow_text_output=False,
+                                        output_tools=[ToolDefinition(name="finish", parameters_json_schema={"type": "object", "properties": {}})])
+    async with binding.materialize() as model:
+        await _request(model, None, streaming, parameters)
+    assert sent[-1]["parallel_tool_calls"] is True

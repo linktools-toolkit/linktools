@@ -360,6 +360,14 @@ mode belong to the request, and cannot be replaced through `extra_body`.
 Native structured-output schemas and profile-generated prompted JSON output own
 their provider output object. A selected Chat native web-search tool owns
 `web_search_options`; without that tool, the raw object remains available.
+Responses profiles that request encrypted reasoning own `include` so it cannot
+silently lose continuation data; explicit `openai_logprobs` and native include
+settings also own that list. On a profile without that requirement and with no
+explicit include settings, raw `include` remains available. Chat streaming owns
+`stream_options` to retain SDK usage accounting; use `openai_continuous_usage_stats`
+for its native option. This restriction does not apply to a non-streaming request.
+Output-only `parallel_tool_calls=False` remains a default: a raw-only `True` can
+replace it, just as an explicit standard setting can.
 SDK session controls are not raw extension fields: configure Anthropic `container`
 through `anthropic_container` and context management through `anthropic_context_management`,
 and Responses `previous_response_id` / `conversation`

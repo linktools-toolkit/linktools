@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """OpenAI Chat and Responses model assembly."""
 
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from types import TracebackType
 
 from httpx2 import AsyncClient, Limits
@@ -13,7 +15,8 @@ except ModuleNotFoundError as error:
     raise ImportError('OpenAI model adapters require pip install "linktools-ai[openai]"') from error
 from openai.types.chat import ChatCompletion
 from pydantic_ai.exceptions import UnexpectedModelBehavior
-from pydantic_ai.models import Model, ModelRequestParameters, ModelSettings
+from pydantic_ai.models import Model, ModelMessage, ModelRequestParameters, ModelSettings, StreamedResponse
+from pydantic_ai.tools import RunContext
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
 from pydantic_ai.native_tools import WebSearchTool
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -39,7 +42,6 @@ _CHAT_REQUEST_SETTING_FIELDS = {
     "frequency_penalty": "frequency_penalty", "logit_bias": "logit_bias",
     "openai_reasoning_effort": "reasoning_effort", "openai_logprobs": "logprobs",
     "openai_prediction": "prediction", "openai_text_verbosity": "verbosity",
-    "openai_continuous_usage_stats": "stream_options",
 }
 _RESPONSES_REQUEST_SETTING_FIELDS = {
     **_COMMON_REQUEST_SETTING_FIELDS,
@@ -47,7 +49,8 @@ _RESPONSES_REQUEST_SETTING_FIELDS = {
     "openai_reasoning_mode": "reasoning", "openai_reasoning_context": "reasoning",
     "openai_reasoning_summary": "reasoning", "openai_text_verbosity": "text",
     "openai_truncation": "truncation", "openai_context_management": "context_management",
-    "openai_background": "background", "openai_include_code_execution_outputs": "include",
+    "openai_background": "background", "openai_logprobs": "include",
+    "openai_include_code_execution_outputs": "include",
     "openai_include_web_search_sources": "include", "openai_include_file_search_results": "include",
     "openai_prompt_cache_diagnostics": "prompt_cache_options",
 }
@@ -90,6 +93,25 @@ class _OutputOnlyOpenAIChatModel(OpenAIChatModel):
         ), parameters
 
 
+    @asynccontextmanager
+    async def request_stream(
+        self,
+        messages: list[ModelMessage],
+        model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+        run_context: RunContext[object] | None = None,
+    ) -> AsyncGenerator[StreamedResponse, None]:
+        # Streaming usage is required by SDK accounting, not a tuning default.
+        _ProviderModelBinding.validate_request_owners(
+            merge_model_settings(self.settings, model_settings),
+            wire_fields={}, request_fields=("stream_options",),
+        )
+        async with super().request_stream(
+            messages, model_settings, model_request_parameters, run_context,
+        ) as response:
+            yield response
+
+
 class _OutputOnlyOpenAIResponsesModel(OpenAIResponsesModel):
     def prepare_request(
         self, model_settings: ModelSettings | None, model_request_parameters: ModelRequestParameters,
@@ -101,6 +123,10 @@ class _OutputOnlyOpenAIResponsesModel(OpenAIResponsesModel):
                             "previous_response_id", "conversation"),
         )
         settings, parameters = super().prepare_request(model_settings, model_request_parameters)
+        if self.profile.get("openai_supports_encrypted_reasoning_content", False):
+            _ProviderModelBinding.validate_request_owners(
+                settings, wire_fields={}, request_fields=("include",),
+            )
         if parameters.output_mode == "native" or (
             parameters.output_mode == "prompted" and self.profile.get("supports_json_object_output", False)
         ):
