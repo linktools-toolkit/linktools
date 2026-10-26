@@ -9,6 +9,7 @@ import httpx2
 import pytest
 import yaml
 
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.model import ModelBinding, ModelClientRequestRecorder, create_model
 from linktools.ai.model import _anthropic, _openai
@@ -38,9 +39,12 @@ def _binding(monkeypatch: pytest.MonkeyPatch, protocol: str, model: str,
 
     monkeypatch.setattr(_anthropic if protocol == "anthropic" else _openai,
                         "DefaultAsyncHttpxClient", client)
+    settings = dict(model_settings or {})
+    limit = {"openai": "max_completion_tokens", "openai-responses": "max_output_tokens", "anthropic": "max_tokens"}[protocol]
+    if limit not in settings.get("extra_body", {}):
+        settings.setdefault("max_tokens", 12000)
     return create_model(protocol=protocol, model=model, api_key="mock-only",
-                        base_url="https://model.invalid/v1", max_retries=0,
-                        max_tokens=12000, model_settings=model_settings)
+                        base_url="https://model.invalid/v1", max_retries=0, model_settings=settings)
 
 
 @pytest.mark.asyncio
@@ -48,7 +52,7 @@ def _binding(monkeypatch: pytest.MonkeyPatch, protocol: str, model: str,
     ("openai", "max_completion_tokens"), ("openai-responses", "max_output_tokens"),
     ("anthropic", "max_tokens"),
 ])
-async def test_unknown_native_fields_and_output_overrides_reach_wire(monkeypatch, protocol, limit):
+async def test_unknown_native_fields_and_raw_only_output_limit_reach_wire(monkeypatch, protocol, limit):
     sent = []
     original = {"vendor_option": {"tokens": 3072, "labels": ["custom"]}, limit: 9000}
     binding = _binding(monkeypatch, protocol, "unregistered-model-alias", sent, model_settings={"extra_body": original})
@@ -68,7 +72,7 @@ async def test_unknown_native_fields_and_output_overrides_reach_wire(monkeypatch
     for body in sent:
         assert body["vendor_option"] == {"tokens": 3072, "labels": ["custom"]}
         assert body[limit] == 9000
-    assert binding.contract["settings"]["max_tokens"] == 12000
+    assert "max_tokens" not in binding.contract["settings"]
     assert "mock-only" not in repr(dict(binding.contract))
 
 
@@ -89,6 +93,29 @@ async def test_native_manual_budget_overrides_unified_false(monkeypatch):
 def test_model_settings_requires_json_object(value):
     with pytest.raises((TypeError, ValueError)):
         create_model(protocol="openai", model="alias", model_settings=value)
+
+
+@pytest.mark.parametrize("protocol", ["openai", "openai-responses", "anthropic"])
+@pytest.mark.parametrize("field", ["max_tokens", "timeout"])
+def test_request_settings_have_no_duplicate_factory_argument(protocol, field):
+    with pytest.raises(TypeError):
+        create_model(protocol=protocol, model="fixture", **{field: 1000})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol,limit", [
+    ("openai", "max_completion_tokens"), ("openai-responses", "max_output_tokens"),
+    ("anthropic", "max_tokens"),
+])
+async def test_explicit_null_limit_keeps_native_semantics(monkeypatch, protocol, limit):
+    sent = []
+    binding = _binding(monkeypatch, protocol, "fixture", sent,
+                       model_settings={"max_tokens": None, "timeout": None})
+    async with binding.materialize() as model:
+        await model.request([ModelRequest(parts=[UserPromptPart("hello")])], None, ModelRequestParameters())
+    assert binding.model_settings["max_tokens"] is None
+    assert binding.model_settings["timeout"] is None
+    assert limit in sent[0] and sent[0][limit] is None
 
 
 @pytest.mark.asyncio
@@ -145,7 +172,7 @@ model_settings:
       enabled: true
 """)
     binding = _binding(monkeypatch, protocol, model, sent, **configuration)
-    assert binding.max_tokens == 6000 and binding.timeout == 13
+    assert binding.model_settings["max_tokens"] == 6000 and binding.model_settings["timeout"] == 13
     assert binding.contract["settings"] == {
         "temperature": 0.25, "max_tokens": 6000,
         "extra_body": {"vendor_feature": {"enabled": True}},
@@ -172,10 +199,8 @@ model_settings:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("protocol", ["openai", "openai-responses", "anthropic"])
-@pytest.mark.parametrize("sdk_retries,per_request", [(0, False), (1, True), (2, False)])
-async def test_explicit_sdk_retry_count_is_not_multiplied_by_outer_retries(
-    monkeypatch, streaming, protocol, sdk_retries, per_request,
-):
+@pytest.mark.parametrize("location", ["missing", "binding", "request"])
+async def test_sdk_zero_does_not_disable_binding_retry_owner(monkeypatch, streaming, protocol, location):
     from pydantic_ai.exceptions import ModelHTTPError
     attempts = []
     clients = []
@@ -192,11 +217,13 @@ async def test_explicit_sdk_retry_count_is_not_multiplied_by_outer_retries(
 
     monkeypatch.setattr(_anthropic if protocol == "anthropic" else _openai,
                         "DefaultAsyncHttpxClient", client)
+    settings = {"max_tokens": 1000}
+    if location == "binding":
+        settings["max_retries"] = 0
     binding = create_model(protocol=protocol, model="fixture", api_key="mock-only",
-                           base_url="https://model.invalid", max_tokens=1000,
-                           max_retries=4, retry_delay=0,
-                           model_settings=None if per_request else {"max_retries": sdk_retries})
-    request_settings = {"max_retries": sdk_retries} if per_request else None
+                           base_url="https://model.invalid", max_retries=2, retry_delay=0,
+                           model_settings=settings)
+    request_settings = {"max_retries": 0} if location == "request" else None
     model = binding.materialize()
     with ModelClientRequestRecorder() as recorder:
         async with model:
@@ -209,10 +236,38 @@ async def test_explicit_sdk_retry_count_is_not_multiplied_by_outer_retries(
                 else:
                     await model.request([ModelRequest(parts=[UserPromptPart("hello")])],
                                         request_settings, ModelRequestParameters())
-    assert len(attempts) == sdk_retries + 1
-
-    assert len(recorder.requests) == sdk_retries + 1
+    assert len(attempts) == 3
+    assert len(recorder.requests) == 3
     assert clients and all(client.is_closed for client in clients)
+
+
+@pytest.mark.parametrize("protocol", ["openai", "openai-responses", "anthropic"])
+@pytest.mark.parametrize("value", [None, 1, 2, False])
+def test_sdk_retry_override_rejected_at_binding(protocol, value):
+    with pytest.raises(AIError) as raised:
+        create_model(protocol=protocol, model="fixture", model_settings={"max_retries": value})
+    assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
+    assert raised.value.retryable is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("protocol", ["openai", "openai-responses", "anthropic"])
+@pytest.mark.parametrize("value", [None, 1, 2, False])
+async def test_sdk_retry_override_rejected_before_request(monkeypatch, streaming, protocol, value):
+    sent = []
+    binding = _binding(monkeypatch, protocol, "fixture", sent)
+    async with binding.materialize() as model:
+        with pytest.raises(AIError):
+            if streaming:
+                async with model.request_stream([ModelRequest(parts=[UserPromptPart("hello")])],
+                                                 {"max_retries": value}, ModelRequestParameters()) as stream:
+                    async for _ in stream:
+                        pass
+            else:
+                await model.request([ModelRequest(parts=[UserPromptPart("hello")])],
+                                    {"max_retries": value}, ModelRequestParameters())
+    assert sent == []
 
 
 @pytest.mark.asyncio

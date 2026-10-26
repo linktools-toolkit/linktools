@@ -85,8 +85,12 @@ def test_fallback_requires_a_candidate_and_preserves_ordered_semantics() -> None
     with pytest.raises(ValueError, match="at least one candidate"):
         FallbackBinding()
     primary = create_model(
-        protocol="openai", model="primary", api_key="secret-primary",
-        base_url="https://primary.example.test", max_tokens=25, input_types=["image"],
+        protocol='openai',
+        model='primary',
+        api_key='secret-primary',
+        base_url='https://primary.example.test',
+        input_types=['image'],
+        model_settings={'max_tokens': 25},
     )
     secondary = create_model(
         protocol="anthropic", model="secondary", api_key="secret-secondary",
@@ -147,8 +151,12 @@ def test_handler_implementation_and_connections_do_not_define_model_semantics() 
 
     primary = create_model(protocol="openai", model="primary", api_key="first-secret")
     other_connection = create_model(
-        protocol="openai", model="primary", api_key="second-secret",
-        base_url="https://secondary.example.test", timeout=30, max_retries=5,
+        protocol='openai',
+        model='primary',
+        api_key='second-secret',
+        base_url='https://secondary.example.test',
+        max_retries=5,
+        model_settings={'timeout': 30},
     )
     binding = FallbackBinding(primary, fallback_on=Handler())
     other = FallbackBinding(other_connection, fallback_on=ValueError)

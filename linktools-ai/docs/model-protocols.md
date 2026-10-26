@@ -47,12 +47,12 @@ paths are unchanged. There is no separate public registry or `Runtime.open(model
 
 ## Generic limits and configuration names
 
-Use explicit generic options for ordinary limits. For example:
+Keep connection/capacity options separate from request settings. For example:
 
 ```python
 features.model("default", lambda: create_model(
     protocol="openai", model="gateway-model",
-    context_window=131072, max_tokens=8192, timeout=45,
+    context_window=131072, model_settings={"max_tokens": 8192, "timeout": 45},
     max_retries=3, retry_delay=5, retry_max_delay=120,
     retry_backoff_factor=4,
 ))
@@ -65,7 +65,7 @@ SDK's inferred context window and is recorded in `contract["context_window"]`.
 not booleans. SDK-inferred capability profiles remain internal to the adapter;
 `create_model` does not expose a profile override.
 
-`max_tokens` reserves output tokens. Compaction uses a known context window minus
+`model_settings["max_tokens"]` reserves output tokens. Compaction uses a known context window minus
 the effective output reserve and current instruction/tool/output-schema overhead.
 If the SDK has no known window and no explicit compaction target exists, Runtime
 does not invent one. Native fallback uses the smallest **known** candidate window;
@@ -75,7 +75,9 @@ replace the provider's actual input limit.
 
 The same seven numeric names are accepted in workspace `.linktools/config.yaml`:
 `context_window`, `max_tokens`, `timeout`, `max_retries`, `retry_delay`,
-`retry_max_delay`, `retry_backoff_factor`. Python and workspace use snake_case;
+`retry_max_delay`, `retry_backoff_factor`. The CLI adapter places `max_tokens` and
+`timeout` in `model_settings` when constructing the binding; they are not duplicate
+factory arguments. Configuration names use snake_case;
 all three local commands use corresponding kebab-case flags such as
 `--context-window` and `--retry-max-delay`. Existing LinkTools configuration uses
 `MODEL_CONTEXT_WINDOW`, `MODEL_MAX_TOKENS`, `MODEL_TIMEOUT`, `MODEL_MAX_RETRIES`,
@@ -327,16 +329,16 @@ evidence that no provider call occurred.
 
 `create_model(..., model_settings={...})` is the single JSON extension point for
 SDK common and provider-specific settings across Chat Completions, Responses and
-Anthropic Messages. Explicit settings override the corresponding top-level
-`max_tokens` and `timeout` defaults. LinkTools does not maintain a provider-key
-allowlist or translate proprietary switches; the selected SDK adapter owns their
-interpretation. An unknown SDK settings key is not automatically a body field.
+Anthropic Messages. `max_tokens` and `timeout` live only in this mapping, not in
+duplicate factory arguments. LinkTools does not translate proprietary switches;
+the selected SDK adapter owns their interpretation. An unknown SDK settings key is not automatically a body field.
 Use nested `extra_body` for native endpoint fields:
 
 ```python
 binding = create_model(
-    protocol="anthropic", model="claude-opus-4-5", max_tokens=8192,
+    protocol="anthropic", model="claude-opus-4-5",
     model_settings={
+        "max_tokens": 8192,
         "anthropic_thinking": {"type": "enabled", "budget_tokens": 4096},
         "extra_body": {"custom_endpoint_option": True},
     },
@@ -347,14 +349,36 @@ The manual budget applies only to models supporting that control; adaptive-think
 models may use different settings. The custom body field is illustrative and must
 be supported by the endpoint. For raw thinking fields use
 `model_settings={"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 4096}}}`.
-Body fields can override SDK-generated fields of the same name, including output
-limits and thinking. Thus `max_tokens` is not an unbypassable hard cap; raw overrides
-can also make local context estimates differ from the request. The SDK owns nested
-merge semantics and the endpoint validates native fields.
+A native setting and `extra_body` cannot both own the same provider request object.
+Conflicts fail before sending, including explicit `None` values: for example,
+`anthropic_effort="low"` plus `extra_body.output_config` is ambiguous even if the
+latter only supplies `format`. Choose either the SDK-native settings or the whole
+raw object, such as `extra_body={"output_config": {"effort": "low", ...}}`, not both.
+There is no guessed deep merge. Unknown raw fields and nested values pass through.
+The model identity, input messages, registered tools, instructions and streaming
+mode belong to the request, and cannot be replaced through `extra_body`.
+Native structured-output schemas likewise own their provider output object.
+
+Protocol adapters track the wire-object owners of supported SDK fields, not an
+allowlist of extensions. When updating an SDK adapter, update this ownership mapping
+and its wire tests together. Unified Thinking is a portable fallback, not a second
+native owner; explicit provider settings or a raw thinking object still take
+precedence. A compatible backend may ignore numeric thinking budgets, and unified
+`False` can mean omission or minimum reasoning rather than a guaranteed wire-level
+disable. Use the backend's documented native control when that distinction matters.
+
+Per-request settings replace binding settings by key, following the SDK's shallow
+merge: a request-level `extra_body` is the complete replacement object, not a partial
+patch. Omitted keys inherit; explicit `None` retains that field's SDK semantics,
+not a universal inheritance/reset rule. For example, an explicit `max_tokens=None`
+serializes a null limit and may be rejected by the endpoint. Use omission for the
+provider default, not null. Raw-only output limits are not interpreted as a local
+context reserve; use the standard setting when local budgeting is required.
 
 The binding copies and freezes JSON settings. Its `contract["settings"]` records
 the resolved semantic settings, excluding operational `timeout`, `request_timeout`,
-`max_retries` and `extra_headers`; those controls still reach the SDK. Authentication
+`max_retries` and `extra_headers`; timeouts and headers still reach the SDK,
+while transport retry ownership remains with LinkTools. Authentication
 belongs in connection parameters, not in body fields. Semantic settings and
 `extra_body` are contract-captured data, not a secret store. Excluding headers from
 the contract does not make arbitrary request logging safe for secrets.
@@ -392,6 +416,8 @@ support.
 
 Migrate the removed pre-release APIs directly; no compatibility aliases remain:
 
+- Move factory `max_tokens=` and `timeout=` into `model_settings`; no aliases remain.
+  Keep transport retry parameters on the factory and remove SDK retry-owner overrides.
 - Remove `create_model(profile=...)`. Move a declared `context_window` to the
   dedicated argument; its contract location is now top-level `context_window`,
   not `profile.context_window`. Do not move the old profile wholesale into
@@ -427,14 +453,15 @@ honor the provider field; no token reduction is inferred from the setting alone.
 
 ## Transport retries
 
-By default the model binding owns transport retries and native SDK retries are
-zero. An explicit non-null `model_settings["max_retries"]` instead selects SDK
-retry ownership and disables outer retries, avoiding multiplied attempts. This
-includes final request-level overrides. In SDK-owned mode, the SDK controls which
-errors retry and its wait policy; top-level `retry_delay`, `retry_max_delay` and
-`retry_backoff_factor` do not apply. Explicit SDK zero means no retries.
+The model binding is the sole owner of transport retries; native SDK retries
+remain zero for every attempt. `model_settings["max_retries"]` may be omitted or
+exactly integer `0`; `None`, nonzero values and booleans are configuration errors,
+both at binding construction and for per-request settings. A request override
+cannot hide an invalid binding value. SDK zero does **not** disable LinkTools retries:
+use `create_model(max_retries=0)` for that. Backoff parameters never silently become
+ineffective because of an SDK override.
 
-The remainder of this section describes the default LinkTools-owned policy. `max_retries` counts additional attempts (default `2`), and `retry_delay`
+`max_retries` counts additional attempts (default `2`), and `retry_delay`
 is the initial backoff base (default `1.0` seconds), not a fixed wait. The local
 base is multiplied by `retry_backoff_factor` (default `2.0`) after each retry
 wait, with up to 25% additive jitter. The factor must be finite and at least

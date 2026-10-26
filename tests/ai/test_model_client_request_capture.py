@@ -284,18 +284,22 @@ async def test_model_client_request_capture_client_lifecycle_follows_nested_agen
 
 
 @pytest.mark.asyncio
-async def test_model_client_request_capture_preserves_final_body_overrides(
+async def test_model_client_request_capture_rejects_message_owner_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    model, _clients = _model(monkeypatch, _response)
+    def unexpected_request(request: httpx2.Request) -> httpx2.Response:
+        pytest.fail("conflicting request must not reach the transport")
+
+    model, _clients = _model(monkeypatch, unexpected_request)
     original = [{"role": "developer", "content": [{"type": "text", "text": "actual"}]}]
     async with model:
         with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
-            await model.request(
-                [ModelRequest(parts=[UserPromptPart("before-extra-body")])],
-                {"extra_body": {"messages": original}}, ModelRequestParameters(),
-            )
-    assert json.loads(recorder.requests[0].body)["messages"] == original
+            with pytest.raises(AIError, match="messages"):
+                await model.request(
+                    [ModelRequest(parts=[UserPromptPart("before-extra-body")])],
+                    {"extra_body": {"messages": original}}, ModelRequestParameters(),
+                )
+    assert recorder.requests == ()
 
 
 @pytest.mark.asyncio

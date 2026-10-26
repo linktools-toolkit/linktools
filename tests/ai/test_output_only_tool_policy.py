@@ -124,8 +124,12 @@ def _model(
     provider = _anthropic.AnthropicProvider if protocol == "anthropic" else _openai.OpenAIProvider
     monkeypatch.setattr(provider, "model_profile", staticmethod(lambda name: profile))
     model = create_model(
-        protocol=protocol, model="fixture-model", api_key="synthetic",
-        base_url="https://offline.invalid/v1", max_retries=0, max_tokens=max_tokens,
+        protocol=protocol,
+        model='fixture-model',
+        api_key='synthetic',
+        base_url='https://offline.invalid/v1',
+        max_retries=0,
+        model_settings={} if max_tokens is None else {'max_tokens': max_tokens},
     ).materialize()
     return model, bodies
 

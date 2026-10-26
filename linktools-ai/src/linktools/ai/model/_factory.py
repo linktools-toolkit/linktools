@@ -17,19 +17,19 @@ def create_model(
     model_settings: Mapping[str, JsonValue] | None = None,
     base_url: "str | None" = None,
     api_key: "str | None" = None,
-    timeout: "int | float | None" = None,
     max_retries: int = 2,
     retry_delay: "int | float" = 1.0,
     retry_max_delay: "int | float" = 60.0,
     retry_backoff_factor: "int | float" = 2.0,
-    max_tokens: "int | None" = None,
     context_window: "int | None" = None,
 ) -> ModelBinding:
     """Construct a binding without creating a client or resolving credentials.
 
     ``model_settings`` accepts JSON-valued SDK settings, including provider-specific
-    settings and ``extra_body`` for native fields. Explicit settings override the
-    top-level request defaults. Authentication stays in connection parameters;
+    settings and ``extra_body`` for native fields. Request limits and timeouts
+    belong only to ``model_settings``. Transport retries belong to this factory;
+    ``model_settings.max_retries`` may only be omitted or zero. Authentication
+    stays in connection parameters;
     request-body values are durable configuration and must not contain secrets.
     """
     if protocol == "openai":
@@ -51,12 +51,10 @@ def create_model(
         model_settings={} if model_settings is None else model_settings,
         base_url=base_url,
         api_key=api_key,
-        timeout=timeout,
         max_retries=max_retries,
         retry_delay=retry_delay,
         retry_max_delay=retry_max_delay,
         retry_backoff_factor=retry_backoff_factor,
-        max_tokens=max_tokens,
         context_window=context_window,
     )
 

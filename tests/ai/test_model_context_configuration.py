@@ -19,8 +19,13 @@ from linktools.commands.ai.web import command as web_command
 @pytest.mark.parametrize("protocol", ("openai", "openai-responses", "anthropic"))
 @pytest.mark.parametrize("explicit", (65536, 131072))
 def test_context_window_is_one_explicit_contract_field(protocol, explicit):
-    binding = create_model(protocol=protocol, model="synthetic", api_key="synthetic",
-                           context_window=explicit, max_tokens=8192)
+    binding = create_model(
+        protocol=protocol,
+        model='synthetic',
+        api_key='synthetic',
+        context_window=explicit,
+        model_settings={'max_tokens': 8192},
+    )
     model = binding.materialize()
     assert model.context_window == explicit
     assert model.settings["max_tokens"] == 8192
@@ -59,7 +64,7 @@ def test_cli_numeric_options_override_config_environment_and_workspace(monkeypat
     args = command.create_parser().parse_args(arguments + ["--model", "synthetic", "--api-key", "synthetic"])
     binding = _local_runtime_model(workspace, args)
     assert binding.contract["context_window"] == 65536
-    assert binding.max_tokens == 8192 and binding.timeout == 45
+    assert binding.model_settings["max_tokens"] == 8192 and binding.model_settings["timeout"] == 45
     assert binding.max_retries == 3 and binding.retry_delay == 5
     assert binding.retry_max_delay == 120 and binding.retry_backoff_factor == 4
     options = []
@@ -86,7 +91,7 @@ def test_missing_generic_configuration_keeps_library_defaults(monkeypatch, tmp_p
         monkeypatch.delenv("LINKTOOLS_MODEL_" + option.upper(), raising=False)
     binding = _local_model(Workspace(tmp_path, {"model": "synthetic"}), api_key="synthetic")
     assert "context_window" not in binding.contract
-    assert binding.max_tokens is None and binding.timeout is None
+    assert "max_tokens" not in binding.model_settings and "timeout" not in binding.model_settings
     assert (binding.max_retries, binding.retry_delay, binding.retry_max_delay, binding.retry_backoff_factor) == (2, 1, 60, 2)
 
 

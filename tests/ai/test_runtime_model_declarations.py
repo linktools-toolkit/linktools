@@ -351,8 +351,11 @@ def test_registered_model_identity_is_independent_of_configuration(protocol) -> 
     compiler = AgentCompiler(models={"registered": lambda: state["binding"]}, candidates=(), agents={"agent": spec})
     compiled = compiler.compile(spec)
     original = compiler.bind(compiled)
-    state["binding"] = create_model(protocol=protocol, model="replacement",
-                                   model_settings={"extra_body": {"custom": True}}, max_tokens=4096)
+    state["binding"] = create_model(
+        protocol=protocol,
+        model='replacement',
+        model_settings={'max_tokens': 4096, 'extra_body': {'custom': True}},
+    )
     current = compiler.bind(compiled)
     assert current.binding_digest == original.binding_digest
     assert current.binding_contract.model_contract != original.binding_contract.model_contract

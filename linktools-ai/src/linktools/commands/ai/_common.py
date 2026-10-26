@@ -198,7 +198,10 @@ def _local_model(
             protocol=api,
             model=selected_model,
             input_types=input_types,
-            **{name: value for name, value in numeric_options.items() if value is not None},
+            model_settings={name: value for name, value in numeric_options.items()
+                            if name in {"max_tokens", "timeout"} and value is not None},
+            **{name: value for name, value in numeric_options.items()
+               if name not in {"max_tokens", "timeout"} and value is not None},
             base_url=(
                 base_url
                 if base_url is not None

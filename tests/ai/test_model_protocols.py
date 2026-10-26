@@ -40,9 +40,16 @@ def model_binding(monkeypatch: pytest.MonkeyPatch, kind: str, model: str, handle
         return result
 
     monkeypatch.setattr(module, 'DefaultAsyncHttpxClient', client)
-    return create_model(protocol=kind.replace('_', '-'), model=model, api_key='fixture-secret',
-        base_url='https://model.invalid/v1', max_retries=options.pop('max_retries', 0),
-        retry_delay=0, max_tokens=128, **options), clients
+    return create_model(
+        protocol=kind.replace('_', '-'),
+        model=model,
+        api_key='fixture-secret',
+        base_url='https://model.invalid/v1',
+        max_retries=options.pop('max_retries', 0),
+        retry_delay=0,
+        model_settings={'max_tokens': 128, **options.pop('model_settings', {})},
+        **options,
+    ), clients
 
 
 def response(api: str, *, tool: bool = False) -> dict:
@@ -376,9 +383,9 @@ def test_generic_factory_forwards_all_options(monkeypatch, kind, api, model_name
         received.update(kwargs)
         return sentinel
     monkeypatch.setattr(module, name, construct)
-    options = dict(model=model_name, input_types=("image",), model_settings={"extra_body": {"custom": True}},
-                   base_url="https://model.invalid/v1", api_key="fixture-secret", timeout=9,
-                   max_retries=3, retry_delay=0.2, retry_max_delay=120, retry_backoff_factor=4, max_tokens=99, context_window=131072)
+    options = dict(model=model_name, input_types=("image",), model_settings={"extra_body": {"custom": True}, "timeout": 9, "max_tokens": 99},
+                   base_url="https://model.invalid/v1", api_key="fixture-secret",
+                   max_retries=3, retry_delay=0.2, retry_max_delay=120, retry_backoff_factor=4, context_window=131072)
     assert create_model(protocol=api, **options) is sentinel
     assert received == options
 

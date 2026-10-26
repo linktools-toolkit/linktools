@@ -39,7 +39,8 @@ def test_static_connection_values_are_normalized() -> None:
                                          ("retry_delay", -1), ("max_tokens", 0)])
 def test_static_connection_and_request_settings_are_validated(field, value) -> None:
     with pytest.raises(ValueError):
-        create_model(protocol="openai", model="gpt-test", **{field: value})
+        create_model(protocol="openai", model="gpt-test",
+                     **({"model_settings": {field: value}} if field in {"max_tokens", "timeout"} else {field: value}))
 
 
 def test_model_route_capture_keeps_shared_binding_when_source_map_changes() -> None:

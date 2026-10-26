@@ -66,7 +66,13 @@ async def test_installed_adapter_projects_native_transport_errors(
         raise httpx2.ConnectError("fixture connection failure", request=request)
     monkeypatch.setattr(module, "DefaultAsyncHttpxClient", lambda **kwargs: httpx2.AsyncClient(
         transport=httpx2.MockTransport(fail), trust_env=False, **kwargs))
-    models = create_model(protocol=factory, model="fixture", api_key="fixture-secret", max_tokens=128, max_retries=0)
+    models = create_model(
+        protocol=factory,
+        model='fixture',
+        api_key='fixture-secret',
+        max_retries=0,
+        model_settings={'max_tokens': 128},
+    )
     async with models.materialize() as model:
         with pytest.raises(ModelAPIError) as caught:
             await model.request([ModelRequest(parts=[UserPromptPart("hello")])], None, ModelRequestParameters())
