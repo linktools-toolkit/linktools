@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Local command composition preserves completed execution observations."""
 
+from linktools.ai.persistence import Persistence
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -78,7 +79,7 @@ def test_web_command_preserves_terminal_history_after_handoff_and_reopen(
 async def test_local_runtime_retains_terminal_model_history(
     tmp_path: Path, session_bound: bool,
 ) -> None:
-    from linktools.ai.runtime import RuntimeHistory
+    from linktools.ai.history import History
     from linktools.commands.ai._common import (
         _load_workspace, _local_runtime_storage, _open_local_runtime,
     )
@@ -96,7 +97,7 @@ async def test_local_runtime_retains_terminal_model_history(
         identity = execution.execution_id
         models = await execution.model_interactions(include_content=True)
         assert models.items
-    async with RuntimeHistory.open('default', storage=_local_runtime_storage(workspace)) as history:
+    async with Persistence.open('default', storage=_local_runtime_storage(workspace), tenant_id="default", read_only=True) as history_persistence_99, History.open(persistence=history_persistence_99) as history:
         async with client(create_app(history=history)) as http:
             response = await http.get(f'/api/executions/{identity}/models?include_content=true')
             assert response.status_code == 200, response.text
@@ -112,7 +113,7 @@ def test_run_command_history_is_readable_after_command_close(
     import asyncio
     import json
     import linktools.commands.ai.run as run_command
-    from linktools.ai.runtime import RuntimeHistory
+    from linktools.ai.history import History
     from linktools.commands.ai._common import _load_workspace, _local_runtime_storage
 
     monkeypatch.setattr(run_command, '_local_runtime_model', lambda *_: RuntimeUsageModels())
@@ -126,7 +127,7 @@ def test_run_command_history_is_readable_after_command_close(
 
     async def inspect() -> None:
         workspace = _load_workspace(str(tmp_path))
-        async with RuntimeHistory.open('default', storage=_local_runtime_storage(workspace)) as history:
+        async with Persistence.open('default', storage=_local_runtime_storage(workspace), tenant_id="default", read_only=True) as history_persistence_129, History.open(persistence=history_persistence_129) as history:
             async with client(create_app(history=history)) as http:
                 response = await http.get(f"/api/executions/{result['execution_id']}/models?include_content=true")
                 assert response.status_code == 200, response.text

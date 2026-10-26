@@ -11,20 +11,20 @@ import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import InMemoryCacheBackend
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord, StepEvent
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.persistence._step_contracts import AgentRunRecord, StepEvent
 
 from .test_step_projection import _execution
 
 
 async def _setup(tmp_path: Path, backend: str, cache: object | None = None, *, buffer=None):
     if backend == "memory":
-        state = RuntimeState(RuntimeStorage.in_memory(cache=cache))
+        state = Persistence(PersistenceStorage.in_memory(cache=cache))
     elif backend == "filesystem":
-        state = RuntimeState(RuntimeStorage.filesystem(tmp_path / "state", cache=cache))
+        state = Persistence(PersistenceStorage.filesystem(tmp_path / "state", cache=cache))
     else:
-        state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache))
+        state = Persistence(PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache))
     await state.initialize(namespace="projection-buffer", tenant_id="tenant")
     execution = replace(_execution(), revision=1)
     repository = state.execution.executions
@@ -69,7 +69,7 @@ async def test_observations_without_write_buffer_persist_at_each_boundary(
 ) -> None:
     state = await _setup(tmp_path, backend, _HotContentCache() if hot_cache else None)
     try:
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         await _observe(state)
         assert len(await archive.list_events(agent_run_id="run")) == 1
         await _observe(state, 2)
@@ -81,7 +81,7 @@ async def test_observations_without_write_buffer_persist_at_each_boundary(
 
 
 def test_observation_policy_keeps_approved_window_and_threshold() -> None:
-    from linktools.ai.runtime.state import _trace_persistence
+    from linktools.ai.persistence import _trace_persistence
 
     assert _trace_persistence.DEFAULT_TRACE_FLUSH_INTERVAL == 3.0
     assert _trace_persistence.DEFAULT_TRACE_BATCH_SIZE == 128
@@ -95,7 +95,7 @@ async def test_required_drain_repeated_cancellation_waits_for_source_confirmatio
     import asyncio
 
     state = await _setup(tmp_path, backend, buffer=InMemoryCacheBackend(max_bytes=65536))
-    archive = state.run_store.read_store(RuntimeDomain.TRACE)
+    archive = state.run_store.read_store(PersistenceDomain.TRACE)
     original = archive.sync_prepared_projection
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -160,7 +160,7 @@ async def test_write_only_cache_batches_trace_without_hot_content_operations(
     state = await _setup(tmp_path, backend, buffer=cache)
     store = state.run_store
     store.trace_persistence.configure("run", buffer=cache, batch_size=2, flush_interval=60.0)
-    archive = store.read_store(RuntimeDomain.TRACE)
+    archive = store.read_store(PersistenceDomain.TRACE)
     original = archive.sync_prepared_projection
     source_error = AIError(ErrorCode.STORAGE_UNAVAILABLE)
 

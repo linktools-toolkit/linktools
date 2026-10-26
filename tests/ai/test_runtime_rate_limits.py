@@ -3,6 +3,10 @@
 """Executable host example proves logical RPM/TPM accounting without a service."""
 
 from __future__ import annotations
+
+from linktools.ai.persistence import Persistence
+
+from linktools.ai.core import ExecutionContext
 from ._runtime_test_helpers import model_features
 
 import asyncio
@@ -23,7 +27,8 @@ from pydantic_ai.settings import ModelSettings
 from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
@@ -184,10 +189,7 @@ async def test_runtime_token_estimator_reads_native_metadata_and_observes_respon
     model = FunctionModel(stream_function=chunks) if streaming else _UsageFunctionModel(answer)
     group.model("default", _Models(model))
     app = {"quota": "project-a"}
-    async with Runtime.open(
-        "quota-metadata", context=RuntimeContext(app),
-        storage=RuntimeStorage.in_memory(), features=await group.capture(),
-    ) as runtime:
+    async with Persistence.open('quota-metadata', storage=PersistenceStorage.in_memory()) as persistence_189, Runtime.open(persistence=persistence_189, context=ExecutionContext(app), features=await group.capture()) as runtime:
         execution = await runtime.agents.get().start("question", correlation={"request": "one"})
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         deps, request = requests[0]

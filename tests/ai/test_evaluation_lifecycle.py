@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Closed evaluation coordinators reject new work without changing durable facts."""
-from ._runtime_test_helpers import model_features
+
+from linktools.ai.persistence import Persistence
+from linktools.ai.task_engine import TaskEngine
+from linktools.ai.evaluation_engine import Evaluations
 
 import asyncio
 from dataclasses import replace
@@ -16,11 +19,11 @@ from linktools.ai.evaluation import (
     HumanScoreRequest, RescoreRequest, ScoreAttemptView, ScoreBundle, ScorerSpec,
     StartEvaluationRequest,
 )
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime.state._store import RecordQuery
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.state import RecordQuery
 from linktools.ai.task import Task, TaskRef
 
-from .test_evaluation_consumers import CONTEXT, DIMENSION, PRINCIPAL, FixtureModels, echo
+from .test_evaluation_consumers import CONTEXT, DIMENSION, PRINCIPAL, echo
 
 
 @pytest.mark.asyncio
@@ -30,16 +33,18 @@ async def test_closed_evaluations_reject_control_without_persisting(
 ) -> None:
     target = Task("lifecycle.target", echo, effect_policy="none")
     scorer = ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,))
-    storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("evaluation-lifecycle", features=model_features(FixtureModels()), storage=storage,
-                            context=CONTEXT) as runtime:
-        engine = runtime.tasks.bind(target)
-        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("lifecycle", 1), (
+    storage = PersistenceStorage.filesystem(tmp_path)
+    async with (
+        Persistence.open('evaluation-lifecycle', storage=storage, tenant_id='evaluation-consumers') as persistence_34,
+        TaskEngine.open(target, persistence=persistence_34, context=CONTEXT) as engine,
+        Evaluations.open(engine) as evaluations,
+    ):
+        dataset = await evaluations.publish_dataset(DatasetSpec(DatasetRef("lifecycle", 1), (
             CaseSpec.task(CaseRef("lifecycle", "one", 1), input={"answer": "yes"}),
         )), principal=PRINCIPAL, idempotency_key="dataset")
         request = StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("candidate", task=target.ref),), (scorer,)), PRINCIPAL, "start")
-        run = await runtime.evaluations.start(request, engine=engine)
+        run = await evaluations.start(request)
 
         async def waiting_score() -> ScoreAttemptView:
             while True:
@@ -53,21 +58,21 @@ async def test_closed_evaluations_reject_control_without_persisting(
                 await asyncio.sleep(0.01)
 
         pending = await asyncio.wait_for(waiting_score(), 10)
-        await runtime.evaluations.close()
-        repository = runtime._state.evaluation.records
+        await evaluations.close()
+        repository = persistence_34.evaluation.records
         before = await repository.state_store.read(
             lambda transaction: transaction.list_records(RecordQuery(kind="evaluation")))
         assert len(before) == 1
         key = "closed-request"
         with pytest.raises(AIError) as raised:
             if operation == "start":
-                await runtime.evaluations.start(replace(request, idempotency_key=key), engine=engine)
+                await evaluations.start(replace(request, idempotency_key=key))
             elif operation == "rescore":
-                await run.rescore(RescoreRequest((scorer,), key), engine=engine)
+                await run.rescore(RescoreRequest((scorer,), key))
             elif operation == "cancel":
                 await run.cancel(idempotency_key=key)
             elif operation == "reconcile":
-                await runtime.evaluations.reconcile(run.experiment_id, engine=engine,
+                await evaluations.reconcile(run.experiment_id,
                                                     principal=PRINCIPAL, idempotency_key=key)
             else:
                 await run.submit_human_score(HumanScoreRequest(pending.trial.trial_id,
@@ -77,10 +82,10 @@ async def test_closed_evaluations_reject_control_without_persisting(
         assert not raised.value.retryable
         assert await repository.state_store.read(
             lambda transaction: transaction.list_records(RecordQuery(kind="evaluation"))) == before
-        assert await runtime._state.evaluation.idempotency.get("evaluation.run", idempotency_key_digest(key),
+        assert await persistence_34.evaluation.idempotency.get("evaluation.run", idempotency_key_digest(key),
                                                        tenant_id=PRINCIPAL.tenant_id) is None
-        reopened = await runtime.evaluations.get(run.experiment_id, principal=PRINCIPAL)
+        reopened = await evaluations.get(run.experiment_id, principal=PRINCIPAL)
         assert (await reopened.inspect()).completion == "running"
         assert (await reopened.scores()).items == (pending,)
         assert (await reopened.trials()).items[0].evidence_ref is not None
-        assert (await runtime.evaluations.get_dataset(dataset, principal=PRINCIPAL)).ref == dataset
+        assert (await evaluations.get_dataset(dataset, principal=PRINCIPAL)).ref == dataset

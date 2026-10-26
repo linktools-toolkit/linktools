@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Regression coverage for TaskGraph optimistic CAS convergence."""
 from ._runtime_test_helpers import model_features
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 import sqlite3
 from collections.abc import AsyncIterator
@@ -28,17 +30,15 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import (
-    AgentTaskInput,
-    Runtime,
-    RuntimeStorage,
-    TaskGraphRunEvent,
-    TaskGraphProjection,
-)
-from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
-from linktools.ai.runtime.service_api import ExecutionStreamEvent, ExecutionTreeEvent, ExecutionView, ModelInteractionReadBoundary
-from linktools.ai.runtime.state._sql import _SqlTransaction
-from linktools.ai.runtime.state._task_repository import TaskRepositoryImpl
+from linktools.ai.inputs import AgentTaskInput
+from linktools.ai.runtime import Runtime
+from linktools.ai.execution import TaskGraphRunEvent, TaskGraphProjection
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.task_engine._runner import TaskNodeExecutor
+from linktools.ai.task_engine import TaskEngine
+from linktools.ai.execution import ExecutionStreamEvent, ExecutionTreeEvent, ExecutionView, ModelInteractionReadBoundary
+from linktools.ai.persistence._sql import _SqlTransaction
+from linktools.ai.persistence._task_repository import TaskRepositoryImpl
 from linktools.ai.storage import FilesystemObjectStore, ObjectRef, StoredPayload
 from linktools.ai.task import (
     DefaultTaskGraphService,
@@ -101,7 +101,7 @@ async def _provision_sqlite(path: Path) -> None:
 
 
 async def _digest_run(
-    self: RuntimeTaskNodeRunner,
+    self: TaskNodeExecutor,
     invocation: TaskNodeInvocation,
     *,
     control: TaskNodeRunControl,
@@ -118,14 +118,14 @@ async def _digest_run(
 
 
 async def _noop_cancel(
-    self: RuntimeTaskNodeRunner,
+    self: TaskNodeExecutor,
     invocation: TaskNodeInvocation,
 ) -> None:
     del self, invocation
 
 
 def _agent_task(runtime: Runtime[object]) -> Task[object]:
-    return runtime.tasks.from_agent(
+    return Task.from_agent(
         "sqlite.agent.default",
         runtime.agents.get("default"),
     )
@@ -152,11 +152,11 @@ async def test_sqlite_state_group_serializes_mutation_callbacks(
 ) -> None:
     database = tmp_path / "serialized.sqlite"
     await _provision_sqlite(database)
-    state = RuntimeStorage.sqlite(
+    state = PersistenceStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="sqlite-serialize", tenant_id="default")
     store = state.task.tasks.state_store
     first_entered = asyncio.Event()
@@ -202,7 +202,7 @@ async def test_sqlite_graph_state_keeps_one_snapshot_during_expansion(
     finally:
         connection.close()
 
-    state = RuntimeStorage.sqlite(
+    state = PersistenceStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
@@ -228,17 +228,13 @@ async def test_sqlite_graph_state_keeps_one_snapshot_during_expansion(
         return records
 
     try:
-        async with Runtime.open(
-            "sqlite-dynamic-state",
-            features=model_features(_TaskTestModels()),  # type: ignore[arg-type]
-            storage=state,
-        ) as runtime:
-            repository = runtime._state.task.tasks
-            await runtime._state.task.admissions.admit(
+        async with Persistence.open('sqlite-dynamic-state', storage=state) as persistence_231, TaskEngine.open(persistence=persistence_231) as engine:
+            repository = engine.persistence.task.tasks
+            await engine.persistence.task.admissions.admit(
                 TaskGraphAdmission.from_request(request),
                 graph,
             )
-            run = await runtime.tasks.bind().get(
+            run = await engine.get(
                 graph.graph_id,
                 principal=request.principal,
             )
@@ -356,7 +352,7 @@ async def test_sqlite_graph_state_keeps_one_snapshot_during_expansion(
             final_state = await run.state(include_content=True)
             assert assert_coherent(final_state) == 14
 
-            state_store = runtime._state.task.tasks.state_store
+            state_store = engine.persistence.task.tasks.state_store
             child_state_key = repository._state_key(graph.graph_id, "child")
 
             async def remove_child_state(transaction) -> None:
@@ -368,7 +364,6 @@ async def test_sqlite_graph_state_keeps_one_snapshot_during_expansion(
             assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         continue_read.set()
-        await runtime._state.close()
 
 
 @pytest.mark.asyncio
@@ -378,7 +373,7 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
 ) -> None:
     database = tmp_path / "dynamic-watch.sqlite"
     await _provision_sqlite(database)
-    storage = RuntimeStorage.sqlite(
+    storage = PersistenceStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
@@ -387,7 +382,7 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
     expansion_started = asyncio.Event()
     stream_requests: list[tuple[str, dict[str, int]]] = []
     principal = Principal("watcher", "default")
-    original_run = RuntimeTaskNodeRunner.run
+    original_run = TaskNodeExecutor.run
 
     async def wait_for_expansion(context: TaskNodeContext[object]) -> JsonValue:
         del context
@@ -401,12 +396,8 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
         effect_policy="none",
     )
 
-    async with Runtime.open(
-        "sqlite-dynamic-watch",
-        storage=storage,
-        features=model_features(_TaskTestModels(), _agent_group()),
-    ) as runtime:
-        agent_task = runtime.tasks.from_agent(
+    async with Persistence.open('sqlite-dynamic-watch', storage=storage) as persistence_404, Runtime.open(persistence=persistence_404, features=model_features(_TaskTestModels(), _agent_group())) as runtime, TaskEngine.open(persistence=persistence_404) as engine:
+        agent_task = Task.from_agent(
             "sqlite.watch.agent",
             runtime.agents.get("default"),
         )
@@ -438,7 +429,7 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
         )
 
         async def run_child(
-            self: RuntimeTaskNodeRunner,
+            self: TaskNodeExecutor,
             invocation: TaskNodeInvocation,
             *,
             control: TaskNodeRunControl,
@@ -529,19 +520,23 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
         async def subscribe_models(*args, **kwargs):
             return None
 
+        async def model_updates(*args, **kwargs):
+            return await model_cutoffs(*args, **kwargs), ()
+
         history = SimpleNamespace(
             capture_model_interaction_cutoffs=model_cutoffs,
             subscribe_model_interactions=subscribe_models,
+            read_model_interaction_updates=model_updates,
         )
 
+        engine = engine.with_definitions(root_task, agent_task, expander)
         principal_arg = principal
-        monkeypatch.setattr(RuntimeTaskNodeRunner, "run", run_child)
-        monkeypatch.setattr(runtime.executions, "inspect", inspect_execution)
-        monkeypatch.setattr(runtime, "_watch_execution_tree", watch_tree)
-        monkeypatch.setattr(runtime, "_capture_execution_tree", capture_tree)
-        monkeypatch.setattr(runtime, "_replay_execution_tree", replay_tree)
-        monkeypatch.setattr(runtime, "history", history)
-        engine = runtime.tasks.bind(root_task, agent_task, expander)
+        monkeypatch.setattr(TaskNodeExecutor, "run", run_child)
+        monkeypatch.setattr(engine, "_inspect_execution", inspect_execution)
+        monkeypatch.setattr(engine, "_watch_execution_tree", watch_tree)
+        monkeypatch.setattr(engine, "_capture_execution_tree", capture_tree)
+        monkeypatch.setattr(engine, "_replay_execution_tree", replay_tree)
+        monkeypatch.setattr(engine, "_history", history)
         run = await engine.start(
             graph,
             idempotency_key="submit:dynamic-watch",
@@ -585,25 +580,22 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
         success_cursor = successful.cursor
         assert success_cursor is not None
 
-    reopened_storage = RuntimeStorage.sqlite(
+    reopened_storage = PersistenceStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
-    async with Runtime.open(
-        "sqlite-dynamic-watch",
-        storage=reopened_storage,
-        features=model_features(_TaskTestModels(), _agent_group()),
-    ) as runtime:
-        agent_task = runtime.tasks.from_agent(
+    async with Persistence.open('sqlite-dynamic-watch', storage=reopened_storage) as persistence_592, Runtime.open(persistence=persistence_592, features=model_features(_TaskTestModels(), _agent_group())) as runtime, TaskEngine.open(persistence=persistence_592) as engine:
+        agent_task = Task.from_agent(
             "sqlite.watch.agent",
             runtime.agents.get("default"),
         )
-        monkeypatch.setattr(runtime.executions, "inspect", inspect_execution)
-        monkeypatch.setattr(runtime, "_watch_execution_tree", watch_tree)
-        monkeypatch.setattr(runtime, "_capture_execution_tree", capture_tree)
-        monkeypatch.setattr(runtime, "_replay_execution_tree", replay_tree)
-        monkeypatch.setattr(runtime, "history", history)
-        reopened = await runtime.tasks.bind(root_task, agent_task, expander).get(
+        engine = engine.with_definitions(root_task, agent_task, expander)
+        monkeypatch.setattr(engine, "_inspect_execution", inspect_execution)
+        monkeypatch.setattr(engine, "_watch_execution_tree", watch_tree)
+        monkeypatch.setattr(engine, "_capture_execution_tree", capture_tree)
+        monkeypatch.setattr(engine, "_replay_execution_tree", replay_tree)
+        monkeypatch.setattr(engine, "_history", history)
+        reopened = await engine.get(
             graph.graph_id,
             principal=principal,
         )
@@ -637,21 +629,17 @@ async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
     monkeypatch: pytest.MonkeyPatch,
     repetitions: int,
 ) -> None:
-    monkeypatch.setattr(RuntimeTaskNodeRunner, "run", _digest_run)
-    monkeypatch.setattr(RuntimeTaskNodeRunner, "cancel", _noop_cancel)
+    monkeypatch.setattr(TaskNodeExecutor, "run", _digest_run)
+    monkeypatch.setattr(TaskNodeExecutor, "cancel", _noop_cancel)
     database = tmp_path / "state.sqlite"
     await _provision_sqlite(database)
-    state = RuntimeStorage.sqlite(
+    state = PersistenceStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
-    async with Runtime.open(
-        "default",
-        storage=state,
-        features=model_features(_TaskTestModels(), _agent_group()),
-    ) as runtime:
+    async with Persistence.open('default', storage=state) as persistence_648, Runtime.open(persistence=persistence_648, features=model_features(_TaskTestModels(), _agent_group())) as runtime, TaskEngine.open(persistence=persistence_648) as engine:
         task = _agent_task(runtime)
-        engine = runtime.tasks.bind(task)
+        engine = engine.with_definitions(task)
         for index in range(repetitions):
             graph = TaskGraph(
                 f"serial-{index}",
@@ -704,7 +692,7 @@ async def test_sqlite_public_runtime_task_failure_blocks_dependency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def run(
-        self: RuntimeTaskNodeRunner,
+        self: TaskNodeExecutor,
         invocation: TaskNodeInvocation,
         *,
         control: TaskNodeRunControl,
@@ -722,21 +710,17 @@ async def test_sqlite_public_runtime_task_failure_blocks_dependency(
         )
         return TaskNodeRunResult(payload.digest, result_payload=payload)
 
-    monkeypatch.setattr(RuntimeTaskNodeRunner, "run", run)
-    monkeypatch.setattr(RuntimeTaskNodeRunner, "cancel", _noop_cancel)
+    monkeypatch.setattr(TaskNodeExecutor, "run", run)
+    monkeypatch.setattr(TaskNodeExecutor, "cancel", _noop_cancel)
     database = tmp_path / "failure.sqlite"
     await _provision_sqlite(database)
-    state = RuntimeStorage.sqlite(
+    state = PersistenceStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
-    async with Runtime.open(
-        "default",
-        storage=state,
-        features=model_features(_TaskTestModels(), _agent_group()),
-    ) as runtime:
+    async with Persistence.open('default', storage=state) as persistence_733, Runtime.open(persistence=persistence_733, features=model_features(_TaskTestModels(), _agent_group())) as runtime, TaskEngine.open(persistence=persistence_733) as engine:
         task = _agent_task(runtime)
-        engine = runtime.tasks.bind(task)
+        engine = engine.with_definitions(task)
         graph = TaskGraph(
             "failure",
             (
@@ -770,7 +754,7 @@ async def test_sqlite_public_runtime_task_wait_timeout_and_cancel(
     started = asyncio.Event()
 
     async def run(
-        self: RuntimeTaskNodeRunner,
+        self: TaskNodeExecutor,
         invocation: TaskNodeInvocation,
         *,
         control: TaskNodeRunControl,
@@ -785,21 +769,17 @@ async def test_sqlite_public_runtime_task_wait_timeout_and_cancel(
         await asyncio.Event().wait()
         raise AssertionError("blocked task unexpectedly completed")
 
-    monkeypatch.setattr(RuntimeTaskNodeRunner, "run", run)
-    monkeypatch.setattr(RuntimeTaskNodeRunner, "cancel", _noop_cancel)
+    monkeypatch.setattr(TaskNodeExecutor, "run", run)
+    monkeypatch.setattr(TaskNodeExecutor, "cancel", _noop_cancel)
     database = tmp_path / "cancel.sqlite"
     await _provision_sqlite(database)
-    state = RuntimeStorage.sqlite(
+    state = PersistenceStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
-    async with Runtime.open(
-        "default",
-        storage=state,
-        features=model_features(_TaskTestModels(), _agent_group()),
-    ) as runtime:
+    async with Persistence.open('default', storage=state) as persistence_796, Runtime.open(persistence=persistence_796, features=model_features(_TaskTestModels(), _agent_group())) as runtime, TaskEngine.open(persistence=persistence_796) as engine:
         task = _agent_task(runtime)
-        engine = runtime.tasks.bind(task)
+        engine = engine.with_definitions(task)
         graph = TaskGraph("timeout", (_agent_node(task, "blocked", "blocked"),))
         run = await engine.start(
             graph,
@@ -827,11 +807,11 @@ async def test_sqlite_terminal_nodes_leave_recovery_index_after_reconcile(
         TaskGraphLimits(max_concurrency=1),
     )
     admission = TaskGraphAdmission.from_request(request)
-    state = RuntimeStorage.sqlite(
+    state = PersistenceStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="task-cas-recovery", tenant_id="tenant")
     try:
         await state.task.admissions.admit(admission, request.graph)
@@ -856,11 +836,11 @@ async def test_sqlite_terminal_nodes_leave_recovery_index_after_reconcile(
     finally:
         await state.close()
 
-    reopened = RuntimeStorage.sqlite(
+    reopened = PersistenceStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
-    reopened = RuntimeState(reopened)
+    reopened = Persistence(reopened)
     await reopened.initialize(namespace="task-cas-recovery", tenant_id="tenant")
     try:
         view = await reopened.task.tasks.scheduler_state(
@@ -968,9 +948,9 @@ async def test_task_inspect_and_wait_are_read_only() -> None:
 
 async def _admitted_state(
     graph: TaskGraph,
-) -> tuple[RuntimeState, TaskGraphRequest]:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+) -> tuple[Persistence, TaskGraphRequest]:
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-cas", tenant_id="tenant")
     request = TaskGraphRequest(
         graph,

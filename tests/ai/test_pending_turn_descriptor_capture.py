@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeState
-from linktools.ai.runtime.state._conversation_repositories import ConversationHistoryRepositoryImpl
-from linktools.ai.runtime.state._store import active_state_scope
+from linktools.ai.persistence import PersistenceDomain, Persistence
+from linktools.ai.persistence._conversation_repositories import ConversationHistoryRepositoryImpl
+from linktools.ai.persistence.state import active_state_scope
 from .test_incremental_projection_boundaries import _storage
 from .test_pending_turn_commit import (
     _NAMESPACE, _commit, _pending_turn,
@@ -51,7 +51,7 @@ async def test_post_capture_descriptor_change_is_rejected_by_fresh_comparison(
 ) -> None:
     async with _turn_state("sqlite", tmp_path) as state:
         owner = state.storage.conversation.histories
-        archive = state.storage.run_store.read_store(RuntimeDomain.CONVERSATION)
+        archive = state.storage.run_store.read_store(PersistenceDomain.CONVERSATION)
         original = archive.prepare_conversation_checkpoint
         snapshots = []
         async def changed_after_capture(run, checkpoint, **kwargs):
@@ -88,7 +88,7 @@ async def test_unmatched_owner_keeps_original_read_path(
         other = None
         calls = []
         if scope == "other_group":
-            other = RuntimeState(_storage("sqlite", tmp_path / "second"))
+            other = Persistence(_storage("sqlite", tmp_path / "second"))
             await other.initialize(namespace=_NAMESPACE, tenant_id="tenant")
             await other.conversation.sessions.create(state.session)
             owner = other.conversation.histories
@@ -130,7 +130,7 @@ async def test_late_winner_after_capture_remains_authoritative(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, identity: str,
 ) -> None:
     async with _turn_state("sqlite", tmp_path) as state:
-        archive = state.storage.run_store.read_store(RuntimeDomain.CONVERSATION)
+        archive = state.storage.run_store.read_store(PersistenceDomain.CONVERSATION)
         original = archive.prepare_conversation_checkpoint
         late = _pending_turn(state, execution_id="late-winner", answer="winner")
         contender = _pending_turn(

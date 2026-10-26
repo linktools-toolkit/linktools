@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Execution conversation promises are explicit in the durable wire."""
 from ._runtime_test_helpers import model_features
 
@@ -9,15 +11,16 @@ import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime.state._codec import (
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
     decode_domain,
     encode_domain,
     encode_envelope,
 )
-from linktools.ai.runtime.state._contracts import ExecutionRecord
+from linktools.ai.persistence.contracts import ExecutionRecord
 
 from .test_explicit_runtime_features import _FeatureModels, _features
 
@@ -28,11 +31,9 @@ from .test_explicit_runtime_features import _FeatureModels, _features
 async def test_execution_writer_requires_explicit_conversation(
     persisted: bool, conversation: bool,
 ) -> None:
-    storage = RuntimeStorage.in_memory()
+    storage = PersistenceStorage.in_memory()
     features = _features(*(ExecutionCapability(retain_history=True),) if conversation else ())
-    async with Runtime.open(
-        "conversation-wire", storage=storage, features=model_features(_FeatureModels(), features),
-    ) as runtime:
+    async with Persistence.open('conversation-wire', storage=storage) as persistence_33, Runtime.open(persistence=persistence_33, features=model_features(_FeatureModels(), features)) as runtime:
         execution = await runtime.agents.get().start("answer")
         await execution.wait(timeout_seconds=5)
         record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)

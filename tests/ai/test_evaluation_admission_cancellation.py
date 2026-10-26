@@ -2,13 +2,16 @@
 # -*- coding: utf-8 -*-
 """Cancellation owns the same native admission receipt as a concurrent start."""
 
+from linktools.ai.persistence import Persistence
+from linktools.ai.task_engine import TaskEngine
+from linktools.ai.evaluation_engine import Evaluations
+
 import asyncio
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import (
     AuthorizationAction, JsonValue, Principal, ResourceRef, TenantAuthorizationPolicy,
     idempotency_key_digest, service_principal,
@@ -19,8 +22,7 @@ from linktools.ai.evaluation import (
     StartEvaluationRequest,
 )
 
-from linktools.ai.runtime import Runtime
-from linktools.ai.runtime.state._evaluation_records import EvaluationRecord
+from linktools.ai.persistence._evaluation_records import EvaluationRecord
 from linktools.ai.task import Task, TaskNodeContext
 
 from .test_evaluation_consumers import (
@@ -52,18 +54,19 @@ async def test_admission_cancellation_fences_both_start_orderings(
     target_task = Task("cancel-admission.target", target, effect_policy="none")
     scorer = Task("cancel-admission.score", score, effect_policy="none")
     storage = storage_for(backend, tmp_path)
-    async with Runtime.open(
-        "cancel-admission", storage=storage, context=CONTEXT,
-    ) as runtime:
-        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("cancel", 1), (
+    async with (
+        Persistence.open('cancel-admission', storage=storage, tenant_id='evaluation-consumers') as persistence_55,
+        TaskEngine.open(target_task, scorer, persistence=persistence_55, context=CONTEXT) as engine,
+        Evaluations.open(engine) as evaluations,
+    ):
+        dataset = await evaluations.publish_dataset(DatasetSpec(DatasetRef("cancel", 1), (
             CaseSpec.task(CaseRef("cancel", "one", 1), input={"answer": "yes"}, expected="yes"),
         )), principal=PRINCIPAL, idempotency_key="dataset")
         request = StartEvaluationRequest(EvaluationSpec(
             dataset, (CandidateSpec("current", task=target_task.ref),), (rule_scorer(scorer),),
         ), PRINCIPAL, "same-admission")
-        engine = runtime.tasks.bind(target_task, scorer)
         entered, release = asyncio.Event(), asyncio.Event()
-        reserve = runtime._state.evaluation.records.reserve_experiment
+        reserve = persistence_55.evaluation.records.reserve_experiment
         delayed_gate = "open" if winner == "cancel" else "closed_cancel"
 
         async def paused(record: EvaluationRecord) -> EvaluationRecord:
@@ -73,18 +76,18 @@ async def test_admission_cancellation_fences_both_start_orderings(
             return await reserve(record)
 
         with monkeypatch.context() as patch:
-            patch.setattr(runtime._state.evaluation.records, "reserve_experiment", paused)
+            patch.setattr(persistence_55.evaluation.records, "reserve_experiment", paused)
             delayed = asyncio.create_task(
-                runtime.evaluations.start(request, engine=engine) if winner == "cancel" else
-                runtime.evaluations.cancel_admission(request, engine=engine)
+                evaluations.start(request) if winner == "cancel" else
+                evaluations.cancel_admission(request)
             )
             try:
                 await asyncio.wait_for(entered.wait(), 10)
                 if winner == "cancel":
-                    first = await runtime.evaluations.cancel_admission(request, engine=engine)
+                    first = await evaluations.cancel_admission(request)
                     assert (await first.inspect()).completion == "cancelled"
                 else:
-                    first = await runtime.evaluations.start(request, engine=engine)
+                    first = await evaluations.start(request)
                     await asyncio.wait_for(target_started.wait(), 10)
                 release.set()
                 second = await asyncio.wait_for(delayed, EVALUATION_COMPLETION_TIMEOUT_SECONDS)
@@ -95,18 +98,18 @@ async def test_admission_cancellation_fences_both_start_orderings(
                 await asyncio.gather(delayed, return_exceptions=True)
         assert first.experiment_id == second.experiment_id
         assert (await second.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "cancelled"
-        record = await runtime._state.evaluation.records.get(first.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        record = await persistence_55.evaluation.records.get(first.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         assert record is not None and record.gate == "closed_cancel"
         assert record.manifest.principal == PRINCIPAL
         assert calls == ([] if winner == "cancel" else ["target"])
         assert not any(item.scorer_slot_id is not None for item in record.intents)
 
         release_target.set()
-        repeated = await runtime.evaluations.start(request, engine=engine)
+        repeated = await evaluations.start(request)
         assert repeated.experiment_id == first.experiment_id
         assert (await repeated.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "cancelled"
         assert calls == ([] if winner == "cancel" else ["target"])
-        repeated_cancel = await runtime.evaluations.cancel_admission(request, engine=engine)
+        repeated_cancel = await evaluations.cancel_admission(request)
         assert repeated_cancel.experiment_id == first.experiment_id
         assert (await repeated_cancel.inspect()).completion == "cancelled"
 
@@ -127,44 +130,46 @@ async def test_admission_cancellation_preserves_authorization_and_request_identi
     target = Task("cancel-security.target", echo, effect_policy="none")
     scorer = Task("cancel-security.score", exact, effect_policy="none")
     storage = storage_for("filesystem", tmp_path)
-    async with Runtime.open(
-        "cancel-security", storage=storage, context=CONTEXT,
-        features=RuntimeFeatures("authorization", authorization=authorization),
-    ) as runtime:
-        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("cancel", 1), (
-            CaseSpec.task(CaseRef("cancel", "one", 1), input={"answer": "yes"}, expected="yes"),
-        )), principal=PRINCIPAL, idempotency_key="dataset")
-        request = StartEvaluationRequest(EvaluationSpec(
-            dataset, (CandidateSpec("current", task=target.ref),), (rule_scorer(scorer),),
-        ), PRINCIPAL, "cancelled-admission")
-        engine = runtime.tasks.bind(target, scorer)
-        for action in (AuthorizationAction.EVALUATION_RUN, AuthorizationAction.EVALUATION_CANCEL):
-            authorization.denied = action
-            with pytest.raises(AIError) as denied:
-                await runtime.evaluations.cancel_admission(request, engine=engine)
-            assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
-            assert await runtime._state.evaluation.idempotency.get(
-                "evaluation.run", idempotency_key_digest(request.idempotency_key), tenant_id=PRINCIPAL.tenant_id,
-            ) is None
-        authorization.denied = None
-        run = await runtime.evaluations.cancel_admission(request, engine=engine)
-        for principal in (
-            service_principal(PRINCIPAL.tenant_id, "other-owner"),
-            service_principal("foreign", PRINCIPAL.principal_id),
+    async with (
+        Persistence.open('cancel-security', storage=storage, tenant_id='evaluation-consumers') as persistence_130,
+    ):
+        async with (
+            TaskEngine.open(target, scorer, persistence=persistence_130, context=CONTEXT, authorization=authorization) as engine,
+            Evaluations.open(engine) as evaluations,
         ):
-            with pytest.raises(AIError) as denied:
-                await runtime.evaluations.cancel_admission(replace(request, principal=principal), engine=engine)
-            assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
-        changed = replace(request, spec=replace(request.spec, repetitions=2))
-        for operation in (runtime.evaluations.start, runtime.evaluations.cancel_admission):
-            with pytest.raises(AIError) as conflict:
-                await operation(changed, engine=engine)
-            assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
-        assert (await run.inspect()).completion == "cancelled"
+            dataset = await evaluations.publish_dataset(DatasetSpec(DatasetRef("cancel", 1), (
+                CaseSpec.task(CaseRef("cancel", "one", 1), input={"answer": "yes"}, expected="yes"),
+            )), principal=PRINCIPAL, idempotency_key="dataset")
+            request = StartEvaluationRequest(EvaluationSpec(
+                dataset, (CandidateSpec("current", task=target.ref),), (rule_scorer(scorer),),
+            ), PRINCIPAL, "cancelled-admission")
+            for action in (AuthorizationAction.EVALUATION_RUN, AuthorizationAction.EVALUATION_CANCEL):
+                authorization.denied = action
+                with pytest.raises(AIError) as denied:
+                    await evaluations.cancel_admission(request)
+                assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+                assert await persistence_130.evaluation.idempotency.get(
+                    "evaluation.run", idempotency_key_digest(request.idempotency_key), tenant_id=PRINCIPAL.tenant_id,
+                ) is None
+            authorization.denied = None
+            run = await evaluations.cancel_admission(request)
+            for principal in (
+                service_principal(PRINCIPAL.tenant_id, "other-owner"),
+                service_principal("foreign", PRINCIPAL.principal_id),
+            ):
+                with pytest.raises(AIError) as denied:
+                    await evaluations.cancel_admission(replace(request, principal=principal))
+                assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+            changed = replace(request, spec=replace(request.spec, repetitions=2))
+            for operation in (evaluations.start, evaluations.cancel_admission):
+                with pytest.raises(AIError) as conflict:
+                    await operation(changed)
+                assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+            assert (await run.inspect()).completion == "cancelled"
 
-        completed_request = replace(request, idempotency_key="completed-admission")
-        completed = await runtime.evaluations.start(completed_request, engine=engine)
-        assert (await completed.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
-        cancelled = await runtime.evaluations.cancel_admission(completed_request, engine=engine)
-        assert cancelled.experiment_id == completed.experiment_id
-        assert (await cancelled.inspect()).completion == "complete"
+            completed_request = replace(request, idempotency_key="completed-admission")
+            completed = await evaluations.start(completed_request)
+            assert (await completed.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
+            cancelled = await evaluations.cancel_admission(completed_request)
+            assert cancelled.experiment_id == completed.experiment_id
+            assert (await cancelled.inspect()).completion == "complete"

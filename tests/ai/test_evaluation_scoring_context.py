@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Authoritative case context and durable scoring submission boundaries."""
-from ._runtime_test_helpers import model_features
+
+from linktools.ai.persistence import Persistence
+from linktools.ai.task_engine import TaskEngine
+from linktools.ai.evaluation_engine import Evaluations
 
 import asyncio
 from dataclasses import replace
@@ -16,13 +19,13 @@ from linktools.ai.evaluation import (
     LabelProvenance, RescoreRequest, ScoreBundle, ScorerContract, ScoringInput,
     StartEvaluationRequest, TargetTrialRef,
 )
-from linktools.ai.runtime import Runtime, RuntimeStorage, TaskEngine
-from linktools.ai.runtime.state._codec import encode_domain
-from linktools.ai.runtime.state._evaluation_records import EvaluationRecord
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.codec import encode_domain
+from linktools.ai.persistence._evaluation_records import EvaluationRecord
 from linktools.ai.task import Task, TaskGraph, TaskGraphSubmission, TaskNodeContext, TaskSubmissionResult
 
 from .test_evaluation_consumers import (
-    CONTEXT, EVALUATION_COMPLETION_TIMEOUT_SECONDS, PRINCIPAL, FixtureModels, echo, rule_scorer,
+    CONTEXT, EVALUATION_COMPLETION_TIMEOUT_SECONDS, PRINCIPAL, echo, rule_scorer,
 )
 
 
@@ -48,21 +51,23 @@ async def test_program_scorer_uses_frozen_case_context_for_identical_inputs_and_
     cases = tuple(CaseSpec.task(CaseRef("context", f"case-{index}", 1), input=untrusted,
                                expected="same answer", label_provenance=label)
                   for index, label in enumerate(labels))
-    async with Runtime.open("scoring-context", features=model_features(FixtureModels()), context=CONTEXT,
-                            storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
-        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("context", 1), cases),
+    async with (
+        Persistence.open('scoring-context', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_51,
+        TaskEngine.open(target, scorer, persistence=persistence_51, context=CONTEXT) as engine,
+        Evaluations.open(engine) as evaluations,
+    ):
+        dataset = await evaluations.publish_dataset(DatasetSpec(DatasetRef("context", 1), cases),
             principal=PRINCIPAL, idempotency_key="dataset")
         spec = replace(rule_scorer(scorer), config={"policy": "constant"})
-        run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-            (CandidateSpec("candidate", task=target.ref),), (spec,)), PRINCIPAL, "start"),
-            engine=runtime.tasks.bind(target, scorer))
+        run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
+            (CandidateSpec("candidate", task=target.ref),), (spec,)), PRINCIPAL, "start"))
         assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         assert len(received) == len(cases)
         revised = tuple(replace(case, ref=replace(case.ref, revision=2),
                                 label_provenance=LabelProvenance("later-assessment")) for case in cases)
-        await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("context", 2), revised),
+        await evaluations.publish_dataset(DatasetSpec(DatasetRef("context", 2), revised),
             principal=PRINCIPAL, idempotency_key="revised-dataset")
-        rescored = await run.rescore(RescoreRequest((spec,), "rescore"), engine=runtime.tasks.bind(scorer))
+        rescored = await run.rescore(RescoreRequest((spec,), "rescore"))
         assert (await rescored.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         for samples in (received[:len(cases)], received[len(cases):]):
             assert {sample.case_ref: sample.label_provenance for sample in samples} == {
@@ -84,7 +89,7 @@ async def test_program_scorer_uses_frozen_case_context_for_identical_inputs_and_
             frozen = await selected_run.trials(limit=3)
             assert tuple(item.trial for item in frozen.items) == tuple(item.trial for item in current)
             for item in current:
-                case = await runtime.evaluations.get_case(item.case_ref, principal=PRINCIPAL)
+                case = await evaluations.get_case(item.case_ref, principal=PRINCIPAL)
                 original = next(original for original in cases if original.ref == item.case_ref)
                 assert case.ref == original.ref
                 assert case.label_provenance == original.label_provenance
@@ -112,15 +117,17 @@ async def test_scoring_intent_replays_original_input_and_rejects_changed_context
     scorer = Task("replay.score", score, effect_policy="none")
     case = CaseSpec.task(CaseRef("replay", "case", 1), input={"answer": "yes"}, expected="yes",
                          label_provenance=LabelProvenance("assessment:42", "reviewer", "human-confirmed", "3"))
-    def storage() -> RuntimeStorage:
-        return (RuntimeStorage.filesystem(tmp_path) if backend == "filesystem"
-                else RuntimeStorage.sqlite(tmp_path / "state.sqlite"))
+    def storage() -> PersistenceStorage:
+        return (PersistenceStorage.filesystem(tmp_path) if backend == "filesystem"
+                else PersistenceStorage.sqlite(tmp_path / "state.sqlite"))
 
     initial = storage()
-    async with Runtime.open("scoring-replay", features=model_features(FixtureModels()), context=CONTEXT,
-                            storage=initial) as runtime:
-        engine = runtime.tasks.bind(target, scorer)
-        build_graph = runtime.evaluations._scoring_graph
+    async with (
+        Persistence.open('scoring-replay', storage=initial, tenant_id='evaluation-consumers') as persistence_120,
+        TaskEngine.open(target, scorer, persistence=persistence_120, context=CONTEXT) as engine,
+        Evaluations.open(engine) as evaluations,
+    ):
+        build_graph = evaluations._scoring_graph
         captured: list[ScoringInput] = []
 
         def project(record: EvaluationRecord, trial: TargetTrialRef, contract: ScorerContract,
@@ -142,16 +149,15 @@ async def test_scoring_intent_replays_original_input_and_rejects_changed_context
             return await start_prepared(selected, submission)
 
         with monkeypatch.context() as patch:
-            patch.setattr(runtime.evaluations, "_scoring_graph", project)
+            patch.setattr(evaluations, "_scoring_graph", project)
             patch.setattr(TaskEngine, "start_prepared", interrupt)
-            dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("replay", 1), (case,)),
+            dataset = await evaluations.publish_dataset(DatasetSpec(DatasetRef("replay", 1), (case,)),
                 principal=PRINCIPAL, idempotency_key="dataset")
-            run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-                (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),)), PRINCIPAL, "start"),
-                engine=engine)
+            run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
+                (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),)), PRINCIPAL, "start"))
             await asyncio.wait_for(entered.wait(), EVALUATION_COMPLETION_TIMEOUT_SECONDS)
             experiment_id = run.experiment_id
-            repository = runtime._state.evaluation.records
+            repository = persistence_120.evaluation.records
             record = await repository.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
             saved = next(intent for intent in record.intents if intent.scorer_slot_id is not None)
             assert not saved.confirmed and not saved.released
@@ -163,7 +169,7 @@ async def test_scoring_intent_replays_original_input_and_rejects_changed_context
                 alternate.pop("case_ref")
                 alternate.pop("label_provenance")
             graph = build_graph(record, saved.trial, record.manifest.scorers[0], ScoringInput.from_mapping(alternate))
-            submission = await engine.with_definitions(runtime.evaluations._recorder).describe_submission(
+            submission = await engine.with_definitions(evaluations._recorder).describe_submission(
                 graph, principal=PRINCIPAL, idempotency_key=f"evaluation:{experiment_id}:{saved.slot_id}",
                 limits=saved.submission.admission.limits, correlation=saved.submission.admission.correlation)
             assert submission.ref.operation_id == saved.submission.ref.operation_id
@@ -173,24 +179,27 @@ async def test_scoring_intent_replays_original_input_and_rejects_changed_context
                 await repository.register_launch_intent(experiment_id, replace(saved, submission=submission), capacity=1)
             assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
             assert await repository.get(experiment_id, tenant_id=PRINCIPAL.tenant_id) == record
-            await runtime.evaluations.close()
+            await evaluations.close()
         assert received == [] and target_calls == ["yes"]
 
     reopened = storage()
-    async with Runtime.open("scoring-replay", features=model_features(FixtureModels()), context=CONTEXT,
-                            storage=reopened) as runtime:
+    async with (
+        Persistence.open('scoring-replay', storage=reopened, tenant_id='evaluation-consumers') as persistence_180,
+        TaskEngine.open(target, scorer, persistence=persistence_180, context=CONTEXT) as engine,
+        Evaluations.open(engine) as evaluations,
+    ):
         def reject_rebuild(*args: object, **kwargs: object) -> TaskGraph:
             pytest.fail("an existing scoring intent must replay its saved submission")
 
-        monkeypatch.setattr(runtime.evaluations, "_scoring_graph", reject_rebuild)
-        recovered = await runtime.evaluations.reconcile(experiment_id, engine=runtime.tasks.bind(target, scorer),
+        monkeypatch.setattr(evaluations, "_scoring_graph", reject_rebuild)
+        recovered = await evaluations.reconcile(experiment_id,
             principal=PRINCIPAL, idempotency_key="resume")
         assert (await recovered.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         assert target_calls == ["yes"] and len(received) == 1
         sample = received[0]
         assert sample.case_ref == (case.ref if include_case_context else None)
         assert sample.label_provenance == (case.label_provenance if include_case_context else None)
-        record = await runtime._state.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        record = await persistence_180.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
         restored = next(intent for intent in record.intents if intent.scorer_slot_id is not None)
         assert canonical_json_bytes(encode_domain(restored.submission)) == original_bytes
         assert sample.to_mapping() == saved.submission.graph.nodes[0].input

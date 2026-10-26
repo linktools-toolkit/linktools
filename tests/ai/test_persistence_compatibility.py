@@ -27,9 +27,9 @@ from linktools.ai.evaluation import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 
-from linktools.ai.runtime._message import decode_model_messages, encode_model_messages
-from linktools.ai.runtime.state import _codec as runtime_codec
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.model.messages import decode_model_messages, encode_model_messages
+from linktools.ai.persistence import codec as runtime_codec
+from linktools.ai.persistence.contracts import (
     ContextProjection,
     EvaluationRecord,
     IdempotencyTerminalUpdate,

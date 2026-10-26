@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Exact model-request selectors retain identity, authorization, and lazy bodies."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import hashlib
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -20,17 +20,19 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelClientRequest, ModelClientResponse
-from linktools.ai.runtime import Execution, RuntimeExecutions, RuntimeHistory
+from linktools.ai.history import History
+from linktools.ai.execution import Execution
+from linktools.ai.runtime import RuntimeExecutions
 from linktools.ai.core import _signed_cursor as _cursor
 from linktools.ai.runtime._execution import DefaultExecutionService
-from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
-from linktools.ai.runtime._model_interaction import build_context_projection
-from linktools.ai.runtime.service_api import UsageReadCutoff
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._archive import PreparedArchive
-from linktools.ai.runtime.state._archive_closure import iter_archive_roots
-from linktools.ai.runtime.state._codec import _encode_persisted_domain, iter_runtime_object_refs
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord
+from linktools.ai.history._service import DefaultExecutionHistoryService
+from linktools.ai.persistence._model_interaction import build_context_projection
+from linktools.ai.execution import UsageReadCutoff
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._archive import PreparedArchive
+from linktools.ai.persistence._archive_closure import iter_archive_roots
+from linktools.ai.persistence.codec import _encode_persisted_domain, iter_runtime_object_refs
+from linktools.ai.persistence._step_contracts import AgentRunRecord
 
 from .test_history_projection_conformance import _reader, _record
 from .test_model_client_interaction_storage import _staged, _storage
@@ -48,7 +50,7 @@ def _execution_service(history):
 async def _object_keys(value, archive):
     encoded = _encode_persisted_domain(value)
     keys = {ref.key for _, ref in iter_runtime_object_refs(
-        encoded, default_domain=RuntimeDomain.TRACE,
+        encoded, default_domain=PersistenceDomain.TRACE,
     )}
     roots = tuple(iter_archive_roots(encoded))
     if roots:
@@ -61,7 +63,7 @@ async def _object_keys(value, archive):
 
 @asynccontextmanager
 async def _seed(backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    storage = RuntimeState(_storage(backend, tmp_path))
+    storage = Persistence(_storage(backend, tmp_path))
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
         root = _record(ExecutionStatus.STARTED, 2)
@@ -72,7 +74,7 @@ async def _seed(backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         )
         for record in (root, child):
             await storage.execution.executions.create_with_history_head(record)
-        archive = storage.run_store.read_store(RuntimeDomain.TRACE)
+        archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         records, bodies, sdk_keys, raw_keys = {}, {}, {}, {}
         payloads = {}
 
@@ -127,7 +129,7 @@ async def _seed(backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         service = DefaultExecutionHistoryService(
             storage.execution.executions, TenantAuthorizationPolicy("tenant"), reader, signer,
         )
-        objects = storage.object_store(RuntimeDomain.TRACE)
+        objects = storage.object_store(PersistenceDomain.TRACE)
         original_resolve = archive.resolve_model_interactions
         original_list_children = storage.execution.executions.list_children
         opened, resolved, children_reads = [], [], []
@@ -144,7 +146,7 @@ async def _seed(backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
         monkeypatch.setattr(storage.execution.executions, "list_children", track_children)
         object_stores = {id(objects): objects}
-        archive_objects = storage.archive_object_store(RuntimeDomain.TRACE)
+        archive_objects = storage.archive_object_store(PersistenceDomain.TRACE)
         object_stores[id(archive_objects)] = archive_objects
         for object_store in object_stores.values():
             async def track_open(key, original_open=object_store.open):
@@ -155,7 +157,7 @@ async def _seed(backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(archive, "resolve_model_interactions", track_resolve)
         yield SimpleNamespace(
             storage=storage, reader=reader, service=service, signer=signer,
-            history=RuntimeHistory(service, tenant_id="tenant"), principal=Principal("reader", "tenant"),
+            history=History(service, tenant_id="tenant"), principal=Principal("reader", "tenant"),
             records=records, bodies=bodies, sdk_keys=sdk_keys, raw_keys=raw_keys,
             opened=opened, resolved=resolved, children_reads=children_reads,
         )
@@ -306,7 +308,7 @@ async def test_model_client_selectors_require_real_execution_and_tenant_authoriz
                 if resource.id == "child":
                     raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
-        history = RuntimeHistory(DefaultExecutionHistoryService(
+        history = History(DefaultExecutionHistoryService(
             data.storage.execution.executions, Policy(), data.reader, data.signer,
         ), tenant_id="tenant")
         await history.model_interactions("execution", principal=data.principal, agent_run_seq=1, model_request_seq=2)
@@ -354,10 +356,10 @@ async def test_model_client_selectors_keep_default_custom_reader_and_service_cal
     principal = Principal("reader", "tenant")
     executions = RuntimeExecutions(ExistingService(), unused_get)
     readers = (
-        RuntimeHistory(DefaultExecutionHistoryService(
+        History(DefaultExecutionHistoryService(
             _Executions(), TenantAuthorizationPolicy("tenant"), ExistingReader(),
         ), tenant_id="tenant"),
-        RuntimeHistory(ExistingService(), tenant_id="tenant"),
+        History(ExistingService(), tenant_id="tenant"),
         executions,
         _execution_service(ExistingService()),
     )
@@ -393,7 +395,7 @@ async def test_model_client_selectors_propagate_through_execution_facades() -> N
     history = DefaultExecutionHistoryService(_Executions(), TenantAuthorizationPolicy("tenant"), Reader())
     service = _execution_service(history)
     executions = RuntimeExecutions(service, None)
-    for target in (service, executions, RuntimeHistory(history, tenant_id="tenant")):
+    for target in (service, executions, History(history, tenant_id="tenant")):
         await target.model_interactions(
             "execution", principal=principal, agent_run_seq=2, model_request_seq=3,
             include_client_requests=True,

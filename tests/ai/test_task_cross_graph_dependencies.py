@@ -15,7 +15,7 @@ from linktools.ai.core import (
     TaskStatus,
     canonical_sha256,
 )
-from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
+from linktools.ai.task_engine._runner import TaskNodeExecutor
 from linktools.ai.task import (
     TaskDependency,
     TaskNode,
@@ -150,7 +150,7 @@ async def test_prepare_node_authorizes_source_header_and_deduplicates_hold() -> 
 
     authorization = Authorization()
     execution = Execution()
-    runner = object.__new__(RuntimeTaskNodeRunner)
+    runner = object.__new__(TaskNodeExecutor)
     runner._namespace = "runtime"
     runner._authorization = authorization
     runner._task_state = TaskRepositories()

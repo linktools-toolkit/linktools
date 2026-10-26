@@ -11,11 +11,11 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal, RunBudget
+from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal, RunBudget, TaskStatus
 from linktools.ai.errors import ErrorCode
-from linktools.ai.runtime import ExecutionView
-from linktools.ai.runtime import _agent_task
-from linktools.ai.runtime._agent_task import RuntimeAgentTaskRunner
+from linktools.ai.execution import ExecutionView
+from linktools.ai.task_engine import _agent as _agent_task
+from linktools.ai.task_engine._agent import AgentTaskRunner
 from linktools.ai.task import TaskNode, TaskNodeInvocation, TaskNodeRunError
 
 
@@ -61,10 +61,10 @@ def _view(started_at: datetime, terminal_at: datetime | None = None) -> Executio
     )
 
 
-def _runner(execution: _Execution) -> RuntimeAgentTaskRunner:
+def _runner(execution: _Execution) -> AgentTaskRunner:
     # A controlled execution boundary makes result/readback races deterministic;
     # full Runtime construction and real cancellation are covered by integration tests.
-    runner = RuntimeAgentTaskRunner.__new__(RuntimeAgentTaskRunner)
+    runner = AgentTaskRunner.__new__(AgentTaskRunner)
 
     async def inspect(execution_id: str, principal: Principal) -> ExecutionView:
         assert execution_id == "execution" and principal == _PRINCIPAL
@@ -146,12 +146,12 @@ async def test_unsettled_cancel_has_fixed_bound(
 def test_recovery_deadline_uses_original_start_and_tighter_parent() -> None:
     started = datetime(2020, 1, 1, tzinfo=timezone.utc)
     node = TaskNode("agent", timeout_seconds=3)
-    policy = RuntimeAgentTaskRunner.deadline_policy(node, started, None)
+    policy = AgentTaskRunner.deadline_policy(node, started, None)
     assert policy is not None
     assert policy[0] == started + timedelta(seconds=3)
     assert policy[1] is ErrorCode.EXECUTION_WAIT_TIMEOUT
     budget = RunBudget(deadline_at=started + timedelta(seconds=2))
-    parent_policy = RuntimeAgentTaskRunner.deadline_policy(node, started, ("graph:graph", budget))
+    parent_policy = AgentTaskRunner.deadline_policy(node, started, ("graph:graph", budget))
     assert parent_policy is not None
     assert parent_policy[0] == budget.deadline_at
     assert parent_policy[1] is ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED
@@ -161,7 +161,7 @@ def test_recovery_deadline_uses_original_start_and_tighter_parent() -> None:
 @pytest.mark.asyncio
 async def test_recovery_deadline_guard_does_not_block_pending_cancellation() -> None:
     from linktools.ai.runtime._recovery_coordinator import _RecoveryCoordinator
-    from linktools.ai.runtime.state._contracts import RecoveryCheckpointState, RecoveryHandoffPhase
+    from linktools.ai.persistence.contracts import RecoveryCheckpointState, RecoveryHandoffPhase
     from .test_local_execution_recovery import _record
 
     execution = replace(_record(), status=ExecutionStatus.CANCELLING)
@@ -189,24 +189,25 @@ async def test_recovery_deadline_guard_does_not_block_pending_cancellation() -> 
 
 @pytest.mark.asyncio
 async def test_standalone_recovery_does_not_read_graph_deadline_state() -> None:
-    from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
+    from linktools.ai.inputs.recovery import TaskRecoveryGuard
     from .test_local_execution_recovery import _record
 
     # No graph repositories exist on this boundary double: standalone recovery
     # must not reach graph ownership or input-capture reads.
-    runner = RuntimeTaskNodeRunner.__new__(RuntimeTaskNodeRunner)
-    assert await runner.allow_execution_relaunch(_record())
+    guard = TaskRecoveryGuard(SimpleNamespace(), SimpleNamespace())
+    assert await guard(_record())
 
 
 @pytest.mark.asyncio
 async def test_task_recovery_without_retained_invocation_does_not_relaunch() -> None:
-    from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
+    from linktools.ai.inputs.recovery import TaskRecoveryGuard
     from .test_local_execution_recovery import _record
 
-    runner = RuntimeTaskNodeRunner.__new__(RuntimeTaskNodeRunner)
-    runner._task_state = SimpleNamespace(tenant_id="tenant")
-    runner._input_captures = SimpleNamespace(read_invocation_node=AsyncMock(return_value=None))
-    assert not await runner.allow_execution_relaunch(replace(_record(), requires_task_invocation_capture=True))
+    guard = TaskRecoveryGuard(
+        SimpleNamespace(tenant_id="tenant"),
+        SimpleNamespace(read_invocation_node=AsyncMock(return_value=None)),
+    )
+    assert not await guard(replace(_record(), requires_task_invocation_capture=True))
 
 
 @pytest.mark.asyncio
@@ -237,7 +238,7 @@ async def test_rebound_deadline_preserves_invocation_before_failure(
 
 @pytest.mark.asyncio
 async def test_subagent_recovery_inherits_task_ancestor_deadline() -> None:
-    from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
+    from linktools.ai.inputs.recovery import TaskRecoveryGuard
     from .test_local_execution_recovery import _record
 
     parent = replace(_record(), execution_id="parent", root_execution_id="parent",
@@ -248,16 +249,23 @@ async def test_subagent_recovery_inherits_task_ancestor_deadline() -> None:
                     started_at=datetime.now(timezone.utc))
     principal = Principal(parent.principal_id, "tenant", parent.principal_kind)
     node = TaskNode("node", timeout_seconds=1)
-    runner = RuntimeTaskNodeRunner.__new__(RuntimeTaskNodeRunner)
-    runner._execution_state = SimpleNamespace(get=AsyncMock(return_value=parent))
-    runner._task_state = SimpleNamespace(tenant_id="tenant", graph_state=AsyncMock(return_value=SimpleNamespace(
-        nodes=(node,), node_states=(SimpleNamespace(node_id="node", execution_id="parent"),),
-    )))
-    runner._input_captures = SimpleNamespace(read_invocation_node=AsyncMock(return_value=("graph", node)))
-    runner._task_admissions = SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(
-        principal=principal, budget_scope_id=None, budget=None,
-    )))
-    assert not await runner.allow_execution_relaunch(child)
+    persistence = SimpleNamespace(
+        tenant_id="tenant",
+        execution=SimpleNamespace(executions=SimpleNamespace(get=AsyncMock(return_value=parent))),
+        task=SimpleNamespace(
+            operations=SimpleNamespace(list_pending=AsyncMock(return_value=())),
+            tasks=SimpleNamespace(graph_state=AsyncMock(return_value=SimpleNamespace(
+                status=TaskStatus.RUNNING, nodes=(node,),
+                node_states=(SimpleNamespace(node_id="node", execution_id="parent", status=TaskStatus.RUNNING),),
+            ))),
+            admissions=SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(
+                principal=principal, budget_scope_id=None, budget=None,
+            ))),
+        ),
+    )
+    captures = SimpleNamespace(read_invocation_node=AsyncMock(return_value=("graph", node)))
+    assert not await TaskRecoveryGuard(persistence, captures)(child)
+
 
 
 @pytest.mark.asyncio
@@ -284,3 +292,92 @@ async def test_recovery_binding_candidate_ignores_model_connection_changes() -> 
         contracts.append(await resolver.resolve_root("parent"))
     assert contracts[0].binding_digest == contracts[1].binding_digest
     assert contracts[0] == contracts[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("graph_status,node_status", [
+    (TaskStatus.CANCELLED, TaskStatus.RUNNING),
+    (TaskStatus.FAILED, TaskStatus.RUNNING),
+    (TaskStatus.SUCCEEDED, TaskStatus.SUCCEEDED),
+    (TaskStatus.RUNNING, TaskStatus.CANCELLED),
+    (TaskStatus.RUNNING, TaskStatus.FAILED),
+    (TaskStatus.RUNNING, TaskStatus.RUNNING),
+])
+async def test_recovery_guard_respects_durable_graph_and_node_outcome(
+    graph_status: TaskStatus, node_status: TaskStatus,
+) -> None:
+    from linktools.ai.inputs.recovery import TaskRecoveryGuard
+    from .test_local_execution_recovery import _record
+
+    execution = replace(_record(), requires_task_invocation_capture=True)
+    node = TaskNode("node")
+    persistence = SimpleNamespace(
+        tenant_id="tenant",
+        task=SimpleNamespace(
+            operations=SimpleNamespace(list_pending=AsyncMock(return_value=())),
+            tasks=SimpleNamespace(graph_state=AsyncMock(return_value=SimpleNamespace(
+                status=graph_status, nodes=(node,),
+                node_states=(SimpleNamespace(node_id="node", execution_id=execution.execution_id,
+                                             status=node_status),),
+            ))),
+            admissions=SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(
+                principal=Principal(execution.principal_id, "tenant", execution.principal_kind),
+                budget_scope_id=None, budget=None,
+            ))),
+        ),
+    )
+    captures = SimpleNamespace(read_invocation_node=AsyncMock(return_value=("graph", node)))
+    assert await TaskRecoveryGuard(persistence, captures)(execution) is (
+        graph_status is TaskStatus.RUNNING and node_status is TaskStatus.RUNNING
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_target,expected", [(None, False), ("execution", False), ("other", True)])
+async def test_recovery_guard_honors_pending_cancel_before_graph_state_changes(
+    cancel_target: str | None, expected: bool,
+) -> None:
+    from linktools.ai.core import OperationKind
+    from linktools.ai.inputs.recovery import TaskRecoveryGuard
+    from .test_local_execution_recovery import _record
+
+    execution = replace(_record(), execution_id="execution", root_execution_id="execution",
+                        requires_task_invocation_capture=True)
+    node = TaskNode("node")
+    operations = SimpleNamespace(list_pending=AsyncMock(return_value=(SimpleNamespace(
+        operation_kind=OperationKind.TASK_CANCEL, execution_id=cancel_target,
+    ),)))
+    persistence = SimpleNamespace(
+        tenant_id="tenant",
+        task=SimpleNamespace(
+            operations=operations,
+            tasks=SimpleNamespace(graph_state=AsyncMock(return_value=SimpleNamespace(
+                status=TaskStatus.RUNNING, nodes=(node,),
+                node_states=(SimpleNamespace(node_id="node", execution_id=execution.execution_id,
+                                             status=TaskStatus.RUNNING),),
+            ))),
+            admissions=SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(
+                principal=Principal(execution.principal_id, "tenant", execution.principal_kind),
+                budget_scope_id=None, budget=None,
+            ))),
+        ),
+    )
+    captures = SimpleNamespace(read_invocation_node=AsyncMock(return_value=("graph", node)))
+    assert await TaskRecoveryGuard(persistence, captures)(execution) is expected
+
+
+@pytest.mark.asyncio
+async def test_recovery_guard_checks_cancellation_after_first_ledger_page() -> None:
+    from linktools.ai.core import OperationKind
+    from linktools.ai.inputs.recovery import TaskRecoveryGuard
+
+    pending = AsyncMock(side_effect=[
+        tuple(SimpleNamespace(operation_kind=OperationKind.TASK_CANCEL,
+                              execution_id="other", sequence=index) for index in range(1, 129)),
+        (SimpleNamespace(operation_kind=OperationKind.TASK_CANCEL, execution_id=None, sequence=129),),
+    ])
+    guard = TaskRecoveryGuard(SimpleNamespace(
+        tenant_id="tenant", task=SimpleNamespace(operations=SimpleNamespace(list_pending=pending)),
+    ), SimpleNamespace())
+    assert await guard._has_cancel_intent("graph", "execution")
+    assert [call.kwargs["after_sequence"] for call in pending.await_args_list] == [None, 128]

@@ -28,7 +28,7 @@ from pydantic_ai.usage import RequestUsage, RunUsage
 
 from linktools.ai.core import PromptLimits
 from linktools.ai.runtime._compaction import CompactionCapability
-from linktools.ai.runtime._journal import ModelRequestJournal
+from linktools.ai.observe.journal import ModelRequestJournal
 
 
 def _tool_history(result_chars: int = 400) -> list[ModelMessage]:

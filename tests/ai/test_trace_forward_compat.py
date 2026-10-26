@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Forward-compatibility coverage for public execution trace projections."""
 
-from linktools.ai.runtime.service_api import ExecutionTraceItem
+from linktools.ai.execution import ExecutionTraceItem
 
 
 def _usage(**extra: object) -> dict[str, object]:

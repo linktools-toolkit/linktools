@@ -11,17 +11,16 @@ from datetime import datetime
 from ..core import ExecutionStatus, IdempotencyStatus, SessionStatus
 from ..errors import AIError, ErrorCode
 from ..storage import TurnCoordination
-from ._pending_coordination import _PendingTurnCoordination
-from .state._archive import ArchiveRoot
-from .state._contracts import (
+from linktools.ai.persistence.coordination import PendingTurnCoordination
+from linktools.ai.persistence.runs import ArchiveRoot
+from linktools.ai.execution import (
     ExecutionRecord,
     ExecutionStartReservation,
     ExecutionTerminalCommitResult,
-    RecoveryCheckpoint,
-    RecoveryCheckpointState,
     RuntimePayloadRef,
-    SessionRecord,
 )
+from linktools.ai.persistence.contracts import RecoveryCheckpoint, RecoveryCheckpointState
+from linktools.ai.session import SessionRecord
 
 
 @dataclass(slots=True)
@@ -93,12 +92,12 @@ class _PendingExecutionTurns:
     """One Runtime's accepted turns; entries are never evicted as hot cache."""
 
     def __init__(self) -> None:
-        self.coordination: _PendingTurnCoordination | None = None
+        self.coordination: PendingTurnCoordination | None = None
         self._executions: dict[tuple[str, str], _PendingExecutionTurn] = {}
         self._requests: dict[tuple[str, str, str], _PendingExecutionTurn] = {}
         self._sessions: dict[tuple[str, str], _PendingExecutionTurn] = {}
 
-    def bind_coordination(self, coordination: _PendingTurnCoordination | None) -> None:
+    def bind_coordination(self, coordination: PendingTurnCoordination | None) -> None:
         self.coordination = coordination
 
     async def read_remote_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:

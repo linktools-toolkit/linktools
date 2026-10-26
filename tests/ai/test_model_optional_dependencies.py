@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Run this module in each installed wheel extra combination without source PYTHONPATH."""
 from ._runtime_test_helpers import model_features
 import importlib.util
@@ -13,7 +15,8 @@ from pydantic_ai.models.test import TestModel
 
 from linktools.ai.errors import ErrorCode
 from linktools.ai.model import create_model, model_binding_error
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 import linktools.ai.web
 
 
@@ -45,7 +48,7 @@ class _TestBinding:
 @pytest.mark.asyncio
 async def test_base_runtime_can_invoke_custom_sdk_model():
     models = _TestBinding()
-    async with Runtime.open("extras", features=model_features(models), storage=RuntimeStorage.in_memory()) as runtime:
+    async with Persistence.open('extras', storage=PersistenceStorage.in_memory()) as persistence_48, Runtime.open(persistence=persistence_48, features=model_features(models)) as runtime:
         execution = await runtime.agents.get().start("hello")
         result = await execution.wait()
         assert result.result.status.value == "SUCCEEDED"

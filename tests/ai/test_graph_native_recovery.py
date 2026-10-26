@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from linktools.ai.task import Task
+from linktools.ai.task_engine import TaskEngine
+
+from linktools.ai.persistence import Persistence
 """Native graph recovery preserves captured input and the admitted principal."""
 from ._runtime_test_helpers import model_features
 
@@ -24,14 +28,11 @@ from linktools.ai.core import (
     TenantAuthorizationPolicy,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import (
-    AgentTaskInput,
-    CaptureInputRequest,
-    Runtime,
-    RuntimeStorage,
-)
+from linktools.ai.inputs import AgentTaskInput, CaptureInputRequest
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task import TaskGraph, TaskNode
-from linktools.ai.runtime.state._contracts import ExecutionRecord
+from linktools.ai.persistence.contracts import ExecutionRecord
 
 from ._runtime_test_helpers import _wait_for_committed
 from .test_live_history_readback_integration import _Models
@@ -80,14 +81,11 @@ async def test_run_only_actor_recovers_native_captured_agent_graph(
     authorization = Authorization()
     group = RuntimeFeatures("native-graph-recovery", authorization=authorization)
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    storage = RuntimeStorage.filesystem(tmp_path / "state")
+    storage = PersistenceStorage.filesystem(tmp_path / "state")
     try:
-        async with Runtime.open(
-            "native-graph-recovery",
-            storage=storage, features=model_features(_Models(FunctionModel(stream_function=model)), group),
-        ) as runtime:
-            task = runtime.tasks.from_agent("test.native-captured-agent", runtime.agents.get("default"))
-            engine = runtime.tasks.bind(task)
+        async with Persistence.open('native-graph-recovery', storage=storage) as persistence_85, Runtime.open(persistence=persistence_85, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as runtime, TaskEngine.open(persistence=persistence_85, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+            task = Task.from_agent("test.native-captured-agent", runtime.agents.get("default"))
+            engine = runtime_engine.with_definitions(task)
             source = await engine.start(
                 TaskGraph("capture-source", (
                     TaskNode("agent", task=task, input=AgentTaskInput("immutable recovery prompt")),
@@ -96,10 +94,10 @@ async def test_run_only_actor_recovers_native_captured_agent_graph(
             )
             assert (await source.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED
             source_execution = await source.execution("agent")
-            capture = await runtime.executions.capture_input(
+            capture = await runtime_engine.inputs.capture_input(
                 source_execution.execution_id, CaptureInputRequest(origin, "source-input"),
             )
-            task_capture = await runtime._input_captures.task_input(capture, principal=origin)
+            task_capture = await runtime_engine.inputs.task_input(capture, principal=origin)
             run = await engine.start(
                 TaskGraph("native-recovery", (
                     TaskNode("agent", task=task, input_capture=task_capture),
@@ -145,13 +143,10 @@ async def test_run_only_actor_recovers_native_captured_agent_graph(
             assert interrupted.status is TaskStatus.RECOVERY_REQUIRED
             assert not backend.worker_installed(execution_id)
 
-        storage = RuntimeStorage.filesystem(tmp_path / "state")
-        async with Runtime.open(
-            "native-graph-recovery",
-            storage=storage, features=model_features(_Models(FunctionModel(stream_function=model)), group),
-        ) as runtime:
-            task = runtime.tasks.from_agent("test.native-captured-agent", runtime.agents.get("default"))
-            engine = runtime.tasks.bind(task)
+        storage = PersistenceStorage.filesystem(tmp_path / "state")
+        async with Persistence.open('native-graph-recovery', storage=storage) as persistence_149, Runtime.open(persistence=persistence_149, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as runtime, TaskEngine.open(persistence=persistence_149, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+            task = Task.from_agent("test.native-captured-agent", runtime.agents.get("default"))
+            engine = runtime_engine.with_definitions(task)
             run = await engine.get("native-recovery", principal=origin)
             recovery_handle = await engine.get(run.graph_id, principal=actor)
             authorization.allow_actor_read = False
@@ -210,14 +205,11 @@ async def test_graph_takeover_rejects_active_local_worker_without_child_claim(tm
 
     group = RuntimeFeatures("local-graph-recovery")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    storage = RuntimeStorage.filesystem(tmp_path / "state")
-    async with Runtime.open(
-        "local-graph-recovery",
-        storage=storage, features=model_features(_Models(FunctionModel(stream_function=model)), group),
-    ) as runtime:
+    storage = PersistenceStorage.filesystem(tmp_path / "state")
+    async with Persistence.open('local-graph-recovery', storage=storage) as persistence_214, Runtime.open(persistence=persistence_214, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as runtime, TaskEngine.open(persistence=persistence_214, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         try:
-            task = runtime.tasks.from_agent("test.local-agent", runtime.agents.get("default"))
-            run = await runtime.tasks.bind(task).start(
+            task = Task.from_agent("test.local-agent", runtime.agents.get("default"))
+            run = await runtime_engine.with_definitions(task).start(
                 TaskGraph("local-active-graph", (
                     TaskNode("agent", task=task, input=AgentTaskInput("keep original worker")),
                 )),

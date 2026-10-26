@@ -45,7 +45,7 @@ ObjectStore 和 CacheBackend 不能为了词形一致合并。get 返回可缺�
 
 其他名称只有真实职责歧义时才调整，不为了字面整齐改变公开接口。本轮不同时推行另一组未实施的路径、metadata或revision方法改名。
 
-缓存接入使用两层职责：CacheBackend 仅保存字节，具体实现为 InMemoryCacheBackend、FilesystemCacheBackend、TieredCacheBackend；ContentCache 持有 backend 并定义 cache_key/to_cache/from_cache。AssetContentCache(backend) 直接实现该领域职责，StorageOverlay 只有 content_cache 一个缓存参数，不再另传适配器。RuntimeStorage 使用 cache，沿用自身引用、租户与源存在性校验，不新增 Runtime 适配器或 options/binding 封装。两者借用后端而不关闭它；单飞保留 value 与 encoded bytes，每个 reader 独立解码可变值。不同领域的路径与逻辑身份继续按所属合同区分，不机械给所有 DTO 添加前缀，不增加总 manager/spec/registry。
+缓存接入使用两层职责：CacheBackend 仅保存字节，具体实现为 InMemoryCacheBackend、FilesystemCacheBackend、TieredCacheBackend；ContentCache 持有 backend 并定义 cache_key/to_cache/from_cache。AssetContentCache(backend) 直接实现该领域职责，StorageOverlay 只有 content_cache 一个缓存参数，不再另传适配器。PersistenceStorage 使用 cache，沿用自身引用、租户与源存在性校验，不新增 Runtime 适配器或 options/binding 封装。两者借用后端而不关闭它；单飞保留 value 与 encoded bytes，每个 reader 独立解码可变值。不同领域的路径与逻辑身份继续按所属合同区分，不机械给所有 DTO 添加前缀，不增加总 manager/spec/registry。
 
 修订作用域通过类型与所属对象明确：entry_revision 是单条目历史修订；backend.head_revision 是单源 head；Overlay.current_revision 是组合视图 head；写结果 store_revision 仍指实际 writer head。保留这些现有名称并补足合同，不为前缀整齐增加 effective_revision/backend_revision 两套平行术语。RESET 撤销写层覆盖、DELETE 产生删除状态，不能合并为同一动作。
 
@@ -72,13 +72,13 @@ StoredRecord.storage_revision 与 Observed.storage_revision 是物理 CAS token�
 | 可观测性指标/诊断 | 评估有界批写 | 先明确哪些允许延迟/丢失；记账和审计不能默认可丢 |
 | 快照/恢复/冻结资产 | 各自固定读取源 | 不以最新在线缓存替代冻结内容 |
 
-资产缓存允许同一摘要的字节跨来源复用；现有 AssetContentCache 不提供租户或物理 backend 的 key 隔离。需要独立隔离的宿主使用适配器 namespace 或独立缓存实例，不增加框架参数。Runtime 对象缓存采用另一所有者合同：key 包含 namespace、tenant、domain 与完整 ObjectRef；store_id 不是全局物理源标识；共用 cache 时同一 Runtime namespace 必须绑定同一逻辑数据源，换源须换 namespace 或 cache 实例。普通观察的正文命中无需 stat，所属读缓存 envelope 强制原始 capture 起最多3秒期限，过期回源验证存在性和完整性，L1晋升及重开 Runtime 都不续期。RECOVERY域始终保留原有当前源校验；result/wait、RuntimeHistory 结果、持久checkpoint、模型与恢复输入、展示重建（含 max_age=0）保留原有当前源 stat 验证，复用已校验字节，避免重复传输完整正文。新展示不会把旧正文期限延长；stat 能检出的变化仅遵循原 ObjectStore 合同。
+资产缓存允许同一摘要的字节跨来源复用；现有 AssetContentCache 不提供租户或物理 backend 的 key 隔离。需要独立隔离的宿主使用适配器 namespace 或独立缓存实例，不增加框架参数。Runtime 对象缓存采用另一所有者合同：key 包含 namespace、tenant、domain 与完整 ObjectRef；store_id 不是全局物理源标识；共用 cache 时同一 Runtime namespace 必须绑定同一逻辑数据源，换源须换 namespace 或 cache 实例。普通观察的正文命中无需 stat，所属读缓存 envelope 强制原始 capture 起最多3秒期限，过期回源验证存在性和完整性，L1晋升及重开 Runtime 都不续期。RECOVERY域始终保留原有当前源校验；result/wait、History 结果、持久checkpoint、模型与恢复输入、展示重建（含 max_age=0）保留原有当前源 stat 验证，复用已校验字节，避免重复传输完整正文。新展示不会把旧正文期限延长；stat 能检出的变化仅遵循原 ObjectStore 合同。
 
 ## 5. 最小接入方式
 
-已有：CacheBackend、内存/文件/Tiered实现、ObjectStore、StorageOverlay。PR191已实现并验证：RuntimeStorage 快捷构造器的 cache 参数及内部读取路由（当前缓存由各 StorageRoute 持有）。Storage 与 Asset 批读沿用第3节的分层合同；当前术语见第3节，已确认的写缓存公开形状在第8节。
+已有：CacheBackend、内存/文件/Tiered实现、ObjectStore、StorageOverlay。PR191已实现并验证：PersistenceStorage 快捷构造器的 cache 参数及内部读取路由（当前缓存由各 StorageRoute 持有）。Storage 与 Asset 批读沿用第3节的分层合同；当前术语见第3节，已确认的写缓存公开形状在第8节。
 
-配置分为两组：StorageRoute.cache 只借用 get/put/delete 热点读取能力；CommitPolicy.batch(buffer=..., batch_size=..., flush_interval=...) 借用 append/read_batch/ack 写缓存并声明提交时机。ExecutionCapability.coordination 独立借用 turn/stream 与 pending-turn 所需能力。同一底层实例可以分别注入多个用途，但不会因实现某组方法而隐式启用它。无写 buffer 时保持领域原有直接源写入路径，不创建隐藏队列；无热点 cache 时直接回源。宿主无需继承全能力包装或提供无用空方法。
+配置分为两组：StorageRoute.cache 只借用 get/put/delete 热点读取能力；CommitPolicy.batch(buffer=..., batch_size=..., flush_interval=...) 借用 append/read_batch/ack 写缓存并声明提交时机。PersistenceStorage.coordination 独立借用 turn/stream 与 pending-turn 所需能力。同一底层实例可以分别注入多个用途，但不会因实现某组方法而隐式启用它。无写 buffer 时保持领域原有直接源写入路径，不创建隐藏队列；无热点 cache 时直接回源。宿主无需继承全能力包装或提供无用空方法。
 
 SQL Runtime 在 mutation 确认提交后，可以把事务实际写入或 guard 的完整 session/execution 记录写入同一 singleton 热点 key。no-op mutation 不失效也不重发已有观察。每个 store 最多持有一个受管发布任务，忙时丢弃后续填充，不新增待写队列；缓存错误不能改变源提交结果，关闭等待该任务的取消清理。未确认或结果未知的提交不发布，整批读取仍独立捕获完整快照，不拼接 singleton。期限始终从原事务 capture 起算3秒，commit、延迟发布及跨层读取都不续期；本 owner 失效阻止旧本地填充，跨 owner 晚到的旧快照在其原期限内仍可能覆盖较新的缓存，不承诺全局单调。该优化仅覆盖这两种 SQL metadata 热点，其他 backend 保持原 read-through；节省源查询可能增加 cache put 和传输字节，须分别计量。
 
@@ -130,13 +130,13 @@ SQL Runtime 在 mutation 确认提交后，可以把事务实际写入或 guard 
 
 ### 5.2 已有 Runtime 历史：现有业务 API 与完整生命周期
 
-此例使用 PR191 已有接口。runtime_root 必须是已有 RuntimeStorage.from_root 使用的同一目录，namespace、principal 及 authorization 必须对应该数据的原租户和授权策略。session_id 与 execution_id 指向可读取的既有会话和已成功完成、结果及持久 transcript 仍可读取的 Agent 执行；仅有结果而未保存 transcript 的执行不满足此例前提。本例不会创建业务记录。cache_root 是独立、专用于可丢弃副本的目录。
+此例使用独立 History 只读接口。runtime_root 必须是已有 PersistenceStorage.from_root 使用的同一目录，namespace、principal 及 authorization 必须对应该数据的原租户和授权策略。session_id 与 execution_id 指向可读取的既有会话和已成功完成、结果及持久 transcript 仍可读取的 Agent 执行；仅有结果而未保存 transcript 的执行不满足此例前提。本例不会创建业务记录。cache_root 是独立、专用于可丢弃副本的目录。
 
     from pathlib import Path
 
-    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.core import AuthorizationPolicy, Principal
-    from linktools.ai.runtime import RuntimeHistory, RuntimeStorage
+    from linktools.ai.history import History
+    from linktools.ai.persistence import Persistence, PersistenceStorage
     from linktools.ai.storage import (
         CacheBackend, FilesystemCacheBackend,
         InMemoryCacheBackend, TieredCacheBackend,
@@ -162,15 +162,12 @@ SQL Runtime 在 mutation 确认提交后，可以把事务实际写入或 guard 
             InMemoryCacheBackend(max_bytes=16 * 1024 * 1024),
             lower_cache,
         )
-        storage = RuntimeStorage.from_root(
+        storage = PersistenceStorage.from_root(
             runtime_root, cache=cache_backend,
         )
-        async with RuntimeHistory.open(
-            namespace,
-            storage=storage,
-            tenant_id=principal.tenant_id,
-            features=RuntimeFeatures("history", authorization=authorization),
-        ) as history:
+        async with Persistence.open(
+            namespace, storage=storage, tenant_id=principal.tenant_id, read_only=True,
+        ) as persistence, History.open(persistence=persistence, authorization=authorization) as history:
             print(await history.inspect_session(session_id, principal=principal))
             timeline = await history.session_timeline(
                 session_id, principal=principal, limit=20,
@@ -182,13 +179,13 @@ SQL Runtime 在 mutation 确认提交后，可以把事务实际写入或 guard 
             result = await history.result(execution_id, principal=principal)
             print(timeline.items, transcript.items, result.output)
 
-RuntimeHistory.open 在进入时按 read_only=True 初始化所传 storage，在退出时关闭它，包括业务读取异常的退出路径。此例应传入新构造的 storage，不借用正在运行的 Runtime 所拥有的实例。示例仅读首个 timeline/transcript 页面；完整分页继续使用返回的 next_cursor 与相同查询参数。构造函数不会替调用者找已有会话，目录和身份参数需由宿主提供。
+Persistence.open 负责绑定 namespace/tenant 与物理资源，并在外层退出时关闭自身拥有的资源。History.open 只借用已经打开的 Persistence，关闭时仅清理自己的读取订阅；不会关闭 Persistence、运行中的 Runtime 或共享缓存。此例以 read_only=True 打开独立只读 Persistence。示例仅读首个 timeline/transcript 页面；完整分页继续使用返回的 next_cursor 与相同查询参数。构造函数不会替调用者找已有会话，目录和身份参数需由宿主提供。
 
 有 shared_cache 时依次检查内存、文件、宿主共享层，命中向前层提升；put 向配置的层写入。只需要内存或两层时直接删减组合，避免无收益副本与写放大。示例预算用于展示，不是固定最佳值；Runtime 和资产使用独立预算，避免大正文挤出资产缓存。
 
-宿主共享缓存适配器实现同一 CacheBackend；连接配置与关闭仍由宿主资源所有者负责，RuntimeHistory 退出不关闭它。适配器须限制网络操作耗时；低层 TTL 不会自动使已提升到内存/文件层的副本过期，业务失效仍由拥有者合同决定。
+宿主共享缓存适配器实现同一 CacheBackend；连接配置与关闭仍由宿主资源所有者负责，History 退出不关闭它。适配器须限制网络操作耗时；低层 TTL 不会自动使已提升到内存/文件层的副本过期，业务失效仍由拥有者合同决定。
 
-RuntimeStorage.read_object(domain, reference) 是 storage-bound SDK 读出口，供内部组装 history/transcript/result 复用；普通业务不主动调用它。它与通用 storage.read_object(store, key, ...) 的完整物化/校验工具具有不同所属对象和参数。独立冷 miss 创建新 flight，直接读取源而不先 stat；普通观察可在原 capture 的3秒内借用 flight 或热字节，晚于期限的新调用另读源，原慢调用可以正常结束。强消费者对借用 flight/热字节保留当前源 stat 验证。查询数按冷读、普通命中和强验证分别计量。禁用缓存和非 DURABLE 保留原有取消与源读取行为。
+PersistenceStorage.read_object(domain, reference) 是 storage-bound SDK 读出口，供内部组装 history/transcript/result 复用；普通业务不主动调用它。它与通用 storage.read_object(store, key, ...) 的完整物化/校验工具具有不同所属对象和参数。独立冷 miss 创建新 flight，直接读取源而不先 stat；普通观察可在原 capture 的3秒内借用 flight 或热字节，晚于期限的新调用另读源，原慢调用可以正常结束。强消费者对借用 flight/热字节保留当前源 stat 验证。查询数按冷读、普通命中和强验证分别计量。禁用缓存和非 DURABLE 保留原有取消与源读取行为。
 
 ## 6. 并发、一致性与生命周期
 
@@ -230,7 +227,7 @@ max_bytes 只保留在各实例内存中。每次成功写入的put持共享锁�
 
     from linktools.ai.core import CommitPolicy
     from linktools.ai.observe import Metrics
-    from linktools.ai.runtime import RuntimeStorage
+    from linktools.ai.persistence import PersistenceStorage
     from linktools.ai.storage import InMemoryCacheBackend
 
     cache = InMemoryCacheBackend(max_bytes=8 * 1024 * 1024, max_size=1024)
@@ -238,9 +235,9 @@ max_bytes 只保留在各实例内存中。每次成功写入的put持共享锁�
     metrics = Metrics.sqlite("metrics-cached.sqlite3", commit=CommitPolicy.batch(
         buffer=cache, batch_size=128, flush_interval=60,
     ))
-    storage = RuntimeStorage.in_memory(cache=cache)
+    storage = PersistenceStorage.in_memory(cache=cache)
 
-Metrics 的工厂通过 commit.buffer 配置自动批写；Runtime 仍只接收 metrics，不另传指标缓存。RuntimeStorage 工厂的 cache 参数仅配置热点读取。相同 cache 可以在两组配置中显式复用；仅设置热点 cache 不启用批写。CommitPolicy 不拥有 buffer 生命周期，值相等与哈希不包括资源。同一 Runtime 内，显式复用同一 buffer 实例且 batch_size、flush_interval 均相同的 owner 共享自动 flush 调度：合计已接纳且未派发的条目达到阈值，或最早 pending 条目的期限到达时，分别唤醒各 owner 当前已接纳的前缀。Trace 的条目是观察边界标记，不是 SQL 行。后续入队不重置最早期限，在途前缀不重复计数。各 owner 仍拥有独立队列、回调、结算和 SQL 事务；显式 flush/close 仅影响自己，最后成员退出时清理 timer。不同 Runtime 即使共用 buffer 也不共享调度，不提供跨 Pod 消费 claim。本阶段不实现同一 SQL 事务合批，也不据此承诺数据库 IO 进一步下降。
+Metrics 的工厂通过 commit.buffer 配置自动批写；Runtime 仍只接收 metrics，不另传指标缓存。PersistenceStorage 工厂的 cache 参数仅配置热点读取。相同 cache 可以在两组配置中显式复用；仅设置热点 cache 不启用批写。CommitPolicy 不拥有 buffer 生命周期，值相等与哈希不包括资源。同一 Runtime 内，显式复用同一 buffer 实例且 batch_size、flush_interval 均相同的 owner 共享自动 flush 调度：合计已接纳且未派发的条目达到阈值，或最早 pending 条目的期限到达时，分别唤醒各 owner 当前已接纳的前缀。Trace 的条目是观察边界标记，不是 SQL 行。后续入队不重置最早期限，在途前缀不重复计数。各 owner 仍拥有独立队列、回调、结算和 SQL 事务；显式 flush/close 仅影响自己，最后成员退出时清理 timer。不同 Runtime 即使共用 buffer 也不共享调度，不提供跨 Pod 消费 claim。本阶段不实现同一 SQL 事务合批，也不据此承诺数据库 IO 进一步下降。
 
 Metrics.record、record_observations 与 MetricStore.put_observations 保留确认写入合同；仅自动 recorder 走批写接纳。Metrics.query/get_observation 读取权威已提交数据，不混入 pending，不因注入缓存增加查询 TTL。
 
@@ -377,7 +374,7 @@ BatchWriteScope.confirmed 只表示回调成功返回。用于已提交读视图
 |---|---|---|
 | 自动观测指标 | 现有异步 best-effort 写入；Metrics 查询通过 MetricStore | 对应“可缓冲写、只读已提交”。首批提炼 BatchWriteScope 不把 pending 自动加入聚合查询 |
 | 活跃执行 transcript / interaction / payload | StagingAgentRunStore / AgentRunStore 持有同 owner 未落库事实；projection 按捕获高水位交接 | 已有领域可读暂存路径；保持其更强的恢复/终态合同，不降级成失败可丢 |
-| 独立 DURABLE RuntimeHistory | archive / 权威对象 reader | 只读已提交；不保证看到另一实例尚未落库的 staging |
+| 独立 DURABLE History | archive / 权威对象 reader | 只读已提交；不保证看到另一实例尚未落库的 staging |
 | revision 提示与能力元数据 | 已提交 head、RevisionSource、Capability reader | 读缓存/失效问题，不是需要批量写库的 pending 事实；继续单飞与生命周期修复 |
 | 已提交正文 | ObjectStore + CacheBackend | 可丢读副本，不能混入未确认正文来提高命中率 |
 | 显式允许失败的按 key 最终值读写 | StorageBuffer 复用源 get/apply_batch，内部封装 pending 与 committed 交接 | 第14节的单一视图负责接纳、覆盖、源读竞态与失败回源，不要求普通消费者拼接队列 |

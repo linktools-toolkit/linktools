@@ -8,7 +8,8 @@ from pathlib import Path
 from linktools.ai.capability import WorkspaceCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.model import create_model
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.workspace import Workspace
 
 
@@ -34,10 +35,8 @@ async def run(project: Path) -> object:
         allow_skills=(),
         system_prompt="You are a careful writer.",
     )
-    async with Runtime.open(
-        "default",
-        storage=RuntimeStorage.in_memory(),
-        features=application,
+    async with Persistence.open("default", storage=PersistenceStorage.in_memory()) as persistence, Runtime.open(
+        persistence=persistence, features=application,
     ) as runtime:
         result = await runtime.agents.get("writer").run("Say hello.")
         return result.result.output

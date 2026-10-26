@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Trace cache admission is optional; source durability never is."""
 from ._runtime_test_helpers import model_features
 
@@ -10,8 +12,9 @@ import pytest
 from linktools.ai.capability import TraceCapability
 from linktools.ai.core import CommitPolicy
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.storage import InMemoryCacheBackend
 from .test_observation_coalescing import _observe, _setup
 from .test_explicit_runtime_features import _FeatureModels, _definitions
@@ -42,7 +45,7 @@ async def test_trace_without_write_cache_commits_each_boundary(tmp_path, cache):
     try:
         store = state.run_store
         store.trace_persistence.configure('run', buffer=store.trace_persistence._caches['run'], batch_size=128, flush_interval=60)
-        archive = store.read_store(RuntimeDomain.TRACE)
+        archive = store.read_store(PersistenceDomain.TRACE)
         for index in range(1, 4):
             await _observe(store, index)
             assert len(await archive.list_events(agent_run_id='run')) == index
@@ -59,8 +62,7 @@ async def test_trace_rejects_partial_write_buffer():
     features = _definitions()
     with pytest.raises(TypeError, match='buffer'):
         features.capability(TraceCapability(commit=CommitPolicy.batch(buffer=Partial(), batch_size=128, flush_interval=3)), scope='runtime')
-        async with Runtime.open('partial-trace-cache', storage=RuntimeStorage.in_memory(),
-                                features=model_features(_FeatureModels(), features)):
+        async with Persistence.open('partial-trace-cache', storage=PersistenceStorage.in_memory()) as persistence_62, Runtime.open(persistence=persistence_62, features=model_features(_FeatureModels(), features)):
             pytest.fail('partial write buffers must be rejected before runtime admission')
 
 
@@ -79,7 +81,7 @@ async def test_trace_failed_cache_admission_uses_guarded_direct_commit(tmp_path,
         store = state.run_store
         store.trace_persistence.configure('run', buffer=store.trace_persistence._caches['run'], flush_interval=60)
         await _observe(store, 1)
-        assert len(await store.read_store(RuntimeDomain.TRACE).list_events(agent_run_id='run')) == 1
+        assert len(await store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id='run')) == 1
         assert 'run' not in store.trace_persistence.dirty
         assert not store.trace_persistence._buffers
         assert cache._pending_count == 0
@@ -108,7 +110,7 @@ async def test_trace_callback_failure_surfaces_original_source_error(tmp_path, c
             await store.flush_execution_projection('run', execution_id='execution', producer_generation=1)
         assert captured.value is error
         assert 'run' in owner.dirty
-        assert await store.read_store(RuntimeDomain.TRACE).list_events(agent_run_id='run') == []
+        assert await store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id='run') == []
     finally:
         owner._flush = original
         await store.flush_execution_projection('run', execution_id='execution', producer_generation=1)
@@ -133,7 +135,7 @@ async def test_trace_ack_failure_does_not_replay_committed_projection(tmp_path, 
         await store.flush_execution_projection('run', execution_id='execution', producer_generation=1)
         after = await state.execution.executions.get_history_head('execution', tenant_id='tenant')
         assert before == after
-        assert len(await store.read_store(RuntimeDomain.TRACE).list_events(agent_run_id='run')) == 1
+        assert len(await store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id='run')) == 1
         assert owner._caches['run'] is None
     finally:
         await state.close()
@@ -181,7 +183,7 @@ async def test_trace_cache_timeout_settles_source_before_barrier_cancellation(tm
         assert scope.status().confirmed == 1
         assert scope.status().unconfirmed == 0
         assert not store._durability_flights
-        assert len(await store.read_store(RuntimeDomain.TRACE).list_events(agent_run_id='run')) == 1
+        assert len(await store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id='run')) == 1
     finally:
         release.set()
         owner._flush = original
@@ -201,9 +203,9 @@ async def test_trace_stop_before_dispatch_keeps_tail_for_atomic_owner(tmp_path):
         await owner.stop('run')
         assert cache._pending_count == 0
         assert 'run' in owner.dirty
-        assert await store.read_store(RuntimeDomain.TRACE).list_events(agent_run_id='run') == []
+        assert await store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id='run') == []
         await store.flush_execution_projection('run', execution_id='execution', producer_generation=1)
-        assert len(await store.read_store(RuntimeDomain.TRACE).list_events(agent_run_id='run')) == 1
+        assert len(await store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id='run')) == 1
     finally:
         await state.close()
 
@@ -215,7 +217,7 @@ async def test_trace_timed_out_unknown_commit_keeps_authoritative_flight(tmp_pat
     state = await _setup(tmp_path, 'memory')
     store = state.run_store
     owner = store.trace_persistence
-    archive = store.read_store(RuntimeDomain.TRACE)
+    archive = store.read_store(PersistenceDomain.TRACE)
     original_head = archive.execution_history_head_record
     original_flush = owner._flush
     entered, release = asyncio.Event(), asyncio.Event()

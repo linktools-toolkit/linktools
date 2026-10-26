@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Asset loading is owned by one explicit Runtime-scoped capability."""
 from ._runtime_test_helpers import model_features
 
@@ -193,7 +195,8 @@ async def test_asset_loader_cannot_introduce_an_uncaptured_asset_source(wrapped)
 @pytest.mark.asyncio
 async def test_asset_bootstrap_is_consumed_before_native_agent_hooks():
     from pydantic_ai.messages import ModelResponse, TextPart
-    from linktools.ai.runtime import Runtime, RuntimeStorage
+    from linktools.ai.runtime import Runtime
+    from linktools.ai.persistence import PersistenceStorage
     from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
     store = await _store()
@@ -223,8 +226,7 @@ async def test_asset_bootstrap_is_consumed_before_native_agent_hooks():
 
         features.model("default", _Models(_UsageFunctionModel(answer)))
         capture = await features.capture()
-        async with Runtime.open("asset-bootstrap", features=capture,
-                                storage=RuntimeStorage.in_memory()) as runtime:
+        async with Persistence.open('asset-bootstrap', storage=PersistenceStorage.in_memory()) as persistence_226, Runtime.open(persistence=persistence_226, features=capture) as runtime:
             assert (await runtime.agents.get().run("question")).result.output == {"text": "answer"}
             assert native_calls
     finally:

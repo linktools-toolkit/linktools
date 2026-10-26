@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Shared models, storage and crash boundaries for session tool contracts."""
 from ._runtime_test_helpers import model_features
 
@@ -17,13 +19,14 @@ from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.capability import ExecutionCapability, CheckpointCapability, TraceCapability
-from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
-from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint
-from linktools.ai.runtime.state._steps import RuntimeAgentRunStore
+from linktools.ai.persistence._runtime_commands import StateCommands
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint
+from linktools.ai.persistence.runs import RuntimeAgentRunStore
 from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models.test import TestModel
 from sqlalchemy.engine import URL
@@ -87,9 +90,9 @@ def _application(
     return application
 
 
-def _split_sqlite_storage(database: Path) -> RuntimeStorage:
-    return RuntimeStorage(
-        RuntimeStoragePlan(
+def _split_sqlite_storage(database: Path) -> PersistenceStorage:
+    return PersistenceStorage(
+        PersistencePlan(
             conversation=StorageRoute.sqlite(
                 database.with_name(f"{database.stem}-conversation.db")
             ),
@@ -117,17 +120,17 @@ def _crash_session_process(
     original_success = LocalExecutionBackend._commit_success
     original_reconcile_handoff = LocalExecutionBackend._reconcile_handoff
     original_commit_reconciled = LocalExecutionBackend._commit_reconciled_terminal
-    original_activate = RuntimeStateCommands.commit_agent_attempt_checkpoint
-    original_admission = RuntimeStateCommands.commit_tool_admission
+    original_activate = StateCommands.commit_agent_attempt_checkpoint
+    original_admission = StateCommands.commit_tool_admission
 
-    async def admit(self: RuntimeStateCommands, request: Any) -> Any:
+    async def admit(self: StateCommands, request: Any) -> Any:
         if phase == "effect_unconfirmed":
             request = replace(request, lease_seconds=1)
         elif phase == "effect_unconfirmed_live_lease":
             request = replace(request, lease_seconds=5)
         return await original_admission(self, request)
 
-    async def activate(self: RuntimeStateCommands, *args: Any, **kwargs: Any) -> Any:
+    async def activate(self: StateCommands, *args: Any, **kwargs: Any) -> Any:
         result = await original_activate(self, *args, **kwargs)
         if phase == "activated":
             os._exit(91)
@@ -195,8 +198,8 @@ def _crash_session_process(
         )
 
     RuntimeToolOperationBridge.complete = complete
-    RuntimeStateCommands.commit_agent_attempt_checkpoint = activate
-    RuntimeStateCommands.commit_tool_admission = admit
+    StateCommands.commit_agent_attempt_checkpoint = activate
+    StateCommands.commit_tool_admission = admit
     RuntimeAgentRunStore.save_checkpoint = save_checkpoint
     LocalExecutionBackend._commit_success = commit_success
     LocalExecutionBackend._reconcile_handoff = reconcile_handoff
@@ -204,7 +207,7 @@ def _crash_session_process(
 
     async def run() -> None:
         if backend == "sqlite":
-            state = RuntimeStorage.sqlite(database)
+            state = PersistenceStorage.sqlite(database)
         elif backend == "split_sqlite":
             state = _split_sqlite_storage(Path(database))
         else:
@@ -213,17 +216,13 @@ def _crash_session_process(
             )
             if phase != "recovered_before_terminal":
                 await provision_runtime_database(engine)
-            state = RuntimeStorage.sql(engine)
+            state = PersistenceStorage.sql(engine)
         application = _application(
             [], effect_policy="non_replay_safe", effect_log=Path(effect_log)
         )
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Runtime.open(
-            "session-tool-crash",
-            storage=state,
-            features=model_features(_ToolModels(), application),
-        ) as runtime:
+        async with Persistence.open('session-tool-crash', storage=state) as persistence_222, Runtime.open(persistence=persistence_222, features=model_features(_ToolModels(), application)) as runtime:
             if phase != "recovered_before_terminal":
                 await runtime.agents.get("default").create_session("session")
             execution = (
@@ -268,24 +267,20 @@ async def _assert_tool_turn_recovers_without_replaying_effect(
     execution_id = committed_effects[0]
     engine = None
     if backend == "sqlite":
-        state = RuntimeStorage.sqlite(database)
+        state = PersistenceStorage.sqlite(database)
     elif backend == "split_sqlite":
         state = _split_sqlite_storage(database)
     else:
         engine = create_async_engine(
             URL.create("sqlite+aiosqlite", database=str(database))
         )
-        state = RuntimeStorage.sql(engine)
+        state = PersistenceStorage.sql(engine)
     calls: list[str] = []
     application = _application(calls, effect_policy="non_replay_safe", effect_log=effect_log)
     try:
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Runtime.open(
-            "session-tool-crash",
-            storage=state,
-            features=model_features(_ToolModels(), application),
-        ) as runtime:
+        async with Persistence.open('session-tool-crash', storage=state) as persistence_284, Runtime.open(persistence=persistence_284, features=model_features(_ToolModels(), application)) as runtime:
             session = runtime.agents.get("default").session("session")
             before_replay = await runtime._state.execution.executions.get(
                 execution_id, tenant_id=runtime.default_principal.tenant_id,

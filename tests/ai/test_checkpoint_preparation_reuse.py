@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Run checkpoint preparation reuses only metadata preceding body I/O."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from dataclasses import replace
 from pathlib import Path
@@ -11,10 +11,10 @@ import pytest
 from sqlalchemy import event
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeDomain
-from linktools.ai.runtime.state._model_interaction_store import ModelInteractionStateStepArchive
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord
-from linktools.ai.runtime.state._store import active_state_scope
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
+from linktools.ai.persistence._step_contracts import AgentRunRecord
+from linktools.ai.persistence.state import active_state_scope
 
 from .test_checkpoint_metadata_snapshot_io import _assert_prepared_values_equal, _checkpoint
 from .test_incremental_projection_boundaries import _storage
@@ -26,9 +26,9 @@ pytestmark = pytest.mark.asyncio
 async def test_run_preparation_reduces_empty_prefix_reads_without_changing_values(
     tmp_path: Path, existing: str,
 ) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="run-preparation", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     engine = archive.state_store.storage_group.context.engine.sync_engine
     statements = []
@@ -84,9 +84,9 @@ async def test_run_preparation_reduces_empty_prefix_reads_without_changing_value
 async def test_run_preparation_preserves_custom_relocation_and_preparation(
     tmp_path: Path, override: str,
 ) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="run-preparation", tenant_id="tenant")
-    original = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    original = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     run = AgentRunRecord("run")
 
     class RelocatingArchive(ModelInteractionStateStepArchive):
@@ -101,7 +101,7 @@ async def test_run_preparation_preserves_custom_relocation_and_preparation(
 
     custom = (RelocatingArchive if override == "relocate" else PreparingArchive)(
         original.state_store, object_store=None, namespace="run-preparation",
-        tenant_id="tenant", runtime_domain=RuntimeDomain.CHECKPOINT,
+        tenant_id="tenant", runtime_domain=PersistenceDomain.CHECKPOINT,
     )
     try:
         checkpoint = _checkpoint(1)
@@ -120,9 +120,9 @@ async def test_run_preparation_preserves_custom_relocation_and_preparation(
 async def test_run_preparation_body_io_keeps_fresh_commit_and_releases_cancelled_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, fault: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="run-preparation", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     prepare = archive.transcript_repository.prepare_model_projection
     entered = False
@@ -173,9 +173,9 @@ async def test_run_preparation_body_io_keeps_fresh_commit_and_releases_cancelled
 async def test_run_preparation_rejects_corrupt_head_without_run(
     tmp_path: Path, backend: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="run-preparation", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     try:
         await archive.materialize_checkpoint(run, _checkpoint(1))

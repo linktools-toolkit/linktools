@@ -13,7 +13,7 @@ from pydantic_ai.messages import (
 
 from linktools.ai.core import HmacCursorSigner, Page, Principal, ResourceKind, ResourceRef
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeHistory
+from linktools.ai.history import History
 from linktools.ai.session import ConversationCursor
 
 from .test_session_timeline import _session
@@ -73,7 +73,7 @@ class _Transcript:
 
 def _reader(count=4):
     sessions, transcript = _Sessions(count), _Transcript()
-    reader = RuntimeHistory(
+    reader = History(
         SimpleNamespace(), tenant_id="tenant", sessions=sessions,
         authorization=_Authorization(), cursor_signer=HmacCursorSigner("history", b"test"),
         session_transcript_store=transcript,
@@ -163,14 +163,14 @@ async def test_runtime_history_session_reader_empty_unavailable_and_invalid_limi
 @pytest.mark.asyncio
 async def test_runtime_history_session_reader_shared_display_cache_preserves_sql_budget(tmp_path):
     from sqlalchemy import event
-    from linktools.ai.runtime import RuntimeStorage
-    from linktools.ai.runtime.state import RuntimeState
+    from linktools.ai.persistence import PersistenceStorage
+    from linktools.ai.persistence import Persistence
     from linktools.ai.core import TenantAuthorizationPolicy
     from linktools.ai.storage import InMemoryCacheBackend
     from .test_session_display_cache import _prepare, _service
 
     cache = InMemoryCacheBackend(max_bytes=2**20)
-    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "history.db", cache=cache))
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "history.db", cache=cache))
     await _prepare(state, body=True)
     statements = []
     engine = state.conversation.sessions.state_store.storage_group.context.engine.sync_engine
@@ -181,7 +181,7 @@ async def test_runtime_history_session_reader_shared_display_cache_preserves_sql
     event.listen(engine, "before_cursor_execute", observe)
     try:
         signer = HmacCursorSigner("display", b"display-test-key")
-        reader = RuntimeHistory(
+        reader = History(
             SimpleNamespace(), tenant_id="tenant", sessions=state.conversation.sessions,
             executions=state.execution.executions, conversation=state.conversation,
             authorization=TenantAuthorizationPolicy(), cursor_signer=signer,
@@ -209,30 +209,32 @@ async def test_runtime_history_session_reader_pending_overlay_and_canonical_boun
     tmp_path, monkeypatch, transition, borrowed,
 ):
     import asyncio
-    from contextlib import nullcontext
+    from contextlib import AsyncExitStack, nullcontext
     from linktools.ai.capability import ExecutionCapability
     from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.core import CommitPolicy, ExecutionStatus
-    from linktools.ai.runtime import Runtime, RuntimeStorage
-    from linktools.ai.runtime.service_api import CancelExecutionRequest
+    from linktools.ai.runtime import Runtime
+    from linktools.ai.persistence import PersistenceStorage
+    from linktools.ai.execution import CancelExecutionRequest
     from linktools.ai.storage import InMemoryCacheBackend
     from linktools.ai.storage._database import SqlStorageContext
     from .test_pending_session_projection import _runtimes
 
     cache = InMemoryCacheBackend(max_bytes=2**24)
-    async with _runtimes(tmp_path, cache=cache, shared=borrowed) as (runtimes, entered, finish, block):
+    async with _runtimes(tmp_path, cache=cache, shared=borrowed) as (runtimes, entered, finish, block), AsyncExitStack() as readers:
         owner, _ = runtimes[0]
         session = await owner.agents.get().create_session("session")
         features = RuntimeFeatures("read-history")
-        features.capability(ExecutionCapability(commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
 
         def no_runtime(*args, **kwargs):
             raise AssertionError("read-only history must not build a Runtime")
 
         monkeypatch.setattr(Runtime, "open", no_runtime)
-        reader_context = (nullcontext(runtimes[1][0].history) if borrowed else RuntimeHistory.open(
-            "pending-session-display", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache),
-            features=features,
+        reader_context = (nullcontext(runtimes[1][0].history) if borrowed else History.open(
+            persistence=await readers.enter_async_context(Persistence.open(
+                "pending-session-display", read_only=True,
+                storage=PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache),
+            )), authorization=features.authorization,
         ))
         async with reader_context as reader:
             principal = owner.default_principal
@@ -302,7 +304,7 @@ async def test_runtime_history_session_reader_pending_overlay_and_canonical_boun
 @pytest.mark.asyncio
 async def test_runtime_history_session_reader_fork_raw_prefix_and_cold_readonly_open(tmp_path, monkeypatch):
     from pydantic_ai.messages import UserPromptPart
-    from linktools.ai.runtime import RuntimeStorage
+    from linktools.ai.persistence import PersistenceStorage
     from linktools.ai.storage import InMemoryCacheBackend
     from linktools.ai.storage._database import SqlStorageContext
     from .test_pending_session_projection import _runtimes
@@ -324,9 +326,7 @@ async def test_runtime_history_session_reader_fork_raw_prefix_and_cold_readonly_
         raise AssertionError("read-only open/list/messages/detail/close must not mutate storage")
 
     monkeypatch.setattr(SqlStorageContext, "run_mutation", no_mutation)
-    async with RuntimeHistory.open(
-        "pending-session-display", storage=RuntimeStorage.sqlite(tmp_path / "state.db"),
-    ) as history:
+    async with Persistence.open('pending-session-display', storage=PersistenceStorage.sqlite(tmp_path / 'state.db'), tenant_id="default", read_only=True) as history_persistence_327, History.open(persistence=history_persistence_327) as history:
         page = await history.messages("child", principal=principal, limit=1)
         messages = list(page.items)
         while page.next_cursor is not None:
@@ -349,30 +349,26 @@ async def test_runtime_history_session_reader_independent_terminal_commit_is_aut
     from linktools.ai.capability import ExecutionCapability
     from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.core import CommitPolicy, ExecutionStatus
-    from linktools.ai.runtime import RuntimeStorage
-    from linktools.ai.runtime.state import RuntimeState
-    from linktools.ai.runtime._pending_coordination import _PendingTurnCoordination
+    from linktools.ai.persistence import PersistenceStorage
+    from linktools.ai.persistence import Persistence
+    from linktools.ai.persistence.coordination import PendingTurnCoordination
     from linktools.ai.storage import InMemoryCacheBackend
     from .test_pending_coordination import _claim
     from .test_session_timeline import _execution, _commit_empty_turn
 
     path = tmp_path / "independent.db"
     # The writer does not participate in this reader's disposable read cache.
-    writer = RuntimeState(RuntimeStorage.sqlite(path))
+    writer = Persistence(PersistenceStorage.sqlite(path))
     await writer.initialize(namespace="independent", tenant_id="tenant")
     await writer.conversation.sessions.create(_session())
     coordination = InMemoryCacheBackend(max_bytes=2**20)
-    observer = _PendingTurnCoordination.select(coordination, namespace="independent", tenant_id="tenant")
+    observer = PendingTurnCoordination.select(coordination, namespace="independent", tenant_id="tenant")
     pending = _execution("execution", status=ExecutionStatus.STARTED, prompt="question")
     lease = await _claim(observer)
     await observer.publish(pending, lease)
     features = RuntimeFeatures("independent-history")
-    features.capability(ExecutionCapability(commit=CommitPolicy.terminal(), coordination=coordination), scope="runtime")
     try:
-        async with RuntimeHistory.open(
-            "independent", tenant_id="tenant", features=features,
-            storage=RuntimeStorage.sqlite(path, cache=InMemoryCacheBackend(max_bytes=2**20)),
-        ) as reader:
+        async with Persistence.open('independent', storage=PersistenceStorage.sqlite(path, cache=InMemoryCacheBackend(max_bytes=2 ** 20), coordination=coordination), tenant_id='tenant', read_only=True) as history_persistence_372, History.open(persistence=history_persistence_372, authorization=features.authorization) as reader:
             assert (await reader.inspect_execution(
                 pending.execution_id, principal=_OWNER, include_usage=False,
             )).status is ExecutionStatus.STARTED

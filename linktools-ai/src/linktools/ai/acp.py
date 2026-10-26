@@ -19,6 +19,7 @@ except ModuleNotFoundError:
 
 from .capability import ExecutionCapability, WorkspaceCapability
 from .runtime import RuntimeFeatures
+from linktools.ai.persistence import Persistence, PersistenceStorage
 from .core import (
     ExecutionDeltaType,
     ExecutionEventType,
@@ -28,13 +29,8 @@ from .core import (
     validate_memory_scope,
 )
 from .errors import AIError, ErrorCode
-from .runtime import (
-    CancelExecutionRequest,
-    ExecutionTreeEvent,
-    ListSessionRequest,
-    Runtime,
-    RuntimeStorage,
-)
+from .execution import CancelExecutionRequest, ExecutionTreeEvent, ListSessionRequest
+from .runtime import Runtime
 from .workspace import Workspace
 
 _logger = environ.get_logger("ai.acp")
@@ -124,7 +120,7 @@ class ACPAgent:
     async def fork_session(self, session_id: str, cwd: str, **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
         _, schema = _require_acp()
-        from .runtime import ForkSessionRequest
+        from .execution import ForkSessionRequest
 
         source = await self._runtime.sessions.get(session_id, principal=self._principal)
         session = await self._runtime.sessions.fork(
@@ -137,7 +133,7 @@ class ACPAgent:
     async def close_session(self, session_id: str, **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
         _, schema = _require_acp()
-        from .runtime import CloseSessionRequest
+        from .execution import CloseSessionRequest
 
         await self._runtime.sessions.close(session_id, CloseSessionRequest(self._principal, uuid4().hex))
         return schema.CloseSessionResponse()
@@ -226,7 +222,7 @@ class ACPAgent:
 class ACPApplication:
     workspace: Workspace
     features: RuntimeFeatures
-    storage: RuntimeStorage
+    storage: PersistenceStorage
     execution: ExecutionCapability | None = None
 
     @classmethod
@@ -235,7 +231,7 @@ class ACPApplication:
         workspace: Workspace,
         *,
         features: RuntimeFeatures,
-        storage: RuntimeStorage,
+        storage: PersistenceStorage,
         execution: ExecutionCapability | None = None,
     ) -> "ACPApplication":
         """Assemble workspace and execution capabilities into the given features."""
@@ -249,10 +245,8 @@ class ACPApplication:
         )
 
     async def serve(self, *, memory_scope: str) -> None:
-        async with Runtime.open(
-            "default",
-            storage=self.storage,
-            features=self.features,
+        async with Persistence.open("default", storage=self.storage) as persistence, Runtime.open(
+            persistence=persistence, features=self.features,
         ) as runtime:
             await serve_stdio(
                 ACPAgent(

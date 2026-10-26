@@ -6,13 +6,13 @@ import hashlib
 
 import pytest
 
-from linktools.ai.runtime._object import RuntimeObjectKeyFactory
-from linktools.ai.runtime._storage_keys import runtime_object_key
-from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.persistence.objects import ObjectKeyFactory
+from linktools.ai.persistence._storage_keys import runtime_object_key
+from linktools.ai.persistence import PersistenceDomain
 
 
 def test_runtime_object_keys_keep_the_existing_durable_address() -> None:
-    domain = RuntimeDomain.EXECUTION
+    domain = PersistenceDomain.EXECUTION
     namespace = "runtime-namespace"
     tenant = "tenant"
     stored_digest = hashlib.sha256(b"immutable payload").hexdigest()
@@ -20,14 +20,14 @@ def test_runtime_object_keys_keep_the_existing_durable_address() -> None:
     tenant_digest = hashlib.sha256(tenant.encode("utf-8")).hexdigest()
     expected = f"v1/runtime/{namespace_digest}/{tenant_digest}/{stored_digest}"
 
-    assert RuntimeObjectKeyFactory(namespace).key(domain, tenant, stored_digest) == expected
+    assert ObjectKeyFactory(namespace).key(domain, tenant, stored_digest) == expected
     assert runtime_object_key(
         namespace_digest=namespace_digest,
         tenant_digest=tenant_digest,
         stored_digest=stored_digest,
     ) == expected
-    assert RuntimeObjectKeyFactory("other").key(domain, tenant, stored_digest) != expected
-    assert RuntimeObjectKeyFactory(namespace).key(domain, "other", stored_digest) != expected
+    assert ObjectKeyFactory("other").key(domain, tenant, stored_digest) != expected
+    assert ObjectKeyFactory(namespace).key(domain, "other", stored_digest) != expected
 
 
 @pytest.mark.parametrize(("field", "value"), [

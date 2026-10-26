@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Exception identity references preserve complete failures without duplicate expansion."""
 
 import json
@@ -18,8 +20,9 @@ from linktools.ai.capability import TraceCapability
 from linktools.ai.core import ExecutionEventType, ExecutionStatus
 from linktools.ai.errors import ErrorDiagnostics
 from linktools.ai.model import FallbackBinding
-from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
-from linktools.ai.runtime.state._codec import decode_domain, encode_domain
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.codec import decode_domain, encode_domain
 
 if sys.version_info < (3, 11):
     from exceptiongroup import ExceptionGroup
@@ -172,8 +175,8 @@ async def test_runtime_shared_failures_preserve_attempts_terminal_event_and_reop
     features.agent("default", allow_tools=())
     features.model("default", FallbackBinding(*(Binding() for _ in range(11))))
     features.capability(TraceCapability(), scope="runtime")
-    storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("alias-persistence", storage=storage, features=features) as runtime:
+    storage = PersistenceStorage.filesystem(tmp_path)
+    async with Persistence.open('alias-persistence', storage=storage) as persistence_176, Runtime.open(persistence=persistence_176, features=features) as runtime:
         result = (await runtime.agents.get().run("synthetic offline failure", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.FAILED
         diagnostics = result.error_diagnostics
@@ -187,7 +190,7 @@ async def test_runtime_shared_failures_preserve_attempts_terminal_event_and_reop
         terminal = next(event for event in events.items if event.event_type == ExecutionEventType.EXECUTION_FAILED)
         assert terminal.payload["error_diagnostics"] == diagnostics.to_payload()
         principal = runtime.default_principal
-    async with Runtime.open("alias-persistence", storage=storage, features=features) as runtime:
+    async with Persistence.open('alias-persistence', storage=storage) as persistence_190, Runtime.open(persistence=persistence_190, features=features) as runtime:
         restored = await runtime.executions.result(result.execution_id, principal=principal)
         assert restored.error_diagnostics == diagnostics
     assert len(calls) == 11

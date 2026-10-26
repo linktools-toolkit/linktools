@@ -29,7 +29,7 @@ from pydantic_ai.tools import ToolDefinition
 from ..capability import AgentContext, ToolCallFailed, ToolCallRetry
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Observation
-from ._metric_id import _tool_observation_id
+from linktools.ai.observe.identity import tool_observation_id
 
 _logger = environ.get_logger("ai.runtime.tool_metrics")
 TOOL_METRICS_MANAGED_METADATA_KEY = "linktools.tool_metrics_managed"
@@ -54,7 +54,7 @@ class ToolMetricContext:
     ) -> None:
         """Record a model-visible failure before Pydantic handles it."""
         await self._record(
-            _tool_observation_id(
+            tool_observation_id(
                 self.source_namespace,
                 self.tenant_id,
                 self.execution_id,
@@ -78,7 +78,7 @@ class ToolMetricContext:
         suppress_cancel: Callable[[], bool],
         capture: Callable[[Observation], None] | None = None,
     ) -> Any:
-        attempt_id = _tool_observation_id(
+        attempt_id = tool_observation_id(
             self.source_namespace,
             self.tenant_id,
             self.execution_id,

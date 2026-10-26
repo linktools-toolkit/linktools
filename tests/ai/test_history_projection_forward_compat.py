@@ -4,7 +4,7 @@
 
 from pydantic_ai.messages import BinaryContent, ImageUrl, UploadedFile, ModelRequest, ToolAvailabilityDeltaPart, UserPromptPart
 
-from linktools.ai.runtime.state._views import project_session_history_message
+from linktools.ai.persistence._views import project_session_history_message
 
 
 def test_session_history_preserves_multimodal_user_content() -> None:

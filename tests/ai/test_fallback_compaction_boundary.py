@@ -19,7 +19,7 @@ from linktools.ai.core import PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ReferencedContent
 from linktools.ai.runtime._compaction import CompactionCapability
-from linktools.ai.runtime._journal import ModelRequestFact, ModelRequestJournal
+from linktools.ai.observe.journal import ModelRequestFact, ModelRequestJournal
 
 from .test_referenced_input_failure import _REF, _SOURCE
 

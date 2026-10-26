@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Native request extensions and SDK thinking retain their actual wire semantics."""
 
 import json
@@ -13,7 +15,8 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.model import ModelBinding, ModelClientRequestRecorder, create_model
 from linktools.ai.model import _anthropic, _openai
-from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import PersistenceStorage
 from pydantic_ai.capabilities import Thinking
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models import ModelRequestParameters
@@ -127,7 +130,7 @@ async def test_runtime_uses_sdk_thinking_mapping_without_local_model_rejection(m
     features.model("default", binding)
     features.agent("default", model="default")
     features.capability(Thinking(effort="high"))
-    async with Runtime.open("native-thinking", storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Persistence.open('native-thinking', storage=PersistenceStorage.in_memory()) as persistence_103, Runtime.open(persistence=persistence_103, features=features) as runtime:
         result = await runtime.agents.get().run("hello", thinking=thinking, timeout_seconds=10)
     assert result.result.status is ExecutionStatus.SUCCEEDED
     assert sent[-1]["reasoning"]["effort"] == expected
@@ -141,7 +144,7 @@ async def test_runtime_unknown_model_keeps_native_extension_without_profile(monk
     features = RuntimeFeatures()
     features.model("default", binding)
     features.agent("default", model="default")
-    async with Runtime.open("unknown-model", storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Persistence.open('unknown-model', storage=PersistenceStorage.in_memory()) as persistence_117, Runtime.open(persistence=persistence_117, features=features) as runtime:
         result = await runtime.agents.get().run("hello", thinking=True, timeout_seconds=10)
     assert result.result.status is ExecutionStatus.SUCCEEDED
     assert sent[-1]["vendor_thinking"] == {"budget": 2048}
@@ -179,7 +182,7 @@ model_settings:
     }
     assert "transport-only" not in repr(binding)
     assert "transport-only" not in repr(binding.contract)
-    from linktools.ai.runtime._model_interaction import request_envelope
+    from linktools.ai.persistence._model_interaction import request_envelope
     envelope, encoded = request_envelope(model_settings=dict(binding.model_settings),
                                          parameters=ModelRequestParameters(), streaming=False)
     assert "transport-only" not in str(envelope)
@@ -285,7 +288,7 @@ async def test_yaml_thinking_is_inherited_until_spec_or_run_explicitly_overrides
     features.model("default", binding)
     features.agent("default", model="default",
                    **({} if spec_thinking is None else {"thinking": spec_thinking}))
-    async with Runtime.open("inherited-thinking", storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Persistence.open('inherited-thinking', storage=PersistenceStorage.in_memory()) as persistence_233, Runtime.open(persistence=persistence_233, features=features) as runtime:
         result = await runtime.agents.get().run(
             "hello", timeout_seconds=10,
             **({} if run_thinking is None else {"thinking": run_thinking}),
@@ -301,7 +304,7 @@ async def test_omitted_thinking_preserves_sdk_model_default(monkeypatch):
     features = RuntimeFeatures()
     features.model("default", binding)
     features.agent("default", model="default")
-    async with Runtime.open("default-thinking", storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Persistence.open('default-thinking', storage=PersistenceStorage.in_memory()) as persistence_249, Runtime.open(persistence=persistence_249, features=features) as runtime:
         result = await runtime.agents.get().run("hello", timeout_seconds=10)
     assert result.result.status is ExecutionStatus.SUCCEEDED
     assert "reasoning" not in sent[-1]

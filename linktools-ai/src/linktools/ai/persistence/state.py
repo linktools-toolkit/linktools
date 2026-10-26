@@ -1,0 +1,1096 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Backend-neutral persistence primitives for Runtime state.
+
+The module deliberately contains no domain state machines.  It defines the
+small physical contract shared by memory, filesystem, and SQL stores.
+"""
+
+import asyncio
+import hashlib
+import math
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextvars import ContextVar, Token
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Generic, Protocol, TypeVar, runtime_checkable
+
+from linktools.ai.core import ImmutableJsonMapping, JsonValue, canonical_json_bytes
+from linktools.ai.persistence._archive_read import ArchiveFrontierReader, ArchiveNodeRead
+
+ValueT = TypeVar("ValueT")
+
+
+class StateLockOrderError(RuntimeError):
+    """Raised when a state callback requests an invalid synchronization edge."""
+
+
+class StateTransactionNestingError(RuntimeError):
+    """Raised when a callback requests an invalid nested state operation."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveStateScope:
+    group: "StateStorageGroup"
+    task: "asyncio.Task[object]"
+    transactions: Mapping["StateStore", "StateTransaction"]
+    writable: bool
+    record_reader: "GroupRecordReader | None" = None
+
+
+_active_state_scope: ContextVar[_ActiveStateScope | None] = ContextVar(
+    "linktools_ai_active_state_transaction",
+    default=None,
+)
+
+_run_history_lock_stack: ContextVar[tuple[str, ...]] = ContextVar(
+    "linktools_ai_run_history_lock_stack",
+    default=(),
+)
+
+
+def enter_run_history_lock(agent_run_id: str) -> Token[tuple[str, ...]]:
+    """Mark a local run-history lock as held for runtime I/O guards."""
+    if not agent_run_id:
+        raise ValueError("agent_run_id is required")
+    stack = _run_history_lock_stack.get()
+    if stack and stack[-1] != agent_run_id:
+        raise StateLockOrderError("one task cannot hold multiple run history locks")
+    return _run_history_lock_stack.set(stack + (agent_run_id,))
+
+
+def exit_run_history_lock(token: Token[tuple[str, ...]]) -> None:
+    """Restore the run-history lock marker after leaving a local lock."""
+    _run_history_lock_stack.reset(token)
+
+
+def require_no_run_history_lock(operation: str) -> None:
+    """Fail before durable I/O is attempted while a run lock is held."""
+    if _run_history_lock_stack.get():
+        raise StateLockOrderError(
+            f"{operation} cannot run while a RunHistoryLock is held"
+        )
+
+
+def active_state_transaction(
+    store: "StateStore",
+    *,
+    writable: bool = False,
+) -> "StateTransaction | None":
+    """Return the active transaction, rejecting invalid scope reuse."""
+    return _active_transaction(store, writable=writable)
+
+
+def _active_transaction(
+    store: "StateStore",
+    *,
+    writable: bool,
+) -> "StateTransaction | None":
+    active = _active_state_scope.get()
+    if active is None:
+        return None
+    task = asyncio.current_task()
+    if active.task is not task:
+        raise StateTransactionNestingError(
+            "a child task cannot reuse its parent StateStore transaction"
+        )
+    if writable and not active.writable:
+        raise StateTransactionNestingError(
+            "a read-only StateStore callback cannot mutate state"
+        )
+    try:
+        return active.transactions[store]
+    except KeyError as error:
+        if store.storage_group is active.group:
+            raise StateTransactionNestingError(
+                "a StateStore was not enlisted in the active group transaction"
+            ) from error
+        raise StateTransactionNestingError(
+            "a task cannot access two StateStorageGroups at once"
+        ) from error
+
+
+def active_state_scope() -> _ActiveStateScope | None:
+    """Return the current scope for synchronization-order checks."""
+    return _active_state_scope.get()
+
+
+def bind_state_scope(
+    group: "StateStorageGroup",
+    transactions: Mapping["StateStore", "StateTransaction"],
+    *,
+    writable: bool = True,
+    record_reader: "GroupRecordReader | None" = None,
+) -> Token:
+    task = asyncio.current_task()
+    if task is None:
+        raise RuntimeError("StateStore mutation requires an asyncio task")
+    bound = (
+        transactions
+        if writable
+        else {
+            store: _ReadOnlyStateTransaction(transaction)
+            for store, transaction in transactions.items()
+        }
+    )
+    return _active_state_scope.set(_ActiveStateScope(group, task, bound, writable, record_reader))
+
+
+class _BoundStateGroupTransaction:
+    def __init__(
+        self,
+        group: "StateStorageGroup",
+        transactions: Mapping["StateStore", "StateTransaction"],
+    ) -> None:
+        self._group = group
+        self._transactions = transactions
+
+    def transaction(self, store: "StateStore") -> "StateTransaction":
+        if store.storage_group is not self._group:
+            raise RuntimeError("store does not belong to this StateStorageGroup")
+        try:
+            return self._transactions[store]
+        except KeyError as error:
+            raise RuntimeError("store was not enlisted in the StateStorageGroup transaction") from error
+
+
+class _BoundGroupRecordReader(_BoundStateGroupTransaction):
+    def __init__(
+        self,
+        group: "StateStorageGroup",
+        transactions: Mapping["StateStore", "StateTransaction"],
+        reader: "GroupRecordReader",
+    ) -> None:
+        super().__init__(group, transactions)
+        self._reader = reader
+
+    async def get_records(
+        self, requests: Mapping["StateStore", Sequence[bytes]],
+    ) -> Mapping["StateStore", Mapping[bytes, "StoredRecord"]]:
+        active_state_group_transaction(self._group, tuple(requests), writable=False)
+        active = active_state_scope()
+        if active is None or active.record_reader is not self._reader:
+            raise StateTransactionNestingError("group record reader is outside its transaction")
+        return await self._reader.get_records(requests)
+
+
+def active_state_group_transaction(
+    group: "StateStorageGroup",
+    stores: Sequence["StateStore"],
+    *,
+    writable: bool = True,
+) -> "StateGroupTransaction":
+    active = _active_state_scope.get()
+    if active is None:
+        raise RuntimeError("no active StateStorageGroup transaction")
+    task = asyncio.current_task()
+    if active.task is not task:
+        raise StateTransactionNestingError(
+            "a child task cannot reuse its parent StateStorageGroup transaction"
+        )
+    if writable and not active.writable:
+        raise StateTransactionNestingError(
+            "a read-only StateStore callback cannot mutate state"
+        )
+    if active.group is not group:
+        raise StateTransactionNestingError(
+            "a task cannot access two StateStorageGroups at once"
+        )
+    for store in stores:
+        if store not in active.transactions:
+            raise StateTransactionNestingError(
+                "store was not enlisted in the StateStorageGroup transaction"
+            )
+    if active.record_reader is not None:
+        return _BoundGroupRecordReader(group, active.transactions, active.record_reader)
+    return _BoundStateGroupTransaction(group, active.transactions)
+
+
+def reset_state_transaction(token: Token) -> None:
+    _active_state_scope.reset(token)
+
+
+def _digest(value: JsonValue) -> bytes:
+    return hashlib.sha256(canonical_json_bytes(value)).digest()
+
+
+def _require_digest(value: bytes, name: str) -> bytes:
+    if not isinstance(value, bytes) or len(value) != 32:
+        raise ValueError(f"{name} must be a 32-byte digest")
+    return value
+
+
+def _require_nonnegative_int(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an integer")
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative")
+    return value
+
+
+def _require_optional_string(value: object, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string or None")
+    return value
+
+
+def _require_state(value: object, name: str, *, optional: bool) -> str | None:
+    if value is None:
+        if optional:
+            return None
+        raise TypeError(f"{name} must be a string")
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string")
+    if not optional and not value:
+        raise ValueError(f"{name} is required")
+    if len(value) > 64:
+        raise ValueError(f"{name} must contain at most 64 characters")
+    return value
+
+
+def _require_optional_aware_datetime(value: object, name: str) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        raise TypeError(f"{name} must be a datetime or None")
+    if value.tzinfo is None:
+        raise ValueError(f"{name} must be timezone-aware")
+    return value
+
+
+def _require_json_value(value: object, name: str) -> None:
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{name} contains a non-finite float")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _require_json_value(item, f"{name}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"{name} contains a non-string object key")
+            _require_json_value(item, f"{name}.{key}")
+        return
+    raise TypeError(f"{name} contains a non-JSON value")
+
+
+def _require_data_mapping(value: object, name: str) -> Mapping[str, JsonValue]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{name} must be a mapping")
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise TypeError(f"{name} contains a non-string object key")
+        _require_json_value(item, f"{name}.{key}")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class StoredRecord:
+    """Current state with a physical CAS revision independent of domain data."""
+
+    key_digest: bytes
+    scope_digest: bytes | None
+    parent_digest: bytes | None
+    kind: str
+    sort_key: str
+    state: str | None
+    storage_revision: int
+    lease_owner: str | None
+    lease_fence: int
+    lease_expires_at: datetime | None
+    data: Mapping[str, JsonValue]
+
+    def __post_init__(self) -> None:
+        _require_digest(self.key_digest, "key_digest")
+        if self.scope_digest is not None:
+            _require_digest(self.scope_digest, "scope_digest")
+        if self.parent_digest is not None:
+            _require_digest(self.parent_digest, "parent_digest")
+        if not isinstance(self.kind, str) or not 0 < len(self.kind) <= 32:
+            raise ValueError("record kind must contain at most 32 characters")
+        if self.kind in {".", ".."} or any(character in self.kind for character in "/\\"):
+            raise ValueError("record kind contains a path separator")
+        if (
+            not isinstance(self.sort_key, str)
+            or not self.sort_key
+            or not self.sort_key.isascii()
+        ):
+            raise ValueError("record sort_key must contain non-empty ASCII characters")
+        _require_state(self.state, "record state", optional=True)
+        _require_nonnegative_int(self.storage_revision, "storage_revision")
+        _require_optional_string(self.lease_owner, "lease_owner")
+        _require_nonnegative_int(self.lease_fence, "lease_fence")
+        _require_optional_aware_datetime(self.lease_expires_at, "lease_expires_at")
+        if not isinstance(self.data, ImmutableJsonMapping):
+            _require_data_mapping(self.data, "record data")
+            object.__setattr__(self, "data", ImmutableJsonMapping(self.data))
+
+
+@dataclass(frozen=True, slots=True)
+class StoredAlias:
+    alias_digest: bytes
+    record_key_digest: bytes
+
+    def __post_init__(self) -> None:
+        _require_digest(self.alias_digest, "alias_digest")
+        _require_digest(self.record_key_digest, "record_key_digest")
+
+
+@dataclass(frozen=True, slots=True)
+class StoredFact:
+    stream_digest: bytes
+    sequence: int
+    owner_key_digest: bytes
+    kind: str
+    subject_digest: bytes | None
+    state: str | None
+    data: Mapping[str, JsonValue]
+
+    def __post_init__(self) -> None:
+        _require_digest(self.stream_digest, "stream_digest")
+        _require_digest(self.owner_key_digest, "owner_key_digest")
+        if self.subject_digest is not None:
+            _require_digest(self.subject_digest, "subject_digest")
+        _require_nonnegative_int(self.sequence, "fact sequence")
+        if not isinstance(self.kind, str) or not 0 < len(self.kind) <= 32:
+            raise ValueError("fact kind must contain at most 32 characters")
+        _require_state(self.state, "fact state", optional=True)
+        if not isinstance(self.data, ImmutableJsonMapping):
+            _require_data_mapping(self.data, "fact data")
+            object.__setattr__(self, "data", ImmutableJsonMapping(self.data))
+
+
+@dataclass(frozen=True, slots=True)
+class StoredOperation:
+    key_digest: bytes
+    stream_digest: bytes
+    sequence: int
+    state: str
+    compactable: bool
+    data: Mapping[str, JsonValue]
+
+    def __post_init__(self) -> None:
+        _require_digest(self.key_digest, "key_digest")
+        _require_digest(self.stream_digest, "stream_digest")
+        _require_nonnegative_int(self.sequence, "operation sequence")
+        _require_state(self.state, "operation state", optional=False)
+        if not isinstance(self.compactable, bool):
+            raise TypeError("operation compactable must be a bool")
+        if not isinstance(self.data, ImmutableJsonMapping):
+            _require_data_mapping(self.data, "operation data")
+            object.__setattr__(self, "data", ImmutableJsonMapping(self.data))
+
+
+@dataclass(frozen=True, slots=True)
+class RecordScanCursor:
+    kind: str
+    key_digest: bytes
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, str) or not self.kind:
+            raise ValueError("record scan cursor kind is required")
+        _require_digest(self.key_digest, "key_digest")
+
+
+@dataclass(frozen=True, slots=True)
+class FactScanCursor:
+    stream_digest: bytes
+    sequence: int
+
+    def __post_init__(self) -> None:
+        _require_digest(self.stream_digest, "stream_digest")
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int):
+            raise TypeError("fact scan cursor sequence must be an integer")
+        if self.sequence < 1:
+            raise ValueError("fact scan cursor sequence must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class OperationScanCursor:
+    key_digest: bytes
+
+    def __post_init__(self) -> None:
+        _require_digest(self.key_digest, "key_digest")
+
+
+@dataclass(frozen=True, slots=True)
+class Observed(Generic[ValueT]):
+    """A value paired with its physical CAS token."""
+
+    value: ValueT
+    storage_revision: int
+
+    def __post_init__(self) -> None:
+        _require_nonnegative_int(self.storage_revision, "storage_revision")
+
+
+@dataclass(frozen=True, slots=True)
+class RecordReplacement:
+    record: StoredRecord
+    expected_storage_revision: int
+
+    def __post_init__(self) -> None:
+        _require_nonnegative_int(self.expected_storage_revision, "expected_storage_revision")
+
+
+@dataclass(frozen=True, slots=True)
+class RecordQuery:
+    scope_digest: bytes | None = None
+    parent_digest: bytes | None = None
+    kind: str | None = None
+    states: frozenset[str] | None = None
+    sort_key_prefix: str | None = None
+    after_sort_key: str | None = None
+    after_key_digest: bytes | None = None
+    limit: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind is None and self.scope_digest is None and self.parent_digest is None:
+            raise ValueError("RecordQuery requires a query dimension")
+        for name, value in (
+            ("scope_digest", self.scope_digest),
+            ("parent_digest", self.parent_digest),
+        ):
+            if value is not None:
+                _require_digest(value, name)
+        if self.kind is not None and (
+            not isinstance(self.kind, str)
+            or not 0 < len(self.kind) <= 32
+            or self.kind in {".", ".."}
+            or any(character in self.kind for character in "/\\")
+        ):
+            raise ValueError("record kind contains a path separator")
+        if self.sort_key_prefix is not None and (
+            not isinstance(self.sort_key_prefix, str)
+            or not self.sort_key_prefix
+            or not self.sort_key_prefix.isascii()
+        ):
+            raise ValueError("record sort key prefix must contain non-empty ASCII characters")
+        if (self.after_sort_key is None) != (self.after_key_digest is None):
+            raise ValueError("record cursor requires both sort key and key digest")
+        if self.after_sort_key is not None:
+            encode_sort_key(self.after_sort_key)
+        if self.after_key_digest is not None:
+            _require_digest(self.after_key_digest, "after_key_digest")
+        _validate_limit(self.limit)
+
+
+@dataclass(frozen=True, slots=True)
+class FactQuery:
+    stream_digest: bytes
+    after_sequence: int | None = None
+    limit: int | None = None
+    subject_digest: bytes | None = None
+    latest: bool = False
+    latest_per_subject: bool = False
+
+    def __post_init__(self) -> None:
+        _require_digest(self.stream_digest, "stream_digest")
+        if self.after_sequence is not None:
+            _require_nonnegative_int(self.after_sequence, "after_sequence")
+        if self.subject_digest is not None:
+            _require_digest(self.subject_digest, "subject_digest")
+        if not isinstance(self.latest, bool) or not isinstance(self.latest_per_subject, bool):
+            raise TypeError("latest flags must be bool values")
+        if self.latest and self.latest_per_subject:
+            raise ValueError("latest and latest_per_subject cannot both be true")
+        if self.latest_per_subject and self.subject_digest is not None:
+            raise ValueError("latest_per_subject cannot be combined with subject_digest")
+        _validate_limit(self.limit)
+
+
+@dataclass(frozen=True, slots=True)
+class OperationQuery:
+    stream_digest: bytes | None = None
+    states: frozenset[str] | None = None
+    through_sequence: int | None = None
+    compactable: bool | None = None
+    limit: int | None = None
+    after_sequence: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.after_sequence is not None:
+            _require_nonnegative_int(self.after_sequence, "after_sequence")
+        if self.stream_digest is not None:
+            _require_digest(self.stream_digest, "stream_digest")
+        if self.through_sequence is not None:
+            _require_nonnegative_int(self.through_sequence, "through_sequence")
+        if self.compactable is not None and not isinstance(self.compactable, bool):
+            raise TypeError("compactable must be a bool or None")
+        _validate_limit(self.limit)
+
+
+class StateTransaction(Protocol):
+    async def now(self) -> datetime: ...
+
+    async def get_record(self, key: bytes) -> StoredRecord | None: ...
+    async def get_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]: ...
+    async def insert_record(self, record: StoredRecord) -> None: ...
+    async def insert_records(self, records: Sequence[StoredRecord]) -> None: ...
+    async def guard_record(
+        self,
+        key: bytes,
+        *,
+        expected_storage_revision: int,
+    ) -> StoredRecord | None: ...
+    async def replace_record(self, record: StoredRecord, *, expected_storage_revision: int) -> bool: ...
+    async def replace_records(self, replacements: Sequence["RecordReplacement"]) -> None: ...
+    async def update_record_lease(
+        self,
+        key: bytes,
+        *,
+        expected_storage_revision: int,
+        lease_owner: str | None,
+        lease_fence: int,
+        lease_expires_at: datetime | None,
+    ) -> bool: ...
+    async def delete_record(self, key: bytes, *, expected_storage_revision: int | None = None) -> bool: ...
+    async def delete_records(self, keys: Sequence[bytes]) -> None: ...
+    async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]: ...
+    async def scan_records(self) -> tuple[StoredRecord, ...]: ...
+    async def scan_records_page(
+        self,
+        *,
+        after: RecordScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredRecord, ...]: ...
+    async def resolve_alias(self, alias: bytes) -> bytes | None: ...
+    async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]: ...
+    async def scan_aliases(self) -> tuple[StoredAlias, ...]: ...
+    async def scan_aliases_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> tuple[StoredAlias, ...]: ...
+    async def insert_alias(self, alias: StoredAlias) -> None: ...
+    async def insert_aliases(self, aliases: Sequence[StoredAlias]) -> None: ...
+    async def get_sequence(self, key: bytes) -> int: ...
+    async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]: ...
+    async def scan_sequences(self) -> Mapping[bytes, int]: ...
+    async def scan_sequences_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> Mapping[bytes, int]: ...
+    async def next_sequence(self, key: bytes) -> int: ...
+    async def reserve_sequence(self, key: bytes, count: int) -> int: ...
+    async def reserve_sequences(self, reservations: Mapping[bytes, int]) -> Mapping[bytes, int]: ...
+    async def advance_sequence(self, key: bytes, expected: int) -> int: ...
+    async def delete_sequence(self, key: bytes) -> None: ...
+    async def delete_sequences(self, keys: Sequence[bytes]) -> None: ...
+    async def insert_fact(self, fact: StoredFact) -> None: ...
+    async def insert_facts(self, facts: Sequence[StoredFact]) -> None: ...
+    async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]: ...
+    async def scan_facts(self) -> tuple[StoredFact, ...]: ...
+    async def scan_facts_page(
+        self,
+        *,
+        after: FactScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredFact, ...]: ...
+    async def delete_fact_streams(self, owner_key: bytes) -> None: ...
+    async def insert_operation(self, value: StoredOperation) -> None: ...
+    async def get_operation(self, key: bytes) -> StoredOperation | None: ...
+    async def replace_operation(self, value: StoredOperation, *, expected_state: str) -> bool: ...
+    async def list_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]: ...
+    async def scan_operations(self) -> tuple[StoredOperation, ...]: ...
+    async def scan_operations_page(
+        self,
+        *,
+        after: OperationScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredOperation, ...]: ...
+    async def delete_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]: ...
+
+
+class _ReadOnlyStateTransaction(StateTransaction):
+    def __init__(self, transaction: StateTransaction) -> None:
+        self._transaction = transaction
+
+    async def now(self) -> datetime:
+        return await self._transaction.now()
+
+    async def get_record(self, key: bytes) -> StoredRecord | None:
+        return await self._transaction.get_record(key)
+
+    async def get_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
+        return await self._transaction.get_records(keys)
+
+    async def read_archive_frontiers(
+        self, *, scope_digest: bytes, requests: Sequence[ArchiveNodeRead],
+        content_keys: Sequence[bytes] = (),
+    ) -> Mapping[bytes, StoredRecord] | None:
+        if isinstance(self._transaction, ArchiveFrontierReader):
+            return await self._transaction.read_archive_frontiers(
+                scope_digest=scope_digest, requests=requests, content_keys=content_keys,
+            )
+        return None
+
+    async def guard_record(
+        self,
+        key: bytes,
+        *,
+        expected_storage_revision: int,
+    ) -> StoredRecord | None:
+        del key, expected_storage_revision
+        self._reject("guard_record")
+        return None
+
+    async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
+        return await self._transaction.list_records(query)
+
+    async def scan_records(self) -> tuple[StoredRecord, ...]:
+        return await self._transaction.scan_records()
+
+    async def scan_records_page(
+        self,
+        *,
+        after: RecordScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredRecord, ...]:
+        return await self._transaction.scan_records_page(after=after, limit=limit)
+
+    async def resolve_alias(self, alias: bytes) -> bytes | None:
+        return await self._transaction.resolve_alias(alias)
+
+    async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]:
+        return await self._transaction.resolve_aliases(aliases)
+
+    async def scan_aliases(self) -> tuple[StoredAlias, ...]:
+        return await self._transaction.scan_aliases()
+
+    async def scan_aliases_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> tuple[StoredAlias, ...]:
+        return await self._transaction.scan_aliases_page(after=after, limit=limit)
+
+    async def get_sequence(self, key: bytes) -> int:
+        return await self._transaction.get_sequence(key)
+
+    async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]:
+        return await self._transaction.get_sequences(keys)
+
+    async def scan_sequences(self) -> Mapping[bytes, int]:
+        return await self._transaction.scan_sequences()
+
+    async def scan_sequences_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> Mapping[bytes, int]:
+        return await self._transaction.scan_sequences_page(after=after, limit=limit)
+
+    async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
+        return await self._transaction.list_facts(query)
+
+    async def scan_facts(self) -> tuple[StoredFact, ...]:
+        return await self._transaction.scan_facts()
+
+    async def scan_facts_page(
+        self,
+        *,
+        after: FactScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredFact, ...]:
+        return await self._transaction.scan_facts_page(after=after, limit=limit)
+
+    async def get_operation(self, key: bytes) -> StoredOperation | None:
+        return await self._transaction.get_operation(key)
+
+    async def list_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]:
+        return await self._transaction.list_operations(query)
+
+    async def scan_operations(self) -> tuple[StoredOperation, ...]:
+        return await self._transaction.scan_operations()
+
+    async def scan_operations_page(
+        self,
+        *,
+        after: OperationScanCursor | None,
+        limit: int,
+    ) -> tuple[StoredOperation, ...]:
+        return await self._transaction.scan_operations_page(
+            after=after,
+            limit=limit,
+        )
+
+    def _reject(self, operation: str) -> None:
+        raise StateTransactionNestingError(
+            f"read-only StateTransaction cannot perform {operation}"
+        )
+
+    async def insert_record(self, record: StoredRecord) -> None:
+        del record
+        self._reject("insert_record")
+
+    async def insert_records(self, records: Sequence[StoredRecord]) -> None:
+        del records
+        self._reject("insert_records")
+
+    async def replace_record(self, record: StoredRecord, *, expected_storage_revision: int) -> bool:
+        del record, expected_storage_revision
+        self._reject("replace_record")
+        return False
+
+    async def replace_records(self, replacements: Sequence[RecordReplacement]) -> None:
+        del replacements
+        self._reject("replace_records")
+
+    async def update_record_lease(
+        self,
+        key: bytes,
+        *,
+        expected_storage_revision: int,
+        lease_owner: str | None,
+        lease_fence: int,
+        lease_expires_at: datetime | None,
+    ) -> bool:
+        del key, expected_storage_revision, lease_owner, lease_fence, lease_expires_at
+        self._reject("update_record_lease")
+        return False
+
+    async def delete_record(self, key: bytes, *, expected_storage_revision: int | None = None) -> bool:
+        del key, expected_storage_revision
+        self._reject("delete_record")
+        return False
+
+    async def delete_records(self, keys: Sequence[bytes]) -> None:
+        del keys
+        self._reject("delete_records")
+
+    async def insert_alias(self, alias: StoredAlias) -> None:
+        del alias
+        self._reject("insert_alias")
+
+    async def insert_aliases(self, aliases: Sequence[StoredAlias]) -> None:
+        del aliases
+        self._reject("insert_aliases")
+
+    async def next_sequence(self, key: bytes) -> int:
+        del key
+        self._reject("next_sequence")
+        return 0
+
+    async def reserve_sequence(self, key: bytes, count: int) -> int:
+        del key, count
+        self._reject("reserve_sequence")
+        return 0
+
+    async def reserve_sequences(self, reservations: Mapping[bytes, int]) -> Mapping[bytes, int]:
+        del reservations
+        self._reject("reserve_sequences")
+        return {}
+
+    async def advance_sequence(self, key: bytes, expected: int) -> int:
+        del key, expected
+        self._reject("advance_sequence")
+        return 0
+
+    async def delete_sequence(self, key: bytes) -> None:
+        del key
+        self._reject("delete_sequence")
+
+    async def delete_sequences(self, keys: Sequence[bytes]) -> None:
+        del keys
+        self._reject("delete_sequences")
+
+    async def insert_fact(self, fact: StoredFact) -> None:
+        del fact
+        self._reject("insert_fact")
+
+    async def insert_facts(self, facts: Sequence[StoredFact]) -> None:
+        del facts
+        self._reject("insert_facts")
+
+    async def delete_fact_streams(self, owner_key: bytes) -> None:
+        del owner_key
+        self._reject("delete_fact_streams")
+
+    async def insert_operation(self, value: StoredOperation) -> None:
+        del value
+        self._reject("insert_operation")
+
+    async def replace_operation(self, value: StoredOperation, *, expected_state: str) -> bool:
+        del value, expected_state
+        self._reject("replace_operation")
+        return False
+
+    async def delete_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]:
+        del query
+        self._reject("delete_operations")
+        return ()
+
+
+StateCallback = Callable[[StateTransaction], Awaitable[ValueT]]
+StateGroupCallback = Callable[["StateGroupTransaction"], Awaitable[ValueT]]
+
+
+class StateGroupTransaction(Protocol):
+    def transaction(self, store: "StateStore") -> StateTransaction: ...
+
+
+@runtime_checkable
+class GroupRecordReader(Protocol):
+    """Optional exact-key reads across enlisted stores in the current callback.
+
+    Returned mappings contain found records only. Requested but absent keys are
+    observed misses, not unsupported reads. Implementations reuse each store's
+    transaction-local read view and preserve its updates after own writes.
+    Parameter limits may require multiple statements; this operation does not
+    strengthen the backend's transaction isolation or bound returned bytes.
+    """
+
+    async def get_records(
+        self, requests: Mapping["StateStore", Sequence[bytes]],
+    ) -> Mapping["StateStore", Mapping[bytes, StoredRecord]]: ...
+
+
+@runtime_checkable
+class StateStorageGroup(Protocol):
+    async def open_partition(
+        self, key: bytes, *, create: bool = False,
+    ) -> "StateStore | None":
+        """Borrow an isolated logical store owned by this existing group.
+
+        Keys are opaque 32-byte storage identities. Open outside transaction
+        callbacks; opening never changes record keys or transaction boundaries.
+        Read-only opens do not create partitions. The group owns their lifetime.
+        """
+        ...
+
+    async def open_archive(
+        self, *, create: bool = False,
+    ) -> tuple[str, "StateStore"] | None:
+        """Open group-owned archive metadata and its stable opaque key scope.
+
+        Open outside state callbacks, before preparing or publishing owners.
+        Read-only opens never create identity or provision storage. Restoring the
+        original resource preserves its scope; independent clones must import
+        and retain content into a new resource. Identity does not grant GC
+        exclusivity and cannot detect manually copied resources. Once opened,
+        this store is automatically enlisted in subsequent group callbacks so
+        owner and archive writes share one physical commit.
+        """
+        ...
+
+    async def scan_stores(self) -> tuple["StateStore", ...]:
+        """Enumerate all persisted group partitions, not just active routes.
+
+        Destructive collection still requires externally proven offline
+        exclusivity for every writer's prepare-through-publication window.
+        """
+        ...
+
+    async def read(self, store: "StateStore", fn: StateCallback[ValueT]) -> ValueT: ...
+
+    async def read_many(
+        self,
+        stores: Sequence["StateStore"],
+        fn: StateGroupCallback[ValueT],
+    ) -> ValueT:
+        """Read enlisted stores in one consistent, task-local callback scope."""
+        ...
+
+    async def mutate(
+        self,
+        stores: Sequence["StateStore"],
+        fn: StateGroupCallback[ValueT],
+    ) -> ValueT: ...
+
+
+class StateStore(Protocol):
+    """Physical StateStore contract with retry-safe, transaction-local callbacks.
+
+    Mutation callbacks must not perform external side effects outside the
+    supplied StateTransaction.
+    """
+
+    async def initialize(self) -> None: ...
+    async def close(self) -> None: ...
+    @property
+    def storage_group(self) -> StateStorageGroup: ...
+    async def read_record(self, key: bytes) -> StoredRecord | None: ...
+    async def read_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]: ...
+    async def read(self, fn: StateCallback[ValueT]) -> ValueT: ...
+    async def mutate(self, fn: StateCallback[ValueT]) -> ValueT: ...
+
+    async def validate_integrity(self) -> None: ...
+
+
+def record_key_digest(
+    namespace: str,
+    tenant_id: str,
+    runtime_domain: str,
+    kind: str,
+    identity: JsonValue,
+) -> bytes:
+    return _digest(["record", namespace, tenant_id, runtime_domain, kind, identity])
+
+
+def state_store_digest(namespace: str, tenant_id: str, runtime_domain: str) -> bytes:
+    return _digest(["state_store", namespace, tenant_id, runtime_domain])
+
+
+def scope_digest(
+    namespace: str,
+    tenant_id: str,
+    runtime_domain: str,
+    kind: str,
+    relation: str,
+    identity: JsonValue,
+) -> bytes:
+    return _digest(["scope", namespace, tenant_id, runtime_domain, kind, relation, identity])
+
+
+def parent_digest(
+    namespace: str,
+    tenant_id: str,
+    runtime_domain: str,
+    kind: str,
+    relation: str,
+    identity: JsonValue,
+) -> bytes:
+    return _digest(["parent", namespace, tenant_id, runtime_domain, kind, relation, identity])
+
+
+def alias_digest(
+    namespace: str,
+    tenant_id: str,
+    runtime_domain: str,
+    relation: str,
+    identity: JsonValue,
+) -> bytes:
+    return _digest(["alias", namespace, tenant_id, runtime_domain, relation, identity])
+
+
+def stream_digest(
+    namespace: str,
+    tenant_id: str,
+    runtime_domain: str,
+    relation: str,
+    identity: JsonValue,
+) -> bytes:
+    return _digest(["stream", namespace, tenant_id, runtime_domain, relation, identity])
+
+
+def sequence_key(
+    namespace: str,
+    tenant_id: str,
+    runtime_domain: str,
+    relation: str,
+    identity: JsonValue,
+) -> bytes:
+    return _digest(["sequence", namespace, tenant_id, runtime_domain, relation, identity])
+
+
+def operation_key(
+    namespace: str,
+    tenant_id: str,
+    runtime_domain: str,
+    identity: JsonValue,
+) -> bytes:
+    return _digest(["operation", namespace, tenant_id, runtime_domain, identity])
+
+
+def subject_digest(identity: JsonValue) -> bytes:
+    return _digest(["subject", identity])
+
+
+def sortable_id(value: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError("sortable id must be non-empty")
+    return "i:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def sortable_timestamp(value: datetime, suffix: str) -> str:
+    if value.tzinfo is None:
+        raise ValueError("sortable timestamp must be timezone-aware")
+    micros = int(value.astimezone(timezone.utc).timestamp() * 1_000_000)
+    if micros < 0 or micros >= 1 << 63:
+        raise ValueError("sortable timestamp is outside the supported range")
+    if not suffix:
+        raise ValueError("sortable timestamp suffix is required")
+    return "t:" + f"{micros:016x}" + ":" + hashlib.sha256(suffix.encode("utf-8")).hexdigest()
+
+
+def sortable_identity(identity: JsonValue) -> str:
+    return "i:" + hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
+
+
+def encode_sort_key(value: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError("sort key is required")
+    if not value.isascii():
+        raise ValueError("sort key must contain ASCII characters")
+    return value
+
+
+def decode_sort_key(value: str) -> str:
+    return encode_sort_key(value)
+
+
+def validate_record_identity(record: StoredRecord) -> None:
+    """Validate physical invariants after decoding a backend row or file."""
+    values = (
+        ("key_digest", record.key_digest),
+        ("scope_digest", record.scope_digest),
+        ("parent_digest", record.parent_digest),
+    )
+    for name, value in values:
+        if value is not None and (not isinstance(value, bytes) or len(value) != 32):
+            raise ValueError(f"record {name} is invalid")
+    encode_sort_key(record.sort_key)
+    if type(record.data) is ImmutableJsonMapping:
+        return
+    try:
+        canonical_json_bytes(dict(record.data))
+    except (TypeError, ValueError) as error:
+        raise ValueError("record data is not canonical JSON") from error
+
+
+def validate_record_replacement(current: StoredRecord, candidate: StoredRecord) -> None:
+    """Keep immutable physical identity columns stable across a CAS."""
+    if (
+        current.key_digest != candidate.key_digest
+        or current.scope_digest != candidate.scope_digest
+        or current.parent_digest != candidate.parent_digest
+        or current.kind != candidate.kind
+        or current.sort_key != candidate.sort_key
+    ):
+        raise ValueError("record physical identity cannot change")
+
+
+def validate_operation_replacement(
+    current: StoredOperation,
+    candidate: StoredOperation,
+) -> None:
+    """Keep immutable operation identity stable across a state replacement."""
+    if (
+        current.key_digest != candidate.key_digest
+        or current.stream_digest != candidate.stream_digest
+        or current.sequence != candidate.sequence
+        or current.compactable != candidate.compactable
+    ):
+        raise ValueError("operation physical identity cannot change")
+
+
+def _validate_limit(limit: int | None) -> None:
+    if limit is None:
+        return
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 0 < limit <= 1000:
+        raise ValueError("limit must be between 1 and 1000")
+
+
+__all__ = ['FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sequence_key', 'sortable_id', 'sortable_identity', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'subject_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

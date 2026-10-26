@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
+from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task import Task
 """Model-boundary observations share one bounded execution/head snapshot."""
 from ._runtime_test_helpers import model_features
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -13,9 +17,9 @@ import pytest
 
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime.state._execution_repositories import ExecutionRepositoryImpl
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
 from linktools.ai.storage import InMemoryCacheBackend, _write_cache
 
 from .test_step_projection import _execution
@@ -24,11 +28,11 @@ from .test_step_projection import _execution
 @asynccontextmanager
 async def _state(backend: str, path: Path, cache=None):
     if backend == "memory":
-        state = RuntimeState(RuntimeStorage.in_memory(cache=cache))
+        state = Persistence(PersistenceStorage.in_memory(cache=cache))
     elif backend == "filesystem":
-        state = RuntimeState(RuntimeStorage.filesystem(path, cache=cache))
+        state = Persistence(PersistenceStorage.filesystem(path, cache=cache))
     else:
-        state = RuntimeState(RuntimeStorage.sqlite(path / "state.db", cache=cache))
+        state = Persistence(PersistenceStorage.sqlite(path / "state.db", cache=cache))
     await state.initialize(namespace="model-control", tenant_id="tenant")
     try:
         yield state
@@ -267,13 +271,13 @@ async def test_custom_repository_retains_original_strong_snapshot(tmp_path: Path
                 raise AssertionError("custom owner is not optimized")
 
             async def get_history_head(self, *args, **kwargs):
-                from linktools.ai.runtime.state._store import active_state_transaction
+                from linktools.ai.persistence.state import active_state_transaction
                 assert active_state_transaction(source) is not None
                 calls.append("head")
                 return await super().get_history_head(*args, **kwargs)
 
             async def get(self, *args, **kwargs):
-                from linktools.ai.runtime.state._store import active_state_transaction
+                from linktools.ai.persistence.state import active_state_transaction
                 assert active_state_transaction(source) is not None
                 calls.append("execution")
                 return await super().get(*args, **kwargs)
@@ -319,9 +323,9 @@ async def test_task_owned_model_boundaries_do_not_use_bounded_observation(
     tmp_path: Path, delegated: bool, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from .test_task_agent_persistence import test_task_agent_trace_survives_terminal_release_and_reopen
-    from linktools.ai.runtime.state._store import active_state_transaction
+    from linktools.ai.persistence.state import active_state_transaction
 
-    original = RuntimeStorage.sqlite
+    original = PersistenceStorage.sqlite
     original_observe = ExecutionRepositoryImpl.observe_execution_control
 
     def sqlite(*args, **kwargs):
@@ -334,7 +338,7 @@ async def test_task_owned_model_boundaries_do_not_use_bounded_observation(
         )
         return await original_observe(self, *args, **kwargs)
 
-    monkeypatch.setattr(RuntimeStorage, "sqlite", sqlite)
+    monkeypatch.setattr(PersistenceStorage, "sqlite", sqlite)
     monkeypatch.setattr(ExecutionRepositoryImpl, "observe_execution_control", observe)
     await test_task_agent_trace_survives_terminal_release_and_reopen(tmp_path, delegated)
 
@@ -345,11 +349,11 @@ async def test_task_owned_model_boundaries_do_not_use_bounded_observation(
 async def test_transient_route_uses_frozen_restart_guarantee(
     restart: bool, trace: bool, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from linktools.ai.runtime import RuntimeStoragePlan
+    from linktools.ai.persistence import PersistencePlan
     from linktools.ai.storage import StorageRoute
 
-    state = RuntimeState(RuntimeStorage.from_plan(
-        RuntimeStoragePlan(execution=StorageRoute.transient(cache=InMemoryCacheBackend(max_bytes=1000000))),
+    state = Persistence(PersistenceStorage.from_plan(
+        PersistencePlan(execution=StorageRoute.transient(cache=InMemoryCacheBackend(max_bytes=1000000))),
     ))
     await state.initialize(namespace="model-control", tenant_id="tenant")
     try:
@@ -391,7 +395,9 @@ async def test_volatile_task_and_descendant_keep_strong_model_boundaries(
     from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
     from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.core import TaskStatus
-    from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStoragePlan
+    from linktools.ai.inputs import AgentTaskInput
+    from linktools.ai.runtime import Runtime
+    from linktools.ai.persistence import PersistencePlan
     from linktools.ai.storage import StorageRoute
     from linktools.ai.task import TaskGraph, TaskNode
     from ._runtime_test_helpers import _Models, _UsageFunctionModel
@@ -411,16 +417,13 @@ async def test_volatile_task_and_descendant_keep_strong_model_boundaries(
     group = RuntimeFeatures("application")
     group.agent("default", model="default", allow_tools=(), allow_subagents=("child",) if delegated else ())
     group.agent("child", model="default", allow_tools=(), allow_subagents=())
-    storage = RuntimeStorage.from_plan(
-        RuntimeStoragePlan(execution=StorageRoute.transient(cache=InMemoryCacheBackend(max_bytes=1000000))),
+    storage = PersistenceStorage.from_plan(
+        PersistencePlan(execution=StorageRoute.transient(cache=InMemoryCacheBackend(max_bytes=1000000))),
     )
-    async with Runtime.open(
-        "transient-task-control",
-        storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as runtime:
-        task = runtime.tasks.from_agent("answer", runtime.agents.get())
+    async with Persistence.open('transient-task-control', storage=storage) as persistence_417, Runtime.open(persistence=persistence_417, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_417) as engine:
+        task = Task.from_agent("answer", runtime.agents.get())
         definition = TaskGraph("graph", (TaskNode("answer", task=task, input=AgentTaskInput("question")),))
-        graph = await runtime.tasks.bind(task).start(definition, idempotency_key="once")
+        graph = await engine.with_definitions(task).start(definition, idempotency_key="once")
         assert (await graph.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED
 
 
@@ -434,7 +437,7 @@ async def test_remote_cancel_stops_model_retry_and_strong_tool_admission(
     from linktools.ai.capability import AgentContext
     from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.runtime import Runtime
-    from linktools.ai.runtime.service_api import CancelExecutionRequest
+    from linktools.ai.execution import CancelExecutionRequest
     from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
     class Answer(BaseModel):
@@ -463,13 +466,7 @@ async def test_remote_cancel_stops_model_retry_and_strong_tool_admission(
     group.agent("default", model="default", allow_tools=("work",))
     database = tmp_path / "cancel.db"
     models = _Models(_UsageFunctionModel(model))
-    async with Runtime.open(
-        "model-pair-cancel", features=model_features(models, group),
-        storage=RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000)),
-    ) as owner, Runtime.open(
-        "model-pair-cancel", features=model_features(models, group),
-        storage=RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000)),
-    ) as other:
+    async with Persistence.open('model-pair-cancel', storage=PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))) as persistence_466, Runtime.open(persistence=persistence_466, features=model_features(models, group)) as owner, Persistence.open('model-pair-cancel', storage=PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))) as persistence_469, Runtime.open(persistence=persistence_469, features=model_features(models, group)) as other:
         execution = await owner.agents.get().start("question", output=Answer, idempotency_key="once")
         try:
             await asyncio.wait_for(entered.wait(), 5)

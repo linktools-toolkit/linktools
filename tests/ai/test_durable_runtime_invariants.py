@@ -3,7 +3,7 @@
 """Focused regressions for durable composition and close ownership."""
 from linktools.ai.model import create_model
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -25,24 +25,24 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._factory import _RuntimeCloseCoordinator
 from linktools.ai.runtime._execution import (
     _ExecutionRuntimeBridge,
 )
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._pending_turn import _PendingExecutionTurns
-from linktools.ai.runtime._event import LiveExecutionEventBroker
-from linktools.ai.runtime.state._durability import (
+from linktools.ai.execution.events import LiveExecutionEventBroker
+from linktools.ai.persistence.durability import (
     CommitObservation,
     DurableCommitState,
     run_durable_commit,
 )
-from linktools.ai.runtime.state._materializer import _RuntimeObjectRouter
-from linktools.ai.runtime.state._plan import RuntimeDomain
-from linktools.ai.runtime.state._step_archive import InMemoryStepArchive, StagingAgentRunStore
-from linktools.ai.runtime.state._retention import RuntimeRetentionController
-from linktools.ai.runtime.state._steps import RuntimeAgentRunStore
+from linktools.ai.persistence._materializer import _RuntimeObjectRouter
+from linktools.ai.persistence._plan import PersistenceDomain
+from linktools.ai.persistence._step_archive import InMemoryStepArchive, StagingAgentRunStore
+from linktools.ai.persistence._retention import RuntimeRetentionController
+from linktools.ai.persistence.runs import RuntimeAgentRunStore
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore, StoredPayload
 from linktools.ai.task import (
@@ -249,7 +249,7 @@ async def test_durable_commit_cancellation_accepts_committed_readback() -> None:
 def _run_store_for_preflight() -> RuntimeAgentRunStore:
     return RuntimeAgentRunStore(
         StagingAgentRunStore(),
-        conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
+        conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
         execution_archive=None,
         recovery_archive=None,
     )
@@ -291,7 +291,7 @@ async def test_runtime_object_preflight_rejects_pending_filesystem_work(
 ) -> None:
     store = FilesystemObjectStore(tmp_path / "objects")
     router = _RuntimeObjectRouter(
-        {RuntimeDomain.EXECUTION: store},
+        {PersistenceDomain.EXECUTION: store},
         close_guard_stores=(store,),
     )
     release = asyncio.Event()
@@ -311,7 +311,7 @@ async def test_runtime_object_preflight_ignores_external_filesystem_work(
 ) -> None:
     store = FilesystemObjectStore(tmp_path / "objects")
     router = _RuntimeObjectRouter(
-        {RuntimeDomain.EXECUTION: store},
+        {PersistenceDomain.EXECUTION: store},
         close_guard_stores=(),
     )
     release = asyncio.Event()
@@ -373,7 +373,7 @@ async def test_runtime_object_preflight_rejects_pending_sql_work(tmp_path) -> No
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'objects.db'}")
     store = SqlObjectStore(engine)
     router = _RuntimeObjectRouter(
-        {RuntimeDomain.EXECUTION: store},
+        {PersistenceDomain.EXECUTION: store},
         close_guard_stores=(store,),
     )
     release = asyncio.Event()
@@ -525,8 +525,8 @@ async def test_execution_wait_rechecks_after_local_worker_quiescence(after_wait:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             await super().authorize(principal, action, resource)
 
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="result-read", tenant_id="tenant")
     record = await _seed_result(state)
     authorization = Authorization()

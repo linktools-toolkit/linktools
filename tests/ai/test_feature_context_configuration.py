@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
+
+from linktools.ai.core import ExecutionContext
 """Captured Runtime policies and offline response declarations have one owner."""
 from ._runtime_test_helpers import model_features
 
@@ -14,7 +18,9 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import AuthorizationAction, PromptLimits, ResourceKind, ResourceRef, service_principal
 from linktools.ai.errors import AIError, ErrorCode
 
-from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeHistory, RuntimeStorage
+from linktools.ai.history import History
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 
 from .test_tool_response_fixture import _manifest, _store
 
@@ -57,10 +63,7 @@ def test_removed_open_keywords_have_no_aliases():
     for name in ('authorization', 'limits', 'tool_responses'):
         assert name not in inspect.signature(Runtime.open).parameters
         with pytest.raises(TypeError):
-            Runtime.open('test', storage=RuntimeStorage.in_memory(), **{name: None})
-    assert 'authorization' not in inspect.signature(RuntimeHistory.open).parameters
-    with pytest.raises(TypeError):
-        RuntimeHistory.open('test', storage=RuntimeStorage.in_memory(), authorization=None)
+            Runtime.open(persistence=None, **{name: None})
     with pytest.raises(TypeError):
         RuntimeFeatures('test', limits=object())
 
@@ -70,10 +73,11 @@ async def test_runtime_uses_captured_policy_and_limits_even_when_filter_rejects_
     policy = Policy()
     limits = PromptLimits(max_binary_input_parts=1)
     features = RuntimeFeatures('policy', authorization=policy, limits=limits, filter=lambda *_: False)
-    async with Runtime.open('test', storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Persistence.open('test', storage=PersistenceStorage.in_memory()) as persistence_75, Runtime.open(persistence=persistence_75, features=features) as runtime:
         assert runtime._execution_service._authorization is policy
         assert runtime._session_service._authorization is policy
-        assert runtime._graph_service._authorization is policy
+        assert not hasattr(runtime, "tasks")
+        assert not hasattr(runtime, "evaluations")
         assert runtime._execution_service._input_materializer._limits is limits
 
 
@@ -81,8 +85,7 @@ async def test_runtime_uses_captured_policy_and_limits_even_when_filter_rejects_
 @pytest.mark.parametrize('tenant', ('one', 'two'))
 async def test_default_policy_resolves_per_open_tenant(tenant):
     capture = await RuntimeFeatures('reused').capture()
-    async with Runtime.open('test', storage=RuntimeStorage.in_memory(),
-                            context=RuntimeContext(None, tenant_id=tenant), features=capture) as runtime:
+    async with Persistence.open('test', storage=PersistenceStorage.in_memory(), tenant_id=tenant) as persistence_86, Runtime.open(persistence=persistence_86, context=ExecutionContext(None), features=capture) as runtime:
         policy = runtime._execution_service._authorization
         ref = ResourceRef(ResourceKind.EXECUTION, 'execution', tenant)
         await policy.authorize(service_principal(tenant, 'actor'), AuthorizationAction.EXECUTION_READ, ref)
@@ -94,12 +97,12 @@ async def test_default_policy_resolves_per_open_tenant(tenant):
 
 @pytest.mark.asyncio
 async def test_history_uses_current_capture_policy(tmp_path):
-    storage = RuntimeStorage.from_root(tmp_path)
-    async with Runtime.open('test', storage=storage):
+    storage = PersistenceStorage.from_root(tmp_path)
+    async with Persistence.open('test', storage=storage) as persistence_100, Runtime.open(persistence=persistence_100):
         pass
     policy = Policy()
     capture = await RuntimeFeatures('history', authorization=policy).capture()
-    async with RuntimeHistory.open('test', storage=RuntimeStorage.from_root(tmp_path), features=capture) as history:
+    async with Persistence.open('test', storage=PersistenceStorage.from_root(tmp_path), tenant_id="default", read_only=True) as history_persistence_106, History.open(persistence=history_persistence_106, authorization=capture.authorization) as history:
         assert history._authorization is policy
         assert history._service._authorization is policy
 
@@ -120,11 +123,11 @@ async def test_response_capability_scope_uniqueness_and_bootstrap_consumption():
         with pytest.raises(AIError) as caught:
             features.capability(ToolResponsesCapability(fixture), scope='runtime')
         assert caught.value.code is ErrorCode.CAPABILITY_CONFLICT
-        async with Runtime.open('test', storage=RuntimeStorage.in_memory(), features=features) as runtime:
+        async with Persistence.open('test', storage=PersistenceStorage.in_memory()) as persistence_125, Runtime.open(persistence=persistence_125, features=features) as runtime:
             assert runtime._execution_service._tool_responses is fixture
         wrapped = RuntimeFeatures('wrapped')
         wrapped.capability(PrefixTools(CombinedCapability([ToolResponsesCapability(fixture)]), prefix='test'), id='wrapped.responses', scope='runtime')
-        async with Runtime.open('wrapped', storage=RuntimeStorage.in_memory(), features=wrapped) as runtime:
+        async with Persistence.open('wrapped', storage=PersistenceStorage.in_memory()) as persistence_129, Runtime.open(persistence=persistence_129, features=wrapped) as runtime:
             assert runtime._execution_service._tool_responses is fixture
     finally:
         await store.close()
@@ -135,7 +138,7 @@ async def test_captured_limits_reject_oversized_input_before_execution():
     from pydantic_ai import BinaryContent
 
     features = RuntimeFeatures('limits', limits=PromptLimits(max_binary_input_parts=1))
-    async with Runtime.open('test', storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Persistence.open('test', storage=PersistenceStorage.in_memory()) as persistence_140, Runtime.open(persistence=persistence_140, features=features) as runtime:
         with pytest.raises(AIError) as caught:
             await runtime._execution_service._input_materializer.materialize(
                 (BinaryContent(b'one', media_type='text/plain'), BinaryContent(b'two', media_type='text/plain')), (),
@@ -143,24 +146,22 @@ async def test_captured_limits_reject_oversized_input_before_execution():
         assert caught.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
 
-def test_restored_history_forwards_current_features(monkeypatch, tmp_path):
-    from linktools.ai.runtime import RestoredRuntime
+@pytest.mark.asyncio
+async def test_restored_history_enforces_current_policy(tmp_path):
+    from linktools.ai.snapshot import RestoredSnapshot
 
-    sentinel = object()
-    features = RuntimeFeatures('restored', authorization=Policy())
-    seen = {}
-
-    def open_history(namespace, **kwargs):
-        seen.update(namespace=namespace, **kwargs)
-        return sentinel
-
-    monkeypatch.setattr(RuntimeHistory, 'open', open_history)
-    restored = RestoredRuntime('digest', 'namespace', 'tenant', tmp_path, None, 'generation')
-    assert restored.open_history(features=features) is sentinel
-    assert seen['features'] is not features
-    assert seen['features'].authorization is features.authorization
-    assert seen['tenant_id'] == 'tenant'
-    assert 'authorization' not in seen
+    policy = Policy()
+    async with Persistence.open('namespace', storage=PersistenceStorage.from_root(tmp_path), tenant_id='tenant'):
+        pass
+    restored = RestoredSnapshot('digest', 'namespace', 'tenant', tmp_path, None, 'generation')
+    async with restored.open_history(authorization=policy) as history:
+        principal = service_principal('tenant', 'reader')
+        assert (await history.list_sessions(principal=principal)).items == ()
+        assert policy.calls
+        policy.denied = True
+        with pytest.raises(AIError) as rejected:
+            await history.list_sessions(principal=principal)
+        assert rejected.value.code is ErrorCode.AUTHORIZATION_DENIED
 
 
 @pytest.mark.asyncio
@@ -169,9 +170,10 @@ async def test_restored_history_ignores_source_routes_and_cache(tmp_path, monkey
     import shutil
 
     from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
-    from linktools.ai.runtime import RuntimeDomain, RuntimeSnapshot
+    from linktools.ai.snapshot import Snapshot
+    from linktools.ai.persistence import PersistenceDomain
     from linktools.ai.storage import StorageRoute
-    from linktools.ai.runtime.state import SnapshotLimits
+    from linktools.ai.persistence.snapshots import SnapshotLimits
     from linktools.ai.storage import InMemoryObjectStore
 
     from .test_explicit_runtime_features import _FeatureModels, _features
@@ -180,21 +182,20 @@ async def test_restored_history_ignores_source_routes_and_cache(tmp_path, monkey
 
     source = tmp_path / 'source'
     routes = {domain: StorageRoute.filesystem(source / 'modules' / domain.value, transaction_root=source)
-              for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.CHECKPOINT, RuntimeDomain.TRACE)}
-    def source_storage() -> RuntimeStorage:
-        return RuntimeStorage(replace(RuntimeStorage.filesystem(source).plan, conversation=routes[RuntimeDomain.CONVERSATION]))
+              for domain in (PersistenceDomain.CONVERSATION, PersistenceDomain.CHECKPOINT, PersistenceDomain.TRACE)}
+    def source_storage() -> PersistenceStorage:
+        return PersistenceStorage(replace(PersistenceStorage.filesystem(source).plan, conversation=routes[PersistenceDomain.CONVERSATION], trace=routes[PersistenceDomain.TRACE], checkpoint=routes[PersistenceDomain.CHECKPOINT]))
 
     cache = _Cache()
-    routes[RuntimeDomain.TRACE] = routes[RuntimeDomain.TRACE].with_cache(cache)
+    routes[PersistenceDomain.TRACE] = routes[PersistenceDomain.TRACE].with_cache(cache)
     group = _features(ExecutionCapability(retain_history=True),
-                      CheckpointCapability(storage=routes[RuntimeDomain.CHECKPOINT]),
-                      TraceCapability(storage=routes[RuntimeDomain.TRACE]))
+                      CheckpointCapability(),
+                      TraceCapability())
     policy = Policy()
     group._authorization = policy
     group.model("default", _FeatureModels())
     capture = await group.capture()
-    async with Runtime.open('restore-policy', storage=source_storage(),
-                            features=capture) as runtime:
+    async with Persistence.open('restore-policy', storage=source_storage()) as persistence_198, Runtime.open(persistence=persistence_198, features=capture) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question')
         await execution.wait(timeout_seconds=5)
@@ -202,10 +203,10 @@ async def test_restored_history_ignores_source_routes_and_cache(tmp_path, monkey
         expected = (await execution.model_interactions()).items
     objects = InMemoryObjectStore('snapshot')
     limits = SnapshotLimits(max_entries=10000, max_bytes=16 * 1024 * 1024)
-    ref = await RuntimeSnapshot.create('restore-policy', tenant_id=principal.tenant_id,
-                                       storage=source_storage(), object_store=objects,
-                                       features=capture, exclusive=_SnapshotGuard(), limits=limits)
-    restored = await RuntimeSnapshot.restore(ref, object_store=objects, target=tmp_path / 'restored',
+    async with Persistence.open('restore-policy', storage=source_storage(), tenant_id=principal.tenant_id, read_only=True) as persistence:
+        ref = await Snapshot.create(persistence=persistence, object_store=objects,
+                                    exclusive=_SnapshotGuard(), limits=limits)
+    restored = await Snapshot.restore(ref, object_store=objects, target=tmp_path / 'restored',
                                             namespace='restore-policy', tenant_id=principal.tenant_id, limits=limits)
     shutil.rmtree(source)
 
@@ -220,7 +221,7 @@ async def test_restored_history_ignores_source_routes_and_cache(tmp_path, monkey
 
     if not captured:
         monkeypatch.setattr(group, 'capture', forbidden_capture)
-    async with restored.open_history(features=capture if captured else group) as history:
+    async with restored.open_history(authorization=policy) as history:
         assert history._authorization is policy
         assert (await history.result(execution_id, principal=principal)).output == {'text': 'done'}
         assert len((await history.model_interactions(execution_id, principal=principal)).items) == len(expected)

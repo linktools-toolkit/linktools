@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Original client requests remain separate from SDK message projections."""
 from ._runtime_test_helpers import model_features
 from linktools.ai.model import create_model
@@ -32,10 +34,11 @@ from linktools.ai.errors import AIError, ErrorCode
 
 from linktools.ai.model import ModelBinding, ModelClientRequestRecorder
 from linktools.ai.model import _http, _openai
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._compaction import CompactionCapability
-from linktools.ai.runtime._journal import ModelRequestJournal
-from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.observe.journal import ModelRequestJournal
+from linktools.ai.persistence import PersistenceDomain
 
 
 from linktools.ai.capability import TraceCapability
@@ -372,12 +375,10 @@ async def test_model_client_request_capture_runtime_closes_owned_client(
         return _response(request)
 
     registry, clients = _binding(monkeypatch, handler)
-    storage = RuntimeStorage.in_memory()
+    storage = PersistenceStorage.in_memory()
     features = _agents()
     features.capability(TraceCapability(record_http_bodies=True), scope="runtime")
-    async with Runtime.open(
-        "default", storage=storage, features=model_features(registry, features),
-    ) as runtime:
+    async with Persistence.open('default', storage=storage) as persistence_374, Runtime.open(persistence=persistence_374, features=model_features(registry, features)) as runtime:
         with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
             execution = await runtime.agents.get("default").start("hello")
             await asyncio.wait_for(dispatched.wait(), 5)
@@ -398,7 +399,7 @@ async def test_model_client_request_capture_runtime_closes_owned_client(
         assert result.status is expected
         assert recorder.requests == ()
         item = (await execution.model_interactions()).items[0]
-        archive = runtime._state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = runtime._run_store.read_store(PersistenceDomain.TRACE)
         records = await archive.list_model_interactions(agent_run_id=agent_run_id(
             namespace="default", tenant_id="default", execution_id=item.execution_id, agent_run_seq=item.agent_run_seq,
         ))
@@ -449,9 +450,7 @@ async def test_model_client_request_capture_runtime_preserves_custom_model_lifec
 ) -> None:
     model = _LifecycleModel(failure)
     registry = _ModelBinding(model)
-    async with Runtime.open(
-        "default", storage=RuntimeStorage.in_memory(), features=model_features(registry, _agents()),
-    ) as runtime:
+    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_448, Runtime.open(persistence=persistence_448, features=model_features(registry, _agents())) as runtime:
         result = (await runtime.agents.get("default").run("hello", timeout_seconds=5)).result
     assert result.status is ExecutionStatus.FAILED
     expected = ErrorCode.INTERNAL_ERROR if failure == "exit" else ErrorCode.MODEL_CONFIG_INVALID
@@ -469,9 +468,7 @@ async def test_model_client_request_capture_runtime_leaves_borrowed_client_open(
             base_url="https://capture.invalid/v1", api_key="test", http_client=client,
         ))
         registry = _ModelBinding(model)
-        async with Runtime.open(
-            "default", storage=RuntimeStorage.in_memory(), features=model_features(registry, _agents()),
-        ) as runtime:
+        async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_468, Runtime.open(persistence=persistence_468, features=model_features(registry, _agents())) as runtime:
             result = (await runtime.agents.get("default").run("hello", timeout_seconds=5)).result
         assert result.status is ExecutionStatus.SUCCEEDED
         assert not client.is_closed and client.close_calls == 0

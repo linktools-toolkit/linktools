@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Timeline metadata shares bounded reads without holding authorization or bodies."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from pathlib import Path
 from dataclasses import replace
 
@@ -11,10 +11,10 @@ from sqlalchemy import event
 
 from linktools.ai.core import ExecutionStatus, HmacCursorSigner, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
-from linktools.ai.runtime._session_timeline import project_session_timeline
-from linktools.ai.runtime.state._store import active_state_scope
+from linktools.ai.history._session_timeline import project_session_timeline
+from linktools.ai.persistence.state import active_state_scope
 
 from .test_incremental_projection_boundaries import _storage
 from .test_session_timeline import _commit_empty_turn, _execution, _session
@@ -28,7 +28,7 @@ class _Authorization(TenantAuthorizationPolicy):
         return await super().authorize(principal, action, resource)
 
 
-async def _seed(state: RuntimeState) -> None:
+async def _seed(state: Persistence) -> None:
     await state.conversation.sessions.create(_session())
     await state.execution.executions.create(replace(_execution(
         "failed", status=ExecutionStatus.FAILED, prompt="original prompt",
@@ -49,7 +49,7 @@ async def _seed(state: RuntimeState) -> None:
     )
 
 
-async def _timeline(state: RuntimeState, owner: str = "owner"):
+async def _timeline(state: Persistence, owner: str = "owner"):
     return await project_session_timeline(
         state.conversation, state.execution.executions, _Authorization(),
         HmacCursorSigner("timeline", b"timeline-read-scope"), state.run_store,
@@ -62,7 +62,7 @@ async def test_timeline_read_scope_preserves_turns_and_authority(
     tmp_path: Path, backend: str,
 ) -> None:
     state = _storage(backend, tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="timeline-scope", tenant_id="tenant")
     try:
         await _seed(state)
@@ -84,8 +84,8 @@ async def test_timeline_read_scope_preserves_turns_and_authority(
 
 
 async def test_timeline_read_scope_uses_one_post_authorization_sql_snapshot(tmp_path: Path) -> None:
-    state = RuntimeStorage.sqlite(tmp_path / "timeline.db")
-    state = RuntimeState(state)
+    state = PersistenceStorage.sqlite(tmp_path / "timeline.db")
+    state = Persistence(state)
     await state.initialize(namespace="timeline-scope", tenant_id="tenant")
     try:
         await _seed(state)
@@ -109,11 +109,11 @@ async def test_timeline_read_scope_uses_one_post_authorization_sql_snapshot(tmp_
 
 
 async def test_timeline_read_scope_keeps_separate_database_routes(tmp_path: Path) -> None:
-    state = RuntimeStorage.from_plan(RuntimeStoragePlan(
+    state = PersistenceStorage.from_plan(PersistencePlan(
         execution=StorageRoute.sqlite(tmp_path / "execution.db"),
         conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
     ))
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="timeline-scope", tenant_id="tenant")
     try:
         await _seed(state)

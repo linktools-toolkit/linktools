@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Injected timeline repositories retain their independent task and read ownership."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
@@ -15,17 +15,18 @@ from linktools.ai.core import (
     Principal,
     TenantAuthorizationPolicy,
 )
-from linktools.ai.runtime import RuntimeHistory, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.history import History
+from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence.contracts import (
     ExecutionRecord,
     ExecutionRepository,
     SessionRecord,
     SessionRepository,
     SessionTurnCommit,
 )
-from linktools.ai.runtime.state._conversation_repositories import SessionRepositoryImpl
-from linktools.ai.runtime.state._execution_repositories import ExecutionRepositoryImpl
+from linktools.ai.persistence._conversation_repositories import SessionRepositoryImpl
+from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
 from sqlalchemy import event
 
 from .test_session_timeline import _commit_empty_turn, _execution, _session
@@ -102,10 +103,10 @@ class ParallelSessionSubclass(SessionRepositoryImpl):
 
 
 def _history(
-    state: RuntimeState, *, executions: ExecutionRepository | None = None,
+    state: Persistence, *, executions: ExecutionRepository | None = None,
     sessions: SessionRepository | None = None,
-) -> RuntimeHistory:
-    return RuntimeHistory(
+) -> History:
+    return History(
         object(), tenant_id="tenant",
         executions=state.execution.executions if executions is None else executions,
         authorization=TenantAuthorizationPolicy(),
@@ -115,7 +116,7 @@ def _history(
     )
 
 
-async def _populate(state: RuntimeState) -> None:
+async def _populate(state: Persistence) -> None:
     await state.initialize(namespace="timeline-owner", tenant_id="tenant")
     await state.conversation.sessions.create(_session())
     await state.execution.executions.create(replace(
@@ -142,12 +143,12 @@ async def _populate(state: RuntimeState) -> None:
 async def test_public_history_accepts_parallel_injected_repository_reads(
     tmp_path: Path, split: bool, subclass: bool, phase: str,
 ) -> None:
-    state = RuntimeStorage.from_plan(RuntimeStoragePlan(
+    state = PersistenceStorage.from_plan(PersistencePlan(
         execution=StorageRoute.sqlite(tmp_path / "execution.db"),
         conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
-    )) if split else RuntimeStorage.sqlite(tmp_path / "shared.db")
+    )) if split else PersistenceStorage.sqlite(tmp_path / "shared.db")
     try:
-        state = RuntimeState(state)
+        state = Persistence(state)
         await _populate(state)
         principal = Principal("owner", "tenant")
         expected = await _history(state).session_timeline("session", principal=principal)
@@ -173,9 +174,9 @@ async def test_public_history_accepts_parallel_injected_repository_reads(
 
 
 async def test_builtin_public_timeline_keeps_one_metadata_transaction(tmp_path: Path) -> None:
-    state = RuntimeStorage.sqlite(tmp_path / "builtin.db")
+    state = PersistenceStorage.sqlite(tmp_path / "builtin.db")
     try:
-        state = RuntimeState(state)
+        state = Persistence(state)
         await _populate(state)
         engine = state.conversation.sessions.state_store.storage_group.context.engine.sync_engine
         statements, begins = [], []

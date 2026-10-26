@@ -22,7 +22,8 @@ Choose the actual API, not a vendor-looking model name:
 
 ```python
 from linktools.ai.model import create_model
-from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import Persistence, PersistenceStorage
 
 features = RuntimeFeatures()
 features.model("default", create_model(protocol="openai-responses", model="gpt-5"))
@@ -31,7 +32,9 @@ features.model("compatible", create_model(protocol="openai", model="gateway-mode
     "extra_body": {"enable_thinking": True},
 }))
 
-async with Runtime.open("app", features=features, storage=RuntimeStorage.in_memory()) as runtime:
+async with Persistence.open("app", storage=PersistenceStorage.in_memory()) as persistence, Runtime.open(
+    persistence=persistence, features=features,
+) as runtime:
     ...
 ```
 

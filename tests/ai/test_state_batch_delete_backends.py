@@ -14,11 +14,11 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime.state._filesystem import FilesystemStateStore
-from linktools.ai.runtime.state._filesystem_layout import _CowMap, _FactStreamInfo
-from linktools.ai.runtime.state._memory import InMemoryStateStore
-from linktools.ai.runtime.state._sql import SqlStateStore, _SqlTransaction
-from linktools.ai.runtime.state._store import (
+from linktools.ai.persistence._filesystem import FilesystemStateStore
+from linktools.ai.persistence._filesystem_layout import _CowMap, _FactStreamInfo
+from linktools.ai.persistence._memory import InMemoryStateStore
+from linktools.ai.persistence._sql import SqlStateStore, _SqlTransaction
+from linktools.ai.persistence.state import (
     FactQuery, RecordQuery, StateStore, StateTransaction, StateTransactionNestingError,
     StoredAlias, StoredFact, StoredOperation, StoredRecord,
 )

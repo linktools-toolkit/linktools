@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime.state._archive import ContentArchive, PreparedArchive
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence._archive import ContentArchive, PreparedArchive
 from .test_incremental_projection_boundaries import _storage
 from .test_shared_content_archive import _archive, _publish
 
@@ -20,7 +20,7 @@ pytestmark = pytest.mark.asyncio
 async def test_prepared_ranges_resolve_without_a_state_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="prepared-range", tenant_id="tenant")
     try:
         archive = await _archive(state)
@@ -47,7 +47,7 @@ async def test_prepared_ranges_resolve_without_a_state_scope(
 async def test_partial_prepared_ranges_fall_back_to_one_scope_and_cold_skips_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="prepared-range", tenant_id="tenant")
     try:
         archive = await _archive(state)
@@ -88,7 +88,7 @@ async def test_partial_prepared_ranges_fall_back_to_one_scope_and_cold_skips_pro
 async def test_prepared_range_probe_never_turns_invalid_or_missing_metadata_into_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, fault: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="prepared-range", tenant_id="tenant")
     try:
         archive = await _archive(state)

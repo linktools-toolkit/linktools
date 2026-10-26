@@ -10,14 +10,19 @@ import pytest
 
 from linktools.ai.core import canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state._archive import ContentArchive, ContentRecord, PreparedArchive
-from linktools.ai.runtime.state._archive_closure import ArchiveClosure, iter_archive_content_refs, iter_archive_roots, rekey_archive_roots
-from linktools.ai.runtime.state._codec import _encode_persisted_domain, decode_domain, encode_domain
-from linktools.ai.runtime.state._contracts import ArchivedContextBlock, RuntimePayloadRef
-from linktools.ai.runtime.state._memory import InMemoryStateStore
-from linktools.ai.runtime.state._object_cleanup import purge_unreferenced_objects
-from linktools.ai.runtime.state._plan import RuntimeDomain
-from linktools.ai.runtime.state._store import StoredRecord
+from linktools.ai.persistence._archive import ContentArchive, ContentRecord, PreparedArchive
+from linktools.ai.persistence._archive_closure import (
+    ArchiveClosure,
+    iter_archive_content_refs,
+    iter_archive_roots,
+    rekey_archive_roots,
+)
+from linktools.ai.persistence.codec import _encode_persisted_domain, decode_domain, encode_domain
+from linktools.ai.persistence.contracts import ArchivedContextBlock, RuntimePayloadRef
+from linktools.ai.persistence._memory import InMemoryStateStore
+from linktools.ai.persistence._object_cleanup import purge_unreferenced_objects
+from linktools.ai.persistence._plan import PersistenceDomain
+from linktools.ai.persistence.state import StoredRecord
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef, StoredPayload
 
 pytestmark = pytest.mark.asyncio
@@ -75,7 +80,7 @@ async def test_archive_closure_keys_content_roots_by_logical_tenant_scope() -> N
                 "session_metadata": {"value": direct}, "memory": None, "repository_instructions": None,
                 "semantic_digest": "digest", "replace_history_system_prompt": False, "unavailable_reason": None}
     wire = {"$dataclass": "execution_record", "fields": {"input_context": encode_domain(
-        RuntimePayloadRef(StoredPayload.inline_json(manifest), RuntimeDomain.EXECUTION))}}
+        RuntimePayloadRef(StoredPayload.inline_json(manifest), PersistenceDomain.EXECUTION))}}
     assert tuple(iter_archive_roots(wire)) == (root,)
     assert tuple(iter_archive_content_refs(wire)) == ((scope, direct["content_scope"], identities[0]),)
     closure.mark_content(*tuple(iter_archive_content_refs(wire))[0])
@@ -120,9 +125,9 @@ async def test_archive_gc_scans_unrouted_owner_and_collects_only_excluded_conten
                           0, None, 0, None, {"root": encode_domain(root.slice(1, 2))})
     await hidden.mutate(lambda tx: tx.insert_record(record))
     contents = {item.sort_key: ContentRecord.from_json(item.data) for item in await store.read(lambda tx: tx.scan_records()) if item.kind == "archive_content"}
-    candidates = tuple((RuntimeDomain.EXECUTION, contents[identity].payload.ref) for identity in identities)
+    candidates = tuple((PersistenceDomain.EXECUTION, contents[identity].payload.ref) for identity in identities)
     result = await purge_unreferenced_objects(candidates, namespace="archive", tenant_id="tenant",
-        stores={RuntimeDomain.EXECUTION: owner}, object_stores={domain: objects for domain in RuntimeDomain}, exclusive=Offline())
+        stores={PersistenceDomain.EXECUTION: owner}, object_stores={domain: objects for domain in PersistenceDomain}, exclusive=Offline())
     assert result.retained == (candidates[1],)
     assert set(result.deleted) == {candidates[0], candidates[2]}
     assert await archive.read_contents(await archive.content_ids(root.slice(1, 2)), codec="bytes") == (values[1],)
@@ -168,7 +173,7 @@ async def test_archive_closure_full_prefix_work_scales_with_unique_nodes_and_roo
 async def test_archive_scanner_accepts_persisted_portable_object_context() -> None:
     payload = StoredPayload.object(ObjectRef("runtime", "v1/runtime/portable-context", "0" * 64, 80000))
     wire = {"$dataclass": "execution_record", "schema": 1, "fields": {"input_context":
-        _encode_persisted_domain(RuntimePayloadRef(payload, RuntimeDomain.EXECUTION))}}
+        _encode_persisted_domain(RuntimePayloadRef(payload, PersistenceDomain.EXECUTION))}}
     assert not tuple(iter_archive_roots(wire))
     assert not tuple(iter_archive_content_refs(wire))
     assert rekey_archive_roots(wire, {}) == wire

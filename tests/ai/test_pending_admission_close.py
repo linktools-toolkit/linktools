@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Runtime shutdown joins admitted work even after its caller is cancelled."""
 from ._runtime_test_helpers import model_features
 
@@ -9,9 +11,10 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.storage import InMemoryCacheBackend
 
@@ -50,19 +53,16 @@ async def test_runtime_close_joins_pending_publication_after_start_cancellation(
 
     monkeypatch.setattr(DefaultExecutionService, "preflight_close", observe_preflight)
     cache = BlockingCache(max_bytes=2**20)
-    storage = RuntimeStorage.sqlite(tmp_path / "state.db")
-    original_close = RuntimeState.close
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db", coordination=cache)
+    original_close = Persistence.close
 
     async def close_storage(owner):
         assert published.is_set(), "storage closed before admitted publication settled"
         await original_close(owner)
         storage_closed.set()
 
-    monkeypatch.setattr(RuntimeState, "close", close_storage)
-    async with Runtime.open(
-        "pending-admission-close", storage=storage,
-        features=model_features(_Models(_UsageFunctionModel(model)), _group(coordination=cache)),
-    ) as runtime:
+    monkeypatch.setattr(Persistence, "close", close_storage)
+    async with Persistence.open('pending-admission-close', storage=storage) as persistence_62, Runtime.open(persistence=persistence_62, features=model_features(_Models(_UsageFunctionModel(model)), _group())) as runtime:
         session = await runtime.agents.get().create_session("session")
         starting = asyncio.create_task(session.start("question", idempotency_key="request"))
         closing = None
@@ -87,13 +87,15 @@ async def test_runtime_close_joins_pending_publication_after_start_cancellation(
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(starting, 5)
             await asyncio.wait_for(repeated_close or closing, 5)
-            assert published.is_set() and storage_closed.is_set()
+            assert published.is_set() and not storage_closed.is_set()
+            assert runtime._state.ready
         finally:
             release.set()
             await asyncio.gather(
                 *(task for task in (starting, closing, repeated_close) if task is not None),
                 return_exceptions=True,
             )
+    assert storage_closed.is_set()
 
 
 @pytest.mark.asyncio

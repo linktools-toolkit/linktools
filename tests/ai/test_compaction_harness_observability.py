@@ -14,7 +14,7 @@ from linktools.ai.runtime._compaction import (
     CompactionPolicy,
     _ObservedCompactionModel,
 )
-from linktools.ai.runtime._journal import ModelRequestFact, ModelRequestJournal
+from linktools.ai.observe.journal import ModelRequestFact, ModelRequestJournal
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
 from linktools.ai.observe import Observation
 from pydantic_ai.messages import (

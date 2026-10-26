@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Native reference capabilities retain model failure and stream contracts."""
 
 import asyncio
@@ -27,7 +29,8 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import (
     ModelClientRequestRecorder, ReferencedContent, ReferencedInputModel, create_model, model_request_error,
 )
-from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.spec import CapabilityRef
 from linktools.ai.storage import StorageEntryRevision
 
@@ -197,7 +200,7 @@ async def test_runtime_reference_stream_failure_keeps_attempt_coordinates_and_sa
                         revision=_SOURCE.revision, scope="agent")
     features.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Runtime.open("reference-stream", storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Persistence.open('reference-stream', storage=PersistenceStorage.in_memory()) as persistence_200, Runtime.open(persistence=persistence_200, features=features) as runtime:
         execution = await runtime.agents.get().start([reference])
         result = (await execution.wait(timeout_seconds=10)).result
         interactions = (await execution.model_interactions(include_content=True, include_client_requests=True)).items

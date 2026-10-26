@@ -21,7 +21,6 @@ from pydantic_ai.tools import ToolDefinition
 
 from ..core import CommitPolicy, DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
 from ..errors import AIError, ErrorCode
-from ..storage import StorageRoute
 from ._context import AgentContext
 
 
@@ -34,21 +33,12 @@ class CheckpointCapability(AbstractCapability[AgentContext[AppT]]):
     Register at Runtime scope. Runtime owns checkpoint transactions and producer
     fencing; each run binds its own capture without modifying the declaration.
 
-    ``storage=None`` inherits the execution route, including its hot-read cache.
-    An explicit route must share the execution StateStorageGroup; it cannot move
-    checkpoints to an independent transaction resource. Derive a route with
-    ``execution_route.with_cache(None)`` to disable only its hot-read cache.
+    Physical routes and caches belong to PersistenceStorage. Checkpoint routes
+    must share the execution StateStorageGroup for atomic safety boundaries.
     """
 
     id = "runtime.checkpoint"
     _service: AbstractCapability[AgentContext[AppT]] | None = None
-
-    def __init__(self, *, storage: StorageRoute | None = None) -> None:
-        self._storage = storage
-
-    @property
-    def storage(self) -> StorageRoute | None:
-        return self._storage
 
     def bind(
         self, service: AbstractCapability[AgentContext[AppT]]
@@ -103,18 +93,16 @@ class TraceCapability(AbstractCapability[AgentContext[AppT]]):
     batch observation boundaries await publication. Terminal mode retains observations
     until Runtime seals the final tail or a required safety boundary publishes them.
 
-    ``storage=None`` inherits the execution route, including its hot-read cache.
-    An explicit route must share the execution StateStorageGroup; it cannot move
-    traces to an independent transaction resource. Derive a route with
-    ``execution_route.with_cache(None)`` to disable only its hot-read cache.
-    Storage caches do not supply ``commit.buffer``; configure that separately.
+    Physical routes and caches belong to PersistenceStorage. Trace routes must
+    share the execution StateStorageGroup. Storage caches do not supply the
+    independent ``commit.buffer`` policy.
     """
 
     id = "runtime.trace"
     _service: AbstractCapability[AgentContext[AppT]] | None = None
 
     def __init__(
-        self, *, storage: StorageRoute | None = None,
+        self, *,
         commit: CommitPolicy = CommitPolicy.batch(),
         record_http_bodies: bool = False,
     ) -> None:
@@ -126,16 +114,11 @@ class TraceCapability(AbstractCapability[AgentContext[AppT]]):
         self._commit = commit.resolve_batch(
             batch_size=DEFAULT_TRACE_BATCH_SIZE, flush_interval=DEFAULT_TRACE_FLUSH_INTERVAL,
         )
-        self._storage = storage
 
     @property
     def record_http_bodies(self) -> bool:
         """Whether supported HTTP attempts retain their unredacted wire bodies."""
         return self._record_http_bodies
-
-    @property
-    def storage(self) -> StorageRoute | None:
-        return self._storage
 
     @property
     def commit(self) -> CommitPolicy:

@@ -21,10 +21,7 @@ from linktools.ai.core import PromptLimits
 from linktools.ai.errors import AIError
 from linktools.ai.runtime._compaction import CompactionCapability, RuntimeSummarizingCompaction
 from linktools.ai.runtime._harness import ReinjectRuntimeSystemPrompt, SummaryProviderModel
-from linktools.ai.runtime._message import (
-    SummaryPromptPart, decode_model_messages, encode_model_messages,
-    freeze_model_messages, without_history_system_prompts,
-)
+from linktools.ai.model.messages import SummaryPromptPart, decode_model_messages, encode_model_messages, freeze_model_messages, without_history_system_prompts
 
 
 def _summaries(messages):

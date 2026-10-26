@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Transient routes expose their live facts without retaining an archive."""
 from ._runtime_test_helpers import model_features
 
@@ -13,7 +15,8 @@ from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
 
 from ._runtime_test_helpers import _UsageFunctionModel
@@ -48,11 +51,8 @@ async def test_transient_execution_reads_live_owner_and_releases_after_handoff(o
     capabilities = RuntimeFeatures("transient-history")
     capabilities.tool(echo, effect_policy="replay_safe")
     capabilities.agent("default", model="default", allow_tools=("echo",))
-    storage = RuntimeStorage(RuntimeStoragePlan(execution=StorageRoute.transient()))
-    async with Runtime.open(
-        "transient-history",
-        storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), capabilities),
-    ) as runtime:
+    storage = PersistenceStorage(PersistencePlan(execution=StorageRoute.transient()))
+    async with Persistence.open('transient-history', storage=storage) as persistence_52, Runtime.open(persistence=persistence_52, features=model_features(_Models(_UsageFunctionModel(model)), capabilities)) as runtime:
         execution = await runtime.agents.get("default").start("question")
         principal = runtime.default_principal
         subscription = None

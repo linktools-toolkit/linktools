@@ -20,24 +20,24 @@ from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import ToolDefinition
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.core import HmacCursorSigner, agent_run_id, agent_conversation_id
-from linktools.ai.runtime import RuntimeDomain
+from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._persistence_services import CheckpointService
 from linktools.ai.runtime._run_hooks import AgentRunCapture
 from linktools.ai.capability import CheckpointCapability
-from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
-from linktools.ai.runtime._journal import ModelRequestJournal
+from linktools.ai.history._projection import StepExecutionHistoryReader
+from linktools.ai.observe.journal import ModelRequestJournal
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
-from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
-from linktools.ai.runtime.state._archive import PreparedArchive
-from linktools.ai.runtime.state._step_contracts import (
+from linktools.ai.persistence._runtime_commands import StateCommands
+from linktools.ai.persistence._archive import PreparedArchive
+from linktools.ai.persistence._step_contracts import (
     AgentRunCheckpoint,
     AgentRunRecord,
 )
-from linktools.ai.runtime.state._steps import RuntimeAgentRunStore, StagingAgentRunStore
+from linktools.ai.persistence.runs import RuntimeAgentRunStore, StagingAgentRunStore
 from linktools.ai.storage import PayloadPolicy
 from .test_incremental_projection_boundaries import _storage
 from .test_step_projection import _execution
@@ -58,7 +58,7 @@ async def test_public_response_ahead_then_distinct_sdk_response(
     conversation = agent_conversation_id(
         namespace=namespace, tenant_id="tenant", execution_id="execution"
     )
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace=namespace, tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -68,11 +68,11 @@ async def test_public_response_ahead_then_distinct_sdk_response(
             lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
         )
         restored = state.run_store
-        public = restored.read_store(RuntimeDomain.TRACE)
-        recovery = restored.read_store(RuntimeDomain.CHECKPOINT)
+        public = restored.read_store(PersistenceDomain.TRACE)
+        recovery = restored.read_store(PersistenceDomain.CHECKPOINT)
         old = RuntimeAgentRunStore(
             StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant",
-            conversation_archive=restored.read_store(RuntimeDomain.CONVERSATION),
+            conversation_archive=restored.read_store(PersistenceDomain.CONVERSATION),
             execution_archive=public,
             recovery_archive=recovery,
         )
@@ -182,7 +182,7 @@ async def test_public_response_ahead_then_distinct_sdk_response(
             lambda tx: repository.admit_history_producer_in_transaction(tx, updated)
         )
         loaded = await restored.load_loaded_model_context(
-            RuntimeDomain.CHECKPOINT, run_id
+            PersistenceDomain.CHECKPOINT, run_id
         )
         sdk_input = list(loaded.model_messages())
         assert sdk_input == [user]
@@ -247,7 +247,7 @@ async def test_public_response_ahead_then_distinct_sdk_response(
         recovered = await recovery.latest_checkpoint(agent_run_id=run_id)
         assert recovered.messages == [user, a, user, response]
         assert recovered.context_messages == [user, response]
-        commands = RuntimeStateCommands(
+        commands = StateCommands(
             repository,
             namespace=namespace,
             events=state.execution.events,
@@ -256,7 +256,7 @@ async def test_public_response_ahead_then_distinct_sdk_response(
         )
         bridge = RuntimeToolOperationBridge(
             state.recovery.tools,
-            state.object_store(RuntimeDomain.RECOVERY),
+            state.object_store(PersistenceDomain.RECOVERY),
             namespace=namespace,
             tenant_id="tenant",
             execution_id="execution",
@@ -273,7 +273,7 @@ async def test_public_response_ahead_then_distinct_sdk_response(
         for attempt in range(2):
             bridge = RuntimeToolOperationBridge(
                 state.recovery.tools,
-                state.object_store(RuntimeDomain.RECOVERY),
+                state.object_store(PersistenceDomain.RECOVERY),
                 namespace=namespace,
                 tenant_id="tenant",
                 execution_id="execution",
@@ -351,7 +351,7 @@ async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associati
         execution_id="execution",
         agent_run_seq=1,
     )
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace=namespace, tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -363,13 +363,13 @@ async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associati
         root_store = state.run_store
         store = RuntimeAgentRunStore(
             StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant",
-            conversation_archive=root_store.read_store(RuntimeDomain.CONVERSATION),
-            execution_archive=root_store.read_store(RuntimeDomain.TRACE),
-            recovery_archive=root_store.read_store(RuntimeDomain.CHECKPOINT),
+            conversation_archive=root_store.read_store(PersistenceDomain.CONVERSATION),
+            execution_archive=root_store.read_store(PersistenceDomain.TRACE),
+            recovery_archive=root_store.read_store(PersistenceDomain.CHECKPOINT),
         )
         await store.initialize()
-        public = store.read_store(RuntimeDomain.TRACE)
-        recovery = store.read_store(RuntimeDomain.CHECKPOINT)
+        public = store.read_store(PersistenceDomain.TRACE)
+        recovery = store.read_store(PersistenceDomain.CHECKPOINT)
         run = AgentRunRecord(
             run_id,
             agent_id="agent",
@@ -401,7 +401,7 @@ async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associati
         # before the delayed public batch, then discard this process-local staging.
         recovery_only = RuntimeAgentRunStore(
             StagingAgentRunStore(),
-            conversation_archive=store.read_store(RuntimeDomain.CONVERSATION),
+            conversation_archive=store.read_store(PersistenceDomain.CONVERSATION),
             execution_archive=None,
             recovery_archive=recovery,
         )
@@ -508,7 +508,7 @@ async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associati
         monkeypatch.setattr(group, "mutate", failed_mutate)
         with pytest.raises(AIError, match="controlled pre-commit failure"):
             await root_store.materialize_from_recovery(
-                target=RuntimeDomain.TRACE,
+                target=PersistenceDomain.TRACE,
                 agent_run_id=run_id,
                 execution_id="execution",
             )
@@ -570,9 +570,9 @@ async def test_restored_completed_tool_group_consumes_published_pending_results(
     tmp_path: Path,
     backend: str,
 ) -> None:
-    from linktools.ai.runtime._transcript_staging import StagedTranscript
+    from linktools.ai.persistence._transcript_staging import StagedTranscript
 
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="restored-tool-group", tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -582,8 +582,8 @@ async def test_restored_completed_tool_group_consumes_published_pending_results(
             lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
         )
         restored = state.run_store
-        public = restored.read_store(RuntimeDomain.TRACE)
-        recovery = restored.read_store(RuntimeDomain.CHECKPOINT)
+        public = restored.read_store(PersistenceDomain.TRACE)
+        recovery = restored.read_store(PersistenceDomain.CHECKPOINT)
         run = AgentRunRecord("run")
         user = ModelRequest(parts=[UserPromptPart("run tools")])
         response = ModelResponse(
@@ -656,7 +656,7 @@ async def test_required_checkpoint_rejects_replaced_producer_before_recovery_wri
     tmp_path: Path,
     backend: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="stale-recovery-checkpoint", tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -668,9 +668,9 @@ async def test_required_checkpoint_rejects_replaced_producer_before_recovery_wri
         root = state.run_store
         old = RuntimeAgentRunStore(
             StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant",
-            conversation_archive=root.read_store(RuntimeDomain.CONVERSATION),
-            execution_archive=root.read_store(RuntimeDomain.TRACE),
-            recovery_archive=root.read_store(RuntimeDomain.CHECKPOINT),
+            conversation_archive=root.read_store(PersistenceDomain.CONVERSATION),
+            execution_archive=root.read_store(PersistenceDomain.TRACE),
+            recovery_archive=root.read_store(PersistenceDomain.CHECKPOINT),
         )
         await old.initialize()
         old.bind_execution_producer(
@@ -699,13 +699,13 @@ async def test_required_checkpoint_rejects_replaced_producer_before_recovery_wri
             )
         assert stale.value.code is ErrorCode.STORAGE_CONFLICT
         assert (
-            await root.read_store(RuntimeDomain.CHECKPOINT).latest_checkpoint(
+            await root.read_store(PersistenceDomain.CHECKPOINT).latest_checkpoint(
                 agent_run_id="run"
             )
             is None
         )
         assert (
-            await root.read_store(RuntimeDomain.TRACE).latest_checkpoint(
+            await root.read_store(PersistenceDomain.TRACE).latest_checkpoint(
                 agent_run_id="run"
             )
             is None

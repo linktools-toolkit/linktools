@@ -12,28 +12,28 @@ import pytest
 from linktools.ai.core import ApprovalStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.runtime._harness import HarnessPlanStoreAdapter
 from linktools.ai.runtime._plan import RuntimePlanStore
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._codec import (
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.codec import (
     _encode_persisted_domain,
     encode_envelope,
 )
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence.contracts import (
     ApprovalRecord,
     ContextProjection,
     LoadedModelContext,
 )
-from linktools.ai.runtime.state._filesystem import FilesystemStateStore
-from linktools.ai.runtime.state._filesystem_transaction import _FilesystemTransaction
-from linktools.ai.runtime.state._history import TranscriptRepository
-from linktools.ai.runtime.state._recovery_repositories import (
+from linktools.ai.persistence._filesystem import FilesystemStateStore
+from linktools.ai.persistence._filesystem_transaction import _FilesystemTransaction
+from linktools.ai.persistence._history import TranscriptRepository
+from linktools.ai.persistence._recovery_repositories import (
     RecoveryApprovalRepositoryImpl,
 )
-from linktools.ai.runtime.state._store import FactQuery, StoredFact, StoredRecord
-from linktools.ai.runtime.state._sql import SqlStateStore
+from linktools.ai.persistence.state import FactQuery, StoredFact, StoredRecord
+from linktools.ai.persistence._sql import SqlStateStore
 from linktools.ai.storage import (
     FilesystemObjectStore,
     SqlObjectStore,
@@ -341,7 +341,7 @@ async def test_session_model_context_reuses_observed_projection(
         object_store=None,
         namespace="io-history",
         tenant_id="tenant",
-        runtime_domain=RuntimeDomain.CONVERSATION,
+        runtime_domain=PersistenceDomain.CONVERSATION,
     )
     projection = ContextProjection(())
     expected = LoadedModelContext(())
@@ -381,13 +381,13 @@ async def test_message_spans_keep_the_observed_head_without_reading_a_new_head(
 ) -> None:
     from .test_session_history_projection import _materialize, _session
 
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="observed-span-head", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
         assert session.history_id is not None
         await _materialize(state, "first", tuple(f"prompt:{index}" for index in range(80)))
-        repository = state.run_store.read_store(RuntimeDomain.CONVERSATION).transcript_repository
+        repository = state.run_store.read_store(PersistenceDomain.CONVERSATION).transcript_repository
         head = await repository.get_head(session.history_id)
         assert head is not None
         await _materialize(state, "later", ("two",))

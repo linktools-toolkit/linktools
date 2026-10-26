@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Execution state checkpoint commands."""
+
+import asyncio
+from collections.abc import Sequence
+from dataclasses import replace
+
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.persistence.contracts import (
+    ExecutionEventAppend,
+    ExecutionHistorySealRecord,
+    ExecutionHistoryState,
+    ExecutionRepository,
+    ExecutionRunSealHead,
+    ExecutionTerminalCommit,
+    ExecutionTerminalCommitResult,
+)
+from linktools.ai.persistence.durability import (
+    CommitObservation,
+    DurableCommitState,
+    run_durable_commit,
+)
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent
+from linktools.ai.persistence._step_archive import (
+    PreparedExecutionProjection,
+    PreparedAgentRunCheckpointBatch,
+    StateStepArchive,
+)
+from linktools.ai.persistence.state import StateStore, StateTransaction
+
+
+class ExecutionStateCommands:
+    """Commit execution audit, step projection, and terminal state together."""
+
+    def __init__(
+        self,
+        state_store: StateStore,
+        executions: ExecutionRepository,
+        steps: StateStepArchive | None,
+        *,
+        background_tasks: "set[asyncio.Task[object]]",
+    ) -> None:
+        self._state_store = state_store
+        self._executions = executions
+        self._steps = steps
+        self._background_tasks = background_tasks
+
+    async def commit_terminal_checkpoint(
+        self,
+        commit: ExecutionTerminalCommit,
+        *,
+        agent_run: AgentRunRecord | None,
+        step_events: Sequence[StepEvent] = (),
+        checkpoints: Sequence[AgentRunCheckpoint] = (),
+        audit_events: Sequence[ExecutionEventAppend] = (),
+    ) -> ExecutionTerminalCommitResult:
+        if not commit.execution.durable_trace and (agent_run is not None or step_events or checkpoints):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        prepared_checkpoints = ()
+        if self._steps is not None and agent_run is not None and checkpoints:
+            prepared_checkpoints = await self._steps.prepare_checkpoints(
+                agent_run,
+                checkpoints,
+            )
+        history_seal = _execution_history_seal(
+            commit,
+            audit_events=audit_events,
+            projections=(),
+            current_run=agent_run,
+            current_events=step_events,
+            current_batch=(
+                prepared_checkpoints
+                if isinstance(prepared_checkpoints, PreparedAgentRunCheckpointBatch)
+                else None
+            ),
+        ) if commit.execution.durable_trace else None
+
+        async def mutate(
+            transaction: StateTransaction,
+        ) -> ExecutionTerminalCommitResult:
+            head, head_record = (
+                await self._executions.require_open_history_head_in_transaction(
+                    transaction,
+                    commit.execution.execution_id,
+                    expected_producer_generation=commit.producer_generation,
+                )
+            )
+            effective_commit = commit
+            if effective_commit.idempotency is None:
+                idempotency = (
+                    await self._executions.terminal_idempotency_in_transaction(
+                        transaction,
+                        effective_commit,
+                    )
+                )
+                effective_commit = replace(effective_commit, idempotency=idempotency)
+            if (
+                self._steps is None
+                and agent_run is not None
+                and (step_events or checkpoints)
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if self._steps is not None and agent_run is not None:
+                await self._steps.sync_projection_in_transaction(
+                    transaction,
+                    agent_run,
+                    events=step_events,
+                    checkpoints=(
+                        prepared_checkpoints.checkpoints
+                        if isinstance(prepared_checkpoints, PreparedAgentRunCheckpointBatch)
+                        else ()
+                    ),
+                    execution_id=commit.execution.execution_id,
+                    history_head_guard=(head, head_record),
+                )
+            if history_seal is not None:
+                await self._executions.put_history_seal_in_transaction(transaction, history_seal)
+            await self._executions.replace_history_head_in_transaction(
+                transaction,
+                head_record,
+                replace(
+                    head,
+                    state=ExecutionHistoryState.SEALED if history_seal is not None else ExecutionHistoryState.CLOSED,
+                    revision=head.revision + 1,
+                    seal_digest=None if history_seal is None else history_seal.seal_digest,
+                ),
+            )
+            return await self._executions.commit_terminal_in_transaction(
+                transaction,
+                effective_commit,
+                pending_events=audit_events,
+            )
+
+        async def readback() -> CommitObservation[ExecutionTerminalCommitResult]:
+            try:
+                execution = await self._executions.get(
+                    commit.execution.execution_id,
+                    tenant_id=self._executions.tenant_id,
+                )
+                head = await self._executions.get_history_head(
+                    commit.execution.execution_id,
+                    tenant_id=self._executions.tenant_id,
+                )
+                seal = await self._executions.get_history_seal(
+                    commit.execution.execution_id,
+                    tenant_id=self._executions.tenant_id,
+                ) if history_seal is not None else None
+            except AIError as error:
+                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=error,
+                    )
+                return CommitObservation(
+                    DurableCommitState.UNRESOLVED,
+                    error=error,
+                )
+            if execution is None or head is None or history_seal is not None and seal is None:
+                return CommitObservation(DurableCommitState.NOT_COMMITTED)
+            expected_revision = commit.expected_revision + len(audit_events) + 1
+            expected_event_seq = (
+                commit.expected_event_seq + len(audit_events) + 1
+            )
+            if (
+                head.state is (ExecutionHistoryState.SEALED if history_seal is not None else ExecutionHistoryState.CLOSED)
+                and seal == history_seal
+                and execution.status is commit.execution.status
+                and execution.result == commit.result
+                and execution.error_code == commit.execution.error_code
+                and execution.revision == expected_revision
+                and execution.event_seq == expected_event_seq
+            ):
+                return CommitObservation(
+                    DurableCommitState.COMMITTED,
+                    value=ExecutionTerminalCommitResult(
+                        execution,
+                        commit.result,
+                    ),
+                )
+            if head.state in {ExecutionHistoryState.SEALED, ExecutionHistoryState.CLOSED}:
+                return CommitObservation(
+                    DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                    error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                )
+            return CommitObservation(DurableCommitState.NOT_COMMITTED)
+
+        outcome = await run_durable_commit(
+            lambda: self._state_store.mutate(mutate),
+            readback,
+            background_tasks=self._background_tasks,
+        )
+        if outcome.state is DurableCommitState.COMMITTED:
+            if outcome.value is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if outcome.cancelled:
+                raise asyncio.CancelledError
+            return outcome.value
+        if outcome.state is DurableCommitState.NOT_COMMITTED:
+            if outcome.error is not None:
+                raise outcome.error
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if outcome.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
+            raise AIError(
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                "terminal checkpoint left partial durable state",
+            ) from outcome.error
+        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from outcome.error
+
+
+def _execution_history_seal(
+    commit: ExecutionTerminalCommit,
+    *,
+    audit_events: Sequence[ExecutionEventAppend],
+    projections: Sequence[PreparedExecutionProjection],
+    current_run: AgentRunRecord | None,
+    current_events: Sequence[StepEvent],
+    current_batch: PreparedAgentRunCheckpointBatch | None,
+) -> ExecutionHistorySealRecord:
+    heads = [
+        ExecutionRunSealHead(
+            projection.run.agent_run_id,
+            projection.target_event_offset,
+            projection.target_checkpoint_offset,
+            projection.target_transcript_message_count,
+            projection.projection_digest,
+            projection.target_interaction_offset,
+        )
+        for projection in projections
+    ]
+    if not projections and current_run is not None:
+        heads.append(
+            ExecutionRunSealHead(
+                current_run.agent_run_id,
+                len(current_events),
+                0 if current_batch is None else len(current_batch.checkpoints),
+                0
+                if current_batch is None
+                else current_batch.target_transcript_message_count,
+                "empty"
+                if current_batch is None or not current_batch.checkpoints
+                else current_batch.checkpoints[-1].projection.digest,
+                0,
+            )
+        )
+    ordered_heads = tuple(sorted(heads, key=lambda head: head.agent_run_id))
+    execution_event_high_water = (
+        commit.expected_event_seq + len(audit_events) + 1
+    )
+    return ExecutionHistorySealRecord(
+        execution_id=commit.execution.execution_id,
+        run_heads=ordered_heads,
+        execution_event_high_water=execution_event_high_water,
+    )
+
+
+__all__ = ["ExecutionStateCommands"]

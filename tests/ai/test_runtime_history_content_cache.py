@@ -11,20 +11,21 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.core import Principal, TenantAuthorizationPolicy, canonical_json_bytes, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeHistory, RuntimeStorage
-from linktools.ai.runtime._message import encode_model_messages
+from linktools.ai.history import History
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.model.messages import encode_model_messages
 from linktools.ai.runtime._execution import DefaultExecutionService, _ExecutionRuntimeBridge
-from linktools.ai.runtime._event import LiveExecutionEventBroker
+from linktools.ai.execution.events import LiveExecutionEventBroker
 from linktools.ai.runtime._factory import _borrowed_runtime_history
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeStoragePlan
+from linktools.ai.persistence import PersistenceDomain, PersistencePlan
 from linktools.ai.storage import StorageRoute
-from linktools.ai.runtime.state._step_archive import StateStepArchive
-from linktools.ai.runtime.state._archive import PreparedArchive
+from linktools.ai.persistence._step_archive import StateStepArchive
+from linktools.ai.persistence._archive import PreparedArchive
 from linktools.ai.storage import InMemoryCacheBackend, InMemoryObjectStore, ObjectRef, StoredPayload, StorageReadCache
 
 from .test_runtime_history_public import _ResultExecutions, _TaskResults
@@ -67,7 +68,7 @@ async def test_history_and_task_results_keep_execution_object_ownership(
 
     await objects.put("result", chunks(), expected_size=len(content), expected_digest=digest)
     reference = ObjectRef("runtime", "result", digest, len(content))
-    storage = RuntimeState(RuntimeStorage.sqlite(
+    storage = Persistence(PersistenceStorage.sqlite(
         tmp_path / "runtime.db", object_store=objects,
         cache=InMemoryCacheBackend(max_bytes=1024),
     ))
@@ -81,13 +82,13 @@ async def test_history_and_task_results_keep_execution_object_ownership(
             tasks._graph_state,
             node_states=(replace(tasks._graph_state.node_states[0], result_digest=canonical_sha256(value)),),
         )
-        domains: list[RuntimeDomain] = []
+        domains: list[PersistenceDomain] = []
 
-        async def read(domain: RuntimeDomain, ref: ObjectRef) -> bytes:
+        async def read(domain: PersistenceDomain, ref: ObjectRef) -> bytes:
             domains.append(domain)
             return await storage.read_object(domain, ref)
 
-        history = RuntimeHistory(
+        history = History(
             SimpleNamespace(), tenant_id="tenant", executions=executions, tasks=tasks,
             authorization=TenantAuthorizationPolicy("tenant"),
             execution_objects=objects,
@@ -98,7 +99,7 @@ async def test_history_and_task_results_keep_execution_object_ownership(
         assert (await history.result("execution", principal=principal)).output == value
         assert await history.task_result("graph", "node", principal=principal) == value
         assert objects.reads == (1 if use_storage_reader else 2)
-        assert domains == ([RuntimeDomain.EXECUTION] * 2 if use_storage_reader else [])
+        assert domains == ([PersistenceDomain.EXECUTION] * 2 if use_storage_reader else [])
 
         with pytest.raises(AIError) as error:
             await history.result("execution", principal=Principal("reader", "other", "service"))
@@ -114,20 +115,19 @@ async def test_history_and_task_results_keep_execution_object_ownership(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("domain", (RuntimeDomain.CONVERSATION, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT))
+@pytest.mark.parametrize("domain", (PersistenceDomain.CONVERSATION, PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT))
 async def test_composed_transcript_archives_cache_verified_compressed_bytes(
-    tmp_path: Path, domain: RuntimeDomain,
+    tmp_path: Path, domain: PersistenceDomain,
 ) -> None:
     objects = _CountingObjects()
     cache = _RecordingCache()
     route = StorageRoute.sqlite(tmp_path / "runtime.db", cache=cache)
-    storage = RuntimeState(RuntimeStorage.from_plan(
-        RuntimeStoragePlan(conversation=route, execution=route),
+    storage = Persistence(PersistenceStorage.from_plan(
+        PersistencePlan(conversation=route, execution=route, trace=route, checkpoint=route.with_cache(None)),
         object_store=objects,
     ))
     await storage.initialize(
         namespace="history", tenant_id="tenant",
-        module_routes={RuntimeDomain.TRACE: route, RuntimeDomain.CHECKPOINT: route.with_cache(None)},
     )
     try:
         archive = storage.run_store.read_store(domain)
@@ -155,7 +155,7 @@ async def test_composed_transcript_archives_cache_verified_compressed_bytes(
 
         assert await repository.load_messages("run") == messages
         assert await repository.load_messages("run") == messages
-        if domain is RuntimeDomain.CHECKPOINT:
+        if domain is PersistenceDomain.CHECKPOINT:
             assert objects.reads == 2
             assert cache.writes == []
             assert await repository.read_payload(StoredPayload.inline_bytes(b"inline body")) == b"inline body"
@@ -199,16 +199,16 @@ async def test_live_result_reads_preserve_authorization_and_direct_construction(
 
     await objects.put("result", chunks(), expected_size=len(content), expected_digest=digest)
     reference = ObjectRef("runtime", "result", digest, len(content))
-    storage = RuntimeState(RuntimeStorage.sqlite(
+    storage = Persistence(PersistenceStorage.sqlite(
         tmp_path / "runtime.db", object_store=objects,
         cache=InMemoryCacheBackend(max_bytes=1024),
     ))
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
         record = await _seed(storage, output=StoredPayload.object(reference))
-        domains: list[RuntimeDomain] = []
+        domains: list[PersistenceDomain] = []
 
-        async def read(domain: RuntimeDomain, ref: ObjectRef) -> bytes:
+        async def read(domain: PersistenceDomain, ref: ObjectRef) -> bytes:
             domains.append(domain)
             return await storage.read_object(domain, ref)
 
@@ -223,7 +223,7 @@ async def test_live_result_reads_preserve_authorization_and_direct_construction(
         assert (await service.result("execution", principal=principal)).output == {"result": "live output"}
         assert (await service.wait("execution", principal=principal)).output == {"result": "live output"}
         assert objects.reads == (1 if use_storage_reader else 2)
-        assert domains == ([RuntimeDomain.EXECUTION] * 2 if use_storage_reader else [])
+        assert domains == ([PersistenceDomain.EXECUTION] * 2 if use_storage_reader else [])
 
         with pytest.raises(AIError) as error:
             await service.result("execution", principal=Principal("principal", "other", "service"))
@@ -257,7 +257,7 @@ async def test_borrowed_and_read_only_history_use_shared_result_cache(tmp_path: 
 
     await objects.put("result", chunks(), expected_size=len(content), expected_digest=digest)
     reference = ObjectRef("runtime", "result", digest, len(content))
-    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "runtime.db", object_store=objects, cache=cache))
+    storage = Persistence(PersistenceStorage.sqlite(tmp_path / "runtime.db", object_store=objects, cache=cache))
     await storage.initialize(namespace="history", tenant_id="tenant")
     principal = Principal("principal", "tenant", "service")
     try:
@@ -272,8 +272,8 @@ async def test_borrowed_and_read_only_history_use_shared_result_cache(tmp_path: 
     finally:
         await storage.close()
 
-    reopened = RuntimeStorage.sqlite(tmp_path / "runtime.db", object_store=objects, cache=cache)
-    async with RuntimeHistory.open("history", storage=reopened, tenant_id="tenant") as history:
+    reopened = PersistenceStorage.sqlite(tmp_path / "runtime.db", object_store=objects, cache=cache)
+    async with Persistence.open('history', storage=reopened, tenant_id='tenant', read_only=True) as history_persistence_277, History.open(persistence=history_persistence_277) as history:
         assert (await history.result("execution", principal=principal)).output == {"result": "persisted output"}
         assert objects.reads == 1
 
@@ -293,7 +293,7 @@ async def test_history_result_confirms_source_membership_inside_body_cache_windo
 
     await objects.put("result", chunks(), expected_size=len(content), expected_digest=digest)
     reference = ObjectRef("runtime", "result", digest, len(content))
-    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "runtime.db", object_store=objects,
+    storage = Persistence(PersistenceStorage.sqlite(tmp_path / "runtime.db", object_store=objects,
                                     cache=InMemoryCacheBackend(max_bytes=100000)))
     await storage.initialize(namespace="history", tenant_id="tenant")
     principal = Principal("principal", "tenant", "service")
@@ -304,7 +304,7 @@ async def test_history_result_confirms_source_membership_inside_body_cache_windo
         assert (await history.result("execution", principal=principal)).output == {"text": "retained result"}
         await objects.delete_object(reference.key, expected_digest=reference.digest)
         now[0] = 1002.0
-        assert await storage.read_object(RuntimeDomain.EXECUTION, reference) == content
+        assert await storage.read_object(PersistenceDomain.EXECUTION, reference) == content
         with pytest.raises(AIError) as raised:
             await history.result("execution", principal=principal)
         assert raised.value.code is ErrorCode.STORAGE_NOT_FOUND
@@ -314,18 +314,18 @@ async def test_history_result_confirms_source_membership_inside_body_cache_windo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("consumer", ("checkpoint", "verify", "relocate", "deferred"))
-@pytest.mark.parametrize("domain", (RuntimeDomain.CHECKPOINT, RuntimeDomain.CONVERSATION))
+@pytest.mark.parametrize("domain", (PersistenceDomain.CHECKPOINT, PersistenceDomain.CONVERSATION))
 async def test_checkpoint_consumers_confirm_source_inside_body_cache_window(
-    tmp_path: Path, monkeypatch, consumer: str, domain: RuntimeDomain,
+    tmp_path: Path, monkeypatch, consumer: str, domain: PersistenceDomain,
 ) -> None:
     from linktools.ai.runtime._local import LocalExecutionBackend
-    from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
+    from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
     from linktools.ai.storage import _write_cache
 
     now = [1000.0]
     monkeypatch.setattr(_write_cache, "time", lambda: now[0])
     objects = _CountingObjects()
-    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "checkpoint.db", object_store=objects,
+    storage = Persistence(PersistenceStorage.sqlite(tmp_path / "checkpoint.db", object_store=objects,
                                     cache=InMemoryCacheBackend(max_bytes=100000)))
     await storage.initialize(
         namespace="checkpoint", tenant_id="tenant",
@@ -345,7 +345,7 @@ async def test_checkpoint_consumers_confirm_source_inside_body_cache_window(
         now[0] = 1002.0
         # The ordinary observer still has its permitted hot bytes. The consumers
         # below must instead validate the current recovery source.
-        if domain is not RuntimeDomain.CHECKPOINT:
+        if domain is not PersistenceDomain.CHECKPOINT:
             assert await archive.transcript_repository.load_messages("run") == tuple(messages)
         with pytest.raises(AIError) as raised:
             if consumer == "checkpoint":
@@ -353,13 +353,13 @@ async def test_checkpoint_consumers_confirm_source_inside_body_cache_window(
             elif consumer == "verify":
                 await archive.verify_checkpoint_projection(agent_run_id="run", checkpoint=checkpoint)
             elif consumer == "relocate":
-                if domain is RuntimeDomain.CONVERSATION:
+                if domain is PersistenceDomain.CONVERSATION:
                     await archive.relocate_conversation_checkpoint(run, checkpoint)
                 else:
                     await archive.relocate_run_checkpoint(run, checkpoint)
             else:
                 backend = object.__new__(LocalExecutionBackend)
-                backend._run_stores = {RuntimeDomain.CHECKPOINT: archive}
+                backend._run_stores = {PersistenceDomain.CHECKPOINT: archive}
                 await backend.load_interrupted_messages("run")
         assert raised.value.code is ErrorCode.STORAGE_NOT_FOUND
     finally:

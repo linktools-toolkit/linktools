@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 """Active model projections refresh contiguous identities with bounded reads."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from pathlib import Path
 
 import pytest
 from sqlalchemy import event
 
-from linktools.ai.runtime._graph_projection import _GraphModelProjection
-from linktools.ai.runtime.service_api import project_execution_view
+from linktools.ai.execution.projection import ModelProjection
+from linktools.ai.execution import project_execution_view
 
 from .test_incremental_projection_boundaries import _storage
 from .test_model_capture_reads import _NAMESPACE, _PRINCIPAL, _publish, _seed, _service
@@ -21,14 +21,14 @@ from .test_step_projection import _execution
 async def test_active_projection_refresh_preserves_all_admitted_identities(
     tmp_path: Path, backend: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
         for sequence in range(2, 6):
             await _publish(state, request_sequence=sequence)
         service = _service(state)
-        projection = _GraphModelProjection(service, _PRINCIPAL)
+        projection = ModelProjection(service, _PRINCIPAL)
         await projection.add("node", project_execution_view(_execution()), 0, subscribe=False)
         first = [row async for row in projection.refresh("execution")]
         assert [row.item.model_request_seq for _, row in first] == [1, 2, 3, 4, 5]
@@ -65,10 +65,10 @@ async def test_refresh_keeps_sparse_ranges_and_bounded_pages(
     expected: tuple[tuple[int, int], ...],
 ) -> None:
     from dataclasses import replace
-    from linktools.ai.runtime import RuntimeStorage
-    from linktools.ai.runtime.service_api import ModelInteractionReadBoundary, UsageReadCutoff
+    from linktools.ai.persistence import PersistenceStorage
+    from linktools.ai.execution import ModelInteractionReadBoundary, UsageReadCutoff
 
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -84,7 +84,7 @@ async def test_refresh_keeps_sparse_ranges_and_bounded_pages(
                 through = min(kwargs["through_model_request_seq"], after + kwargs["limit"])
                 requested.append((after, through))
                 return tuple(replace(item, model_request_seq=n) for n in range(after + 1, through + 1))
-        projection = _GraphModelProjection(History(), _PRINCIPAL)
+        projection = ModelProjection(History(), _PRINCIPAL)
         await projection.add("node", project_execution_view(_execution()), 0, subscribe=False)
         projection.high_waters[("execution", 1)] = previous
         projection.active.update(("execution", 1, n) for n in active)
@@ -106,15 +106,15 @@ async def test_refresh_keeps_sparse_ranges_and_bounded_pages(
 async def test_batched_refresh_propagates_authority_and_integrity_failures(failure: str, composed: bool) -> None:
     from dataclasses import replace
     from linktools.ai.errors import AIError, ErrorCode
-    from linktools.ai.runtime import RuntimeStorage
+    from linktools.ai.persistence import PersistenceStorage
 
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
         await _publish(state, request_sequence=2)
         service = _service(state)
-        projection = _GraphModelProjection(service, _PRINCIPAL)
+        projection = ModelProjection(service, _PRINCIPAL)
         await projection.add("node", project_execution_view(_execution()), 0, subscribe=False)
         assert len([row async for row in projection.refresh("execution")]) == 2
         original = service.read_model_interaction_updates if composed else service.read_model_interaction_metadata

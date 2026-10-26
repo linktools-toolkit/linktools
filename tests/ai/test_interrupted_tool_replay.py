@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Interrupted tool evidence does not replace a recovered terminal result."""
 from ._runtime_test_helpers import model_features
 
@@ -23,18 +25,18 @@ from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._persistence_services import TraceService
 from linktools.ai.runtime._run_hooks import AgentRunCapture
 from linktools.ai.capability import TraceCapability
-from linktools.ai.runtime._journal import DURATION_NS_METADATA_KEY, MODEL_REQUEST_SEQ_METADATA_KEY
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._snapshot_validation import (
+from linktools.ai.observe.journal import DURATION_NS_METADATA_KEY, MODEL_REQUEST_SEQ_METADATA_KEY
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._snapshot_validation import (
     canonical_snapshot_indexes,
     validate_snapshot_domain,
 )
-from linktools.ai.runtime.state._step_contracts import (
+from linktools.ai.persistence._step_contracts import (
     TOOL_ERROR_CODE_METADATA_KEY,
     AgentRunRecord,
     StepEvent,
 )
-from linktools.ai.runtime.state._steps import StagingAgentRunStore
+from linktools.ai.persistence.runs import StagingAgentRunStore
 
 from .test_history_request_association import _history
 
@@ -124,7 +126,7 @@ async def test_recovered_tool_retains_interruptions_and_one_real_result(
                 for item in trace.items[1:3]
             )
 
-        archive = history.state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = history.state.run_store.read_store(PersistenceDomain.TRACE)
         events = await archive.list_events(agent_run_id=recorder.agent_run_id)
         assert [event.error for event in events if event.error is not None] == [
             "unknown attempt 0", "unknown attempt 1",
@@ -135,11 +137,11 @@ async def test_recovered_tool_retains_interruptions_and_one_real_result(
             key=lambda fact: (fact.stream_digest, fact.sequence),
         ))
         aliases, sequences = canonical_snapshot_indexes(
-            namespace="history", tenant_id="tenant", domain=RuntimeDomain.TRACE,
+            namespace="history", tenant_id="tenant", domain=PersistenceDomain.TRACE,
             records=records, facts=facts, operations=(),
         )
         validate_snapshot_domain(
-            namespace="history", tenant_id="tenant", domain=RuntimeDomain.TRACE,
+            namespace="history", tenant_id="tenant", domain=PersistenceDomain.TRACE,
             records=records, aliases=aliases, facts=facts, operations=(), sequences=sequences,
         )
 
@@ -319,7 +321,8 @@ async def test_runtime_composition_records_failed_tool_trace() -> None:
     from pydantic_ai.models.test import TestModel
     from linktools.ai.capability import AgentContext
     from linktools.ai.runtime import RuntimeFeatures
-    from linktools.ai.runtime import Runtime, RuntimeStorage
+    from linktools.ai.runtime import Runtime
+    from linktools.ai.persistence import PersistenceStorage
     from .test_explicit_runtime_features import _FeatureModels
 
     async def explode(context: AgentContext[None]) -> str:
@@ -329,9 +332,7 @@ async def test_runtime_composition_records_failed_tool_trace() -> None:
     features.tool(explode, effect_policy="none")
     features.agent("default", model="default", allow_tools=("explode",))
     features.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open(
-        "failed-tool-trace", features=model_features(_FeatureModels(TestModel(call_tools=["explode"], custom_output_text="done")), features), storage=RuntimeStorage.in_memory(),
-    ) as runtime:
+    async with Persistence.open('failed-tool-trace', storage=PersistenceStorage.in_memory()) as persistence_332, Runtime.open(persistence=persistence_332, features=model_features(_FeatureModels(TestModel(call_tools=['explode'], custom_output_text='done')), features)) as runtime:
         execution = await runtime.agents.get().start("invoke tool")
         await execution.wait(timeout_seconds=5)
         trace = await execution.trace()

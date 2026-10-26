@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Coordinated session refresh captures fresh authority, admission, and timeline."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from contextlib import aclosing
 from dataclasses import replace
@@ -15,11 +15,13 @@ from linktools.ai.core import (
     ExecutionLineageKind, ExecutionStatus, HmacCursorSigner, Principal, TenantAuthorizationPolicy,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeSessions, RuntimeStorage, RuntimeStoragePlan, SessionDetail
+from linktools.ai.runtime import RuntimeSessions
+from linktools.ai.execution import SessionDetail
+from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime._session import RuntimeSessionService
-from linktools.ai.runtime.state._contracts import ConversationCursor
-from linktools.ai.runtime.state._store import active_state_scope
+from linktools.ai.persistence.contracts import ConversationCursor
+from linktools.ai.persistence.state import active_state_scope
 
 from .test_incremental_projection_boundaries import _storage
 from .test_session_timeline import _commit_empty_turn, _commit_fields, _execution, _materialize_conversation, _session
@@ -28,7 +30,7 @@ pytestmark = pytest.mark.asyncio
 _PRINCIPAL = Principal("owner", "tenant")
 
 
-def _service(state: RuntimeState, authorization=None) -> RuntimeSessionService:
+def _service(state: Persistence, authorization=None) -> RuntimeSessionService:
     return RuntimeSessionService(
         state.conversation, state.execution.executions,
         authorization or TenantAuthorizationPolicy(), object(),
@@ -62,7 +64,7 @@ async def test_refresh_reconciles_once_outside_metadata_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, status: ExecutionStatus,
 ) -> None:
     state = _storage(backend, tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -92,8 +94,8 @@ async def test_refresh_reconciles_once_outside_metadata_scope(
 async def test_refresh_uses_header_authority_and_fresh_record_after_authorization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     pending = None
     try:
@@ -140,8 +142,8 @@ async def test_refresh_uses_header_authority_and_fresh_record_after_authorizatio
 
 @pytest.mark.parametrize("principal", (Principal("other", "tenant"), Principal("owner", "other")))
 async def test_refresh_denied_authority_does_not_cleanup_admission(principal: Principal) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -163,8 +165,8 @@ async def test_refresh_denied_authority_does_not_cleanup_admission(principal: Pr
 async def test_refresh_cleans_admission_before_page_errors(
     monkeypatch: pytest.MonkeyPatch, fault: str, expected: ErrorCode,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -196,8 +198,8 @@ async def test_refresh_cleans_admission_before_page_errors(
 async def test_refresh_captures_concurrent_replacement_without_reconciling_twice(
     monkeypatch: pytest.MonkeyPatch, status: ExecutionStatus,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -229,8 +231,8 @@ async def test_refresh_captures_concurrent_replacement_without_reconciling_twice
 async def test_refresh_batches_and_validates_active_execution_outside_page(
     monkeypatch: pytest.MonkeyPatch, corruption: str | None,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -273,11 +275,11 @@ async def test_refresh_batches_and_validates_active_execution_outside_page(
 
 
 async def test_refresh_keeps_split_database_routes_and_domain_facade(tmp_path: Path) -> None:
-    state = RuntimeStorage.from_plan(RuntimeStoragePlan(
+    state = PersistenceStorage.from_plan(PersistencePlan(
         execution=StorageRoute.sqlite(tmp_path / "execution.db"),
         conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
     ))
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -294,8 +296,8 @@ async def test_refresh_keeps_split_database_routes_and_domain_facade(tmp_path: P
 
 
 async def test_refresh_idle_has_one_authority_read_and_one_metadata_snapshot(tmp_path: Path) -> None:
-    state = RuntimeStorage.sqlite(tmp_path / "refresh.db")
-    state = RuntimeState(state)
+    state = PersistenceStorage.sqlite(tmp_path / "refresh.db")
+    state = Persistence(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -325,8 +327,8 @@ async def test_refresh_idle_has_one_authority_read_and_one_metadata_snapshot(tmp
 async def test_refresh_bodies_leave_metadata_scope_and_hold_consumer(
     monkeypatch: pytest.MonkeyPatch, cancel: bool,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="session-timeline", tenant_id="tenant")
     pending = None
     try:
@@ -393,8 +395,8 @@ async def test_refresh_bodies_leave_metadata_scope_and_hold_consumer(
 async def test_timeline_retains_validation_authority_order_and_read_only_admission(
     principal: Principal, limit: int, cursor: str | None, expected: ErrorCode,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -422,8 +424,8 @@ async def test_runtime_sessions_refresh_delegates_to_the_injected_service() -> N
 async def test_refresh_cancellation_during_metadata_releases_scope_and_consumer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     pending = None
     try:
@@ -457,8 +459,8 @@ async def test_refresh_cancellation_during_metadata_releases_scope_and_consumer(
 
 
 async def test_refresh_live_admission_reuses_the_metadata_snapshot(tmp_path: Path) -> None:
-    state = RuntimeStorage.sqlite(tmp_path / "live-refresh.db")
-    state = RuntimeState(state)
+    state = PersistenceStorage.sqlite(tmp_path / "live-refresh.db")
+    state = Persistence(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -492,8 +494,8 @@ async def test_refresh_live_admission_reuses_the_metadata_snapshot(tmp_path: Pat
 async def test_refresh_validates_initial_admission_before_cleanup(
     monkeypatch: pytest.MonkeyPatch, status: ExecutionStatus, corruption: str,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())

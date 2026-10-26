@@ -5,13 +5,13 @@
 from datetime import datetime, timezone
 from inspect import signature
 
-from linktools.ai.runtime.state import _codec as runtime_codec
-from linktools.ai.runtime.state._codec import (
+from linktools.ai.persistence import codec as runtime_codec
+from linktools.ai.persistence.codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
     encode_envelope,
 )
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence.contracts import (
     ArtifactRecord,
     ContextProjection,
     HistoryQuality,

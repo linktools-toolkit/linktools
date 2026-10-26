@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from linktools.ai.task import Task
+from linktools.ai.task_engine import TaskEngine
+
+from linktools.ai.persistence import Persistence
 """Declared output schemas resolve once for root, child, and Task executions."""
 
 import json
@@ -17,7 +21,9 @@ from linktools.ai.capability import AssetCapability
 from linktools.ai.core import ExecutionStatus, JsonValue, Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import create_model
-from linktools.ai.runtime import AgentTaskInput, CaptureInputRequest, Runtime, RuntimeFeatures, RuntimeStorage
+from linktools.ai.inputs import AgentTaskInput, CaptureInputRequest
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.spec import AgentSpec, AgentSpecAdapter, AgentSpecCodec
 from linktools.ai.storage import StorageOverlay
 from linktools.ai.task import TaskGraph, TaskNode
@@ -166,10 +172,7 @@ async def test_root_and_task_defaults_use_native_schema_correction(tmp_path: Pat
     features = RuntimeFeatures("default-output")
     features.agent("default", output_schema=_Count.model_json_schema(), output_retries=1,
                    allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open(
-        "default-output", storage=RuntimeStorage.filesystem(tmp_path),
-        features=model_features(_Models(_UsageFunctionModel(respond)), features),
-    ) as runtime:
+    async with Persistence.open('default-output', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_169, Runtime.open(persistence=persistence_169, features=model_features(_Models(_UsageFunctionModel(respond)), features)) as runtime, TaskEngine.open(persistence=persistence_169, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         agent = runtime.agents.get()
         for options, expected in (
             ({}, {"count": 3}), ({"output": None}, {"count": 3}),
@@ -179,8 +182,8 @@ async def test_root_and_task_defaults_use_native_schema_correction(tmp_path: Pat
             result = (await agent.run("review", timeout_seconds=10, **options)).result
             assert result.status is ExecutionStatus.SUCCEEDED
             assert result.output == expected
-        task = runtime.tasks.from_agent("review-task", agent)
-        run = await runtime.tasks.bind(task).start(TaskGraph("default-output", (
+        task = Task.from_agent("review-task", agent)
+        run = await runtime_engine.with_definitions(task).start(TaskGraph("default-output", (
             TaskNode("inherited", task=task, input=AgentTaskInput("review")),
             TaskNode("explicit", task=task, input=AgentTaskInput("review"), output_type=_Label),
             TaskNode("text", task=task, input=AgentTaskInput("review"), output_type=AssistantTextOutput),
@@ -214,10 +217,7 @@ async def test_delegated_child_returns_declared_structured_output() -> None:
     features.agent("default", allow_tools=(), allow_skills=(), allow_subagents=("child",))
     features.agent("child", output_schema=_Count.model_json_schema(),
                    allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open(
-        "child-output", storage=RuntimeStorage.in_memory(),
-        features=model_features(_Models(_UsageFunctionModel(respond)), features),
-    ) as runtime:
+    async with Persistence.open('child-output', storage=PersistenceStorage.in_memory()) as persistence_217, Runtime.open(persistence=persistence_217, features=model_features(_Models(_UsageFunctionModel(respond)), features)) as runtime:
         result = (await runtime.agents.get().run("delegate review", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
         assert result.output == {"text": "reviewed"}
@@ -248,26 +248,22 @@ async def test_captured_default_or_explicit_text_survives_runtime_reopen(
                     allow_tools=(), allow_skills=(), allow_subagents=())
         return model_features(_Models(_UsageFunctionModel(respond)), group)
 
-    async with Runtime.open(
-        "frozen-output", storage=RuntimeStorage.filesystem(tmp_path),
-        features=features(1, _Count.model_json_schema()),
-    ) as runtime:
+    async with Persistence.open('frozen-output', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_251, Runtime.open(persistence=persistence_251, features=features(1, _Count.model_json_schema())) as runtime, TaskEngine.open(persistence=persistence_251, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("capture", runtime.tenant_id)
         source = await runtime.agents.get().start("review", output=output, principal=principal)
         original = (await source.wait(timeout_seconds=10)).result
         assert original.status is ExecutionStatus.SUCCEEDED
-        capture = await runtime.executions.capture_input(
+        capture = await runtime_engine.inputs.capture_input(
             source.execution_id, CaptureInputRequest(principal, "capture-default-output", "clean")
         )
 
-    async with Runtime.open(
-        "frozen-output", storage=RuntimeStorage.filesystem(tmp_path),
-        features=features(2, _Label.model_json_schema()),
-    ) as runtime:
+    async with Persistence.open('frozen-output', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_263, Runtime.open(persistence=persistence_263, features=features(2, _Label.model_json_schema())) as runtime, TaskEngine.open(persistence=persistence_263, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         fresh = (await runtime.agents.get().run("review", timeout_seconds=10)).result
         assert fresh.output == {"label": "new"}
-        restored = await runtime.tasks.from_agent_capture("restored-output", capture, principal=principal)
-        run = await runtime.tasks.bind(restored).start(TaskGraph("restored-output", (
+        restored_capture = await runtime_engine.inputs.read_agent(capture, principal=principal)
+        restored_capture.require_importable()
+        restored = Task.from_agent("restored-output", runtime.agents.restore(restored_capture.binding))
+        run = await runtime_engine.with_definitions(restored).start(TaskGraph("restored-output", (
             TaskNode("review", task=restored, input=AgentTaskInput("review again")),
         )), principal=principal, idempotency_key="restored-output")
         assert (await run.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED

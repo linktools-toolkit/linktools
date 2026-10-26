@@ -26,11 +26,9 @@ from linktools.ai.core import service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelClientRequestRecorder, ReferencedContent
 from linktools.ai.runtime._harness import SummaryProviderModel
-from linktools.ai.runtime._message import (
-    binary_content_usage, decode_model_messages, encode_model_messages, project_transient_binary_content,
-)
-from linktools.ai.runtime._tool_return_codec import decode_tool_return_content, encode_tool_return_content
-from linktools.ai.runtime._user_content_codec import encode_user_content_item
+from linktools.ai.model.messages import binary_content_usage, decode_model_messages, encode_model_messages, project_transient_binary_content
+from linktools.ai.model._tool_return_codec import decode_tool_return_content, encode_tool_return_content
+from linktools.ai.model._user_content_codec import encode_user_content_item
 from linktools.ai.spec import CapabilityRef
 from linktools.ai.storage import StorageEntryRevision
 

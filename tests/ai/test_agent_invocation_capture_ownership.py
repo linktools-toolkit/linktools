@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task import Task
+
+from linktools.ai.persistence import Persistence
 """Invocation capture storage failures preserve the graph's execution ownership."""
 from ._runtime_test_helpers import model_features
 
 import asyncio
-from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from linktools.ai.core import ExecutionStatus, JsonValue, OperationStatus, ResourceKind, TaskStatus, service_principal
+from linktools.ai.core import ExecutionStatus, OperationStatus, ResourceKind, TaskStatus, service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.runtime import AgentTaskInput, CaptureInputRequest, Runtime, RuntimeFeatures, RuntimeStorage
-from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.inputs import AgentTaskInput, CaptureInputRequest
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.task import TaskGraph, TaskNode
 from ._runtime_test_helpers import _RuntimeUsageModelBinding, _UsageFunctionModel
 
@@ -55,10 +60,10 @@ async def test_invocation_capture_failure_cancels_the_bound_execution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     models = _ControlledModels()
-    storage = RuntimeStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.filesystem(tmp_path)
     principal = service_principal("default", "owner")
-    async with Runtime.open("capture-ownership", storage=storage, features=model_features(models, _agents())) as runtime:
-        objects = runtime._state.object_store(RuntimeDomain.TASK)
+    async with Persistence.open('capture-ownership', storage=storage) as persistence_60, Runtime.open(persistence=persistence_60, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_60, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        objects = runtime._state.object_store(PersistenceDomain.TASK)
         original_put = objects.put
 
         async def fail_invocation(key: str, *args: object, **kwargs: object) -> object:
@@ -68,8 +73,8 @@ async def test_invocation_capture_failure_cancels_the_bound_execution(
             return await original_put(key, *args, **kwargs)
 
         monkeypatch.setattr(objects, "put", fail_invocation)
-        task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
-        run = await runtime.tasks.bind(task).start(TaskGraph("source", (
+        task = Task.from_agent("capture.agent", runtime.agents.get())
+        run = await runtime_engine.with_definitions(task).start(TaskGraph("source", (
             TaskNode("agent", task=task, input=AgentTaskInput("question")),
         )), principal=principal, idempotency_key="source")
         try:
@@ -86,16 +91,15 @@ async def test_invocation_capture_failure_cancels_the_bound_execution(
             record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
             assert record.dependency_hold_ids == ()
             with pytest.raises(AIError) as missing:
-                await runtime.executions.capture_input(execution.execution_id,
+                await runtime_engine.inputs.capture_input(execution.execution_id,
                     CaptureInputRequest(principal, "failed-input"))
             assert missing.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
             assert models.requests == 1
         finally:
             models.release.set()
-    async with Runtime.open("capture-ownership", storage=RuntimeStorage.filesystem(tmp_path),
-                            features=model_features(models, _agents())) as runtime:
+    async with Persistence.open('capture-ownership', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_95, Runtime.open(persistence=persistence_95, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_95, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         with pytest.raises(AIError) as missing:
-            await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(principal, "failed-input"))
+            await runtime_engine.inputs.capture_input(execution.execution_id, CaptureInputRequest(principal, "failed-input"))
         assert missing.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
 
 
@@ -105,10 +109,10 @@ async def test_capture_cleanup_failure_recovers_the_same_execution_and_capture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, release_before_recovery: bool,
 ) -> None:
     models = _ControlledModels()
-    storage = RuntimeStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.filesystem(tmp_path)
     principal = service_principal("default", "owner")
-    async with Runtime.open("capture-recovery", storage=storage, features=model_features(models, _agents())) as runtime:
-        objects = runtime._state.object_store(RuntimeDomain.TASK)
+    async with Persistence.open('capture-recovery', storage=storage) as persistence_110, Runtime.open(persistence=persistence_110, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_110, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        objects = runtime._state.object_store(PersistenceDomain.TASK)
         original_put = objects.put
         original_cancel = runtime._execution_service.cancel
 
@@ -123,8 +127,8 @@ async def test_capture_cleanup_failure_recovers_the_same_execution_and_capture(
 
         monkeypatch.setattr(objects, "put", fail_invocation)
         monkeypatch.setattr(runtime._execution_service, "cancel", fail_cancel)
-        task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
-        run = await runtime.tasks.bind(task).start(TaskGraph("source", (
+        task = Task.from_agent("capture.agent", runtime.agents.get())
+        run = await runtime_engine.with_definitions(task).start(TaskGraph("source", (
             TaskNode("agent", task=task, input=AgentTaskInput("question")),
         )), principal=principal, idempotency_key="source")
         try:
@@ -139,7 +143,7 @@ async def test_capture_cleanup_failure_recovers_the_same_execution_and_capture(
             before_head = await runtime._state.execution.executions.get_history_head(execution.execution_id,
                 tenant_id=principal.tenant_id)
             with pytest.raises(AIError) as pending:
-                await runtime.executions.capture_input(execution.execution_id,
+                await runtime_engine.inputs.capture_input(execution.execution_id,
                     CaptureInputRequest(principal, "recovered-input"))
             assert pending.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
             monkeypatch.setattr(objects, "put", original_put)
@@ -163,9 +167,9 @@ async def test_capture_cleanup_failure_recovers_the_same_execution_and_capture(
             assert (await run.wait(timeout_seconds=5)).result.wait_status is TaskStatus.SUCCEEDED
             assert (await run.execution("agent")).execution_id == execution.execution_id
             assert await run.result("agent") == {"text": "completed"}
-            captured = await runtime.executions.capture_input(execution.execution_id,
+            captured = await runtime_engine.inputs.capture_input(execution.execution_id,
                 CaptureInputRequest(principal, "recovered-input"))
-            invocation = await runtime._input_captures.task_input(captured, principal=principal)
+            invocation = await runtime_engine.inputs.task_input(captured, principal=principal)
             assert invocation.source_execution_id == execution.execution_id
             assert models.requests == 1
         finally:
@@ -177,10 +181,10 @@ async def test_graph_cancel_during_invocation_capture_cancels_the_owned_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     models = _ControlledModels()
-    storage = RuntimeStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.filesystem(tmp_path)
     principal = service_principal("default", "owner")
-    async with Runtime.open("capture-cancel", storage=storage, features=model_features(models, _agents())) as runtime:
-        objects = runtime._state.object_store(RuntimeDomain.TASK)
+    async with Persistence.open('capture-cancel', storage=storage) as persistence_182, Runtime.open(persistence=persistence_182, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_182, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        objects = runtime._state.object_store(PersistenceDomain.TASK)
         original_put = objects.put
         capture_started = asyncio.Event()
 
@@ -191,8 +195,8 @@ async def test_graph_cancel_during_invocation_capture_cancels_the_owned_model(
             return await original_put(key, *args, **kwargs)
 
         monkeypatch.setattr(objects, "put", pause_invocation)
-        task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
-        run = await runtime.tasks.bind(task).start(TaskGraph("source", (
+        task = Task.from_agent("capture.agent", runtime.agents.get())
+        run = await runtime_engine.with_definitions(task).start(TaskGraph("source", (
             TaskNode("agent", task=task, input=AgentTaskInput("question")),
         )), principal=principal, idempotency_key="source")
         try:
@@ -204,9 +208,9 @@ async def test_graph_cancel_during_invocation_capture_cancels_the_owned_model(
             assert (await run.cancel(idempotency_key="cancel")).status is TaskStatus.CANCELLED
             await asyncio.wait_for(models.cancelled.wait(), 5)
             assert (await runtime.executions.inspect(execution.execution_id, principal=principal)).status is ExecutionStatus.CANCELLED
-            captured = await runtime.executions.capture_input(execution.execution_id,
+            captured = await runtime_engine.inputs.capture_input(execution.execution_id,
                 CaptureInputRequest(principal, "cancelled-input"))
-            invocation = await runtime._input_captures.task_input(captured, principal=principal)
+            invocation = await runtime_engine.inputs.task_input(captured, principal=principal)
             assert invocation.source_execution_id == execution.execution_id
         finally:
             models.release.set()
@@ -221,17 +225,16 @@ async def test_terminal_agent_task_keeps_its_invocation_capture(
     models.fail = model_failure
     models.release.set()
     principal = service_principal("default", "owner")
-    async with Runtime.open("capture-terminal", storage=RuntimeStorage.filesystem(tmp_path),
-                            features=model_features(models, _agents())) as runtime:
-        task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
-        run = await runtime.tasks.bind(task).start(TaskGraph("source", (
+    async with Persistence.open('capture-terminal', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_224, Runtime.open(persistence=persistence_224, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_224, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        task = Task.from_agent("capture.agent", runtime.agents.get())
+        run = await runtime_engine.with_definitions(task).start(TaskGraph("source", (
             TaskNode("agent", task=task, input=AgentTaskInput("question")),
         )), principal=principal, idempotency_key="source")
         assert (await run.wait(timeout_seconds=5)).result.wait_status is (TaskStatus.FAILED if model_failure else TaskStatus.SUCCEEDED)
         execution = await run.execution("agent")
-        captured = await runtime.executions.capture_input(execution.execution_id,
+        captured = await runtime_engine.inputs.capture_input(execution.execution_id,
             CaptureInputRequest(principal, "terminal-input"))
-        invocation = await runtime._input_captures.task_input(captured, principal=principal)
+        invocation = await runtime_engine.inputs.task_input(captured, principal=principal)
         assert invocation.source_execution_id == execution.execution_id
 
 
@@ -240,10 +243,10 @@ async def test_graph_cancel_waits_for_capture_failure_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     models = _ControlledModels()
-    storage = RuntimeStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.filesystem(tmp_path)
     principal = service_principal("default", "owner")
-    async with Runtime.open("capture-cleanup", storage=storage, features=model_features(models, _agents())) as runtime:
-        objects = runtime._state.object_store(RuntimeDomain.TASK)
+    async with Persistence.open('capture-cleanup', storage=storage) as persistence_245, Runtime.open(persistence=persistence_245, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_245, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        objects = runtime._state.object_store(PersistenceDomain.TASK)
         original_put = objects.put
         original_cancel = runtime._execution_service.cancel
         cleanup_entered = asyncio.Event()
@@ -268,8 +271,8 @@ async def test_graph_cancel_waits_for_capture_failure_cleanup(
 
         monkeypatch.setattr(objects, "put", fail_invocation_once)
         monkeypatch.setattr(runtime._execution_service, "cancel", pause_cancel)
-        task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
-        run = await runtime.tasks.bind(task).start(TaskGraph("source", (
+        task = Task.from_agent("capture.agent", runtime.agents.get())
+        run = await runtime_engine.with_definitions(task).start(TaskGraph("source", (
             TaskNode("agent", task=task, input=AgentTaskInput("question")),
         )), principal=principal, idempotency_key="source")
         try:
@@ -305,10 +308,10 @@ async def test_invocation_capture_holds_terminal_execution_until_handoff_finishe
 ) -> None:
     models = _ControlledModels()
     models.release.set()
-    storage = RuntimeStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.filesystem(tmp_path)
     principal = service_principal("default", "owner")
-    async with Runtime.open("capture-hold", storage=storage, features=model_features(models, _agents())) as runtime:
-        objects = runtime._state.object_store(RuntimeDomain.TASK)
+    async with Persistence.open('capture-hold', storage=storage) as persistence_310, Runtime.open(persistence=persistence_310, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_310, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        objects = runtime._state.object_store(PersistenceDomain.TASK)
         original_put = objects.put
         capture_started = asyncio.Event()
         capture_release = asyncio.Event()
@@ -320,8 +323,8 @@ async def test_invocation_capture_holds_terminal_execution_until_handoff_finishe
             return await original_put(key, *args, **kwargs)
 
         monkeypatch.setattr(objects, "put", pause_invocation)
-        task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
-        run = await runtime.tasks.bind(task).start(TaskGraph("source", (
+        task = Task.from_agent("capture.agent", runtime.agents.get())
+        run = await runtime_engine.with_definitions(task).start(TaskGraph("source", (
             TaskNode("agent", task=task, input=AgentTaskInput("question")),
         )), principal=principal, idempotency_key="source")
         try:
@@ -345,12 +348,12 @@ async def test_invocation_capture_holds_terminal_execution_until_handoff_finishe
 async def test_pending_invocation_capture_preserves_complete_replay_input(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invocation_written: bool, session_id: str | None,
 ) -> None:
-    from linktools.ai.runtime import AgentTaskInputContext
+    from linktools.ai.inputs import AgentTaskInputContext
     from linktools.ai.task import Task, TaskNodeContext
 
     models = _ControlledModels()
     models.release.set()
-    storage = RuntimeStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.filesystem(tmp_path)
     principal = service_principal("default", "owner")
     projections = []
     producer_ran = asyncio.Event()
@@ -368,10 +371,10 @@ async def test_pending_invocation_capture_preserves_complete_replay_input(
     features = _agents()
     if session_id is not None:
         features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Runtime.open("capture-ready", storage=storage, features=model_features(models, features)) as runtime:
-        task = runtime.tasks.from_agent("capture.agent", runtime.agents.get(), build_input=project)
-        engine = runtime.tasks.bind(producer, task)
-        objects = runtime._state.object_store(RuntimeDomain.TASK)
+    async with Persistence.open('capture-ready', storage=storage) as persistence_371, Runtime.open(persistence=persistence_371, features=model_features(models, features)) as runtime, TaskEngine.open(persistence=persistence_371, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        task = Task.from_agent("capture.agent", runtime.agents.get(), build_input=project)
+        engine = runtime_engine.with_definitions(producer, task)
+        objects = runtime._state.object_store(PersistenceDomain.TASK)
         original_put = objects.put
         entered, release = asyncio.Event(), asyncio.Event()
 
@@ -397,27 +400,27 @@ async def test_pending_invocation_capture_preserves_complete_replay_input(
             execution = await run.execution("agent")
             assert (await asyncio.wait_for(execution.wait(), 30)).result.status is ExecutionStatus.SUCCEEDED
             if invocation_written:
-                early = await runtime.executions.capture_input(execution.execution_id, request)
+                early = await runtime_engine.inputs.capture_input(execution.execution_id, request)
             else:
                 for _ in range(2):
                     with pytest.raises(AIError) as pending:
-                        await runtime.executions.capture_input(execution.execution_id, request)
+                        await runtime_engine.inputs.capture_input(execution.execution_id, request)
                     assert pending.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
         finally:
             release.set()
         assert (await run.wait(timeout_seconds=30)).result.wait_status is TaskStatus.SUCCEEDED
         monkeypatch.setattr(objects, "put", original_put)
-        capture = await runtime.executions.capture_input(execution.execution_id, request)
-        assert await runtime.executions.capture_input(execution.execution_id, request) == capture
+        capture = await runtime_engine.inputs.capture_input(execution.execution_id, request)
+        assert await runtime_engine.inputs.capture_input(execution.execution_id, request) == capture
         if invocation_written:
             assert early == capture
-        value = await runtime._input_captures.read_agent(capture, principal=principal)
+        value = await runtime_engine.inputs.read_agent(capture, principal=principal)
         assert value.prompt == "Hello Ada"
         assert value.task_input.original_input["parameters"] == {"name": "Ada"}
         assert tuple(item.name for item in value.task_input.dependencies) == ("greeting",)
         for mode in ("fixed_input", "reproject_input"):
-            captured = await runtime._input_captures.task_input(capture, principal=principal, input_mode=mode)
-            assert await runtime._input_captures.read_dependency(captured, "greeting", principal=principal) == "Hello"
+            captured = await runtime_engine.inputs.task_input(capture, principal=principal, input_mode=mode)
+            assert await runtime_engine.inputs.read_dependency(captured, "greeting", principal=principal) == "Hello"
             replay = await engine.start(TaskGraph(mode, (TaskNode("agent", task=task, input_capture=captured),)),
                 principal=principal, idempotency_key=mode)
             assert (await replay.wait(timeout_seconds=30)).result.wait_status is TaskStatus.SUCCEEDED
@@ -428,8 +431,7 @@ async def test_pending_invocation_capture_preserves_complete_replay_input(
 async def test_standalone_agent_capture_accepts_unrelated_execution_holds(tmp_path: Path) -> None:
     models = _ControlledModels()
     principal = service_principal("default", "owner")
-    async with Runtime.open("standalone-capture", storage=RuntimeStorage.filesystem(tmp_path),
-                            features=model_features(models, _agents())) as runtime:
+    async with Persistence.open('standalone-capture', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_431, Runtime.open(persistence=persistence_431, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_431, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         execution = await runtime.agents.get().start("standalone input", principal=principal)
         await asyncio.wait_for(models.entered.wait(), 30)
         holds = ("task-ref:dependency", "input-capture:reader")
@@ -439,9 +441,9 @@ async def test_standalone_agent_capture_accepts_unrelated_execution_holds(tmp_pa
         try:
             models.release.set()
             assert (await asyncio.wait_for(execution.wait(), 30)).result.status is ExecutionStatus.SUCCEEDED
-            capture = await runtime.executions.capture_input(execution.execution_id,
+            capture = await runtime_engine.inputs.capture_input(execution.execution_id,
                 CaptureInputRequest(principal, "standalone-input"))
-            value = await runtime._input_captures.read_agent(capture, principal=principal)
+            value = await runtime_engine.inputs.read_agent(capture, principal=principal)
             assert value.prompt == "standalone input"
             assert value.task_input is None
         finally:
@@ -457,10 +459,10 @@ async def test_invocation_capture_requirement_is_durable_and_idempotent(
 ) -> None:
     from dataclasses import replace
 
-    from linktools.ai.runtime import ExecutionRequest
-    from linktools.ai.runtime.service_api import ExecutionHandle
-    from linktools.ai.runtime.state._codec import decode_domain, encode_domain
-    from linktools.ai.runtime.state._contracts import ExecutionRecord
+    from linktools.ai.execution import ExecutionRequest
+    from linktools.ai.execution import ExecutionHandle
+    from linktools.ai.persistence.codec import decode_domain, encode_domain
+    from linktools.ai.persistence.contracts import ExecutionRecord
     from linktools.ai.task import TaskBindingContract
 
     models = _ControlledModels()
@@ -468,8 +470,8 @@ async def test_invocation_capture_requirement_is_durable_and_idempotent(
     principal = service_principal("default", "owner")
     execution_id = None
     for reopened in (False, True):
-        storage = RuntimeStorage.filesystem(tmp_path)
-        async with Runtime.open("capture-contract", storage=storage, features=model_features(models, _agents())) as runtime:
+        storage = PersistenceStorage.filesystem(tmp_path)
+        async with Persistence.open('capture-contract', storage=storage) as persistence_472, Runtime.open(persistence=persistence_472, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_472, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
             agent = runtime.agents.get()
             binding = runtime._compiler.bind(runtime._compiled_agent(agent.id, agent.revision, agent.compiled))
             request = ExecutionRequest("source", principal, "source", None, "run", False, False)
@@ -479,7 +481,7 @@ async def test_invocation_capture_requirement_is_durable_and_idempotent(
                 if agent_execution:
                     return await runtime._execution_service.start(binding.binding_digest, request,
                         binding_contract=binding.binding_contract, requires_task_invocation_capture=required)
-                return await runtime._execution_service.start_task(task_binding, principal=principal,
+                return await runtime_engine._execution_service.start_task(task_binding, principal=principal,
                     input={"source": True}, idempotency_key="source", correlation={},
                     requires_task_invocation_capture=required)
 
@@ -502,7 +504,7 @@ async def test_invocation_capture_requirement_is_durable_and_idempotent(
                 assert (await runtime.executions.wait(execution_id, principal=principal,
                     timeout_seconds=30)).result.status is ExecutionStatus.SUCCEEDED
             elif not reopened:
-                await runtime._execution_service.complete_task(execution_id, principal=principal, output="completed")
+                await runtime_engine._execution_service.complete_task(execution_id, principal=principal, output="completed")
             record = await runtime._state.execution.executions.get(execution_id, tenant_id=principal.tenant_id)
             assert record.requires_task_invocation_capture is True
             assert record.dependency_hold_ids == ()
@@ -515,7 +517,7 @@ async def test_invocation_capture_requirement_is_durable_and_idempotent(
                 decode_domain(malformed, ExecutionRecord)
             assert invalid.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
             with pytest.raises(AIError) as unavailable:
-                await runtime.executions.capture_input(execution_id, CaptureInputRequest(principal, "input"))
+                await runtime_engine.inputs.capture_input(execution_id, CaptureInputRequest(principal, "input"))
             assert unavailable.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
     assert models.requests == (1 if agent_execution else 0)
 
@@ -525,12 +527,12 @@ async def test_agent_task_retry_and_fork_capture_their_independent_input(tmp_pat
     models = _ControlledModels()
     models.release.set()
     principal = service_principal("default", "owner")
-    storage = RuntimeStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.filesystem(tmp_path)
     features = _agents()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Runtime.open("capture-lineage", storage=storage, features=model_features(models, features)) as runtime:
-        task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
-        source = await runtime.tasks.bind(task).start(TaskGraph("source", (
+    async with Persistence.open('capture-lineage', storage=storage) as persistence_531, Runtime.open(persistence=persistence_531, features=model_features(models, features)) as runtime, TaskEngine.open(persistence=persistence_531, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        task = Task.from_agent("capture.agent", runtime.agents.get())
+        source = await runtime_engine.with_definitions(task).start(TaskGraph("source", (
             TaskNode("agent", task=task, input=AgentTaskInput("source input")),
         )), principal=principal, idempotency_key="source")
         assert (await source.wait(timeout_seconds=30)).result.wait_status is TaskStatus.SUCCEEDED
@@ -538,8 +540,8 @@ async def test_agent_task_retry_and_fork_capture_their_independent_input(tmp_pat
         for name, start in (("retry", execution.retry), ("fork", execution.fork)):
             independent = await start(name + " input", idempotency_key=name)
             assert (await asyncio.wait_for(independent.wait(), 30)).result.status is ExecutionStatus.SUCCEEDED
-            captured = await runtime.executions.capture_input(independent.execution_id,
+            captured = await runtime_engine.inputs.capture_input(independent.execution_id,
                 CaptureInputRequest(principal, name, "clean"))
-            value = await runtime._input_captures.read_agent(captured, principal=principal)
+            value = await runtime_engine.inputs.read_agent(captured, principal=principal)
             assert value.prompt == name + " input"
             assert value.task_input is None

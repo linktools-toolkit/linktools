@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Execution history projection for claimed and materialized attempts."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 import hashlib
 import zlib
@@ -26,13 +26,14 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime import RuntimeHistory, RuntimeStorage
-from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
-from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
+from linktools.ai.history import History
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.history._projection import StepExecutionHistoryReader
+from linktools.ai.history._service import DefaultExecutionHistoryService
 from linktools.ai.runtime._local import LocalExecutionBackend
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._codec import _encode_persisted_domain, encode_envelope
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.codec import _encode_persisted_domain, encode_envelope
+from linktools.ai.persistence.contracts import (
     ConversationHistoryRecord,
     ExecutionHistoryHeadRecord,
     ExecutionHistorySealRecord,
@@ -43,14 +44,14 @@ from linktools.ai.runtime.state._contracts import (
     TranscriptChunk,
     TranscriptMessageRef,
 )
-from linktools.ai.runtime.state._steps import ExecutionTerminalSealPlan, StateStepArchive
-from linktools.ai.runtime.state._model_interaction_store import ModelInteractionStateStepArchive
-from linktools.ai.runtime.state._store import (
+from linktools.ai.persistence.runs import ExecutionTerminalSealPlan, StateStepArchive
+from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
+from linktools.ai.persistence.state import (
     StateLockOrderError,
     StoredFact,
     StateTransactionNestingError,
 )
-from linktools.ai.runtime.state._steps import LockOrderError, _AgentRunHistoryLock
+from linktools.ai.persistence.runs import LockOrderError, _AgentRunHistoryLock
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import FilesystemObjectStore, ObjectRef, StoredPayload
 from ._runtime_test_helpers import execution_owner_fields
@@ -62,7 +63,7 @@ from pydantic_ai.messages import (
     ThinkingPart,
     UserPromptPart,
 )
-from linktools.ai.runtime.state._step_contracts import (
+from linktools.ai.persistence._step_contracts import (
     AgentRunCheckpoint,
     AgentRunRecord,
     StepEvent,
@@ -113,7 +114,7 @@ def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
 
 @pytest.mark.asyncio
 async def test_history_head_requires_open_for_mutations() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="history-head", tenant_id="tenant")
     repository = state.execution.executions
     store = repository.state_store
@@ -168,7 +169,7 @@ async def test_history_head_requires_open_for_mutations() -> None:
 async def test_execution_projection_paths_reject_a_sealed_history_head(
     tmp_path: Path,
 ) -> None:
-    state = RuntimeState(RuntimeStorage.filesystem(tmp_path / "runtime"))
+    state = Persistence(PersistenceStorage.filesystem(tmp_path / "runtime"))
     await state.initialize(namespace="history-fence", tenant_id="tenant")
     try:
         await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
@@ -196,7 +197,7 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
             )
 
         await repository.state_store.mutate(seal)
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         assert isinstance(archive, StateStepArchive)
         agent_run_id = make_agent_run_id(
             namespace="history",
@@ -269,7 +270,7 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
 async def test_terminal_prepare_accepts_an_unprojected_execution_run(
     tmp_path: Path,
 ) -> None:
-    state = RuntimeState(RuntimeStorage.filesystem(tmp_path / "runtime"))
+    state = Persistence(PersistenceStorage.filesystem(tmp_path / "runtime"))
     await state.initialize(namespace="history-unprojected", tenant_id="tenant")
     terminal_plan = None
     try:
@@ -296,7 +297,7 @@ async def test_terminal_prepare_accepts_an_unprojected_execution_run(
             )
         )
 
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         assert isinstance(archive, StateStepArchive)
         assert await archive.get_agent_run(agent_run_id=agent_run_id) is None
         terminal_plan = await state.run_store.prepare_execution_terminal_seal(
@@ -326,7 +327,7 @@ async def test_conversation_head_replacement_preserves_physical_identity(
     provisioning_engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(provisioning_engine)
     await provisioning_engine.dispose()
-    state = RuntimeState(RuntimeStorage.sqlite(
+    state = Persistence(PersistenceStorage.sqlite(
         path,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     ))
@@ -350,7 +351,7 @@ async def test_conversation_head_replacement_preserves_physical_identity(
             metadata={"history_id": "history"},
             started_at=now,
         )
-        await state.run_store.read_store(RuntimeDomain.CONVERSATION).materialize_checkpoint(
+        await state.run_store.read_store(PersistenceDomain.CONVERSATION).materialize_checkpoint(
             run,
             AgentRunCheckpoint(
                 agent_run_id="run",
@@ -364,7 +365,7 @@ async def test_conversation_head_replacement_preserves_physical_identity(
             ),
         )
         head = await state.run_store.read_store(
-            RuntimeDomain.CONVERSATION
+            PersistenceDomain.CONVERSATION
         ).transcript_repository.get_head("history")
         assert head is not None
         assert head.message_count == 1
@@ -374,7 +375,7 @@ async def test_conversation_head_replacement_preserves_physical_identity(
 
 @pytest.mark.asyncio
 async def test_projection_flight_resolves_waiters_after_abandon() -> None:
-    steps = RuntimeState(RuntimeStorage.in_memory())
+    steps = Persistence(PersistenceStorage.in_memory())
     await steps.initialize(namespace="flight-abandon", tenant_id="tenant")
     try:
         store = steps.run_store
@@ -409,9 +410,9 @@ async def test_terminal_commit_cancellation_still_finalizes_after_durable_commit
     lifecycle = Lifecycle()
     backend = object.__new__(LocalExecutionBackend)
     backend._run_stores = {
-        RuntimeDomain.TRACE: object.__new__(ModelInteractionStateStepArchive),
-        RuntimeDomain.CONVERSATION: object(),
-        RuntimeDomain.CHECKPOINT: object(),
+        PersistenceDomain.TRACE: object.__new__(ModelInteractionStateStepArchive),
+        PersistenceDomain.CONVERSATION: object(),
+        PersistenceDomain.CHECKPOINT: object(),
     }
     backend._run_store = object()
     backend._agent_run_lifecycle = lifecycle
@@ -460,7 +461,7 @@ async def test_run_history_lock_rejects_cross_run_nesting() -> None:
 
 @pytest.mark.asyncio
 async def test_state_callback_cannot_acquire_run_history_lock() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="lock-order", tenant_id="tenant")
     history_lock = _AgentRunHistoryLock()
     try:
@@ -477,7 +478,7 @@ async def test_state_callback_cannot_acquire_run_history_lock() -> None:
 
 @pytest.mark.asyncio
 async def test_read_only_state_callback_rejects_mutation() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="read-only", tenant_id="tenant")
     try:
 
@@ -492,7 +493,7 @@ async def test_read_only_state_callback_rejects_mutation() -> None:
 
 @pytest.mark.asyncio
 async def test_read_only_state_callback_rejects_record_guard() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="read-only-guard", tenant_id="tenant")
     try:
 
@@ -508,7 +509,7 @@ async def test_read_only_state_callback_rejects_record_guard() -> None:
         await state.close()
 
 
-async def _materialize_attempt(state: RuntimeState, sequence: int, prompt: str) -> None:
+async def _materialize_attempt(state: Persistence, sequence: int, prompt: str) -> None:
     repository = state.execution.executions
     if await repository.get_history_head("execution", tenant_id="tenant") is None:
         await repository.state_store.mutate(
@@ -622,23 +623,23 @@ async def _materialize_attempt(state: RuntimeState, sequence: int, prompt: str) 
     )
 
 
-def _reader(state: RuntimeState) -> StepExecutionHistoryReader:
+def _reader(state: Persistence) -> StepExecutionHistoryReader:
     return StepExecutionHistoryReader(
         namespace="history",
         executions=state.execution.executions,
-        store=state.run_store.read_store(RuntimeDomain.TRACE),
+        store=state.run_store.read_store(PersistenceDomain.TRACE),
         cursor_signer=HmacCursorSigner("history", b"history-key"),
     )
 
 
 @pytest.mark.asyncio
 async def test_in_memory_raw_refs_use_the_same_exact_contract_as_durable() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="history-in-memory-refs", tenant_id="tenant")
     try:
         await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
         await _materialize_attempt(state, 1, "in-memory-ref")
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         agent_run_id = make_agent_run_id(
             namespace="history",
             tenant_id="tenant",
@@ -646,15 +647,15 @@ async def test_in_memory_raw_refs_use_the_same_exact_contract_as_durable() -> No
             agent_run_seq=1,
         )
         resolved = await archive.resolve_transcript_message_refs(
-            (TranscriptMessageRef(RuntimeDomain.TRACE, agent_run_id, 0),)
+            (TranscriptMessageRef(PersistenceDomain.TRACE, agent_run_id, 0),)
         )
         assert len(resolved) == 1
         assert isinstance(resolved[0].message, ModelRequest)
         assert resolved[0].message.parts[0].content == "in-memory-ref"
 
         for ref in (
-            TranscriptMessageRef(RuntimeDomain.TRACE, "missing-run", 0),
-            TranscriptMessageRef(RuntimeDomain.TRACE, agent_run_id, 999),
+            TranscriptMessageRef(PersistenceDomain.TRACE, "missing-run", 0),
+            TranscriptMessageRef(PersistenceDomain.TRACE, agent_run_id, 999),
         ):
             with pytest.raises(AIError) as raised:
                 await archive.resolve_transcript_message_refs((ref,))
@@ -667,7 +668,7 @@ async def test_in_memory_raw_refs_use_the_same_exact_contract_as_durable() -> No
 async def test_terminal_seal_reuses_durable_projection_after_staging_release(
     tmp_path: Path,
 ) -> None:
-    state = RuntimeState(RuntimeStorage.filesystem(tmp_path / "runtime"))
+    state = Persistence(PersistenceStorage.filesystem(tmp_path / "runtime"))
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         await state.execution.executions.create(_record(ExecutionStatus.SUCCEEDED, 1))
@@ -685,7 +686,7 @@ async def test_terminal_seal_reuses_durable_projection_after_staging_release(
             binding_digest="a" * 64,
         )
         assert terminal_plan.projections[0].projection_digest != "empty"
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         assert isinstance(archive, StateStepArchive)
         head = await archive.execution_history_head(agent_run_id)
         projection = terminal_plan.projections[0]
@@ -705,7 +706,7 @@ async def test_terminal_seal_reuses_durable_projection_after_staging_release(
 
 @pytest.mark.asyncio
 async def test_failed_claimed_attempt_without_run_is_skipped() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         await state.execution.executions.create(_record(ExecutionStatus.FAILED, 1))
@@ -730,7 +731,7 @@ async def test_failed_claimed_attempt_without_run_is_skipped() -> None:
 
 @pytest.mark.asyncio
 async def test_history_skips_missing_non_final_attempt() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         await state.execution.executions.create(_record(ExecutionStatus.FAILED, 2))
@@ -764,7 +765,7 @@ async def test_history_skips_missing_non_final_attempt() -> None:
 async def test_successful_execution_requires_final_history_evidence(
     method_name: str,
 ) -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         await state.execution.executions.create(_record(ExecutionStatus.SUCCEEDED, 1))
@@ -783,7 +784,7 @@ async def test_successful_execution_requires_final_history_evidence(
 async def test_successful_history_preserves_user_prompt_and_projects_all_views() -> (
     None
 ):
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         prompt = '  {"question":"你好\\nworld","x":1}  '
@@ -829,12 +830,12 @@ async def test_public_transcript_rejects_corrupt_chunk_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     objects = FilesystemObjectStore(tmp_path / "objects")
-    state = RuntimeState(RuntimeStorage.filesystem(tmp_path / "state", object_store=objects))
+    state = Persistence(PersistenceStorage.filesystem(tmp_path / "state", object_store=objects))
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
         await _materialize_attempt(state, 1, "hello")
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         repository = archive.transcript_repository
         owner_id = make_agent_run_id(
             namespace="history", tenant_id="tenant", execution_id="execution", agent_run_seq=1,
@@ -881,7 +882,7 @@ async def test_public_transcript_rejects_corrupt_chunk_content(
             )
 
         await contents.store.mutate(corrupt_content)
-        history = RuntimeHistory(
+        history = History(
             DefaultExecutionHistoryService(
                 state.execution.executions, TenantAuthorizationPolicy("tenant"), _reader(state),
             ),

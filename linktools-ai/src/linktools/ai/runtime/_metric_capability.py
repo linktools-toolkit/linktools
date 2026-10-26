@@ -47,13 +47,11 @@ from ..model import (
 )
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ._budget import RunBudgetContext
-from ._journal import ModelRequestFact, ModelRequestJournal, await_request_handoff
-from ._message import (
-    project_model_response_attempts, model_response_usage, model_attempts_usage, model_attempts_details,
-)
-from ._metrics_service import (
-    _bind_metric_execution_context,
-    _metric_correlation,
+from linktools.ai.observe.journal import ModelRequestFact, ModelRequestJournal, await_request_handoff
+from linktools.ai.model.messages import project_model_response_attempts, model_response_usage, model_attempts_usage, model_attempts_details
+from linktools.ai.observe.service import (
+    bind_metric_execution_context,
+    metric_correlation,
 )
 
 _logger = environ.get_logger("ai.runtime.model_metrics")
@@ -437,7 +435,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
     ) -> None:
         if self._recorder is None:
             return
-        _bind_metric_execution_context(
+        bind_metric_execution_context(
             self._recorder,
             self._execution_id,
             ctx.deps.correlation,
@@ -1189,7 +1187,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 tenant_id=self._tenant_id,
                 status=status,
                 error_code=error_code,
-                correlation=_metric_correlation(
+                correlation=metric_correlation(
                     None if run_context is None else run_context.correlation,
                     execution_id=self._execution_id,
                     session_id=self._session_id,

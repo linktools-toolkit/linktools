@@ -7,7 +7,7 @@ import pytest
 from pydantic import BaseModel, ValidationError
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._message import decode_model_messages, encode_model_messages
+from linktools.ai.model.messages import decode_model_messages, encode_model_messages
 from pydantic_ai import RequestUsage
 from pydantic_ai.messages import (
     BinaryContent,

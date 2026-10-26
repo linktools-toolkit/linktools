@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Contract tests for model interaction projection primitives."""
 from ._runtime_test_helpers import model_features
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import replace
@@ -28,16 +30,14 @@ from pydantic_ai.models.test import TestModel
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime._attachment import (
-    bind_tool_return_attachments,
-    input_attachment_views,
-)
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.model._attachment import bind_tool_return_attachments, input_attachment_views
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime._journal import MODEL_USAGE_OUTPUT_METADATA_KEY, ModelRequestJournal
-from linktools.ai.runtime._message import decode_model_messages
-from linktools.ai.runtime._model_interaction import (
+from linktools.ai.observe.journal import MODEL_USAGE_OUTPUT_METADATA_KEY, ModelRequestJournal
+from linktools.ai.model.messages import decode_model_messages
+from linktools.ai.persistence._model_interaction import (
     StagedContextInline,
     StagedContextProjection,
     StagedContextSpan,
@@ -47,8 +47,8 @@ from linktools.ai.runtime._model_interaction import (
     project_public_messages,
     request_envelope,
 )
-from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
+from linktools.ai.persistence._step_archive import StagingAgentRunStore
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
 
 
 from linktools.ai.capability import ExecutionCapability, TraceCapability
@@ -89,10 +89,7 @@ async def test_session_projections_do_not_copy_previous_response_bodies(
     sizes = []
     features = _agent_group()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Runtime.open(
-        "response-growth", storage=RuntimeStorage.sqlite(database),
-        features=model_features(_TextModels(), features),
-    ) as runtime:
+    async with Persistence.open('response-growth', storage=PersistenceStorage.sqlite(database)) as persistence_92, Runtime.open(persistence=persistence_92, features=model_features(_TextModels(), features)) as runtime:
         agent = runtime.agents.get("default")
         await agent.create_session("session")
         for turn in range(8):
@@ -587,7 +584,7 @@ async def test_interaction_capture_is_immutable_after_sdk_object_mutation() -> N
 
 @pytest.mark.asyncio
 async def test_parent_tool_result_round_trip_materializes_two_model_requests() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="interaction-tool-roundtrip", tenant_id="tenant")
     try:
         capture = AgentRunRecorder(
@@ -722,7 +719,7 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
             agent_run_id="run",
             require_complete=True,
         )
-        archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
         interactions = await archive.list_model_interactions(agent_run_id="run")
         assert [value.model_request_seq for value in interactions] == [1, 2]
         resolved = await archive.resolve_model_interactions(interactions)
@@ -810,21 +807,13 @@ async def _assert_public_interaction(runtime: Runtime[object]) -> None:
 
 @pytest.mark.asyncio
 async def test_execution_model_interactions_are_durable_and_public() -> None:
-    async with Runtime.open(
-        "default",
-        storage=RuntimeStorage.in_memory(),
-        features=model_features(_TextModels(), _agent_group()),
-    ) as runtime:
+    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_813, Runtime.open(persistence=persistence_813, features=model_features(_TextModels(), _agent_group())) as runtime:
         await _assert_public_interaction(runtime)
 
 
 @pytest.mark.asyncio
 async def test_execution_model_interactions_support_volatile_memory_state() -> None:
-    async with Runtime.open(
-        "default",
-        storage=RuntimeStorage.in_memory(),
-        features=model_features(_TextModels(), _agent_group()),
-    ) as runtime:
+    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_823, Runtime.open(persistence=persistence_823, features=model_features(_TextModels(), _agent_group())) as runtime:
         await _assert_public_interaction(runtime)
 
 

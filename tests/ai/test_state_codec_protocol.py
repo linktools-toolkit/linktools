@@ -12,7 +12,7 @@ import pytest
 from linktools.ai.core import BudgetUsage, IdempotencyStatus, OperationStatus, RunBudget, UsageMetrics
 from linktools.ai.evaluation import CaseRef
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state._codec import (
+from linktools.ai.persistence.codec import (
     _V1_ENUM_WIRE_TYPES,
     _V1_WIRE_TYPES,
     _CURRENT_CODEC,
@@ -32,7 +32,7 @@ from linktools.ai.runtime.state._codec import (
     parse_envelope,
     wire_type_id,
 )
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence.contracts import (
     ConversationCursor,
     ExecutionHistoryState,
     IdempotencyTerminalUpdate,
@@ -43,7 +43,7 @@ from linktools.ai.runtime.state._contracts import (
     TranscriptOwnerDomain,
     HistoryQuality,
 )
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord, StepEvent
+from linktools.ai.persistence._step_contracts import AgentRunRecord, StepEvent
 from linktools.ai.task import TaskBindingContract
 
 

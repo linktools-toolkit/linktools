@@ -16,10 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime.state import GroupRecordReader
-from linktools.ai.runtime.state._memory import InMemoryStateStore
-from linktools.ai.runtime.state._sql import SqlStateStore, _SqlGroupTransaction
-from linktools.ai.runtime.state._store import StateGroupTransaction, StateStore, StateTransaction, StoredRecord
+from linktools.ai.persistence.state import GroupRecordReader
+from linktools.ai.persistence._memory import InMemoryStateStore
+from linktools.ai.persistence._sql import SqlStateStore, _SqlGroupTransaction
+from linktools.ai.persistence.state import StateGroupTransaction, StateStore, StateTransaction, StoredRecord
 from linktools.ai.storage import CacheBackend, InMemoryCacheBackend
 
 from .test_state_group_archive import _filesystem

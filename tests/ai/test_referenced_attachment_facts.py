@@ -10,9 +10,9 @@ from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, Tex
 from linktools.ai.asset import AssetKey, AssetVersionRef
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ReferencedContent
-from linktools.ai.runtime._attachment import bind_tool_return_attachments, request_attachment_facts
-from linktools.ai.runtime._message import decode_model_messages, encode_model_messages, project_transient_binary_content
-from linktools.ai.runtime._user_content_codec import decode_user_content_item, encode_user_content_item
+from linktools.ai.model._attachment import bind_tool_return_attachments, request_attachment_facts
+from linktools.ai.model.messages import decode_model_messages, encode_model_messages, project_transient_binary_content
+from linktools.ai.model._user_content_codec import decode_user_content_item, encode_user_content_item
 from linktools.ai.spec import CapabilityRef
 from linktools.ai.storage import StorageEntryRevision
 

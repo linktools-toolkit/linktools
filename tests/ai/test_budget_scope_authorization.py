@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Existing budget scopes require authority over their durable owners."""
 from ._runtime_test_helpers import model_features
 
@@ -9,21 +11,24 @@ from dataclasses import replace
 import pytest
 import pytest_asyncio
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, Principal, RunBudget
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.runtime import ExecutionRequest, Runtime, RuntimeStorage
-from linktools.ai.runtime.state._codec import _decode_enveloped_domain, encode_domain, encode_envelope
-from linktools.ai.runtime.state._contracts import ExecutionRecord
-from linktools.ai.runtime.state._store import RecordQuery, StateTransaction
+from linktools.ai.execution import ExecutionRequest
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.codec import _decode_enveloped_domain, encode_domain, encode_envelope
+from linktools.ai.persistence.contracts import ExecutionRecord
+from linktools.ai.persistence.state import RecordQuery, StateTransaction
 from linktools.ai.task import TaskBindingContract, TaskGraph
+from linktools.ai.task_engine import TaskEngine
 
 from ._runtime_test_helpers import RuntimeUsageModels
 
 
-_BudgetRuntime = tuple[Runtime, RuntimeState, ExecutionRecord]
+_BudgetRuntime = tuple[Runtime, TaskEngine, Persistence, ExecutionRecord]
 _TASK = TaskBindingContract("adapter.task", 1, "none", {}, None, 1, 0)
 
 
@@ -32,35 +37,34 @@ async def budget_runtime() -> AsyncIterator[_BudgetRuntime]:
     group = RuntimeFeatures("scope-authorization")
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    storage = RuntimeStorage.in_memory()
-    async with Runtime.open("scope-authorization",
-                            storage=storage, features=model_features(RuntimeUsageModels(), group)) as runtime:
+    storage = PersistenceStorage.in_memory()
+    async with Persistence.open('scope-authorization', storage=storage) as persistence_36, Runtime.open(persistence=persistence_36, features=model_features(RuntimeUsageModels(), group)) as runtime, TaskEngine.open(persistence=persistence_36, authorization=group.authorization) as engine:
         root = await runtime.agents.get().start("root", budget=RunBudget(model_requests=20))
         assert (await root.wait()).result.status is ExecutionStatus.SUCCEEDED
         record = await runtime._state.execution.executions.get(root.execution_id, tenant_id="default")
         assert record is not None
-        graph = await runtime.tasks.bind().start(
-            TaskGraph("owned", ()), idempotency_key="graph", budget=RunBudget(model_requests=20),
+        graph = await engine.start(
+            TaskGraph("owned", ()), principal=runtime.default_principal, idempotency_key="graph", budget=RunBudget(model_requests=20),
         )
         await graph.wait()
         await runtime.agents.get().create_session("session", principal=Principal("stranger", "default"))
-        yield runtime, runtime._state, record
+        yield runtime, engine, persistence_36, record
 
 
-async def _records(storage: RuntimeState) -> tuple[object, ...]:
+async def _records(storage: Persistence) -> tuple[object, ...]:
     result = []
     for repository in (storage.execution.executions, storage.task.admissions, storage.conversation.sessions):
         result.append(await repository.state_store.read(lambda transaction: transaction.scan_records()))
     return tuple(result)
 
 
-async def _attach(runtime: Runtime, record: ExecutionRecord, entry: str,
+async def _attach(runtime: Runtime, engine: TaskEngine, record: ExecutionRecord, entry: str,
                   scope: str, principal: Principal, *, budget: RunBudget | None = None) -> object:
     service = runtime._execution_service
     request = ExecutionRequest("attached", principal, "attach", None, record.mode,
                                record.planning, record.thinking, budget=budget)
     if entry == "task":
-        return await service.start_task(_TASK, principal=principal, input={},
+        return await engine._execution_service.start_task(_TASK, principal=principal, input={},
                                         idempotency_key="attach", correlation={}, budget_scope_id=scope)
     if entry == "session":
         return await service.start_for_session("default", record.binding_digest, "session", request,
@@ -74,11 +78,11 @@ async def _attach(runtime: Runtime, record: ExecutionRecord, entry: str,
 @pytest.mark.parametrize("entry", ("start", "session", "task", "resolve"))
 @pytest.mark.parametrize("owner", ("execution", "graph"))
 async def test_same_tenant_budget_owner_is_authorized_before_any_write(budget_runtime: _BudgetRuntime, entry: str, owner: str) -> None:
-    runtime, storage, root = budget_runtime
+    runtime, engine, storage, root = budget_runtime
     scope = root.budget_scope_id if owner == "execution" else "graph:owned"
     before = await _records(storage)
     with pytest.raises(AIError) as rejected:
-        await _attach(runtime, root, entry, scope, Principal("stranger", "default"))
+        await _attach(runtime, engine, root, entry, scope, Principal("stranger", "default"))
     assert rejected.value.code is ErrorCode.AUTHORIZATION_DENIED
     assert await _records(storage) == before
 
@@ -86,21 +90,21 @@ async def test_same_tenant_budget_owner_is_authorized_before_any_write(budget_ru
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scope", ("graph:owned", "execution:foreign", "unattached", "graph:missing"))
 async def test_cross_tenant_or_unowned_scope_is_not_attachment_authority(budget_runtime: _BudgetRuntime, scope: str) -> None:
-    runtime, storage, root = budget_runtime
+    runtime, engine, storage, root = budget_runtime
     await storage.execution.budgets.ensure(scope, RunBudget(model_requests=20))
     before = await _records(storage)
     principal = Principal("runtime", "other") if scope == "graph:owned" else runtime.default_principal
     with pytest.raises(AIError) as rejected:
-        await _attach(runtime, root, "task", scope, principal)
+        await _attach(runtime, engine, root, "task", scope, principal)
     assert rejected.value.code is ErrorCode.AUTHORIZATION_DENIED
     assert await _records(storage) == before
 
 
 @pytest.mark.asyncio
 async def test_graph_owned_custom_task_adapter_attaches_matching_scope(budget_runtime: _BudgetRuntime) -> None:
-    runtime, storage, root = budget_runtime
+    runtime, engine, storage, root = budget_runtime
     before = await storage.execution.budgets.read("graph:owned")
-    handle = await _attach(runtime, root, "task", "graph:owned", runtime.default_principal)
+    handle = await _attach(runtime, engine, root, "task", "graph:owned", runtime.default_principal)
     attached = await storage.execution.executions.get(handle.execution_id, tenant_id="default")
     assert attached is not None and attached.budget_scope_id == "graph:owned"
     assert attached.principal_id == runtime.default_principal.principal_id
@@ -110,7 +114,7 @@ async def test_graph_owned_custom_task_adapter_attaches_matching_scope(budget_ru
 @pytest.mark.asyncio
 @pytest.mark.parametrize("corruption", ("missing", "limits"))
 async def test_graph_scope_missing_or_changed_limits_rejects_without_writes(budget_runtime: _BudgetRuntime, corruption: str) -> None:
-    runtime, storage, root = budget_runtime
+    runtime, engine, storage, root = budget_runtime
     usage = await storage.execution.budgets.read("graph:owned")
 
     async def corrupt(transaction: StateTransaction) -> None:
@@ -128,7 +132,7 @@ async def test_graph_scope_missing_or_changed_limits_rejects_without_writes(budg
     await storage.execution.budgets.state_store.mutate(corrupt)
     before = await _records(storage)
     with pytest.raises(AIError) as rejected:
-        await _attach(runtime, root, "task", "graph:owned", runtime.default_principal)
+        await _attach(runtime, engine, root, "task", "graph:owned", runtime.default_principal)
     assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     assert await _records(storage) == before
 
@@ -136,20 +140,20 @@ async def test_graph_scope_missing_or_changed_limits_rejects_without_writes(budg
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scope", ("", " ", 1))
 async def test_resolve_existing_rejects_invalid_scope_ids(budget_runtime: _BudgetRuntime, scope: str) -> None:
-    runtime, storage, root = budget_runtime
+    runtime, engine, storage, root = budget_runtime
     before = await _records(storage)
     with pytest.raises(AIError) as rejected:
-        await _attach(runtime, root, "resolve", scope, runtime.default_principal)
+        await _attach(runtime, engine, root, "resolve", scope, runtime.default_principal)
     assert rejected.value.code is ErrorCode.REQUEST_FIELD_INVALID
     assert await _records(storage) == before
 
 
 @pytest.mark.asyncio
 async def test_resolve_existing_rejects_fresh_budget_with_inherited_scope(budget_runtime: _BudgetRuntime) -> None:
-    runtime, storage, root = budget_runtime
+    runtime, engine, storage, root = budget_runtime
     before = await _records(storage)
     with pytest.raises(AIError) as rejected:
-        await _attach(runtime, root, "resolve", "graph:owned", runtime.default_principal,
+        await _attach(runtime, engine, root, "resolve", "graph:owned", runtime.default_principal,
                       budget=RunBudget(model_requests=1))
     assert rejected.value.code is ErrorCode.REQUEST_FIELD_INVALID
     assert await _records(storage) == before
@@ -157,7 +161,7 @@ async def test_resolve_existing_rejects_fresh_budget_with_inherited_scope(budget
 
 @pytest.mark.asyncio
 async def test_retry_authorizes_retained_source_after_budget_root_is_retired(budget_runtime: _BudgetRuntime) -> None:
-    runtime, storage, root = budget_runtime
+    runtime, engine, storage, root = budget_runtime
     run = await runtime.executions.get(root.execution_id)
     retained = await run.retry("retained")
     assert (await retained.wait()).result.status is ExecutionStatus.SUCCEEDED

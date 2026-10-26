@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Successful callback cleanup acknowledges delivery without reopening a stream."""
 from ._runtime_test_helpers import model_features
 
@@ -14,7 +16,9 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Execution, Runtime, RuntimeStorage
+from linktools.ai.execution import Execution
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task import TaskEvent, TaskEventType
 
 from ._runtime_test_helpers import _UsageFunctionModel
@@ -37,10 +41,7 @@ async def test_live_wait_acknowledges_callback_cleanup_without_waiting_for_model
 
     group = RuntimeFeatures("wait-cleanup-ack")
     group.agent("default", model="default", allow_tools=())
-    async with Runtime.open(
-        "wait-cleanup-ack",
-        storage=RuntimeStorage.in_memory(), features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as runtime:
+    async with Persistence.open('wait-cleanup-ack', storage=PersistenceStorage.in_memory()) as persistence_40, Runtime.open(persistence=persistence_40, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get().start("hello")
         await asyncio.wait_for(model_started.wait(), 10)
 
@@ -111,7 +112,7 @@ async def test_wait_callback_can_finish_during_cleanup_without_reopening_observa
         except asyncio.CancelledError:
             acknowledged.append(event.cursor)
 
-    bundle.execution_run = Execution(bundle.runtime, "execution", _PRINCIPAL, tree)
+    bundle.execution_run = Execution(bundle.runtime._execution_binding, "execution", _PRINCIPAL, tree)
     bundle.graph.stream_events = graph_events
     bundle.evaluations._inspect = inspect_evaluation
     bundle.evaluations._record = record
@@ -131,7 +132,7 @@ async def test_wait_callback_can_finish_during_cleanup_without_reopening_observa
             assert raised.value.code is ErrorCode.WAIT_TIMEOUT
             assert raised.value.safe_details["cursor"] == acknowledged[-1]
         assert len(acknowledged) == 1
-        await bundle.runtime.close()
+        await bundle.close()
         assert bundle.storage_closed
         assert not release_stream.is_set()
     finally:
@@ -139,7 +140,7 @@ async def test_wait_callback_can_finish_during_cleanup_without_reopening_observa
         if not waiting.done():
             waiting.cancel()
         await asyncio.gather(waiting, return_exceptions=True)
-        await bundle.runtime.close()
+        await bundle.close()
 
 
 @pytest.mark.asyncio
@@ -162,4 +163,4 @@ async def test_authoritative_wait_timeout_keeps_its_own_details(observe) -> None
         assert raised.value is cause
         assert raised.value.safe_details == {"cursor": "service-owned", "scope": "authority"}
     finally:
-        await bundle.runtime.close()
+        await bundle.close()

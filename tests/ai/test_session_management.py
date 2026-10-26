@@ -9,8 +9,8 @@ import pytest
 
 from linktools.ai.core import HmacCursorSigner, Principal, ResourceKind, ResourceRef, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import Persistence
 from linktools.ai.session import CloseSessionRequest, ListSessionRequest, SessionManager, SessionView
 
 from .test_session_timeline import _session
@@ -28,7 +28,7 @@ def _manager(state, **kwargs):
 
 
 async def test_session_manager_injected_read_and_observation_keep_control_separate() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="session-owner", tenant_id="tenant")
     reads, observations = [], []
 
@@ -56,7 +56,7 @@ async def test_session_manager_injected_read_and_observation_keep_control_separa
 
 
 async def test_session_consumer_retains_handoff_until_cancelled_display_finishes() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="session-owner", tenant_id="tenant")
     releases = []
     entered = asyncio.Event()
@@ -99,7 +99,7 @@ async def test_session_consumer_retains_handoff_until_cancelled_display_finishes
 
 
 async def test_session_projection_checks_captured_authority_before_admission() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="session-owner", tenant_id="tenant")
     try:
         manager = _manager(state)

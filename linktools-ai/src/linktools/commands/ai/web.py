@@ -44,6 +44,7 @@ class Command(BaseCommand):
             from linktools.ai.runtime import RuntimeFeatures
             from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
             from linktools.ai.runtime import Runtime
+            from linktools.ai.persistence import Persistence
 
             model_options = _local_model_options(workspace, args)
             model_binding = _local_model(workspace, **model_options)
@@ -64,8 +65,11 @@ class Command(BaseCommand):
                 declarations = [{"kind": item.kind, "id": item.id, "revision": item.revision} for item in capture.contributions]
                 if not any(item["kind"] == "agent" and item["id"] == "default" for item in declarations):
                     declarations.insert(0, {"kind": "agent", "id": "default", "revision": 1})
-                runtime = await stack.enter_async_context(Runtime.open(
+                persistence = await stack.enter_async_context(Persistence.open(
                     "default", storage=_local_runtime_storage(workspace),
+                ))
+                runtime = await stack.enter_async_context(Runtime.open(
+                    persistence=persistence,
                     features=capture, metrics=metrics,
                 ))
                 status = {

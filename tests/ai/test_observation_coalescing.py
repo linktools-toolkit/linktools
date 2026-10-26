@@ -10,10 +10,10 @@ import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from linktools.ai.storage import InMemoryCacheBackend, WriteBufferBackend
-from linktools.ai.runtime import RuntimeDomain
-from linktools.ai.runtime.state import RuntimeState, _steps, _trace_persistence
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent
-from linktools.ai.runtime._transcript_staging import StagedTranscript
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence import Persistence, runs as _steps, _trace_persistence
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent
+from linktools.ai.persistence._transcript_staging import StagedTranscript
 
 from .test_incremental_projection_boundaries import _storage
 from .test_step_projection import _execution
@@ -23,7 +23,7 @@ _DEFAULT_CACHE = object()
 
 
 async def _setup(tmp_path: Path, backend: str, *, cache=_DEFAULT_CACHE):
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     if cache is _DEFAULT_CACHE:
         cache = InMemoryCacheBackend(max_bytes=65536)
     await state.initialize(
@@ -78,7 +78,7 @@ async def test_recovery_checkpoint_keeps_observations_queued_until_public_drain(
         store = state.run_store
         repository = state.execution.executions
         before = await repository.get_history_head("execution", tenant_id="tenant")
-        archive = store.read_store(RuntimeDomain.TRACE)
+        archive = store.read_store(PersistenceDomain.TRACE)
         for index in range(8):
             await _observe(store, index)
         assert await archive.list_events(agent_run_id="run") == []
@@ -89,7 +89,7 @@ async def test_recovery_checkpoint_keeps_observations_queued_until_public_drain(
                 AgentRunCheckpoint("run", 1, [message], transcript_message_count_before=0),
                 execution_id="execution", producer_generation=1,
             )
-            saved = await store.read_store(RuntimeDomain.CHECKPOINT).latest_checkpoint(agent_run_id="run")
+            saved = await store.read_store(PersistenceDomain.CHECKPOINT).latest_checkpoint(agent_run_id="run")
             assert saved is not None and saved.messages == [message]
             assert await archive.latest_checkpoint(agent_run_id="run") is None
             assert [item async for item in archive.iter_messages(agent_run_id="run")] == []
@@ -116,7 +116,7 @@ async def test_boundary_pressure_flushes_a_single_batch(
 ) -> None:
     state = await _setup(tmp_path, "memory")
     try:
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         published = asyncio.Event()
         original = archive.sync_prepared_projection
 
@@ -146,7 +146,7 @@ async def test_staging_during_scheduled_commit_gets_another_bounded_batch(
     entered = asyncio.Event()
     release = asyncio.Event()
     second = asyncio.Event()
-    archive = state.run_store.read_store(RuntimeDomain.TRACE)
+    archive = state.run_store.read_store(PersistenceDomain.TRACE)
     original = archive.sync_prepared_projection
     count = 0
 
@@ -185,7 +185,7 @@ async def test_cancelling_drain_settles_active_observation_commit(
     state = await _setup(tmp_path, "memory")
     entered = asyncio.Event()
     release = asyncio.Event()
-    archive = state.run_store.read_store(RuntimeDomain.TRACE)
+    archive = state.run_store.read_store(PersistenceDomain.TRACE)
     original = archive.sync_prepared_projection
     task = None
 
@@ -223,7 +223,7 @@ async def test_ongoing_observations_do_not_reset_first_dirty_deadline(
 ) -> None:
     monkeypatch.setattr(_trace_persistence, "DEFAULT_TRACE_FLUSH_INTERVAL", 0.05)
     state = await _setup(tmp_path, "memory")
-    archive = state.run_store.read_store(RuntimeDomain.TRACE)
+    archive = state.run_store.read_store(PersistenceDomain.TRACE)
     original = archive.sync_prepared_projection
     committed = asyncio.Event()
     stop = asyncio.Event()
@@ -253,11 +253,11 @@ async def test_ongoing_observations_do_not_reset_first_dirty_deadline(
 
 @pytest.mark.asyncio
 async def test_transient_observations_do_not_schedule_durability_tasks() -> None:
-    from linktools.ai.runtime.state._step_archive import InMemoryStepArchive, StagingAgentRunStore
+    from linktools.ai.persistence._step_archive import InMemoryStepArchive, StagingAgentRunStore
 
     store = _steps.RuntimeAgentRunStore(
         StagingAgentRunStore(),
-        conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
+        conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
         execution_archive=None, recovery_archive=None,
     )
     await store.initialize()
@@ -299,9 +299,9 @@ async def test_recovery_checkpoint_does_not_force_a_public_filesystem_commit(
             execution_id="execution", producer_generation=1,
         )
         assert commits == 1
-        saved = await store.read_store(RuntimeDomain.CHECKPOINT).latest_checkpoint(agent_run_id="run")
+        saved = await store.read_store(PersistenceDomain.CHECKPOINT).latest_checkpoint(agent_run_id="run")
         assert saved is not None and saved.messages == [message]
-        public = store.read_store(RuntimeDomain.TRACE)
+        public = store.read_store(PersistenceDomain.TRACE)
         assert await public.latest_checkpoint(agent_run_id="run") is None
         assert [item async for item in public.iter_messages(agent_run_id="run")] == []
         await store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
@@ -322,7 +322,7 @@ async def test_run_buffers_publish_independently_and_remain_idle_after_drain(
     monkeypatch.setattr(_trace_persistence, "DEFAULT_TRACE_FLUSH_INTERVAL", 0.05)
     state = await _setup(tmp_path, backend)
     await _add_run(state, "other-run", "other-execution")
-    archive = state.run_store.read_store(RuntimeDomain.TRACE)
+    archive = state.run_store.read_store(PersistenceDomain.TRACE)
     observed = set()
     committed = asyncio.Event()
     original = archive.sync_prepared_projection
@@ -359,7 +359,7 @@ async def test_slow_run_does_not_hold_another_runs_flush_barrier(
     monkeypatch.setattr(_trace_persistence, "DEFAULT_TRACE_FLUSH_INTERVAL", 0.01)
     state = await _setup(tmp_path, "memory")
     await _add_run(state, "other-run", "other-execution")
-    archive = state.run_store.read_store(RuntimeDomain.TRACE)
+    archive = state.run_store.read_store(PersistenceDomain.TRACE)
     entered = asyncio.Event()
     release = asyncio.Event()
     completed = asyncio.Event()
@@ -397,7 +397,7 @@ async def test_failed_scheduled_run_does_not_stop_siblings_or_its_required_retry
     monkeypatch.setattr(_trace_persistence, "DEFAULT_TRACE_FLUSH_INTERVAL", 0.01)
     state = await _setup(tmp_path, "memory")
     await _add_run(state, "other-run", "other-execution")
-    archive = state.run_store.read_store(RuntimeDomain.TRACE)
+    archive = state.run_store.read_store(PersistenceDomain.TRACE)
     failed = asyncio.Event()
     completed = asyncio.Event()
     original = archive.sync_prepared_projection
@@ -430,7 +430,7 @@ async def test_runtime_close_drains_all_queued_runs_before_buffer_deadlines(
     monkeypatch.setattr(_trace_persistence, "DEFAULT_TRACE_FLUSH_INTERVAL", 60.0)
     state = await _setup(tmp_path, "memory")
     await _add_run(state, "other-run", "other-execution")
-    archive = state.run_store.read_store(RuntimeDomain.TRACE)
+    archive = state.run_store.read_store(PersistenceDomain.TRACE)
     try:
         await _observe(state.run_store, 1)
         await _observe(state.run_store, 2, run_id="other-run", execution_id="other-execution")
@@ -451,7 +451,7 @@ async def test_buffer_callback_settles_before_release_rebind_or_pressure_drain(
     monkeypatch.setattr(_trace_persistence, "DEFAULT_TRACE_FLUSH_INTERVAL", 0.01)
     state = await _setup(tmp_path, "memory")
     store = state.run_store
-    archive = store.read_store(RuntimeDomain.TRACE)
+    archive = store.read_store(PersistenceDomain.TRACE)
     entered = asyncio.Event()
     release = asyncio.Event()
     original = archive.sync_prepared_projection

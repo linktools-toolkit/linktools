@@ -21,7 +21,7 @@ async def test_invalid_budget_precedes_control(timeout) -> None:
     with pytest.raises(AIError) as caught:
         await bundle.graph_run.cancel(settle_timeout_seconds=timeout)
     assert caught.value.code is ErrorCode.REQUEST_FIELD_INVALID
-    assert not bundle.runtime._cancel_settlements
+    assert not bundle.engine._cancel_settlements
 
 
 @pytest.mark.asyncio
@@ -33,7 +33,7 @@ async def test_zero_budget_does_not_activate_or_submit_control() -> None:
     assert caught.value.safe_details == {
         "phase": "cancel_settlement", "graph_id": "graph", "reason": "deadline_unknown",
     }
-    assert not bundle.runtime._cancel_settlements
+    assert not bundle.engine._cancel_settlements
 
 
 @pytest.mark.asyncio
@@ -53,7 +53,7 @@ async def test_settlement_returns_actual_terminal_status(status) -> None:
     assert result.status is status
     assert requests[0].idempotency_key == "intent"
     assert requests[0].force is True
-    assert not bundle.runtime._cancel_settlements
+    assert not bundle.engine._cancel_settlements
 
 
 @pytest.mark.asyncio
@@ -77,7 +77,7 @@ async def test_settlement_rejects_nonterminal_wait_stops(status) -> None:
     assert caught.value.safe_details["graph_status"] == status.value
     assert bundle.graph.wait_calls == 0
     await asyncio.sleep(0)
-    await bundle.runtime.close()
+    await bundle.close()
 
 
 @pytest.mark.asyncio
@@ -100,12 +100,12 @@ async def test_pending_control_remains_owned_and_closes_only_after_completion() 
     assert caught.value.safe_details["cleanup_pending"] is True
     assert bundle.graph.state_calls == 0
     with pytest.raises(AIError):
-        await bundle.runtime.close()
+        await bundle.close()
     assert not bundle.storage_closed
     release.set()
     await asyncio.sleep(0)
     await asyncio.sleep(0)
-    await bundle.runtime.close()
+    await bundle.close()
     assert bundle.storage_closed
     assert bundle.graph.state_calls == 0
 
@@ -129,7 +129,7 @@ async def test_late_control_failure_is_retained_by_runtime() -> None:
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     with pytest.raises(AIError) as caught:
-        await bundle.runtime.close()
+        await bundle.close()
     assert caught.value is error
     assert not bundle.storage_closed
 
@@ -148,7 +148,8 @@ async def test_activation_timeout_does_not_submit_later() -> None:
             except asyncio.CancelledError:
                 await release.wait()
 
-    run = replace(bundle.graph_run, _engine=Engine())
+    bundle.engine._activate_graph = Engine()._activate_graph
+    run = bundle.graph_run
     with pytest.raises(AIError) as caught:
         await run.cancel(settle_timeout_seconds=0.01)
     assert entered.is_set()
@@ -156,8 +157,8 @@ async def test_activation_timeout_does_not_submit_later() -> None:
     release.set()
     await asyncio.sleep(0)
     await asyncio.sleep(0)
-    assert not bundle.runtime._cancel_settlements
-    await bundle.runtime.close()
+    assert not bundle.engine._cancel_settlements
+    await bundle.close()
 
 
 @pytest.mark.asyncio
@@ -180,7 +181,7 @@ async def test_control_and_authority_errors_are_not_reclassified(phase) -> None:
     with pytest.raises(AIError) as caught:
         await bundle.graph_run.cancel(settle_timeout_seconds=1)
     assert caught.value is error
-    assert not bundle.runtime._cancel_settlements
+    assert not bundle.engine._cancel_settlements
 
 
 @pytest.mark.asyncio
@@ -201,11 +202,11 @@ async def test_caller_cancellation_does_not_cancel_accepted_control() -> None:
     pending.cancel()
     with pytest.raises(asyncio.CancelledError):
         await pending
-    assert bundle.runtime._cancel_settlements
+    assert bundle.engine._cancel_settlements
     release.set()
     await asyncio.sleep(0)
     await asyncio.sleep(0)
-    await bundle.runtime.close()
+    await bundle.close()
 
 
 @pytest.mark.asyncio
@@ -222,7 +223,8 @@ async def test_caller_cancellation_during_activation_never_submits_later() -> No
             except asyncio.CancelledError:
                 await release.wait()
 
-    run = replace(bundle.graph_run, _engine=Engine())
+    bundle.engine._activate_graph = Engine()._activate_graph
+    run = bundle.graph_run
     pending = asyncio.create_task(run.cancel(settle_timeout_seconds=10))
     await entered.wait()
     pending.cancel()
@@ -231,8 +233,8 @@ async def test_caller_cancellation_during_activation_never_submits_later() -> No
     release.set()
     await asyncio.sleep(0)
     await asyncio.sleep(0)
-    assert not bundle.runtime._cancel_settlements
-    await bundle.runtime.close()
+    assert not bundle.engine._cancel_settlements
+    await bundle.close()
 
 
 @pytest.mark.asyncio
@@ -278,8 +280,8 @@ async def test_authorization_before_handoff_cannot_admit_after_stop(stop, swallo
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     assert finalizers == []
-    assert not bundle.runtime._cancel_settlements
-    await bundle.runtime.close()
+    assert not bundle.engine._cancel_settlements
+    await bundle.close()
 
 
 @pytest.mark.asyncio
@@ -312,9 +314,9 @@ async def test_real_control_handoff_retains_finalizer_after_deadline() -> None:
     await asyncio.wait_for(completed.wait(), 1)
     for _ in range(4):
         await asyncio.sleep(0)
-    assert not bundle.runtime._cancel_settlements
+    assert not bundle.engine._cancel_settlements
     assert bundle.graph.state_calls == 0
-    await bundle.runtime.close()
+    await bundle.close()
 
 
 @pytest.mark.asyncio
@@ -326,9 +328,10 @@ async def test_budget_expired_before_scheduling_does_not_start_activation() -> N
         async def _activate_graph(self, graph_id, principal):
             activated.append(graph_id)
 
-    run = replace(bundle.graph_run, _engine=Engine())
+    bundle.engine._activate_graph = Engine()._activate_graph
+    run = bundle.graph_run
     with pytest.raises(AIError) as caught:
         await run.cancel(settle_timeout_seconds=1e-100)
     assert caught.value.safe_details["reason"] == "deadline_unknown"
     assert not activated
-    assert not bundle.runtime._cancel_settlements
+    assert not bundle.engine._cancel_settlements

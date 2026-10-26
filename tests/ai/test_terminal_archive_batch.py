@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Terminal archive sharing preserves owner facts and immutable caller plans."""
 from ._runtime_test_helpers import model_features
 
@@ -16,18 +18,19 @@ from sqlalchemy import event
 from linktools.ai.capability import CheckpointCapability, TraceCapability
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, StopReason, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeDomain
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime.state._archive import ContentArchive, ContentRecord, PreparedArchive
-from linktools.ai.runtime.state._checkpoint_persistence import CheckpointPersistence
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence._archive import ContentArchive, ContentRecord, PreparedArchive
+from linktools.ai.persistence._checkpoint_persistence import CheckpointPersistence
+from linktools.ai.persistence.contracts import (
     ExecutionTerminalCommit, ExecutionTerminalCommitResult, RecoveryCheckpoint,
     RecoveryCheckpointState, ResultRecord,
 )
-from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
-from linktools.ai.runtime.state._model_interaction_store import ModelInteractionStateStepArchive
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
-from linktools.ai.runtime._model_interaction import (
+from linktools.ai.persistence._runtime_commands import StateCommands
+from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
+from linktools.ai.persistence._model_interaction import (
     StagedContextProjection, StagedContextSpan, StagedModelInteraction,
 )
 
@@ -40,10 +43,10 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_terminal_shared_preparation_reduces_reads_and_preserves_owner_values(tmp_path: Path) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="terminal-preparation", tenant_id="tenant")
-    conversation = state.run_store.read_store(RuntimeDomain.CONVERSATION)
-    recovery = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    conversation = state.run_store.read_store(PersistenceDomain.CONVERSATION)
+    recovery = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     run, checkpoint = AgentRunRecord("run"), _checkpoint(2)
     engine = conversation.state_store.storage_group.context.engine.sync_engine
     selected: list[str] = []
@@ -94,12 +97,12 @@ async def test_terminal_shared_preparation_reduces_reads_and_preserves_owner_val
         await state.close()
 
 
-@pytest.mark.parametrize("domain", (RuntimeDomain.CONVERSATION, RuntimeDomain.CHECKPOINT))
+@pytest.mark.parametrize("domain", (PersistenceDomain.CONVERSATION, PersistenceDomain.CHECKPOINT))
 @pytest.mark.parametrize("override", ("relocate", "prepare"))
 async def test_terminal_shared_preparation_keeps_custom_owner_hooks(
-    tmp_path: Path, domain: RuntimeDomain, override: str,
+    tmp_path: Path, domain: PersistenceDomain, override: str,
 ) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="terminal-hooks", tenant_id="tenant")
     original = state.run_store.read_store(domain)
     calls: list[str] = []
@@ -125,7 +128,7 @@ async def test_terminal_shared_preparation_keeps_custom_owner_hooks(
         tenant_id="tenant", runtime_domain=domain,
     )
     try:
-        method = (custom.prepare_conversation_checkpoint if domain is RuntimeDomain.CONVERSATION
+        method = (custom.prepare_conversation_checkpoint if domain is PersistenceDomain.CONVERSATION
                   else custom.prepare_run_checkpoint)
         _, prepared = await method(AgentRunRecord("run"), _checkpoint(1), archive=PreparedArchive())
         assert calls == ["relocate", "prepare"]
@@ -151,7 +154,7 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
     run_publications: list[tuple[int, str]] = []
     replayed_contexts: list[tuple[object, object]] = []
     original_recovery = CheckpointPersistence.materialize_recovery_checkpoint
-    original_terminal = RuntimeStateCommands.commit_terminal_checkpoint
+    original_terminal = StateCommands.commit_terminal_checkpoint
     original_publish = ContentArchive.publish
     checked_plans = 0
 
@@ -207,10 +210,8 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
 
     monkeypatch.setattr(ContentArchive, "publish", publish)
     monkeypatch.setattr(CheckpointPersistence, "materialize_recovery_checkpoint", materialize_recovery)
-    monkeypatch.setattr(RuntimeStateCommands, "commit_terminal_checkpoint", commit)
-    async with Runtime.open(
-        "terminal-archive-tool", storage=storage, features=model_features(_ToolModels(), application),
-    ) as runtime:
+    monkeypatch.setattr(StateCommands, "commit_terminal_checkpoint", commit)
+    async with Persistence.open('terminal-archive-tool', storage=storage) as persistence_211, Runtime.open(persistence=persistence_211, features=model_features(_ToolModels(), application)) as runtime:
         await runtime.agents.get("default").create_session("session")
         session = runtime.agents.get("default").session("session")
         group = runtime._state.execution.executions.state_store.storage_group
@@ -239,8 +240,8 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
         assert _relevant_kinds(history.items) == expected
         if backend == "split":
             retained_scopes = set()
-            for domain in (RuntimeDomain.TRACE, RuntimeDomain.CONVERSATION, RuntimeDomain.CHECKPOINT):
-                owner = runtime._state.run_store.read_store(domain)
+            for domain in (PersistenceDomain.TRACE, PersistenceDomain.CONVERSATION, PersistenceDomain.CHECKPOINT):
+                owner = runtime._run_store.read_store(domain)
                 content = await owner.transcript_repository.content_archive()
                 retained_scopes.add((id(owner.state_store.storage_group), content.scope_id))
                 assert any(record.kind == "archive_content" for record in
@@ -259,14 +260,14 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
 async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, foreign_scope: bool, owner_conflict: bool,
 ) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="terminal-scopes", tenant_id="tenant")
-    trace = state.run_store.read_store(RuntimeDomain.TRACE)
-    original = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    trace = state.run_store.read_store(PersistenceDomain.TRACE)
+    original = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     recovery = ModelInteractionStateStepArchive(
         original.state_store, object_store=None,
         namespace="foreign" if foreign_scope else "terminal-scopes",
-        tenant_id="tenant", runtime_domain=RuntimeDomain.CHECKPOINT,
+        tenant_id="tenant", runtime_domain=PersistenceDomain.CHECKPOINT,
     )
     current = _execution()
     run, checkpoint = AgentRunRecord("run"), _checkpoint(2)
@@ -292,7 +293,7 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
     try:
         await state.execution.executions.create_with_history_head(current)
         await state.recovery.checkpoints.create(source)
-        commands = RuntimeStateCommands(
+        commands = StateCommands(
             state.execution.executions, namespace="terminal-scopes", events=state.execution.events,
             recovery=state.recovery.checkpoints, execution_run_store=trace,
             recovery_run_store=recovery, background_tasks=set(),
@@ -336,7 +337,7 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
 async def test_terminal_archive_batch_does_not_open_scope_without_preparation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="terminal-no-archive", tenant_id="tenant")
     current = _execution()
     result = ResultRecord(None, StopReason.ERROR, UsageMetrics(), current.updated_at)
@@ -357,9 +358,9 @@ async def test_terminal_archive_batch_does_not_open_scope_without_preparation(
             return await open_archive(create=create)
 
         monkeypatch.setattr(group, "open_archive", existing_archive_only)
-        commands = RuntimeStateCommands(
+        commands = StateCommands(
             state.execution.executions, namespace="terminal-no-archive", events=state.execution.events,
-            execution_run_store=state.run_store.read_store(RuntimeDomain.TRACE), background_tasks=set(),
+            execution_run_store=state.run_store.read_store(PersistenceDomain.TRACE), background_tasks=set(),
         )
         committed = await commands.commit_terminal_checkpoint(
             commit, expected_execution=current, execution_checkpoints=(_checkpoint(1),),
@@ -375,7 +376,7 @@ async def test_terminal_cold_replay_rejects_changed_facts_and_missing_context(
     tmp_path: Path, fault: str,
 ) -> None:
     database = tmp_path / "cold-split.db"
-    state = RuntimeState(_split_sqlite_storage(database))
+    state = Persistence(_split_sqlite_storage(database))
     await state.initialize(namespace="terminal-cold-replay", tenant_id="tenant")
     run = AgentRunRecord("run")
     timestamp = run.started_at
@@ -391,7 +392,7 @@ async def test_terminal_cold_replay_rejects_changed_facts_and_missing_context(
         StagedContextProjection((StagedContextSpan(1, 2),)), "SUCCEEDED", None, 1,
         UsageMetrics(model_requests=1, input_tokens=2, output_tokens=1), timestamp, timestamp,
     )
-    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     prepared = PreparedArchive()
     try:
         interactions = await archive.prepare_interactions(
@@ -418,9 +419,9 @@ async def test_terminal_cold_replay_rejects_changed_facts_and_missing_context(
     finally:
         await state.close()
 
-    cold = RuntimeState(_split_sqlite_storage(database))
+    cold = Persistence(_split_sqlite_storage(database))
     await cold.initialize(namespace="terminal-cold-replay", tenant_id="tenant")
-    archive = cold.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = cold.run_store.read_store(PersistenceDomain.CHECKPOINT)
     try:
         current_messages = messages
         if fault == "model":
@@ -432,7 +433,7 @@ async def test_terminal_cold_replay_rejects_changed_facts_and_missing_context(
                 "changed request", timestamp=timestamp,
             )]), *messages[1:])
         else:
-            objects = cold.archive_object_store(RuntimeDomain.CHECKPOINT)
+            objects = cold.archive_object_store(PersistenceDomain.CHECKPOINT)
             assert await objects.delete_object(request_object.key, expected_digest=request_object.digest)
             assert await objects.stat(request_object.key) is None
         content_write = PreparedArchive()

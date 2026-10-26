@@ -15,7 +15,7 @@ from pydantic_ai.models import CompletedStreamedResponse, Model, ModelRequestPar
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import RequestUsage
 
-from linktools.ai.runtime._message import model_response_usage, project_model_response_attempts
+from linktools.ai.model.messages import model_response_usage, project_model_response_attempts
 from linktools.ai.runtime._metric_capability import PreparedRequestModel
 
 

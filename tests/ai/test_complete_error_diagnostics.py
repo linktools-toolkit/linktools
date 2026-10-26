@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Complete, secret-safe failure capture and durable public reads."""
 
 import json
@@ -16,8 +18,10 @@ from linktools.core._logging import LoggingManager
 
 from linktools.ai.core import ExecutionEventType, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode, ErrorDiagnostics
-from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeHistory, RuntimeStorage
-from linktools.ai.runtime.state._codec import decode_domain, encode_domain
+from linktools.ai.history import History
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.codec import decode_domain, encode_domain
 from linktools.ai.storage import FilesystemObjectStore
 
 from ._runtime_test_helpers import model_features
@@ -143,14 +147,14 @@ class _FailingModel:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ["filesystem", "sqlite"])
 async def test_actual_failure_full_diagnostics_survive_close_and_public_reopen(tmp_path: Path, backend: str) -> None:
-    def storage() -> RuntimeStorage:
+    def storage() -> PersistenceStorage:
         if backend == "filesystem":
-            return RuntimeStorage.filesystem(tmp_path / "runtime")
-        return RuntimeStorage.sqlite(tmp_path / "runtime.db", object_store=FilesystemObjectStore(tmp_path / "objects"))
+            return PersistenceStorage.filesystem(tmp_path / "runtime")
+        return PersistenceStorage.sqlite(tmp_path / "runtime.db", object_store=FilesystemObjectStore(tmp_path / "objects"))
 
     group = RuntimeFeatures("complete-diagnostics")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open("complete-diagnostics", features=model_features(_FailingModel(), group), storage=storage()) as runtime:
+    async with Persistence.open('complete-diagnostics', storage=storage()) as persistence_153, Runtime.open(persistence=persistence_153, features=model_features(_FailingModel(), group)) as runtime:
         result = (await runtime.agents.get().run("test failure", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.FAILED
         assert result.error_code == ErrorCode.MODEL_API_ERROR.value
@@ -162,7 +166,7 @@ async def test_actual_failure_full_diagnostics_survive_close_and_public_reopen(t
         assert terminal.payload["error_diagnostics"]["traceback"] == diagnostics.traceback
         assert terminal.payload["error_diagnostics"]["exception_chain"][-1]["exception_message"].endswith("END_TRANSPORT")
         principal = runtime.default_principal
-    async with RuntimeHistory.open("complete-diagnostics", storage=storage()) as history:
+    async with Persistence.open('complete-diagnostics', storage=storage(), tenant_id="default", read_only=True) as history_persistence_168, History.open(persistence=history_persistence_168) as history:
         restored = await history.result(result.execution_id, principal=principal)
         assert restored.error_diagnostics == diagnostics
         summary = await history.inspect_execution(result.execution_id, principal=principal)

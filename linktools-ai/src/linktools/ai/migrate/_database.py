@@ -9,8 +9,9 @@ from linktools.core import environ
 
 from ..asset import build_asset_sql_metadata
 from ..observe import build_metrics_sql_metadata
-from ..runtime.state import RuntimeDomain, runtime_domain_uses_object_store
-from ..runtime.state.schema import build_runtime_sql_metadata
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.objects import runtime_domain_uses_object_store
+from linktools.ai.persistence.schema import build_runtime_sql_metadata
 from ..storage import build_object_sql_metadata, provision_sql
 
 _logger = environ.get_logger("ai.migrate.database")
@@ -27,7 +28,7 @@ def build_sql_schema_metadata() -> "MetaData":
     from sqlalchemy import MetaData
 
     metadata = MetaData()
-    build_runtime_sql_metadata(frozenset(RuntimeDomain), metadata=metadata)
+    build_runtime_sql_metadata(frozenset(PersistenceDomain), metadata=metadata)
     build_object_sql_metadata(metadata=metadata)
     build_asset_sql_metadata(metadata=metadata)
     build_metrics_sql_metadata(metadata=metadata)
@@ -44,14 +45,14 @@ async def provision_database(engine: "AsyncEngine") -> None:
 async def provision_runtime_database(
     engine: "AsyncEngine",
     *,
-    domains: Iterable[RuntimeDomain] = tuple(RuntimeDomain),
+    domains: Iterable[PersistenceDomain] = tuple(PersistenceDomain),
     object_store: "ObjectStore | None" = None,
 ) -> None:
     selected = frozenset(domains)
     if not selected:
-        raise ValueError("at least one RuntimeDomain is required")
-    if not selected.issubset(frozenset(RuntimeDomain)):
-        raise ValueError("domains must contain RuntimeDomain values")
+        raise ValueError("at least one PersistenceDomain is required")
+    if not selected.issubset(frozenset(PersistenceDomain)):
+        raise ValueError("domains must contain PersistenceDomain values")
     from sqlalchemy import MetaData
 
     metadata = MetaData()

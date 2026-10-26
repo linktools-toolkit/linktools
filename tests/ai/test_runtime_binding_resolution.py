@@ -38,15 +38,17 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.runtime._agent_binding_resolver import _AgentBindingResolver
-from linktools.ai.runtime._context import RuntimeContext
-from linktools.ai.runtime._runtime_identity import task_graph_binding_capture_key
+from linktools.ai.core import ExecutionContext
+from linktools.ai.persistence._runtime_identity import task_graph_binding_capture_key
 from linktools.ai.runtime._runtime_service import Runtime
-from linktools.ai.runtime._task_graph_binding_capture import TaskGraphBindingCaptureStore
-from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionRequest
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, SnapshotLimits
-from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
+from linktools.ai.task_engine import TaskEngine
+from linktools.ai.inputs import TaskGraphBindingCaptureStore
+from linktools.ai.execution import ExecutionHandle, ExecutionRequest
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.persistence.snapshots import SnapshotLimits
+from linktools.ai.persistence.contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import (
     AgentSpec,
     MCPServerSpec,
@@ -379,19 +381,10 @@ async def test_runtime_start_admits_resolved_binding() -> None:
     try:
         execution = _RecordingExecution()
         runtime = Runtime(
-            fixture.catalog,
-            fixture.compiler,
-            execution,  # type: ignore[arg-type]
-            object(),  # type: ignore[arg-type]
-            object(),  # type: ignore[arg-type]
-            SimpleNamespace(_bind_observation=lambda *args: None),  # type: ignore[arg-type]
-            object(),  # type: ignore[arg-type]
-            object(),  # type: ignore[arg-type]
-            object(),  # type: ignore[arg-type]
-            object(),  # type: ignore[arg-type]
-            None,
-            namespace="namespace",
-            context=RuntimeContext(None),
+            fixture.catalog, fixture.compiler, execution,
+            object(), object(), object(), object(), object(), None,
+            persistence=SimpleNamespace(namespace="namespace", tenant_id="tenant"),
+            run_store=object(), context=ExecutionContext(None),
             _binding_resolver=fixture.resolver,
         )
 
@@ -626,7 +619,7 @@ async def test_runtime_storage_snapshot_preserves_asset_version_refs(
 ) -> None:
     fixture = await _fixture()
     storage_root = tmp_path / "state"
-    state = RuntimeState(RuntimeStorage.filesystem(storage_root))
+    state = Persistence(PersistenceStorage.filesystem(storage_root))
     await state.initialize(namespace="namespace", tenant_id="tenant")
     try:
         resolved = await fixture.resolver.resolve(fixture.binding)
@@ -670,7 +663,7 @@ async def test_runtime_storage_snapshot_preserves_asset_version_refs(
     )
 
     snapshot_store = InMemoryObjectStore("snapshot")
-    read_state = RuntimeState(RuntimeStorage.filesystem(storage_root))
+    read_state = Persistence(PersistenceStorage.filesystem(storage_root))
     await read_state.initialize(
         namespace="namespace",
         tenant_id="tenant",
@@ -685,13 +678,13 @@ async def test_runtime_storage_snapshot_preserves_asset_version_refs(
         await read_state.close()
 
     restored_root = tmp_path / "restored"
-    await RuntimeState.restore_snapshot(
+    await Persistence.restore_snapshot(
         snapshot_ref,
         object_store=snapshot_store,
         root=restored_root,
         limits=SnapshotLimits(max_entries=1024, max_bytes=8 * 1024 * 1024),
     )
-    restored = RuntimeState(RuntimeStorage.from_root(restored_root))
+    restored = Persistence(PersistenceStorage.from_root(restored_root))
     await restored.initialize(
         namespace="namespace",
         tenant_id="tenant",
@@ -737,7 +730,7 @@ async def test_runtime_storage_snapshot_restores_task_binding_capture(
         },
     )
     storage_root = tmp_path / "task-state"
-    state = RuntimeState(RuntimeStorage.filesystem(storage_root))
+    state = Persistence(PersistenceStorage.filesystem(storage_root))
     await state.initialize(namespace="namespace", tenant_id="tenant")
     graph = TaskGraph(
         "graph",
@@ -756,7 +749,7 @@ async def test_runtime_storage_snapshot_restores_task_binding_capture(
     try:
         captures = TaskGraphBindingCaptureStore(
             "namespace",
-            state.object_store(RuntimeDomain.TASK),
+            state.object_store(PersistenceDomain.TASK),
         )
         await captures.capture(admission, graph, tasks=(task,))
         await state.task.admissions.admit(admission, graph)
@@ -768,7 +761,7 @@ async def test_runtime_storage_snapshot_restores_task_binding_capture(
         await state.close()
 
     snapshot_store = InMemoryObjectStore("task-snapshot")
-    read_state = RuntimeState(RuntimeStorage.filesystem(storage_root))
+    read_state = Persistence(PersistenceStorage.filesystem(storage_root))
     await read_state.initialize(
         namespace="namespace",
         tenant_id="tenant",
@@ -783,13 +776,13 @@ async def test_runtime_storage_snapshot_restores_task_binding_capture(
         await read_state.close()
 
     restored_root = tmp_path / "task-restored"
-    await RuntimeState.restore_snapshot(
+    await Persistence.restore_snapshot(
         snapshot_ref,
         object_store=snapshot_store,
         root=restored_root,
         limits=SnapshotLimits(max_entries=1024, max_bytes=8 * 1024 * 1024),
     )
-    restored = RuntimeState(RuntimeStorage.from_root(restored_root))
+    restored = Persistence(PersistenceStorage.from_root(restored_root))
     await restored.initialize(
         namespace="namespace",
         tenant_id="tenant",
@@ -798,7 +791,7 @@ async def test_runtime_storage_snapshot_restores_task_binding_capture(
     try:
         restored_captures = TaskGraphBindingCaptureStore(
             "namespace",
-            restored.object_store(RuntimeDomain.TASK),
+            restored.object_store(PersistenceDomain.TASK),
         )
         loaded = await restored_captures.load(admission)
         assert set(loaded.tasks) == {("test.capture-agent", 1)}
@@ -871,16 +864,18 @@ async def test_recover_pending_preflights_all_subjects_before_dispatch() -> None
             events.append(("recover", graph_id, request.principal))
             return graph_id
 
-    runtime = object.__new__(Runtime)
-    runtime._closed = False
-    runtime._closing = False
-    runtime._task_admissions = admissions
-    runtime._default_principal = actor
-    runtime._context = SimpleNamespace(tenant_id="tenant")
-    runtime._namespace = "runtime"
-    runtime._graph_service = GraphService()
+    engine = object.__new__(TaskEngine)
+    engine._owner = engine
+    engine._persistence = SimpleNamespace(namespace="runtime", tenant_id="tenant", ready=True)
+    engine._closed = False
+    engine._closing = False
+    engine._task_admissions = admissions
+    engine._default_principal = actor
+    engine._context = SimpleNamespace(tenant_id="tenant")
+    engine._namespace = "runtime"
+    engine._graph_service = GraphService()
 
-    page = await runtime._recover_pending_tasks(
+    page = await engine._recover_pending_tasks(
         Engine(),
         cursor=None,
         limit=10,
@@ -899,7 +894,7 @@ async def test_recover_pending_preflights_all_subjects_before_dispatch() -> None
 
     events.clear()
     with pytest.raises(AIError) as missing_definition:
-        await runtime._recover_pending_tasks(
+        await engine._recover_pending_tasks(
             Engine(fail_on="graph-b"),
             cursor=None,
             limit=10,
@@ -914,9 +909,9 @@ async def test_recover_pending_preflights_all_subjects_before_dispatch() -> None
     ]
 
     events.clear()
-    runtime._graph_service = GraphService(fail_authorize_on="graph-b")
+    engine._graph_service = GraphService(fail_authorize_on="graph-b")
     with pytest.raises(AIError) as denied:
-        await runtime._recover_pending_tasks(
+        await engine._recover_pending_tasks(
             Engine(),
             cursor=None,
             limit=10,

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Actual SDK client attempts follow existing Runtime request boundaries."""
 from ._runtime_test_helpers import model_features
 
@@ -20,10 +22,12 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import Principal, RunBudget, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelClientRequest, ModelClientRequestRecorder
-from linktools.ai.runtime import Execution, ExecutionInputContext, Runtime, RuntimeStorage
+from linktools.ai.execution import Execution, ExecutionInputContext
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._step_archive import StagingAgentRunStore
 from linktools.ai.capability import TraceCapability
 
 from .test_model_client_request_capture import _agents, _model, _binding, _response
@@ -106,10 +110,10 @@ async def test_runtime_records_compaction_and_agent_dispatches_separately(
             ModelRequest(parts=[UserPromptPart(f"user-{index} " + "x" * 240)]),
             ModelResponse(parts=[TextPart(f"answer-{index} " + "y" * 240)]),
         ))
-    storage = RuntimeStorage.in_memory()
+    storage = PersistenceStorage.in_memory()
     features = _agents()
     features.capability(TraceCapability(record_http_bodies=True), scope="runtime")
-    async with Runtime.open("default", storage=storage, features=model_features(models, features)) as runtime:
+    async with Persistence.open('default', storage=storage) as persistence_112, Runtime.open(persistence=persistence_112, features=model_features(models, features)) as runtime:
         execution = await runtime.agents.get("default").start(
             "continue", input_context=ExecutionInputContext.from_messages(history),
             budget=RunBudget(model_requests=2) if budgeted else None,
@@ -162,10 +166,10 @@ async def test_runtime_flushes_original_attempts_only_at_request_completion(
         return httpx2.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
 
     models, _clients = _binding(monkeypatch, handler, retries=int(outcome == "retry"))
-    storage = RuntimeStorage.in_memory() if backend == "memory" else RuntimeStorage.sqlite(tmp_path / "state.db")
+    storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "state.db")
     features = _agents()
     features.capability(TraceCapability(record_http_bodies=record_http_bodies), scope="runtime")
-    async with Runtime.open("default", storage=storage, features=model_features(models, features)) as runtime:
+    async with Persistence.open('default', storage=storage) as persistence_168, Runtime.open(persistence=persistence_168, features=model_features(models, features)) as runtime:
         execution = await runtime.agents.get("default").start("original prompt")
         if outcome == "cancel":
             await asyncio.wait_for(stream.blocked.wait(), 5)
@@ -173,10 +177,10 @@ async def test_runtime_flushes_original_attempts_only_at_request_completion(
                 namespace="default", tenant_id="default", execution_id=execution.execution_id,
                 agent_run_seq=1,
             )
-            staged = await runtime._state.run_store.list_model_interactions(agent_run_id=run_id)
+            staged = await runtime._run_store.list_model_interactions(agent_run_id=run_id)
             assert len(staged) == 1 and staged[0].status == "RUNNING"
             assert staged[0].client_requests is None
-            archive = runtime._state.run_store.read_store(RuntimeDomain.TRACE)
+            archive = runtime._run_store.read_store(PersistenceDomain.TRACE)
             records = await archive.list_model_interactions(agent_run_id=run_id)
             assert all(record.client_requests is None for record in records)
             await execution.cancel()
@@ -246,9 +250,9 @@ async def test_concurrent_subagents_keep_original_attempts_with_their_own_execut
     group.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_subagents=("child",))
     group.agent("child", model="default", allow_tools=(), allow_subagents=())
-    storage = RuntimeStorage.in_memory()
+    storage = PersistenceStorage.in_memory()
     principal = Principal("owner", "default")
-    async with Runtime.open("default", storage=storage, features=model_features(models, group)) as runtime:
+    async with Persistence.open('default', storage=storage) as persistence_251, Runtime.open(persistence=persistence_251, features=model_features(models, group)) as runtime:
         parents = await asyncio.gather(*(runtime.agents.get("default").start(f"root-{i}", principal=principal) for i in range(2)))
         results = await asyncio.gather(*(execution.wait(timeout_seconds=15) for execution in parents))
         assert all(value.result.status == "SUCCEEDED" for value in results)

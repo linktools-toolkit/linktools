@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Ambiguous admission acknowledgements retain exact producer ownership."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -10,8 +10,8 @@ import pytest
 
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.contracts import (
     AgentAttemptClaim,
     PendingDeferredCall,
     PendingToolContinuation,
@@ -31,8 +31,8 @@ async def test_admission_readback_requires_own_receipt(
     monkeypatch: pytest.MonkeyPatch, kind: str, outcome: str,
 ) -> None:
     namespace = "attempt-claim"
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace=namespace, tenant_id="tenant")
     try:
         now = datetime.now(timezone.utc)

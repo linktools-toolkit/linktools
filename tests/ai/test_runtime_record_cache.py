@@ -14,10 +14,10 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime.state._filesystem import FilesystemStateStore
-from linktools.ai.runtime.state._memory import InMemoryStateStore
-from linktools.ai.runtime.state._sql import SqlStateStore
-from linktools.ai.runtime.state._store import StateTransactionNestingError, StoredRecord
+from linktools.ai.persistence._filesystem import FilesystemStateStore
+from linktools.ai.persistence._memory import InMemoryStateStore
+from linktools.ai.persistence._sql import SqlStateStore
+from linktools.ai.persistence.state import StateTransactionNestingError, StoredRecord
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.storage import _write_cache
 
@@ -281,7 +281,7 @@ async def test_record_cache_checks_storage_group_lifetime(backend: str, tmp_path
 async def test_record_cache_without_hot_capability_does_not_roundtrip_codec(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from linktools.ai.runtime.state import _record_cache
+    from linktools.ai.persistence import _record_cache
 
     store = InMemoryStateStore(cache=object())
     await store.initialize()
@@ -426,8 +426,8 @@ async def test_native_refresh_uses_source_start_deadline(monkeypatch: pytest.Mon
 
 
 async def test_repository_refresh_keeps_custom_store_source_contract() -> None:
-    from linktools.ai.runtime.state._repository_common import RepositoryBase
-    from linktools.ai.runtime.state._plan import RuntimeDomain
+    from linktools.ai.persistence._repository_common import RepositoryBase
+    from linktools.ai.persistence._plan import PersistenceDomain
 
     record = _record(1)
     store = InMemoryStateStore()
@@ -438,7 +438,7 @@ async def test_repository_refresh_keeps_custom_store_source_contract() -> None:
         async def read(self, fn):
             return await store.read(fn)
 
-    repository = RepositoryBase(CustomStore(), namespace="custom", tenant_id="tenant", domain=RuntimeDomain.EXECUTION)
+    repository = RepositoryBase(CustomStore(), namespace="custom", tenant_id="tenant", domain=PersistenceDomain.EXECUTION)
     try:
         assert await repository._refresh_records((record.key_digest,)) == {record.key_digest: record}
     finally:

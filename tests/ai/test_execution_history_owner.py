@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Execution owns captured history policy without consuming native SDK capability trees."""
 from ._runtime_test_helpers import model_features
 
@@ -17,10 +19,11 @@ from pydantic_ai.usage import RunUsage
 
 from linktools.ai.capability import ExecutionCapability, SessionCapability
 from linktools.ai.core import ExecutionStatus, PromptLimits
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._capabilities import compose_platform_capabilities, runtime_feature_leaves
 from linktools.ai.runtime._compaction import CompactionPolicy
-from linktools.ai.runtime.state._steps import RuntimeAgentRunStore, StagingAgentRunStore
+from linktools.ai.persistence.runs import RuntimeAgentRunStore, StagingAgentRunStore
 
 from .test_explicit_runtime_features import _FeatureModels, _features
 
@@ -100,8 +103,7 @@ class _RequiresExecution(AbstractCapability):
 @pytest.mark.asyncio
 async def test_default_execution_owner_exists_without_implying_history() -> None:
     observer = _RequiresExecution()
-    async with Runtime.open('default-execution-owner',
-                            storage=RuntimeStorage.in_memory(), features=model_features(_FeatureModels(), _features(observer))) as runtime:
+    async with Persistence.open('default-execution-owner', storage=PersistenceStorage.in_memory()) as persistence_103, Runtime.open(persistence=persistence_103, features=model_features(_FeatureModels(), _features(observer))) as runtime:
         execution = await runtime.agents.get().start('task')
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
     assert observer.observed == [False]
@@ -113,8 +115,7 @@ async def test_retained_execution_forks_with_sessions_disabled() -> None:
     declaration = ExecutionCapability(retain_history=True)
     features = _features(WrapperCapability(CombinedCapability([declaration]), id='execution-wrapper'),
                          SessionCapability(enabled=False), observer)
-    async with Runtime.open('sessionless-execution-owner',
-                            storage=RuntimeStorage.in_memory(), features=model_features(_FeatureModels(), features)) as runtime:
+    async with Persistence.open('sessionless-execution-owner', storage=PersistenceStorage.in_memory()) as persistence_116, Runtime.open(persistence=persistence_116, features=model_features(_FeatureModels(), features)) as runtime:
         source = await runtime.agents.get().start('task')
         assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
         fork = await source.fork('follow up')

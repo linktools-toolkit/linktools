@@ -15,11 +15,7 @@ from linktools.ai.capability import CapabilityContribution, SkillDefinition
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 
-from linktools.ai.runtime import (
-    ExecutionHandle,
-    ExecutionRequest,
-    ResumeSessionRequest,
-)
+from linktools.ai.execution import ExecutionHandle, ExecutionRequest, ResumeSessionRequest
 from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.spec import AgentSpec, MCPServerSpec, SkillSpec
 from linktools.ai.core import Principal, PrincipalKind
@@ -36,12 +32,12 @@ def test_top_level_public_surface_is_exact() -> None:
         "Session",
         "Workspace",
     ]
-    from linktools.ai import capability, runtime, workspace
+    from linktools.ai import capability, execution, runtime, workspace
 
     expected = {
         "Agent": runtime.Agent,
         "RuntimeFeatures": runtime.RuntimeFeatures,
-        "Execution": runtime.Execution,
+        "Execution": execution.Execution,
         "AgentContext": capability.AgentContext,
         "Runtime": runtime.Runtime,
         "Session": runtime.Session,

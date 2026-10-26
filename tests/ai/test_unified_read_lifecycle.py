@@ -26,17 +26,9 @@ from pydantic_ai.usage import RunUsage
 
 from linktools.ai.core import PromptLimits, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._attachment import (
-    bind_tool_return_attachments,
-    request_attachment_facts,
-)
+from linktools.ai.model._attachment import bind_tool_return_attachments, request_attachment_facts
 from linktools.ai.runtime._compaction import CompactionCapability, CompactionPolicy
-from linktools.ai.runtime._message import (
-    binary_content_usage,
-    decode_model_messages,
-    encode_model_messages,
-    project_transient_binary_content,
-)
+from linktools.ai.model.messages import binary_content_usage, decode_model_messages, encode_model_messages, project_transient_binary_content
 
 
 def _text(**changes: object) -> dict[str, object]:

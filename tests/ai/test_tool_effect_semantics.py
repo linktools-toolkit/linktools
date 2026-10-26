@@ -14,7 +14,7 @@ from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     BoundaryToolset,
 )
-from linktools.ai.runtime.state._contracts import ToolOperationRecord
+from linktools.ai.persistence.contracts import ToolOperationRecord
 from pydantic_ai.exceptions import (
     ApprovalRequired,
     CallDeferred,

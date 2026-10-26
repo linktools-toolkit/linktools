@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Durable and public execution error diagnostic evidence."""
 from ._runtime_test_helpers import model_features
 
@@ -22,16 +24,18 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode, ErrorDiagnostics
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.history import History
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import Persistence
 from linktools.ai.runtime._agent_executor import _execution_error
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
-from linktools.ai.runtime.state._codec import (
+from linktools.ai.persistence.codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
     encode_envelope,
 )
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence.contracts import (
     ExecutionRecord,
     ExecutionTerminalCommit,
     ResultRecord,
@@ -140,16 +144,16 @@ def _failed_terminal(
 async def _durable_state(
     tmp_path: Path,
     backend: str,
-) -> tuple[RuntimeState, Path]:
+) -> tuple[Persistence, Path]:
     path = tmp_path / f"runtime-{backend}"
     if backend == "filesystem":
-        return RuntimeState(RuntimeStorage.filesystem(path)), path
+        return Persistence(PersistenceStorage.filesystem(path)), path
     database = path.with_suffix(".db")
     engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
     await provision_runtime_database(engine)
     await engine.dispose()
     return (
-        RuntimeState(RuntimeStorage.sqlite(
+        Persistence(PersistenceStorage.sqlite(
             database,
             object_store=FilesystemObjectStore(tmp_path / "objects"),
         )),
@@ -202,18 +206,14 @@ async def test_terminal_results_survive_restart_through_live_and_read_only_apis(
         await state.close()
 
     reopened = (
-        RuntimeStorage.filesystem(durable_path)
+        PersistenceStorage.filesystem(durable_path)
         if backend == "filesystem"
-        else RuntimeStorage.sqlite(
+        else PersistenceStorage.sqlite(
             durable_path,
             object_store=FilesystemObjectStore(tmp_path / "objects"),
         )
     )
-    async with Runtime.open(
-        "default",
-        features=model_features(_DiagnosticModels()),  # type: ignore[arg-type]
-        storage=reopened,
-    ) as runtime:
+    async with Persistence.open('default', storage=reopened) as persistence_212, Runtime.open(persistence=persistence_212, features=model_features(_DiagnosticModels())) as runtime:
         result = await runtime.executions.result(
             started.execution_id,
             principal=runtime.default_principal,
@@ -248,14 +248,14 @@ async def test_terminal_results_survive_restart_through_live_and_read_only_apis(
             assert terminal.payload["error_diagnostics"] == diagnostics.to_payload()
 
     history_storage = (
-        RuntimeStorage.filesystem(durable_path)
+        PersistenceStorage.filesystem(durable_path)
         if backend == "filesystem"
-        else RuntimeStorage.sqlite(
+        else PersistenceStorage.sqlite(
             durable_path,
             object_store=FilesystemObjectStore(tmp_path / "objects"),
         )
     )
-    async with RuntimeHistory.open("default", storage=history_storage) as history:
+    async with Persistence.open('default', storage=history_storage, tenant_id="default", read_only=True) as history_persistence_257, History.open(persistence=history_persistence_257) as history:
         assert await history.result(
             started.execution_id,
             principal=runtime.default_principal,

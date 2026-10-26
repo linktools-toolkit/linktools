@@ -5,7 +5,7 @@ Watch is an async iterator. Wait optionally delivers events to `on_event` while
 waiting for authoritative state, and always returns `WaitResult`:
 
 ```python
-from linktools.ai.runtime import TaskGraphRunEvent
+from linktools.ai.execution import TaskGraphRunEvent
 
 async def publish(event: TaskGraphRunEvent) -> None:
     await projection.apply_idempotently(event)
@@ -32,7 +32,7 @@ async for item in run.watch(cursor=saved_cursor, include_content=False):
     saved_cursor = item.cursor
 ```
 
-The projection methods above belong to the application. RuntimeTaskGraphExecutor
+The projection methods above belong to the application. TaskEngine
 and its UI/storage implementation are outside this repository.
 
 ## Results and stopping states

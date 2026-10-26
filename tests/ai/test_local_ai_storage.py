@@ -19,8 +19,9 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import validate_metrics_sqlite
-from linktools.ai.runtime import RuntimeHistory, UsageSummary
-from linktools.ai.runtime.state._contracts import StoredUserInput
+from linktools.ai.history import History
+from linktools.ai.execution import UsageSummary
+from linktools.ai.persistence.contracts import StoredUserInput
 from linktools.ai.storage import StoredPayload
 from linktools.ai.task import TaskBindingContract
 from linktools.ai.workspace import Workspace
@@ -175,7 +176,7 @@ async def test_runtime_history_returns_exact_recent_executions_and_errors() -> N
         _record("exec-less-old", base + timedelta(minutes=1)),
         _record("exec-newer", base + timedelta(minutes=4)),
     )
-    history = RuntimeHistory(
+    history = History(
         _RecentHistoryService(),  # type: ignore[arg-type]
         tenant_id="default",
         executions=_RecentRepository(records),  # type: ignore[arg-type]

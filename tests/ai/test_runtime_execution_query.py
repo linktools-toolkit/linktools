@@ -20,12 +20,13 @@ from linktools.ai.core import (
     TenantAuthorizationPolicy,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime import ListExecutionRequest, RuntimeHistory
+from linktools.ai.persistence import Persistence
+from linktools.ai.history import History
+from linktools.ai.execution import ListExecutionRequest
 from linktools.ai.runtime._execution import DefaultExecutionService
-from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
-from linktools.ai.runtime.state import RuntimeStorage
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.history._service import DefaultExecutionHistoryService
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.contracts import (
     ExecutionCandidate,
     ExecutionCandidatePage,
     ExecutionRecord,
@@ -175,7 +176,7 @@ async def test_execution_service_list_delegates_public_query_request() -> None:
 
 @pytest.mark.asyncio
 async def test_execution_list_applies_tenant_filters_and_direct_parent() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="execution-query", tenant_id="tenant")
     try:
         records = (
@@ -244,7 +245,7 @@ async def test_execution_list_applies_tenant_filters_and_direct_parent() -> None
 
 @pytest.mark.asyncio
 async def test_execution_list_cursor_binds_identity_and_continues_without_repeat() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="execution-cursor", tenant_id="tenant")
     try:
         records = tuple(
@@ -299,7 +300,7 @@ async def test_execution_list_cursor_binds_identity_and_continues_without_repeat
 
 @pytest.mark.asyncio
 async def test_execution_list_skips_unauthorized_candidates() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="execution-auth", tenant_id="tenant")
     try:
         for index in range(1, 4):
@@ -325,7 +326,7 @@ async def test_execution_list_skips_unauthorized_candidates() -> None:
 
 @pytest.mark.asyncio
 async def test_execution_list_skips_new_records_before_cursor() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="execution-weak-consistency", tenant_id="tenant")
     try:
         for execution_id in ("exec-001", "exec-002", "exec-003"):
@@ -352,7 +353,7 @@ async def test_execution_list_skips_new_records_before_cursor() -> None:
 
 @pytest.mark.asyncio
 async def test_execution_list_exact_physical_boundary_has_no_false_cursor() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="execution-boundary", tenant_id="tenant")
     try:
         for index in range(1000):
@@ -380,7 +381,7 @@ async def test_execution_list_exact_physical_boundary_has_no_false_cursor() -> N
 
 @pytest.mark.asyncio
 async def test_runtime_and_history_execution_queries_share_projection() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="execution-parity", tenant_id="tenant")
     try:
         record = _record(
@@ -392,7 +393,7 @@ async def test_runtime_and_history_execution_queries_share_projection() -> None:
         service = _service(state.execution.executions)
         execution_service = object.__new__(DefaultExecutionService)
         execution_service._history_service = service
-        history = RuntimeHistory(service, tenant_id="tenant")
+        history = History(service, tenant_id="tenant")
         request = ListExecutionRequest(
             Principal("caller", "tenant", "service"),
             session_id="session-1",

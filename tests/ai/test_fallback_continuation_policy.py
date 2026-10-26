@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Pinned continuations cannot reset candidate budgets or accept rejected output."""
 
 import asyncio
@@ -22,7 +24,8 @@ from pydantic_ai.usage import RequestUsage, RunUsage, UsageLimits
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.model import FallbackBinding
 from linktools.ai.model._binding import _RetryingModel
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 
 from ._runtime_test_helpers import _Models
 from .test_fallback_retry_ownership import _features
@@ -102,7 +105,7 @@ async def test_pinned_failure_uses_transport_budget_only_once(path: str, retries
     calls: list[str] = []
     binding, primary = _binding(calls, [], retries=retries)
     if path == "runtime":
-        async with Runtime.open("continuation", features=_features(binding), storage=RuntimeStorage.in_memory()) as app:
+        async with Persistence.open('continuation', storage=PersistenceStorage.in_memory()) as persistence_105, Runtime.open(persistence=persistence_105, features=_features(binding)) as app:
             execution = await app.agents.get().start("synthetic")
             result = (await execution.wait(timeout_seconds=15)).result
             assert result.status is ExecutionStatus.FAILED
@@ -136,7 +139,7 @@ async def test_successful_pinned_continuation_is_not_disabled(path: str) -> None
     calls: list[str] = []
     binding, _ = _binding(calls, [], outcome="success")
     if path == "runtime":
-        async with Runtime.open("continuation", features=_features(binding), storage=RuntimeStorage.in_memory()) as app:
+        async with Persistence.open('continuation', storage=PersistenceStorage.in_memory()) as persistence_139, Runtime.open(persistence=persistence_139, features=_features(binding)) as app:
             result = (await (await app.agents.get().start("synthetic")).wait(timeout_seconds=15)).result
             assert result.status is ExecutionStatus.SUCCEEDED
     else:
@@ -278,7 +281,7 @@ async def test_runtime_rejected_continuation_retains_usage_and_diagnostics_after
     # Runtime observes streams; this adapter exercises native nonstream policy
     # through the same completed-response boundary used by custom models.
     features = _features(_Models(_CompletedFallback(binding.materialize())))
-    async with Runtime.open("continuation-reopen", features=features, storage=RuntimeStorage.filesystem(tmp_path)) as app:
+    async with Persistence.open('continuation-reopen', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_281, Runtime.open(persistence=persistence_281, features=features) as app:
         execution = await app.agents.get().start("synthetic")
         result = (await execution.wait(timeout_seconds=15)).result
         assert result.status is ExecutionStatus.FAILED
@@ -288,7 +291,7 @@ async def test_runtime_rejected_continuation_retains_usage_and_diagnostics_after
         assert result.error_diagnostics is not None
         assert "synthetic-continuation-secret" not in repr(result.error_diagnostics)
         execution_id, principal = execution.execution_id, app.default_principal
-    async with Runtime.open("continuation-reopen", features=features, storage=RuntimeStorage.filesystem(tmp_path)) as app:
+    async with Persistence.open('continuation-reopen', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_291, Runtime.open(persistence=persistence_291, features=features) as app:
         restored = await app.executions.result(execution_id, principal=principal)
         assert restored.usage == result.usage
         assert restored.safe_error_details == result.safe_error_details
@@ -447,7 +450,7 @@ async def test_runtime_decreasing_cumulative_usage_is_invalid_but_new_job_usage_
 
     binding = FallbackBinding(_Models(FunctionModel(respond, model_name="primary")), fallback_on=_ResponsePolicy([]))
     features = _features(_Models(_CompletedFallback(binding.materialize())))
-    async with Runtime.open("invalid-usage", features=features, storage=RuntimeStorage.filesystem(tmp_path)) as app:
+    async with Persistence.open('invalid-usage', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_450, Runtime.open(persistence=persistence_450, features=features) as app:
         execution = await app.agents.get().start("synthetic")
         result = (await execution.wait(timeout_seconds=15)).result
         assert result.status is ExecutionStatus.FAILED
@@ -465,7 +468,7 @@ async def test_runtime_decreasing_cumulative_usage_is_invalid_but_new_job_usage_
             assert result.usage.input_tokens == 5 + responses[1].usage.input_tokens
             assert Decimal(result.safe_error_details["failed_attempts"][0]["usage"]["cost"]) == responses[1].usage.cost
         execution_id, principal = execution.execution_id, app.default_principal
-    async with Runtime.open("invalid-usage", features=features, storage=RuntimeStorage.filesystem(tmp_path)) as app:
+    async with Persistence.open('invalid-usage', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_468, Runtime.open(persistence=persistence_468, features=features) as app:
         restored = await app.executions.result(execution_id, principal=principal)
         assert restored.usage == result.usage
         assert restored.safe_error_details == result.safe_error_details
@@ -537,7 +540,7 @@ async def test_runtime_unknown_continuation_increment_remains_unknown_after_reop
 
     binding = FallbackBinding(_Models(FunctionModel(respond, model_name="primary")), fallback_on=_ResponsePolicy([]))
     features = _features(_Models(_CompletedFallback(binding.materialize())))
-    async with Runtime.open("unknown-increment", features=features, storage=RuntimeStorage.filesystem(tmp_path)) as app:
+    async with Persistence.open('unknown-increment', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_540, Runtime.open(persistence=persistence_540, features=features) as app:
         execution = await app.agents.get().start("synthetic")
         result = (await execution.wait(timeout_seconds=15)).result
         assert result.status is ExecutionStatus.FAILED
@@ -546,7 +549,7 @@ async def test_runtime_unknown_continuation_increment_remains_unknown_after_reop
         # measured zero for the rejected attempt.
         assert result.usage.input_tokens == (0 if unknown == "previous" else 5)
         execution_id, principal = execution.execution_id, app.default_principal
-    async with Runtime.open("unknown-increment", features=features, storage=RuntimeStorage.filesystem(tmp_path)) as app:
+    async with Persistence.open('unknown-increment', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_549, Runtime.open(persistence=persistence_549, features=features) as app:
         restored = await app.executions.result(execution_id, principal=principal)
         assert restored.usage == result.usage
         assert restored.safe_error_details == result.safe_error_details

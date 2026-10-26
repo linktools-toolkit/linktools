@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Native SDK protocols retain their own request and recovery semantics."""
 
 import json
@@ -7,7 +9,14 @@ from collections.abc import Callable
 
 import httpx2
 import pytest
-from pydantic_ai.messages import BinaryContent, ModelRequest, ThinkingPart, ToolCallPart, ToolReturnPart, UserPromptPart
+from pydantic_ai.messages import (
+    BinaryContent,
+    ModelRequest,
+    ThinkingPart,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.tools import ToolDefinition
 
@@ -15,7 +24,7 @@ from linktools.ai.errors import AIError
 from linktools.ai.agent._model_resolver import _ModelResolver
 from linktools.ai.model import ModelClientRequestRecorder, ModelBinding, create_model, validate_model_input
 from linktools.ai.model import _anthropic, _openai
-from linktools.ai.runtime._message import decode_model_messages, encode_model_messages
+from linktools.ai.model.messages import decode_model_messages, encode_model_messages
 
 
 PROTOCOLS = [('openai', 'openai', 'gpt-4o'),
@@ -330,7 +339,8 @@ def test_model_declaration_inspection_does_not_open_connections(monkeypatch):
 @pytest.mark.parametrize("factory,api,name", PROTOCOLS)
 async def test_runtime_web_session_and_durable_model_content(monkeypatch, tmp_path, factory, api, name):
     from linktools.ai.capability import TraceCapability, ExecutionCapability
-    from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeFeatures
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+    from linktools.ai.persistence import PersistenceStorage
     from linktools.ai.web import create_app
     from .test_web_console_viewers import _client
     from .test_model_client_response_capture import _Stream
@@ -344,8 +354,8 @@ async def test_runtime_web_session_and_durable_model_content(monkeypatch, tmp_pa
     features.agent("old", model="default", allow_tools=())
     features.capability(TraceCapability(), scope="runtime")
     features.capability(ExecutionCapability(), scope="runtime")
-    storage = RuntimeStorage.filesystem(tmp_path / "state")
-    async with Runtime.open("default", features=features, storage=storage) as runtime:
+    storage = PersistenceStorage.filesystem(tmp_path / "state")
+    async with Persistence.open('default', storage=storage) as persistence_341, Runtime.open(persistence=persistence_341, features=features) as runtime:
         session = await runtime.agents.get("old").create_session("session")
         async with _client(create_app(runtime=runtime)) as http:
             meta = await http.get("/api/session", params={"session_id":"session","include_timeline":"false"})
@@ -366,7 +376,7 @@ async def test_runtime_web_session_and_durable_model_content(monkeypatch, tmp_pa
     replacement.agent("replacement", model="default", allow_tools=())
     replacement.capability(TraceCapability(), scope="runtime")
     replacement.capability(ExecutionCapability(), scope="runtime")
-    async with Runtime.open("default", features=replacement, storage=storage) as runtime:
+    async with Persistence.open('default', storage=storage) as persistence_362, Runtime.open(persistence=persistence_362, features=replacement) as runtime:
         async with _client(create_app(runtime=runtime)) as http:
             meta = await http.get("/api/session", params={"session_id":"session","include_timeline":"false"})
             assert meta.status_code == 200, meta.text

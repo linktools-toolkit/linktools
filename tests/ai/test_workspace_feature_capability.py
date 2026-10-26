@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Explicit Workspace registration, per-run binding, and listing semantics."""
 from ._runtime_test_helpers import model_features
 
@@ -13,7 +15,8 @@ from pydantic_ai.models.test import TestModel
 from linktools.ai.capability import WorkspaceCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.workspace import LocalSandbox, Workspace
 
 from .test_explicit_runtime_features import _FeatureModels
@@ -76,7 +79,7 @@ async def test_native_wrapped_workspace_has_one_selected_tool_per_run(tmp_path: 
     features.capability(CombinedCapability([template.prefix_tools("prefix")], id="workspace.bundle"), scope="runtime")
     features.agent("default", allow_tools=("list_files",), allow_capabilities=())
     models = _FeatureModels(TestModel(call_tools=["prefix_list_files"]))
-    async with Runtime.open("workspace-native", storage=RuntimeStorage.in_memory(), features=model_features(models, features)) as runtime:
+    async with Persistence.open('workspace-native', storage=PersistenceStorage.in_memory()) as persistence_79, Runtime.open(persistence=persistence_79, features=model_features(models, features)) as runtime:
         first, second = await asyncio.gather(
             runtime.agents.get().run("list files", timeout_seconds=10),
             runtime.agents.get().run("list files", timeout_seconds=10),

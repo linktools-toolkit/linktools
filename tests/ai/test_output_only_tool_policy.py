@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Built-in providers limit parallel calls only for a single required output tool."""
 
 import json
@@ -21,7 +23,8 @@ from pydantic_ai.tools import ToolDefinition
 from linktools.ai.core import JsonValue
 from linktools.ai.model import create_model
 from linktools.ai.model import _anthropic, _openai
-from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import PersistenceStorage
 
 
 _Protocol = Literal["openai", "openai-responses", "anthropic"]
@@ -313,9 +316,7 @@ async def test_runtime_keeps_caller_supplied_sdk_model_parallel_behavior() -> No
         features.agent("default", output_schema=_SCHEMA, allow_tools=(), allow_skills=(),
                        allow_subagents=())
         features.model("default", _CustomBinding(model))
-        async with Runtime.open(
-            "custom-output", storage=RuntimeStorage.in_memory(), features=features,
-        ) as runtime:
+        async with Persistence.open('custom-output', storage=PersistenceStorage.in_memory()) as persistence_312, Runtime.open(persistence=persistence_312, features=features) as runtime:
             result = (await runtime.agents.get().run("synthetic", timeout_seconds=10)).result
             assert result.status == "SUCCEEDED"
             assert result.output == {"value": "done"}

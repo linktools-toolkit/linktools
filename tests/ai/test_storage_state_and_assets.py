@@ -13,8 +13,8 @@ from linktools.ai.asset import (
     PrefixAssetPathAdapter,
 )
 from linktools.ai.errors import AIError
-from linktools.ai.runtime.state._filesystem import FilesystemStateStore
-from linktools.ai.runtime.state._store import StoredRecord
+from linktools.ai.persistence._filesystem import FilesystemStateStore
+from linktools.ai.persistence.state import StoredRecord
 from linktools.ai.storage import StorageEntryRevision
 
 

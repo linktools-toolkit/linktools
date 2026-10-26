@@ -10,6 +10,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Protocol
+from contextlib import AbstractContextManager
 from linktools.core import environ
 from ..core import (AuthorizationAction, AuthorizationPolicy, Principal, ResourceRef,
     ResourceKind, ExecutionStatus, ExecutionEventType, IdempotencyStatus, JsonValue,
@@ -51,6 +52,10 @@ class ExecutionDriver(Protocol):
 
 class ExecutionManagementPort(Protocol):
     """Storage observation and cross-domain atomic transitions supplied by the host."""
+    @property
+    def embedded_results(self) -> bool: ...
+    def source_reads(self) -> AbstractContextManager[None]: ...
+    async def write_output(self, content: bytes, *, tenant_id: str) -> ObjectRef: ...
     @property
     def driver(self) -> ExecutionDriver | None: ...
     @property

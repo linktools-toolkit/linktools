@@ -9,13 +9,26 @@ from pathlib import Path
 import pytest
 from sqlalchemy import event
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.core import ExecutionStatus, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state._contracts import ExecutionTerminalCommitResult, RecoveryCheckpointState, RuntimeDomain, RuntimePayloadRef
+from linktools.ai.persistence.contracts import (
+    ExecutionTerminalCommitResult,
+    RecoveryCheckpointState,
+    PersistenceDomain,
+    RuntimePayloadRef,
+)
 from linktools.ai.storage import StoredPayload
 
-from tests.ai.test_pending_turn_commit import _NAMESPACE, _TurnState, _pending_turn, _runtime_commands, _snapshot, _storage, _turn_state
+from tests.ai.test_pending_turn_commit import (
+    _NAMESPACE,
+    _TurnState,
+    _pending_turn,
+    _runtime_commands,
+    _snapshot,
+    _storage,
+    _turn_state,
+)
 pytestmark = pytest.mark.asyncio
 
 
@@ -177,7 +190,7 @@ async def test_sessionless_pending_promotes_before_effects(tmp_path: Path, backe
     async with _turn_state(backend, tmp_path) as state:
         turn = _standalone(state)
         before = await _conversation(state)
-        context = RuntimePayloadRef(StoredPayload.inline_bytes(b"[]"), RuntimeDomain.EXECUTION) if prepared else None
+        context = RuntimePayloadRef(StoredPayload.inline_bytes(b"[]"), PersistenceDomain.EXECUTION) if prepared else None
         execution, recovery = await state.commands.promote_pending_turn(
             turn.reservation, expected_session=None, captured_input_context=context,
         )
@@ -192,7 +205,7 @@ async def test_sessionless_pending_independent_connections_obey_request_identity
     tmp_path: Path, monkeypatch, identity: str,
 ):
     async with _turn_state("sqlite", tmp_path) as first:
-        other = RuntimeState(_storage("sqlite", tmp_path))
+        other = Persistence(_storage("sqlite", tmp_path))
         await other.initialize(namespace=_NAMESPACE, tenant_id="tenant")
         try:
             second = _TurnState(other, _runtime_commands(other, _NAMESPACE), first.session)

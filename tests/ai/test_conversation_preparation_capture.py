@@ -7,10 +7,10 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeState
-from linktools.ai.runtime.state._store import active_state_scope
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord
-from linktools.ai.runtime.state._model_interaction_store import ModelInteractionStateStepArchive
+from linktools.ai.persistence import PersistenceDomain, Persistence
+from linktools.ai.persistence.state import active_state_scope
+from linktools.ai.persistence._step_contracts import AgentRunRecord
+from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
 from .test_checkpoint_metadata_snapshot_io import _checkpoint
 from .test_incremental_projection_boundaries import _storage
 
@@ -28,9 +28,9 @@ async def _capture(archive, run, checkpoint):
 
 @pytest.mark.parametrize("damage", ("wrong_store", "missing_key", "extra_key", "record_identity", "other_run", "foreign_namespace", "foreign_tenant"))
 async def test_capture_rejects_mismatched_store_scope_or_keys(tmp_path: Path, damage: str) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="capture", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CONVERSATION)
+    archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
     run, checkpoint = AgentRunRecord("run"), _checkpoint(2)
     try:
         observed = await _capture(archive, run, checkpoint)
@@ -54,7 +54,7 @@ async def test_capture_rejects_mismatched_store_scope_or_keys(tmp_path: Path, da
                 owner, object_store=None,
                 namespace="foreign" if damage == "foreign_namespace" else "capture",
                 tenant_id="foreign" if damage == "foreign_tenant" else "tenant",
-                runtime_domain=RuntimeDomain.CONVERSATION,
+                runtime_domain=PersistenceDomain.CONVERSATION,
             )
         with pytest.raises(AIError) as raised:
             await archive.prepare_conversation_checkpoint(run, checkpoint, observed_records=observed)
@@ -67,9 +67,9 @@ async def test_capture_rejects_mismatched_store_scope_or_keys(tmp_path: Path, da
 async def test_completed_capture_matches_uncaptured_preparation_outside_transaction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="capture", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CONVERSATION)
+    archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
     run, checkpoint = AgentRunRecord("run"), _checkpoint(2)
     try:
         expected = await archive.prepare_conversation_checkpoint(run, checkpoint)
@@ -97,9 +97,9 @@ async def test_completed_capture_matches_uncaptured_preparation_outside_transact
 async def test_custom_preparation_keys_do_not_open_archive_or_encode_bodies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, override: str,
 ) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="capture", tenant_id="tenant")
-    original = state.run_store.read_store(RuntimeDomain.CONVERSATION)
+    original = state.run_store.read_store(PersistenceDomain.CONVERSATION)
     class RelocatingArchive(ModelInteractionStateStepArchive):
         async def relocate_conversation_checkpoint(self, run, checkpoint):
             return await super().relocate_conversation_checkpoint(run, checkpoint)
@@ -108,11 +108,11 @@ async def test_custom_preparation_keys_do_not_open_archive_or_encode_bodies(
             return await super().prepare_checkpoints(run, checkpoints, **kwargs)
     custom = (RelocatingArchive if override == "relocate" else PreparingArchive)(
         original.state_store, object_store=None, namespace="capture", tenant_id="tenant",
-        runtime_domain=RuntimeDomain.CONVERSATION,
+        runtime_domain=PersistenceDomain.CONVERSATION,
     )
     async def forbidden(*args, **kwargs):
         pytest.fail("Custom preparation must not be pre-read by the built-in batching path")
-    import linktools.ai.runtime.state._step_archive as step_module
+    import linktools.ai.persistence._step_archive as step_module
     def no_encoding(*args, **kwargs):
         pytest.fail("Custom preparation must not be pre-encoded by the built-in batching path")
     monkeypatch.setattr(custom.transcript_repository, "content_archive", forbidden)
@@ -127,11 +127,11 @@ async def test_custom_preparation_keys_do_not_open_archive_or_encode_bodies(
 async def test_unobserved_actual_content_is_freshly_checked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, observation: str,
 ) -> None:
-    from linktools.ai.runtime._message import encode_model_messages
-    from linktools.ai.runtime.state._archive import PreparedArchive
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    from linktools.ai.model.messages import encode_model_messages
+    from linktools.ai.persistence._archive import PreparedArchive
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="capture", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CONVERSATION)
+    archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
     run, checkpoint = AgentRunRecord("run"), _checkpoint(2)
     try:
         observed = await _capture(archive, run, checkpoint)
@@ -163,10 +163,10 @@ async def test_unobserved_actual_content_is_freshly_checked(
 
 
 async def test_changed_body_does_not_reuse_unrelated_missing_observations(tmp_path: Path) -> None:
-    from linktools.ai.runtime.state._archive import PreparedArchive
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    from linktools.ai.persistence._archive import PreparedArchive
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="capture", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CONVERSATION)
+    archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
     run, checkpoint = AgentRunRecord("run"), _checkpoint(2)
     try:
         observed = await _capture(archive, run, checkpoint)

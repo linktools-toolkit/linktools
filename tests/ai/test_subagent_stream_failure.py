@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """A real child transport failure remains actionable after parent persistence."""
 
 import json
@@ -13,7 +15,8 @@ from pydantic_ai.models.function import AgentInfo
 
 from linktools.ai.capability import ExecutionCapability, TraceCapability
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import PersistenceStorage
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
 from .test_model_client_request_capture import _binding
@@ -81,12 +84,12 @@ async def test_child_stream_failure_details_survive_parent_history_and_reopen(
     features.capability(TraceCapability(), scope="runtime")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
 
-    def storage() -> RuntimeStorage:
+    def storage() -> PersistenceStorage:
         if backend == "filesystem":
-            return RuntimeStorage.filesystem(tmp_path / "state")
-        return RuntimeStorage.sqlite(tmp_path / "state.db")
+            return PersistenceStorage.filesystem(tmp_path / "state")
+        return PersistenceStorage.sqlite(tmp_path / "state.db")
 
-    async with Runtime.open("child-stream-failure", storage=storage(), features=features) as runtime:
+    async with Persistence.open('child-stream-failure', storage=storage()) as persistence_89, Runtime.open(persistence=persistence_89, features=features) as runtime:
         execution = await runtime.agents.get().start("delegate once and report any failure")
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
@@ -124,7 +127,7 @@ async def test_child_stream_failure_details_survive_parent_history_and_reopen(
 
     assert len(streams) == 2 and all(stream.closed for stream in streams)
     assert all(client.is_closed for client in clients)
-    async with Runtime.open("child-stream-failure", storage=storage(), features=features) as reopened:
+    async with Persistence.open('child-stream-failure', storage=storage()) as persistence_127, Runtime.open(persistence=persistence_127, features=features) as reopened:
         execution = await reopened.executions.get(parent_id)
         child = await reopened.executions.get(child_id)
         assert (await execution.history(include_content=True)).items == parent_history

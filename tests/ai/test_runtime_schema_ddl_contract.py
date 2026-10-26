@@ -5,14 +5,14 @@
 
 from pathlib import Path
 
-from linktools.ai.runtime.state._plan import RuntimeDomain
-from linktools.ai.runtime.state._schema import build_runtime_sql_metadata
+from linktools.ai.persistence._plan import PersistenceDomain
+from linktools.ai.persistence._schema import build_runtime_sql_metadata
 from sqlalchemy.dialects import mysql
 from sqlalchemy.schema import CreateIndex
 
 
 def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
-    metadata = build_runtime_sql_metadata(frozenset({RuntimeDomain.CONVERSATION}))
+    metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION}))
     records = metadata.tables["ai_state_records"]
     dialect = mysql.dialect()
 
@@ -55,7 +55,7 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
 
 
 def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
-    metadata = build_runtime_sql_metadata(frozenset({RuntimeDomain.CONVERSATION}))
+    metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION}))
     expected = {
         "ai_state_records": {
             "uk_store_digest_key_digest",
@@ -143,7 +143,7 @@ def test_runtime_storage_migration_contains_no_known_duplicate_indexes() -> None
 
 
 def test_runtime_fact_ddl_comments_match_canonical_metadata() -> None:
-    metadata = build_runtime_sql_metadata(frozenset({RuntimeDomain.CONVERSATION}))
+    metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION}))
     facts = metadata.tables["ai_state_facts"]
     migration = (
         Path(__file__).resolve().parents[2]

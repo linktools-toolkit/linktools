@@ -6,13 +6,22 @@ import asyncio
 
 import pytest
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state._contracts import RuntimeDomain, RuntimePayloadRef
+from linktools.ai.persistence.contracts import PersistenceDomain, RuntimePayloadRef
 from linktools.ai.storage import StoredPayload
-from linktools.ai.runtime.state._store import active_state_scope
+from linktools.ai.persistence.state import active_state_scope
 
-from tests.ai.test_pending_turn_commit import _NAMESPACE, _TurnState, _commit, _pending_turn, _runtime_commands, _snapshot, _storage, _turn_state
+from tests.ai.test_pending_turn_commit import (
+    _NAMESPACE,
+    _TurnState,
+    _commit,
+    _pending_turn,
+    _runtime_commands,
+    _snapshot,
+    _storage,
+    _turn_state,
+)
 from tests.ai.test_pending_turn_sessionless import _commit as _commit_standalone, _standalone
 
 pytestmark = pytest.mark.asyncio
@@ -71,7 +80,7 @@ async def test_promotion_unknown_confirms_only_original_source_receipt(tmp_path,
     async with _turn_state(backend, tmp_path) as state:
         turn = _standalone(state) if standalone else _pending_turn(state)
         expected = None if standalone else state.session
-        context = RuntimePayloadRef(StoredPayload.inline_bytes(b"[]"), RuntimeDomain.EXECUTION) if prepared else None
+        context = RuntimePayloadRef(StoredPayload.inline_bytes(b"[]"), PersistenceDomain.EXECUTION) if prepared else None
         claim = "original-producer"
         group = state.storage.execution.executions.state_store.storage_group
         mutate, read_many = type(group).mutate, type(group).read_many
@@ -132,7 +141,7 @@ async def test_promotion_unknown_confirms_only_original_source_receipt(tmp_path,
 @pytest.mark.parametrize("prepared", (False, True))
 async def test_promotion_concurrent_conflicting_digest_is_definite_conflict(tmp_path, monkeypatch, prepared):
     async with _turn_state("sqlite", tmp_path) as first:
-        other = RuntimeState(_storage("sqlite", tmp_path))
+        other = Persistence(_storage("sqlite", tmp_path))
         await other.initialize(namespace=_NAMESPACE, tenant_id="tenant")
         try:
             second = _TurnState(other, _runtime_commands(other, _NAMESPACE), first.session)
@@ -150,7 +159,7 @@ async def test_promotion_concurrent_conflicting_digest_is_definite_conflict(tmp_
                     await asyncio.wait_for(ready.wait(), 5)
                 return await original(self, stores, callback)
 
-            context = RuntimePayloadRef(StoredPayload.inline_bytes(b"[]"), RuntimeDomain.EXECUTION) if prepared else None
+            context = RuntimePayloadRef(StoredPayload.inline_bytes(b"[]"), PersistenceDomain.EXECUTION) if prepared else None
             with monkeypatch.context() as patch:
                 patch.setattr(type(groups[0]), "mutate", mutate)
                 results = await asyncio.wait_for(asyncio.gather(*(

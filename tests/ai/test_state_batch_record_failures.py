@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state._store import RecordReplacement, StateTransaction
+from linktools.ai.persistence.state import RecordReplacement, StateTransaction
 from tests.ai.test_state_batch_delete_backends import _open_store, _record
 
 pytestmark = pytest.mark.asyncio

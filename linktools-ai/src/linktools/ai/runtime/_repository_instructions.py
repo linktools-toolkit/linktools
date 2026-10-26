@@ -15,7 +15,8 @@ from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import RepositoryInstructions
 from ._tool_boundary import RepositoryInstructionBoundary
-from .state._contracts import ExecutionRecord, RecoveryCheckpoint
+from linktools.ai.execution import ExecutionRecord
+from linktools.ai.persistence.contracts import RecoveryCheckpoint
 
 if TYPE_CHECKING:
     from ._recovery_coordinator import _RecoveryCoordinator

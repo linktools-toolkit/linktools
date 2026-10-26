@@ -10,12 +10,16 @@ import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models import ModelRequestParameters
 
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
-from linktools.ai.runtime._model_interaction import StagedContextProjection, StagedModelInteraction, request_envelope
-from linktools.ai.runtime._transcript_staging import StagedTranscript
-from linktools.ai.runtime.state._contracts import TranscriptSpanRef
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.persistence._model_interaction import (
+    StagedContextProjection,
+    StagedModelInteraction,
+    request_envelope,
+)
+from linktools.ai.persistence._transcript_staging import StagedTranscript
+from linktools.ai.persistence.contracts import TranscriptSpanRef
+from linktools.ai.persistence._step_contracts import AgentRunRecord
 from linktools.ai.storage import InMemoryCacheBackend, ObjectStoreInspection
 
 from .test_step_projection import _execution
@@ -34,9 +38,9 @@ async def test_close_persists_queued_projection_referencing_external_transcript(
 
     cache = Cache(max_bytes=1024 * 1024)
     root = tmp_path / "state"
-    storage = RuntimeState(RuntimeStorage.filesystem(root, cache=cache))
+    storage = Persistence(PersistenceStorage.filesystem(root, cache=cache))
     await storage.initialize(
-        namespace="close-projection", tenant_id="tenant", module_routes={RuntimeDomain.TRACE: storage.plan.route(RuntimeDomain.TRACE).with_cache(cache)},
+        namespace="close-projection", tenant_id="tenant",
     )
     message = ModelRequest(parts=[UserPromptPart("external transcript " * 4096)])
     try:
@@ -52,8 +56,8 @@ async def test_close_persists_queued_projection_referencing_external_transcript(
         await store.register_agent_run(AgentRunRecord("run"), execution_id="execution")
         store.stage_transcript("run", StagedTranscript((message,)))
         await store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
-        archive = store.read_store(RuntimeDomain.TRACE)
-        objects = storage.archive_object_store(RuntimeDomain.TRACE)
+        archive = store.read_store(PersistenceDomain.TRACE)
+        objects = storage.archive_object_store(PersistenceDomain.TRACE)
         assert isinstance(objects, ObjectStoreInspection)
         assert [item async for item in objects.list_objects()]
 
@@ -66,7 +70,7 @@ async def test_close_persists_queued_projection_referencing_external_transcript(
             agent_run_id="run", step_index=1, model_request_seq=1,
             purpose="agent", output_retry_index=None, model={},
             request_context=StagedContextProjection((
-                TranscriptSpanRef(RuntimeDomain.TRACE, "run", 0, 1),
+                TranscriptSpanRef(PersistenceDomain.TRACE, "run", 0, 1),
             )),
             request_envelope_digest=envelope_digest, response_context=None,
             status="CANCELLED", error_code=None, duration_ns=0, usage=None,
@@ -82,13 +86,12 @@ async def test_close_persists_queued_projection_referencing_external_transcript(
     finally:
         await storage.close()
 
-    reopened = RuntimeState(RuntimeStorage.filesystem(root, cache=cache))
+    reopened = Persistence(PersistenceStorage.filesystem(root, cache=cache))
     await reopened.initialize(
         namespace="close-projection", tenant_id="tenant", read_only=True,
-        module_routes={RuntimeDomain.TRACE: reopened.plan.route(RuntimeDomain.TRACE).with_cache(cache)},
     )
     try:
-        archive = reopened.run_store.read_store(RuntimeDomain.TRACE)
+        archive = reopened.run_store.read_store(PersistenceDomain.TRACE)
         interactions = await archive.list_model_interactions(agent_run_id="run")
         assert len(interactions) == 1
         assert interactions[0].request_context is not None

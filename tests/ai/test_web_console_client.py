@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Deterministic Web client stream and projection invariants, without a model."""
 from ._runtime_test_helpers import model_features
 
@@ -170,7 +172,8 @@ async def test_thinking_request_reaches_custom_binding(tmp_path: Path, thinking)
     import json
     from pydantic_ai.models.test import TestModel
 
-    from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+    from linktools.ai.persistence import PersistenceStorage
     from linktools.ai.web import create_app
     from .test_model_client_request_capture import _ModelBinding
     from .test_web_console_viewers import _client
@@ -190,8 +193,7 @@ async def test_thinking_request_reaches_custom_binding(tmp_path: Path, thinking)
     }))
     features = RuntimeFeatures("custom")
     features.agent("default", model="default", allow_tools=())
-    async with Runtime.open("custom", features=model_features(models, features),
-                            storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
+    async with Persistence.open('custom', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_193, Runtime.open(persistence=persistence_193, features=model_features(models, features)) as runtime:
         await runtime.agents.get("default").create_session("a")
         async with _client(create_app(runtime=runtime)) as http:
             meta = await http.get("/api/session", params={"session_id": "a", "include_timeline": "false"})

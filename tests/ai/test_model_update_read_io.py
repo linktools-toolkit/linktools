@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Bounded model update reads preserve authority and existing history extensions."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from dataclasses import replace
 from pathlib import Path
@@ -12,13 +12,13 @@ from sqlalchemy import event
 
 from linktools.ai.core import Principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._graph_projection import _GraphModelProjection
-from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
-from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
-from linktools.ai.runtime._runtime_history import RuntimeHistory
-from linktools.ai.runtime.service_api import ModelInteractionReadBoundary, UsageReadCutoff, project_execution_view
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._store import active_state_scope
+from linktools.ai.execution.projection import ModelProjection
+from linktools.ai.history._projection import StepExecutionHistoryReader
+from linktools.ai.history._service import DefaultExecutionHistoryService
+from linktools.ai.history._history import History
+from linktools.ai.execution import ModelInteractionReadBoundary, UsageReadCutoff, project_execution_view
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.state import active_state_scope
 
 from .test_incremental_projection_boundaries import _storage
 from .test_model_capture_reads import _NAMESPACE, _PRINCIPAL, _publish, _reader, _seed, _service
@@ -29,7 +29,7 @@ pytestmark = pytest.mark.asyncio
 
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
 async def test_updates_read_bounded_fresh_suffix_without_content(tmp_path: Path, backend: str) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -39,7 +39,7 @@ async def test_updates_read_bounded_fresh_suffix_without_content(tmp_path: Path,
             async def authorize(self, principal, action, resource):
                 assert active_state_scope() is None
                 calls.append((principal, resource.id))
-        history = RuntimeHistory(_service(state, authorization=Authorization()), tenant_id="tenant")
+        history = History(_service(state, authorization=Authorization()), tenant_id="tenant")
         statements = []
         def capture(_connection, _cursor, statement, _parameters, _context, _many):
             statements.append(statement.lstrip().split()[0].upper())
@@ -72,7 +72,7 @@ async def test_updates_read_bounded_fresh_suffix_without_content(tmp_path: Path,
 
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
 async def test_update_boundary_observes_run_admitted_during_authorization(tmp_path: Path, backend: str) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     pending = None
     try:
@@ -108,7 +108,7 @@ async def test_update_boundary_observes_run_admitted_during_authorization(tmp_pa
 async def test_update_read_does_not_disclose_metadata_without_current_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
 ) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -126,7 +126,7 @@ async def test_update_read_does_not_disclose_metadata_without_current_authority(
         async def unexpected(*args, **kwargs):
             raise AssertionError("denied metadata must not be read")
         monkeypatch.setattr(repository, "get", fresh_get)
-        monkeypatch.setattr(state.run_store.read_store(RuntimeDomain.TRACE), "capture_history", unexpected)
+        monkeypatch.setattr(state.run_store.read_store(PersistenceDomain.TRACE), "capture_history", unexpected)
         principal = Principal("other", "tenant") if failure == "principal" else (
             Principal("owner", "other") if failure == "tenant" else _PRINCIPAL
         )
@@ -139,7 +139,7 @@ async def test_update_read_does_not_disclose_metadata_without_current_authority(
 
 @pytest.mark.parametrize("kind", ("structural_service", "service_subclass", "reader", "reader_subclass", "history_subclass"))
 async def test_updates_preserve_custom_public_read_dispatch(tmp_path: Path, kind: str) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -161,7 +161,7 @@ async def test_updates_preserve_custom_public_read_dispatch(tmp_path: Path, kind
                 assert active_state_scope() is None
                 calls.append("metadata")
                 return await _reader(state).read_model_interaction_metadata(execution_id, **kwargs)
-        class History(RuntimeHistory):
+        class History(History):
             async def capture_model_interaction_cutoffs(self, execution_id, **kwargs):
                 calls.append("capture")
                 return await super().capture_model_interaction_cutoffs(execution_id, **kwargs)
@@ -177,7 +177,7 @@ async def test_updates_preserve_custom_public_read_dispatch(tmp_path: Path, kind
             selected = _service(state, reader=reader)
         else:
             selected = original
-        history = (History if kind == "history_subclass" else RuntimeHistory)(selected, tenant_id="tenant")
+        history = (History if kind == "history_subclass" else History)(selected, tenant_id="tenant")
         boundary, rows = await history.read_model_interaction_updates("execution", principal=_PRINCIPAL)
         assert len(boundary.cutoffs) == len(rows) == 1
         assert calls == ["capture", "metadata"]
@@ -190,7 +190,7 @@ async def test_updates_preserve_custom_public_read_dispatch(tmp_path: Path, kind
 async def test_update_cancellation_releases_owner_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, phase: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     pending = None
     try:
@@ -202,7 +202,7 @@ async def test_update_cancellation_releases_owner_scope(
                 if phase == "authorization":
                     entered.set()
                     await blocked.wait()
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         original = archive.read_model_interactions_with_run
         async def read(*args, **kwargs):
             assert active_state_scope() is not None
@@ -231,7 +231,7 @@ async def test_update_cancellation_releases_owner_scope(
 
 @pytest.mark.parametrize("active", (tuple(range(1, 206)), (1, 3, 205), ()))
 async def test_live_update_pages_preserve_all_active_and_new_identities(tmp_path: Path, active: tuple[int, ...]) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -247,7 +247,7 @@ async def test_live_update_pages_preserve_all_active_and_new_identities(tmp_path
                 through = min(kwargs["through_model_request_seq"], after + kwargs["limit"])
                 requests.append((after, through))
                 return tuple(replace(item, model_request_seq=n) for n in range(after + 1, through + 1))
-        projection = _GraphModelProjection(RuntimeHistory(Service(), tenant_id="tenant"), _PRINCIPAL)
+        projection = ModelProjection(History(Service(), tenant_id="tenant"), _PRINCIPAL)
         await projection.add("node", project_execution_view(_execution()), 0, subscribe=False)
         projection.high_waters[("execution", 1)] = 205
         projection.active.update(("execution", 1, n) for n in active)
@@ -267,7 +267,7 @@ async def test_live_update_pages_preserve_all_active_and_new_identities(tmp_path
 async def test_structural_short_pages_keep_cross_run_budget_and_finish_via_existing_pages(
     tmp_path: Path, optional_read: bool,
 ) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -291,8 +291,8 @@ async def test_structural_short_pages_keep_cross_run_budget_and_finish_via_exist
                     after_model_request_seq=0, through_model_request_seq=150, limit=min(limit, 25),
                 )
                 return boundary, rows
-        history = RuntimeHistory(PartialService() if optional_read else Service(), tenant_id="tenant")
-        projection = _GraphModelProjection(history, _PRINCIPAL)
+        history = History(PartialService() if optional_read else Service(), tenant_id="tenant")
+        projection = ModelProjection(history, _PRINCIPAL)
         await projection.add("node", project_execution_view(_execution()), 0, subscribe=False)
         rows = [value.item async for _, value in projection.refresh("execution")]
         assert [(row.agent_run_seq, row.model_request_seq) for row in rows] == [

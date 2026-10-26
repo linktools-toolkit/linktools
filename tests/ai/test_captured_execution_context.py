@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from linktools.ai.task import Task
+from linktools.ai.task_engine import TaskEngine
+
+from linktools.ai.persistence import Persistence
 """Historical reexecution imports the accepted framework context, not live state."""
 from ._runtime_test_helpers import model_features
 
-from linktools.ai.runtime.state import RuntimeState
 from ._runtime_test_helpers import workspace_features
 
-from collections.abc import Mapping
 from pathlib import Path
 from linktools.ai.capability import ExecutionCapability
 
@@ -14,12 +16,14 @@ import pytest
 from pydantic_ai.models.test import TestModel
 
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import ExecutionStatus, JsonValue, Principal
+from linktools.ai.core import ExecutionStatus, Principal
 from linktools.ai.capability import TraceCapability
-from linktools.ai.runtime import AgentTaskInputContext, CaptureInputRequest, Runtime, RuntimeStorage
+from linktools.ai.inputs import AgentTaskInputContext, CaptureInputRequest
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._memory import RuntimeMemoryStore
-from linktools.ai.runtime.state import RuntimeDomain
-from .test_task_mixed_node_reliability import _TaskTestModels, _TaskTestModelBinding
+from linktools.ai.persistence import PersistenceDomain
+from .test_task_mixed_node_reliability import _TaskTestModelBinding
 
 
 class _NoToolsBinding(_TaskTestModelBinding):
@@ -38,8 +42,8 @@ async def test_captured_session_context_ignores_later_turns_and_metadata(tmp_pat
     group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", system_prompt="original-only behavior", allow_tools=(), allow_skills=(), allow_subagents=())
     group.agent("candidate", model="default", system_prompt="candidate-only behavior", allow_tools=(), allow_skills=(), allow_subagents=())
-    storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("captured-session", storage=storage, features=model_features(_NoToolsModels(), group)) as runtime:
+    storage = PersistenceStorage.filesystem(tmp_path)
+    async with Persistence.open('captured-session', storage=storage) as persistence_42, Runtime.open(persistence=persistence_42, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_42, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
         agent = runtime.agents.get()
         session = await agent.create_session("source-session", principal=principal, metadata={"note": "accepted metadata"})
@@ -47,8 +51,8 @@ async def test_captured_session_context_ignores_later_turns_and_metadata(tmp_pat
         await first.wait()
         second = await session.start("second input")
         await second.wait()
-        captured = await runtime.executions.capture_input(second.execution_id, CaptureInputRequest(principal, "context-session-0001"))
-        value = await runtime._input_captures.read_agent(captured, principal=principal)
+        captured = await runtime_engine.inputs.capture_input(second.execution_id, CaptureInputRequest(principal, "context-session-0001"))
+        value = await runtime_engine.inputs.read_agent(captured, principal=principal)
         assert value.input_context is not None
         assert "first historical turn" in value.input_context.history.decode()
         assert "second input" not in value.input_context.history.decode()
@@ -63,8 +67,8 @@ async def test_captured_session_context_ignores_later_turns_and_metadata(tmp_pat
         record = await runtime._state.execution.executions.get(replay.execution_id, tenant_id=principal.tenant_id)
         assert record.session_id is None and record.parent_execution_id is None and record.context_imported
         assert record.principal_id == replay_principal.principal_id
-        recapture = await runtime.executions.capture_input(replay.execution_id, CaptureInputRequest(replay_principal, "context-replay-0001"))
-        restored = await runtime._input_captures.read_agent(recapture, principal=replay_principal)
+        recapture = await runtime_engine.inputs.capture_input(replay.execution_id, CaptureInputRequest(replay_principal, "context-replay-0001"))
+        restored = await runtime_engine.inputs.read_agent(recapture, principal=replay_principal)
         assert restored.input_context.digest == value.input_context.digest
         assert "later production turn" not in restored.input_context.history.decode()
         assert restored.input_context.session_metadata["note"] == "accepted metadata"
@@ -74,22 +78,22 @@ async def test_captured_session_context_ignores_later_turns_and_metadata(tmp_pat
 async def test_captured_memory_preserves_versions_in_new_execution_scope(tmp_path: Path) -> None:
     group = RuntimeFeatures("context-memory")
     group.agent("default", model="default", allow_tools=("*",), allow_skills=(), allow_subagents=())
-    storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("captured-memory", storage=storage, features=model_features(_NoToolsModels(), group)) as runtime:
+    storage = PersistenceStorage.filesystem(tmp_path)
+    async with Persistence.open('captured-memory', storage=storage) as persistence_78, Runtime.open(persistence=persistence_78, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_78, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
-        memory = RuntimeMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(RuntimeDomain.MEMORY),
+        memory = RuntimeMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(PersistenceDomain.MEMORY),
                                     namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id="setup", memory_scope="production")
         original = await memory.write("facts.txt", "old content", expected_version=None)
         source = await runtime.agents.get().start("question", memory_scope="production", principal=principal)
         assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
-        captured = await runtime.executions.capture_input(source.execution_id, CaptureInputRequest(principal, "memory-context-0001"))
-        value = await runtime._input_captures.read_agent(captured, principal=principal)
+        captured = await runtime_engine.inputs.capture_input(source.execution_id, CaptureInputRequest(principal, "memory-context-0001"))
+        value = await runtime_engine.inputs.read_agent(captured, principal=principal)
         assert value.input_context.memory["facts.txt"]["content"] == "old content"
         await memory.write("facts.txt", "new production content", expected_version=original.version)
         replay = await runtime.agents.get().start(value.prompt, input_context=value.input_context, principal=principal)
         assert (await replay.wait()).result.status is ExecutionStatus.SUCCEEDED
         record = await runtime._state.execution.executions.get(replay.execution_id, tenant_id=principal.tenant_id)
-        isolated = RuntimeMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(RuntimeDomain.MEMORY),
+        isolated = RuntimeMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(PersistenceDomain.MEMORY),
             namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id=replay.execution_id, memory_scope=record.memory_scope)
         frozen = await isolated.read("facts.txt", max_chars=1000)
         assert frozen.content == "old content" and frozen.version == original.version
@@ -99,36 +103,36 @@ async def test_captured_memory_preserves_versions_in_new_execution_scope(tmp_pat
 
 @pytest.mark.asyncio
 async def test_captured_agent_task_and_graph_restore_context_after_restart(tmp_path: Path) -> None:
-    from linktools.ai.runtime import AgentTaskInput, CaptureGraphRequest
+    from linktools.ai.inputs import AgentTaskInput, CaptureGraphRequest
     from linktools.ai.task import TaskGraph, TaskNode
 
     group = RuntimeFeatures("context-graph")
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     principal = Principal("owner", "default")
-    async with Runtime.open("captured-graph-context", storage=RuntimeStorage.filesystem(tmp_path), features=model_features(_NoToolsModels(), group)) as runtime:
+    async with Persistence.open('captured-graph-context', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_109, Runtime.open(persistence=persistence_109, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_109, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         agent = runtime.agents.get()
         session = await agent.create_session("graph-session", principal=principal)
         previous = await session.start("remember the earlier turn")
         await previous.wait()
-        task = runtime.tasks.from_agent("context.agent", agent)
-        run = await runtime.tasks.bind(task).start(TaskGraph("context-source", (TaskNode("agent", task=task,
+        task = Task.from_agent("context.agent", agent)
+        run = await runtime_engine.with_definitions(task).start(TaskGraph("context-source", (TaskNode("agent", task=task,
             input=AgentTaskInput("graph question", session_id="graph-session")),)), principal=principal, idempotency_key="context-graph-source")
         await run.wait()
-        graph_capture = await runtime.tasks.capture_graph("context-source", CaptureGraphRequest(principal, "context-graph-capture"))
-        template = await runtime._input_captures.read_graph(graph_capture, principal=principal)
+        graph_capture = await runtime_engine.inputs.capture_graph("context-source", CaptureGraphRequest(principal, "context-graph-capture"))
+        template = await runtime_engine.inputs.read_graph(graph_capture, principal=principal)
         assert template.context_policy == "captured"
         assert template.nodes[0].input["capture_context"]["history"]
         latest = await session.start("this later turn must not leak")
         await latest.wait()
-    async with Runtime.open("captured-graph-context", storage=RuntimeStorage.filesystem(tmp_path), features=model_features(_NoToolsModels(), group)) as runtime:
-        task = runtime.tasks.from_agent("context.agent", runtime.agents.get())
-        template = await runtime._input_captures.read_graph(graph_capture, principal=principal)
-        rerun = await runtime.tasks.bind(task).start(TaskGraph("context-replay", template.nodes), principal=principal, idempotency_key="context-graph-replay")
+    async with Persistence.open('captured-graph-context', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_124, Runtime.open(persistence=persistence_124, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_124, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        task = Task.from_agent("context.agent", runtime.agents.get())
+        template = await runtime_engine.inputs.read_graph(graph_capture, principal=principal)
+        rerun = await runtime_engine.with_definitions(task).start(TaskGraph("context-replay", template.nodes), principal=principal, idempotency_key="context-graph-replay")
         await rerun.wait()
         execution = await rerun.execution("agent")
-        capture = await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(principal, "context-graph-rerun-capture"))
-        value = await runtime._input_captures.read_agent(capture, principal=principal)
+        capture = await runtime_engine.inputs.capture_input(execution.execution_id, CaptureInputRequest(principal, "context-graph-rerun-capture"))
+        value = await runtime_engine.inputs.read_agent(capture, principal=principal)
         assert "remember the earlier turn" in value.input_context.history.decode()
         assert "this later turn must not leak" not in value.input_context.history.decode()
         assert (await runtime.executions.inspect(execution.execution_id, principal=principal)).session_id is None
@@ -145,13 +149,13 @@ async def test_captured_repository_instructions_never_refresh_from_workspace(tmp
     group = workspace_features("context-instructions", workspace=Workspace.load(work))
     group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    storage = RuntimeStorage.filesystem(tmp_path / "state")
-    async with Runtime.open("captured-instructions", storage=storage, features=model_features(_NoToolsModels(), group)) as runtime:
+    storage = PersistenceStorage.filesystem(tmp_path / "state")
+    async with Persistence.open('captured-instructions', storage=storage) as persistence_149, Runtime.open(persistence=persistence_149, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_149, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
         source = await runtime.agents.get().start("question", principal=principal)
         await source.wait()
-        capture = await runtime.executions.capture_input(source.execution_id, CaptureInputRequest(principal, "instructions-capture"))
-        value = await runtime._input_captures.read_agent(capture, principal=principal)
+        capture = await runtime_engine.inputs.capture_input(source.execution_id, CaptureInputRequest(principal, "instructions-capture"))
+        value = await runtime_engine.inputs.read_agent(capture, principal=principal)
         instructions.write_text("Changed live repository instruction", encoding="utf-8")
         rerun = await runtime.agents.get().start(value.prompt, input_context=value.input_context, principal=principal)
         assert (await rerun.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -162,8 +166,8 @@ async def test_captured_repository_instructions_never_refresh_from_workspace(tmp
 
 @pytest.mark.asyncio
 async def test_large_captured_context_survives_portable_storage_snapshot(tmp_path: Path) -> None:
-    from linktools.ai.runtime import ExecutionInputContext
-    from linktools.ai.runtime.state import SnapshotLimits
+    from linktools.ai.execution import ExecutionInputContext
+    from linktools.ai.persistence.snapshots import SnapshotLimits
     from linktools.ai.storage import InMemoryObjectStore
 
     group = RuntimeFeatures("portable-context")
@@ -174,21 +178,21 @@ async def test_large_captured_context_survives_portable_storage_snapshot(tmp_pat
         "second.txt": {"content": "b" * 40000, "version": "m1:" + "2" * 64},
     })
     source_root = tmp_path / "source"
-    storage = RuntimeStorage.filesystem(source_root)
-    async with Runtime.open("portable-context", storage=storage, features=model_features(_NoToolsModels(), group)) as runtime:
+    storage = PersistenceStorage.filesystem(source_root)
+    async with Persistence.open('portable-context', storage=storage) as persistence_178, Runtime.open(persistence=persistence_178, features=model_features(_NoToolsModels(), group)) as runtime:
         execution = await runtime.agents.get().start("question", input_context=baseline, principal=principal)
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
         record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
         assert record.input_context.payload.kind == "inline"
         manifest = record.input_context.payload.decode()
         assert manifest["kind"] == "execution-context"
-        from linktools.ai.runtime._context_archive import ExecutionContextArchive
+        from linktools.ai.inputs import ExecutionContextArchive
         contents = await ExecutionContextArchive(
             runtime._state.execution.executions.state_store,
-            runtime._state.archive_object_store(RuntimeDomain.EXECUTION),
+            runtime._state.archive_object_store(PersistenceDomain.EXECUTION),
             namespace=runtime.namespace, tenant_id=principal.tenant_id,
             object_reader=lambda reference: runtime._state.read_archive_object(
-                RuntimeDomain.EXECUTION, reference,
+                PersistenceDomain.EXECUTION, reference,
             ),
         )._open()
         memory_contents = await contents.content_records(tuple(
@@ -198,8 +202,8 @@ async def test_large_captured_context_survives_portable_storage_snapshot(tmp_pat
         assert all(content.payload.kind == "object" for content in memory_contents)
         assert sum(content.raw_size for content in memory_contents) >= 80000
     archive = InMemoryObjectStore("context-snapshot")
-    storage = RuntimeStorage.filesystem(source_root)
-    storage = RuntimeState(storage)
+    storage = PersistenceStorage.filesystem(source_root)
+    storage = Persistence(storage)
     await storage.initialize(namespace="portable-context", tenant_id=principal.tenant_id, read_only=True)
     limits = SnapshotLimits(max_entries=4096, max_bytes=16 * 1024 * 1024)
     try:
@@ -207,10 +211,10 @@ async def test_large_captured_context_survives_portable_storage_snapshot(tmp_pat
     finally:
         await storage.close()
     restored_root = tmp_path / "restored"
-    await RuntimeState.restore_snapshot(snapshot, object_store=archive, root=restored_root, limits=limits)
-    async with Runtime.open("portable-context", storage=RuntimeStorage.from_root(restored_root), features=model_features(_NoToolsModels(), group)) as runtime:
-        capture = await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(principal, "restored-context"))
-        imported = await runtime._input_captures.read_agent(capture, principal=principal)
+    await Persistence.restore_snapshot(snapshot, object_store=archive, root=restored_root, limits=limits)
+    async with Persistence.open('portable-context', storage=PersistenceStorage.from_root(restored_root)) as persistence_211, Runtime.open(persistence=persistence_211, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_211, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        capture = await runtime_engine.inputs.capture_input(execution.execution_id, CaptureInputRequest(principal, "restored-context"))
+        imported = await runtime_engine.inputs.read_agent(capture, principal=principal)
         assert imported.input_context.digest == baseline.digest
         rerun = await runtime.agents.get().start(imported.prompt, input_context=imported.input_context, principal=principal)
         assert (await rerun.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -218,7 +222,7 @@ async def test_large_captured_context_survives_portable_storage_snapshot(tmp_pat
 
 @pytest.mark.asyncio
 async def test_reprojection_uses_captured_history_without_reopening_source_session(tmp_path: Path) -> None:
-    from linktools.ai.runtime import AgentTaskInput
+    from linktools.ai.inputs import AgentTaskInput
     from linktools.ai.task import TaskGraph, TaskNode, TaskStatus
 
     group = RuntimeFeatures("reproject-context")
@@ -231,26 +235,26 @@ async def test_reprojection_uses_captured_history_without_reopening_source_sessi
     async def replacement_builder(context: AgentTaskInputContext) -> str:
         return "replacement projected question"
 
-    async with Runtime.open("reproject-context", storage=RuntimeStorage.filesystem(tmp_path), features=model_features(_NoToolsModels(), group)) as runtime:
+    async with Persistence.open('reproject-context', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_234, Runtime.open(persistence=persistence_234, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_234, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
         session = await runtime.agents.get().create_session("context-session", principal=principal)
         first = await session.start("immutable earlier history")
         await first.wait()
-        original = runtime.tasks.from_agent("context.original", runtime.agents.get(), build_input=first_builder)
-        candidate = runtime.tasks.from_agent("context.candidate", runtime.agents.get(), build_input=replacement_builder)
-        engine = runtime.tasks.bind(original, candidate)
+        original = Task.from_agent("context.original", runtime.agents.get(), build_input=first_builder)
+        candidate = Task.from_agent("context.candidate", runtime.agents.get(), build_input=replacement_builder)
+        engine = runtime_engine.with_definitions(original, candidate)
         source = await engine.start(TaskGraph("projected-source", (TaskNode("node", task=original,
             input=AgentTaskInput(parameters={"example": 1}, session_id="context-session")),)), principal=principal, idempotency_key="projected-context-source")
         assert (await source.wait()).result.wait_status is TaskStatus.SUCCEEDED
         source_execution = await source.execution("node")
-        captured = await runtime.executions.capture_input(source_execution.execution_id, CaptureInputRequest(principal, "projected-context-capture"))
-        source_value = await runtime._input_captures.read_agent(captured, principal=principal)
-        capture = await runtime._input_captures.task_input(captured, principal=principal, input_mode="reproject_input")
+        captured = await runtime_engine.inputs.capture_input(source_execution.execution_id, CaptureInputRequest(principal, "projected-context-capture"))
+        source_value = await runtime_engine.inputs.read_agent(captured, principal=principal)
+        capture = await runtime_engine.inputs.task_input(captured, principal=principal, input_mode="reproject_input")
         replay = await engine.start(TaskGraph("projected-replay", (TaskNode("node", task=candidate, input_capture=capture),)), principal=principal, idempotency_key="projected-context-replay")
         assert (await replay.wait()).result.wait_status is TaskStatus.SUCCEEDED
         replay_execution = await replay.execution("node")
-        replay_capture = await runtime.executions.capture_input(replay_execution.execution_id, CaptureInputRequest(principal, "projected-context-rerun"))
-        value = await runtime._input_captures.read_agent(replay_capture, principal=principal)
+        replay_capture = await runtime_engine.inputs.capture_input(replay_execution.execution_id, CaptureInputRequest(principal, "projected-context-rerun"))
+        value = await runtime_engine.inputs.read_agent(replay_capture, principal=principal)
         assert value.prompt == "replacement projected question"
         assert value.input_context.digest == source_value.input_context.digest
         assert (await runtime.executions.inspect(replay_execution.execution_id, principal=principal)).session_id is None
@@ -263,24 +267,24 @@ async def test_custom_memory_without_consistent_read_view_reports_precise_unavai
 
     group = RuntimeFeatures("unsupported-context")
     group.agent("default", model="default", allow_tools=("*",), allow_skills=(), allow_subagents=())
-    async with Runtime.open("unsupported-context", storage=RuntimeStorage.filesystem(tmp_path), features=model_features(_NoToolsModels(), group)) as runtime:
+    async with Persistence.open('unsupported-context', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_266, Runtime.open(persistence=persistence_266, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_266, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
         backend = runtime._execution_service.runtime_backend()
         backend._memory_store_factory = lambda *_args: InMemoryStore()
         source = await runtime.agents.get().start("question", memory_scope="custom", principal=principal)
         assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
         with pytest.raises(AIError) as raised:
-            await runtime.executions.capture_input(source.execution_id, CaptureInputRequest(principal, "unsupported-context-capture"))
+            await runtime_engine.inputs.capture_input(source.execution_id, CaptureInputRequest(principal, "unsupported-context-capture"))
         assert raised.value.code is ErrorCode.INPUT_CONTEXT_UNAVAILABLE
         assert raised.value.safe_details["reason"] == "memory_store_has_no_consistent_capture"
-        clean = await runtime.executions.capture_input(source.execution_id, CaptureInputRequest(principal, "explicit-clean", "clean"))
-        assert (await runtime._input_captures.read_agent(clean, principal=principal)).input_context is None
+        clean = await runtime_engine.inputs.capture_input(source.execution_id, CaptureInputRequest(principal, "explicit-clean", "clean"))
+        assert (await runtime_engine.inputs.read_agent(clean, principal=principal)).input_context is None
 
 
 @pytest.mark.asyncio
 async def test_reprojected_files_use_accepted_bytes_after_workspace_file_changes(tmp_path: Path) -> None:
     from pydantic_ai.messages import BinaryContent
-    from linktools.ai.runtime import AgentTaskInput
+    from linktools.ai.inputs import AgentTaskInput
     from linktools.ai.task import TaskGraph, TaskNode, TaskStatus
     from linktools.ai.workspace import Workspace
 
@@ -294,29 +298,37 @@ async def test_reprojected_files_use_accepted_bytes_after_workspace_file_changes
     async def builder(context: AgentTaskInputContext) -> str:
         return "projected prompt"
 
-    async with Runtime.open("file-context", storage=RuntimeStorage.filesystem(tmp_path / "state"), features=model_features(_NoToolsModels(), group)) as runtime:
+    async with Persistence.open('file-context', storage=PersistenceStorage.filesystem(tmp_path / 'state')) as persistence_297, Runtime.open(persistence=persistence_297, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_297, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
-        task = runtime.tasks.from_agent("files.projected", runtime.agents.get(), build_input=builder)
-        engine = runtime.tasks.bind(task)
+        task = Task.from_agent("files.projected", runtime.agents.get(), build_input=builder)
+        engine = runtime_engine.with_definitions(task)
         source = await engine.start(TaskGraph("file-source", (TaskNode("node", task=task, input=AgentTaskInput(files=("input.txt",))),)),
                                     principal=principal, idempotency_key="file-context-source")
         assert (await source.wait()).result.wait_status is TaskStatus.SUCCEEDED
         execution = await source.execution("node")
-        ref = await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(principal, "file-context-capture"))
+        ref = await runtime_engine.inputs.capture_input(execution.execution_id, CaptureInputRequest(principal, "file-context-capture"))
         path.write_text("changed live file", encoding="utf-8")
-        replay_input = await runtime._input_captures.task_input(ref, principal=principal, input_mode="reproject_input")
+        replay_input = await runtime_engine.inputs.task_input(ref, principal=principal, input_mode="reproject_input")
         replay = await engine.start(TaskGraph("file-replay", (TaskNode("node", task=task, input_capture=replay_input),)),
                                    principal=principal, idempotency_key="file-context-replay")
         assert (await replay.wait()).result.wait_status is TaskStatus.SUCCEEDED
         replay_execution = await replay.execution("node")
-        replay_ref = await runtime.executions.capture_input(replay_execution.execution_id, CaptureInputRequest(principal, "file-context-rerun"))
-        value = await runtime._input_captures.read_agent(replay_ref, principal=principal)
+        replay_ref = await runtime_engine.inputs.capture_input(replay_execution.execution_id, CaptureInputRequest(principal, "file-context-rerun"))
+        value = await runtime_engine.inputs.read_agent(replay_ref, principal=principal)
         assert [item.data for item in value.prompt if isinstance(item, BinaryContent)] == [b"accepted file bytes"]
 
 
 @pytest.mark.asyncio
 async def test_model_memory_tool_reads_captured_content_after_production_changes(tmp_path: Path) -> None:
-    from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, RetryPromptPart, TextPart, ToolCallPart, ToolReturnPart
+    from pydantic_ai.messages import (
+        ModelMessage,
+        ModelRequest,
+        ModelResponse,
+        RetryPromptPart,
+        TextPart,
+        ToolCallPart,
+        ToolReturnPart,
+    )
     from pydantic_ai.models.function import AgentInfo
     from ._runtime_test_helpers import _UsageFunctionModel
 
@@ -339,16 +351,16 @@ async def test_model_memory_tool_reads_captured_content_after_production_changes
 
     group = RuntimeFeatures("model-memory-context")
     group.agent("default", model="default", allow_tools=("*",), allow_skills=(), allow_subagents=())
-    storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("model-memory-context", storage=storage, features=model_features(Models(), group)) as runtime:
+    storage = PersistenceStorage.filesystem(tmp_path)
+    async with Persistence.open('model-memory-context', storage=storage) as persistence_343, Runtime.open(persistence=persistence_343, features=model_features(Models(), group)) as runtime, TaskEngine.open(persistence=persistence_343, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
-        memory = RuntimeMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(RuntimeDomain.MEMORY),
+        memory = RuntimeMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(PersistenceDomain.MEMORY),
             namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id="setup", memory_scope="production")
         original = await memory.write("memory/facts.md", "frozen memory value", expected_version=None)
         source = await runtime.agents.get().start("read memory", memory_scope="production", principal=principal)
         assert (await source.wait()).result.output == {"text": "read:frozen memory value"}
-        ref = await runtime.executions.capture_input(source.execution_id, CaptureInputRequest(principal, "model-memory-capture"))
-        value = await runtime._input_captures.read_agent(ref, principal=principal)
+        ref = await runtime_engine.inputs.capture_input(source.execution_id, CaptureInputRequest(principal, "model-memory-capture"))
+        value = await runtime_engine.inputs.read_agent(ref, principal=principal)
         await memory.write("memory/facts.md", "changed production value", expected_version=original.version)
         replay = await runtime.agents.get().start(value.prompt, input_context=value.input_context, principal=principal)
         assert (await replay.wait()).result.output == {"text": "read:frozen memory value"}
@@ -372,16 +384,16 @@ async def test_execution_capture_preserves_detached_accepted_provenance(
         TextContent("hello", metadata=metadata),
         BinaryContent(b"original bytes", media_type="text/plain", identifier="evidence"),
     ) if rich_input else "hello"
-    storage = RuntimeStorage.filesystem(tmp_path / "state")
+    storage = PersistenceStorage.filesystem(tmp_path / "state")
     expected_view = None
-    async with Runtime.open("capture-provenance", storage=storage, features=model_features(_NoToolsModels(), group)) as runtime:
+    async with Persistence.open('capture-provenance', storage=storage) as persistence_377, Runtime.open(persistence=persistence_377, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_377, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         execution = await runtime.agents.get().start(prompt, principal=principal)
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
         metadata["nested"]["labels"].append("author annotation")
-        reference = await runtime.executions.capture_input(
+        reference = await runtime_engine.inputs.capture_input(
             execution.execution_id, CaptureInputRequest(principal, "capture-provenance"),
         )
-        captured = await runtime._input_captures.read_agent(reference, principal=principal)
+        captured = await runtime_engine.inputs.read_agent(reference, principal=principal)
         if rich_input:
             assert isinstance(captured.prompt, MaterializedUserContent)
             expected_view = dict(captured.prompt.view)
@@ -391,13 +403,13 @@ async def test_execution_capture_preserves_detached_accepted_provenance(
             captured.prompt.view["attachments"].append({"display_annotation": "local"})
         else:
             assert captured.prompt == "hello"
-        repeated = await runtime.executions.capture_input(
+        repeated = await runtime_engine.inputs.capture_input(
             execution.execution_id, CaptureInputRequest(principal, "capture-provenance"),
         )
         assert repeated == reference
 
-    async with Runtime.open("capture-provenance", storage=storage, features=model_features(_NoToolsModels(), group)) as runtime:
-        restored = await runtime._input_captures.read_agent(reference, principal=principal)
+    async with Persistence.open('capture-provenance', storage=storage) as persistence_399, Runtime.open(persistence=persistence_399, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_399, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        restored = await runtime_engine.inputs.read_agent(reference, principal=principal)
         if rich_input:
             assert isinstance(restored.prompt, MaterializedUserContent)
             assert restored.prompt.view == expected_view

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Capability authoring imports stay independent from Runtime initialization."""
-from ._runtime_test_helpers import model_features
 
 import subprocess
 import sys
@@ -12,10 +13,9 @@ from linktools.ai.capability import (
     CheckpointCapability,
     TraceCapability,
 )
-from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import PersistencePlan
 
-from .test_explicit_runtime_features import _FeatureModels, _features
+from .test_explicit_runtime_features import _features
 
 
 def test_capability_import_does_not_initialize_runtime_package() -> None:
@@ -47,12 +47,9 @@ def test_runtime_has_no_duplicate_capability_exports() -> None:
     assert not hasattr(capability, "ConversationCapability")
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "capability", [CheckpointCapability, TraceCapability]
-)
-async def test_invalid_module_route_is_rejected_before_storage_initialization(
-    capability, monkeypatch
+@pytest.mark.parametrize("route", ("checkpoint", "trace"))
+def test_invalid_module_route_is_rejected_before_storage_initialization(
+    route: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def unexpected_initialize(*args, **kwargs):
         pytest.fail("invalid declarations must fail before storage I/O")
@@ -60,18 +57,13 @@ async def test_invalid_module_route_is_rejected_before_storage_initialization(
     def unexpected_model_capture(*args, **kwargs):
         pytest.fail("invalid declarations must fail before model resolution")
 
-    monkeypatch.setattr(RuntimeState, "initialize", unexpected_initialize)
-    features = _features(capability(storage=object()))
+    monkeypatch.setattr(Persistence, "initialize", unexpected_initialize)
+    features = _features(CheckpointCapability() if route == "checkpoint" else TraceCapability())
     features.model("default", unexpected_model_capture)
-    with pytest.raises(TypeError, match="storage must be StorageRoute"):
-        async with Runtime.open(
-            "invalid-route",
-            storage=RuntimeStorage.in_memory(),
-            features=features,
-        ):
-            pytest.fail("invalid declaration must not activate Runtime")
+    with pytest.raises(ValueError, match="PersistencePlan contains an invalid route"):
+        PersistencePlan(**{route: object()})
 
 
 def test_invalid_session_route_is_rejected_by_root_storage_plan() -> None:
-    with pytest.raises(ValueError, match="RuntimeStoragePlan contains an invalid route"):
-        RuntimeStoragePlan(conversation=object())
+    with pytest.raises(ValueError, match="PersistencePlan contains an invalid route"):
+        PersistencePlan(conversation=object())

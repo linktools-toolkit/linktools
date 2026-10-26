@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Parallel native tool references keep their call ownership and durable lifecycle."""
 
 import asyncio
@@ -7,13 +9,23 @@ import base64
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import BinaryContent, ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturn, ToolReturnPart
+from pydantic_ai.messages import (
+    BinaryContent,
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+    ToolReturn,
+    ToolReturnPart,
+)
 from pydantic_ai.models.function import AgentInfo
 
 from linktools.ai.capability import AgentContext, ExecutionCapability, ReferencedInputsCapability, TraceCapability
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.model import ReferencedContent
-from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import PersistenceStorage
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 from .test_native_referenced_tool_delivery import _IMAGE, _USER_IMAGE, _SOURCE, _reference
@@ -70,15 +82,15 @@ async def test_parallel_native_tool_outputs_keep_ids_after_reverse_completion_an
     models = _Models(_UsageFunctionModel(respond))
     models.contract = {**models.contract, "input_mime_types": ["image/png"]}
     features = model_features(models, group)
-    storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("native-tool-ownership", storage=storage, features=features) as runtime:
+    storage = PersistenceStorage.filesystem(tmp_path)
+    async with Persistence.open('native-tool-ownership', storage=storage) as persistence_74, Runtime.open(persistence=persistence_74, features=features) as runtime:
         execution = await runtime.agents.get().start("Read both independent files")
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED, result.error_diagnostics
         execution_id = execution.execution_id
         principal = runtime.default_principal
     assert completed == ["b", "a"] and loaded == [references["a"], references["b"]]
-    async with Runtime.open("native-tool-ownership", storage=storage, features=features) as runtime:
+    async with Persistence.open('native-tool-ownership', storage=storage) as persistence_81, Runtime.open(persistence=persistence_81, features=features) as runtime:
         result = await runtime.executions.result(execution_id, principal=principal)
         assert result.status is ExecutionStatus.SUCCEEDED
     assert completed == ["b", "a"] and len(loaded) == 2 and len(requests) == 3

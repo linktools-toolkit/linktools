@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Canonical model-request lifecycle ownership and replay contracts."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -11,20 +11,20 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._codec import _decode_step_envelope, _encode_step_envelope
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.codec import _decode_step_envelope, _encode_step_envelope
+from linktools.ai.persistence.contracts import (
     ContextProjection,
     ModelInteractionRecord,
     RuntimePayloadRef,
 )
-from linktools.ai.runtime.state._snapshot_validation import (
+from linktools.ai.persistence._snapshot_validation import (
     canonical_snapshot_indexes,
     validate_snapshot_domain,
 )
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord
-from linktools.ai.runtime.state._store import RecordQuery
+from linktools.ai.persistence._step_contracts import AgentRunRecord
+from linktools.ai.persistence.state import RecordQuery
 from linktools.ai.storage import StoredPayload
 
 
@@ -54,7 +54,7 @@ def _prepared(value: ModelInteractionRecord) -> ModelInteractionRecord:
         model={"route_id": "default", "model": "prepared-model"},
         request_context=ContextProjection(()),
         request_envelope=RuntimePayloadRef(
-            StoredPayload.inline_bytes(b"{}"), RuntimeDomain.CHECKPOINT,
+            StoredPayload.inline_bytes(b"{}"), PersistenceDomain.CHECKPOINT,
         ),
     )
 
@@ -70,12 +70,12 @@ def _terminal(value: ModelInteractionRecord, status: str = "SUCCEEDED") -> Model
     )
 
 
-def _storage(backend: str, path: Path) -> RuntimeStorage:
+def _storage(backend: str, path: Path) -> PersistenceStorage:
     if backend == "memory":
-        return RuntimeStorage.in_memory()
+        return PersistenceStorage.in_memory()
     if backend == "filesystem":
-        return RuntimeStorage.filesystem(path / "state")
-    return RuntimeStorage.sqlite(path / "state.db")
+        return PersistenceStorage.filesystem(path / "state")
+    return PersistenceStorage.sqlite(path / "state.db")
 
 
 @pytest.mark.parametrize("phase", (
@@ -125,10 +125,10 @@ def test_metadata_can_be_prepared_until_request_content_is_published() -> None:
 async def test_interaction_identity_survives_preparation_and_completion(
     tmp_path: Path, backend: str,
 ) -> None:
-    storage = RuntimeState(_storage(backend, tmp_path))
+    storage = Persistence(_storage(backend, tmp_path))
     await storage.initialize(namespace="request-lifecycle", tenant_id="tenant")
     try:
-        archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        archive = storage.run_store.read_store(PersistenceDomain.CHECKPOINT)
         run = AgentRunRecord("run")
         admitted = _running()
         prepared = _prepared(admitted)
@@ -165,16 +165,16 @@ async def test_interaction_identity_survives_preparation_and_completion(
 async def test_prepared_request_is_immutable_and_failed_preparation_is_visible(
     tmp_path: Path, backend: str,
 ) -> None:
-    storage = RuntimeState(_storage(backend, tmp_path))
+    storage = Persistence(_storage(backend, tmp_path))
     await storage.initialize(namespace="request-lifecycle", tenant_id="tenant")
     try:
-        archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        archive = storage.run_store.read_store(PersistenceDomain.CHECKPOINT)
         run = AgentRunRecord("run")
         first = _prepared(_running())
         failed = _terminal(_running(2), "FAILED")
         await archive.sync_projection(run, events=(), checkpoints=(), interactions=(first, failed))
         invalid = replace(first, request_envelope=RuntimePayloadRef(
-            StoredPayload.inline_bytes(b'{"changed":true}'), RuntimeDomain.CHECKPOINT,
+            StoredPayload.inline_bytes(b'{"changed":true}'), PersistenceDomain.CHECKPOINT,
         ))
         with pytest.raises(AIError) as raised:
             await archive.sync_projection(run, events=(), checkpoints=(), interactions=(invalid,))
@@ -201,10 +201,10 @@ async def test_prepared_request_is_immutable_and_failed_preparation_is_visible(
 async def test_concurrent_completion_keeps_exactly_one_terminal_result(
     tmp_path: Path, backend: str,
 ) -> None:
-    storage = RuntimeState(_storage(backend, tmp_path))
+    storage = Persistence(_storage(backend, tmp_path))
     await storage.initialize(namespace="request-lifecycle", tenant_id="tenant")
     try:
-        archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        archive = storage.run_store.read_store(PersistenceDomain.CHECKPOINT)
         run = AgentRunRecord("run")
         prepared = _prepared(_running())
         await archive.sync_projection(run, events=(), checkpoints=(), interactions=(prepared,))
@@ -227,10 +227,10 @@ async def test_concurrent_completion_keeps_exactly_one_terminal_result(
 async def test_canonical_interaction_pages_and_snapshot_sequences_include_running(
     tmp_path: Path, backend: str,
 ) -> None:
-    storage = RuntimeState(_storage(backend, tmp_path))
+    storage = Persistence(_storage(backend, tmp_path))
     await storage.initialize(namespace="request-lifecycle", tenant_id="tenant")
     try:
-        archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        archive = storage.run_store.read_store(PersistenceDomain.CHECKPOINT)
         run = AgentRunRecord("run")
         values = tuple(_running(sequence) for sequence in range(1, 13))
         await archive.sync_projection(run, events=(), checkpoints=(), interactions=values)
@@ -242,11 +242,11 @@ async def test_canonical_interaction_pages_and_snapshot_sequences_include_runnin
         facts = await archive.state_store.read(lambda tx: tx.scan_facts())
         operations = await archive.state_store.read(lambda tx: tx.scan_operations())
         aliases, sequences = canonical_snapshot_indexes(
-            namespace="request-lifecycle", tenant_id="tenant", domain=RuntimeDomain.CHECKPOINT,
+            namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.CHECKPOINT,
             records=records, facts=facts, operations=operations,
         )
         validate_snapshot_domain(
-            namespace="request-lifecycle", tenant_id="tenant", domain=RuntimeDomain.CHECKPOINT,
+            namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.CHECKPOINT,
             records=records, aliases=aliases, facts=facts, operations=operations, sequences=sequences,
         )
         await archive.release_agent_run("run")
@@ -264,7 +264,7 @@ async def test_recovered_producer_interrupts_unknown_requests_and_fences_old_wri
     from linktools.ai.core import ExecutionStatus
     from .test_history_projection_conformance import _record
 
-    storage = RuntimeState(_storage(backend, tmp_path))
+    storage = Persistence(_storage(backend, tmp_path))
     await storage.initialize(namespace="request-lifecycle", tenant_id="tenant")
     try:
         repository = storage.execution.executions
@@ -273,12 +273,12 @@ async def test_recovered_producer_interrupts_unknown_requests_and_fences_old_wri
         await repository.state_store.mutate(
             lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
         )
-        archive = storage.run_store.read_store(RuntimeDomain.TRACE)
+        archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         run = AgentRunRecord("run")
         prepared = replace(
             _prepared(_running()),
             request_envelope=RuntimePayloadRef(
-                StoredPayload.inline_bytes(b"{}"), RuntimeDomain.TRACE,
+                StoredPayload.inline_bytes(b"{}"), PersistenceDomain.TRACE,
             ),
         )
         await archive.sync_prepared_projection(
@@ -320,14 +320,14 @@ async def test_recovered_producer_interrupts_unknown_requests_and_fences_old_wri
 @pytest.mark.asyncio
 async def test_snapshot_event_associations_remain_derived_from_canonical_facts(tmp_path: Path) -> None:
     from linktools.ai.core import ExecutionStatus
-    from linktools.ai.runtime.state._step_contracts import StepEvent
+    from linktools.ai.persistence._step_contracts import StepEvent
     from .test_history_projection_conformance import _record
 
-    storage = RuntimeState(_storage("sqlite", tmp_path))
+    storage = Persistence(_storage("sqlite", tmp_path))
     await storage.initialize(namespace="request-lifecycle", tenant_id="tenant")
     try:
         await storage.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
-        archive = storage.run_store.read_store(RuntimeDomain.TRACE)
+        archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         await archive.sync_projection(
             AgentRunRecord("run"),
             events=(StepEvent(
@@ -341,18 +341,18 @@ async def test_snapshot_event_associations_remain_derived_from_canonical_facts(t
         facts = await archive.state_store.read(lambda tx: tx.scan_facts())
         operations = await archive.state_store.read(lambda tx: tx.scan_operations())
         aliases, sequences = canonical_snapshot_indexes(
-            namespace="request-lifecycle", tenant_id="tenant", domain=RuntimeDomain.TRACE,
+            namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.TRACE,
             records=records, facts=facts, operations=operations,
         )
         validate_snapshot_domain(
-            namespace="request-lifecycle", tenant_id="tenant", domain=RuntimeDomain.TRACE,
+            namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.TRACE,
             records=records, aliases=aliases, facts=facts, operations=operations, sequences=sequences,
         )
         omitted = next(record for record in records
                        if record.kind == "history_association" and record.sort_key != "coverage:event")
         with pytest.raises(AIError) as missing:
             validate_snapshot_domain(
-                namespace="request-lifecycle", tenant_id="tenant", domain=RuntimeDomain.TRACE,
+                namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.TRACE,
                 records=tuple(record for record in records if record.key_digest != omitted.key_digest),
                 aliases=aliases, facts=facts, operations=operations, sequences=sequences,
             )
@@ -362,7 +362,7 @@ async def test_snapshot_event_associations_remain_derived_from_canonical_facts(t
                    for record in records) == 2
         with pytest.raises(AIError) as uncovered:
             validate_snapshot_domain(
-                namespace="request-lifecycle", tenant_id="tenant", domain=RuntimeDomain.TRACE,
+                namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.TRACE,
                 records=tuple(record for record in records
                               if record.key_digest != omitted.key_digest and record.sort_key != "coverage:event"),
                 aliases=aliases, facts=facts, operations=operations, sequences=sequences,
@@ -374,7 +374,7 @@ async def test_snapshot_event_associations_remain_derived_from_canonical_facts(t
         )
         with pytest.raises(AIError) as raised:
             validate_snapshot_domain(
-                namespace="request-lifecycle", tenant_id="tenant", domain=RuntimeDomain.TRACE,
+                namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.TRACE,
                 records=corrupted, aliases=aliases, facts=facts, operations=operations, sequences=sequences,
             )
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

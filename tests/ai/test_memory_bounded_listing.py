@@ -13,9 +13,9 @@ import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._memory import RuntimeMemoryStore, _decode_receipt
-from linktools.ai.runtime.state._contracts import MemoryRecord
-from linktools.ai.runtime.state._memory import InMemoryStateStorageGroup, InMemoryStateStore
-from linktools.ai.runtime.state._repositories import MemoryRepositoryImpl
+from linktools.ai.persistence.contracts import MemoryRecord
+from linktools.ai.persistence._memory import InMemoryStateStorageGroup, InMemoryStateStore
+from linktools.ai.persistence.repositories import MemoryRepositoryImpl
 from linktools.ai.storage import StoredPayload
 
 pytestmark = pytest.mark.asyncio
@@ -209,16 +209,16 @@ async def test_filesystem_memory_listing_reads_only_requested_record_page(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from linktools.ai.runtime.state import _filesystem_layout as filesystem
-    from linktools.ai.runtime.state._filesystem import FilesystemStateStore
-    from linktools.ai.runtime.state._plan import RuntimeDomain
+    from linktools.ai.persistence import _filesystem_layout as filesystem
+    from linktools.ai.persistence._filesystem import FilesystemStateStore
+    from linktools.ai.persistence._plan import PersistenceDomain
 
     root = tmp_path / "memory-state"
     state = FilesystemStateStore(
         root,
         namespace="memory-bounded-fs",
         tenant_id="tenant",
-        runtime_domain=RuntimeDomain.MEMORY.value,
+        runtime_domain=PersistenceDomain.MEMORY.value,
         _range_index=True,
     )
     await state.initialize()
@@ -253,7 +253,7 @@ async def test_filesystem_memory_listing_reads_only_requested_record_page(
         root,
         namespace="memory-bounded-fs",
         tenant_id="tenant",
-        runtime_domain=RuntimeDomain.MEMORY.value,
+        runtime_domain=PersistenceDomain.MEMORY.value,
         _range_index=True,
     )
     await reopened.initialize()
@@ -289,16 +289,16 @@ async def test_filesystem_rebuilds_missing_record_index_before_bounded_query(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from linktools.ai.runtime.state import _filesystem_layout as filesystem
-    from linktools.ai.runtime.state._filesystem import FilesystemStateStore
-    from linktools.ai.runtime.state._plan import RuntimeDomain
+    from linktools.ai.persistence import _filesystem_layout as filesystem
+    from linktools.ai.persistence._filesystem import FilesystemStateStore
+    from linktools.ai.persistence._plan import PersistenceDomain
 
     root = tmp_path / "memory-reindex"
     state = FilesystemStateStore(
         root,
         namespace="memory-reindex",
         tenant_id="tenant",
-        runtime_domain=RuntimeDomain.MEMORY.value,
+        runtime_domain=PersistenceDomain.MEMORY.value,
         _range_index=True,
     )
     await state.initialize()
@@ -334,7 +334,7 @@ async def test_filesystem_rebuilds_missing_record_index_before_bounded_query(
         root,
         namespace="memory-reindex",
         tenant_id="tenant",
-        runtime_domain=RuntimeDomain.MEMORY.value,
+        runtime_domain=PersistenceDomain.MEMORY.value,
         _range_index=True,
     )
     await reopened.initialize()
@@ -397,15 +397,15 @@ async def test_filesystem_empty_prefix_query_does_not_enumerate_scope_index(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from linktools.ai.runtime.state._filesystem import FilesystemStateStore
-    from linktools.ai.runtime.state._plan import RuntimeDomain
+    from linktools.ai.persistence._filesystem import FilesystemStateStore
+    from linktools.ai.persistence._plan import PersistenceDomain
 
     root = tmp_path / "memory-prefix-trie"
     state = FilesystemStateStore(
         root,
         namespace="memory-prefix-trie",
         tenant_id="tenant",
-        runtime_domain=RuntimeDomain.MEMORY.value,
+        runtime_domain=PersistenceDomain.MEMORY.value,
         _range_index=True,
     )
     await state.initialize()
@@ -440,7 +440,7 @@ async def test_filesystem_empty_prefix_query_does_not_enumerate_scope_index(
         root,
         namespace="memory-prefix-trie",
         tenant_id="tenant",
-        runtime_domain=RuntimeDomain.MEMORY.value,
+        runtime_domain=PersistenceDomain.MEMORY.value,
         _range_index=True,
     )
     await reopened.initialize()

@@ -8,8 +8,8 @@ import pytest
 
 from linktools.ai.agent import AgentBindingContract
 from linktools.ai.core import Principal
-from linktools.ai.runtime._agent_task import RuntimeAgentTaskRunner
-from linktools.ai.runtime._agent_task_input import AgentTaskInput
+from linktools.ai.task_engine._agent import AgentTaskRunner
+from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.spec import AgentSpec
 from linktools.ai.task import TaskNode, TaskNodeInvocation
 
@@ -71,10 +71,10 @@ async def test_cancelled_wait_leaves_handed_off_execution_for_graph_recovery() -
         output_mode="text",
         output_schema={},
     )
-    runner = RuntimeAgentTaskRunner(
+    runner = AgentTaskRunner(
         id="agent-task",
         revision=1,
-        runtime_owner=object(),
+        persistence_owner=object(),
         agent_id="agent",
         agent_revision=1,
         input_mode="literal",
@@ -159,10 +159,10 @@ async def test_cancelled_start_defers_binding_to_idempotent_recovery() -> None:
         output_mode="text",
         output_schema={},
     )
-    runner = RuntimeAgentTaskRunner(
+    runner = AgentTaskRunner(
         id="agent-task",
         revision=1,
-        runtime_owner=object(),
+        persistence_owner=object(),
         agent_id="agent",
         agent_revision=1,
         input_mode="literal",
@@ -212,7 +212,7 @@ async def test_cancelled_handoff_keeps_hold_until_recovery_rebinds() -> None:
         execution_id = "execution"
 
         async def wait(self) -> object:
-            from linktools.ai.runtime import WaitResult
+            from linktools.ai.observe import WaitResult
             return WaitResult(Result(), None)
 
     class BlockingControl:
@@ -290,10 +290,10 @@ async def test_cancelled_handoff_keeps_hold_until_recovery_rebinds() -> None:
         output_mode="text",
         output_schema={},
     )
-    runner = RuntimeAgentTaskRunner(
+    runner = AgentTaskRunner(
         id="agent-task",
         revision=1,
-        runtime_owner=object(),
+        persistence_owner=object(),
         agent_id="agent",
         agent_revision=1,
         input_mode="literal",

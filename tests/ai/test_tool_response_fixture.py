@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Offline native MCP catalogs, version binding, and response semantics."""
 from ._runtime_test_helpers import model_features
 
@@ -15,7 +17,14 @@ from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.tools import ToolDefinition
 
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
-from linktools.ai.capability import AssetCapability, AgentContext, ToolCallFailed, ToolCallRetry, ToolResponseFixture, ToolResponsesCapability
+from linktools.ai.capability import (
+    AssetCapability,
+    AgentContext,
+    ToolCallFailed,
+    ToolCallRetry,
+    ToolResponseFixture,
+    ToolResponsesCapability,
+)
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._mcp import (
@@ -357,7 +366,8 @@ async def test_native_runtime_consumes_fixture_through_durable_mcp_operation(
     from linktools.ai.asset import AssetMaterializer
     from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.core import ExecutionStatus, JsonValue, ToolOperationStatus
-    from linktools.ai.runtime import Runtime, RuntimeStorage
+    from linktools.ai.runtime import Runtime
+    from linktools.ai.persistence import PersistenceStorage
     from linktools.ai.runtime._mcp import _MCPModelToolset, prepare_mcp_projections
     from linktools.ai.workspace import SandboxResource
 
@@ -447,11 +457,8 @@ async def test_native_runtime_consumes_fixture_through_durable_mcp_operation(
         ))
         group.agent("default", model="default", allow_tools=(mcp_tool_selector("server", "lookup"),))
         group.capability(ToolResponsesCapability(fixture), scope="runtime")
-        storage = RuntimeStorage.in_memory()
-        async with Runtime.open(
-            "fixture-native-runtime",
-            storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), group),
-        ) as runtime:
+        storage = PersistenceStorage.in_memory()
+        async with Persistence.open('fixture-native-runtime', storage=storage) as persistence_451, Runtime.open(persistence=persistence_451, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
             execution = await runtime.agents.get("default").start("Look up the fixture")
             result = (await execution.wait(timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED

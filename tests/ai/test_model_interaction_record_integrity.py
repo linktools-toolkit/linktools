@@ -10,11 +10,11 @@ import pytest
 
 from linktools.ai.core import canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._contracts import ModelInteractionRecord
-from linktools.ai.runtime.state._snapshot_validation import canonical_snapshot_indexes, validate_snapshot_domain
-from linktools.ai.runtime.state._step_archive import _encode_step
-from linktools.ai.runtime.state._store import StoredFact
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.contracts import ModelInteractionRecord
+from linktools.ai.persistence._snapshot_validation import canonical_snapshot_indexes, validate_snapshot_domain
+from linktools.ai.persistence._step_archive import _encode_step
+from linktools.ai.persistence.state import StoredFact
 
 from .test_step_archive_read_boundaries import _archive
 
@@ -64,13 +64,13 @@ async def test_interaction_fact_cannot_replace_missing_authoritative_record(
         facts = await store.read(lambda tx: tx.scan_facts())
         with pytest.raises(AIError) as indexes:
             canonical_snapshot_indexes(
-                namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.TRACE,
+                namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
                 records=records, facts=facts, operations=(),
             )
         assert indexes.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         with pytest.raises(AIError) as snapshot:
             validate_snapshot_domain(
-                namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.TRACE,
+                namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
                 records=records, facts=facts, operations=(), aliases=(),
                 sequences={archive._sequence(run.agent_run_id, "interaction"): 1},
             )

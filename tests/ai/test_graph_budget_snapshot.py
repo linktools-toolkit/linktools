@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from linktools.ai.task_engine import TaskEngine
+
+from linktools.ai.persistence import Persistence
 """Graph budget owners survive portable snapshots without execution records."""
 from ._runtime_test_helpers import model_features
 
@@ -11,16 +14,16 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.runtime.state import RuntimeState
 
 from linktools.ai.core import BudgetUsage, RunBudget, TaskStatus, canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime.state import SnapshotLimits
-from linktools.ai.runtime.state._codec import (
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.snapshots import SnapshotLimits
+from linktools.ai.persistence.codec import (
     _decode_enveloped_domain, decode_record, encode_domain, encode_envelope, encode_record,
 )
-from linktools.ai.runtime.state._store import RecordQuery, StateTransaction, StoredRecord
+from linktools.ai.persistence.state import RecordQuery, StateTransaction, StoredRecord
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef, read_object
 from linktools.ai.task import TaskGraph, TaskGraphSubmission
 
@@ -34,11 +37,9 @@ _LIMITS = SnapshotLimits(max_entries=1000, max_bytes=1024 * 1024)
 async def _create_source(
     root: Path, phase: str,
 ) -> tuple[TaskGraphSubmission, BudgetUsage | None]:
-    storage = RuntimeStorage.from_root(root)
-    async with Runtime.open(
-        _NAMESPACE, features=model_features(RuntimeUsageModels()), storage=storage,
-    ) as runtime:
-        engine = runtime.tasks.bind()
+    storage = PersistenceStorage.from_root(root)
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_38, Runtime.open(persistence=persistence_38, features=model_features(RuntimeUsageModels())) as runtime, TaskEngine.open(persistence=persistence_38, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        engine = runtime_engine.with_definitions()
         graph = TaskGraph("empty", ())
         budget = RunBudget(model_requests=3)
         submission = await engine.describe_submission(
@@ -63,7 +64,7 @@ async def _create_source(
 
 
 async def _export_source(root: Path, objects: InMemoryObjectStore) -> ObjectRef:
-    storage = RuntimeState(RuntimeStorage.from_root(root))
+    storage = Persistence(PersistenceStorage.from_root(root))
     await storage.initialize(namespace=_NAMESPACE, tenant_id="default", read_only=True)
     try:
         return await storage.export_snapshot(object_store=objects, limits=_LIMITS)
@@ -88,13 +89,11 @@ async def test_empty_graph_budget_snapshot_preserves_submission_phase(
     objects = InMemoryObjectStore("snapshot")
     reference = await _export_source(source, objects)
     restored = tmp_path / "restored"
-    await RuntimeState.restore_snapshot(
+    await Persistence.restore_snapshot(
         reference, object_store=objects, root=restored, limits=_LIMITS,
     )
-    storage = RuntimeStorage.from_root(restored)
-    async with Runtime.open(
-        _NAMESPACE, features=model_features(RuntimeUsageModels()), storage=storage,
-    ) as runtime:
+    storage = PersistenceStorage.from_root(restored)
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_95, Runtime.open(persistence=persistence_95, features=model_features(RuntimeUsageModels())) as runtime, TaskEngine.open(persistence=persistence_95, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         if phase == "described":
             with pytest.raises(AIError) as missing:
                 await runtime._state.execution.budgets.read("graph:empty")
@@ -103,7 +102,7 @@ async def test_empty_graph_budget_snapshot_preserves_submission_phase(
         else:
             assert await runtime._state.execution.budgets.read("graph:empty") == expected_usage
             assert await runtime._state.task.admissions.submission_status(submission.ref) == phase
-            engine = runtime.tasks.bind()
+            engine = runtime_engine.with_definitions()
             assert (await engine.start_prepared(submission)).admitted
             run = await engine.get("empty")
             assert (await run.wait()).result.status is TaskStatus.SUCCEEDED
@@ -118,7 +117,7 @@ async def test_graph_budget_export_rejects_missing_or_changed_scope(
 ) -> None:
     source = tmp_path / "source"
     await _create_source(source, phase)
-    storage = RuntimeState(RuntimeStorage.from_root(source))
+    storage = Persistence(PersistenceStorage.from_root(source))
     await storage.initialize(namespace=_NAMESPACE, tenant_id="default")
     try:
         async def corrupt(transaction: StateTransaction) -> None:
@@ -168,7 +167,7 @@ async def test_graph_budget_restore_rejects_missing_or_changed_scope_before_writ
     await objects.put(key, chunks(), expected_size=len(payload), expected_digest=digest)
     restored = tmp_path / "restored"
     with pytest.raises(AIError) as invalid:
-        await RuntimeState.restore_snapshot(
+        await Persistence.restore_snapshot(
             ObjectRef(objects.store_id, key, digest, len(payload)),
             object_store=objects, root=restored, limits=_LIMITS,
         )

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Web Session timeline projection regressions."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -30,18 +30,18 @@ from linktools.ai.core import (
     UsageMetrics,
     agent_conversation_id as make_agent_conversation_id,
 )
-import linktools.ai.runtime._session_timeline as timeline_module
+import linktools.ai.history._session_timeline as timeline_module
 from linktools.ai.runtime._session import RuntimeSessionService
-from linktools.ai.runtime.service_api import ExecutionView, SessionHistoryItem
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.execution import ExecutionView, SessionHistoryItem
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.persistence.contracts import (
     ConversationCursor,
     ExecutionRecord,
     ResultRecord,
     SessionRecord,
     StoredUserInput,
 )
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
 from linktools.ai.storage import StoredPayload
 
 
@@ -57,7 +57,7 @@ def _commit_fields(execution: ExecutionRecord) -> dict[str, object]:
     }
 
 
-async def _commit_empty_turn(state: RuntimeState, execution: ExecutionRecord) -> None:
+async def _commit_empty_turn(state: Persistence, execution: ExecutionRecord) -> None:
     """Publish a terminal turn with no model messages through the current writer."""
     sessions = state.conversation.sessions
 
@@ -175,7 +175,7 @@ class _ExecutionService:
 
 
 async def _materialize_conversation(
-    state: RuntimeState, history_id: str
+    state: Persistence, history_id: str
 ) -> tuple[str, int]:
     agent_run_id = "timeline-conversation-run"
     agent_conversation_id = make_agent_conversation_id(
@@ -233,8 +233,8 @@ async def _materialize_conversation(
 
 @pytest.mark.asyncio
 async def test_session_timeline_restores_original_prompt_without_runtime_instructions() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="session-timeline", tenant_id="tenant")
     try:
         created = await state.conversation.sessions.create(_session())

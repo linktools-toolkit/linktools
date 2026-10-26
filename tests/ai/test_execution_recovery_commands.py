@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Focused durable recovery command regressions."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -22,10 +22,10 @@ from linktools.ai.core import (
     canonical_sha256,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._tool import ToolOperationRecord
-from linktools.ai.runtime.state._contracts import ExecutionRecord
-from linktools.ai.runtime.state._recovery_commands import RuntimeRecoveryCommands
+from linktools.ai.persistence.contracts import ExecutionRecord
+from linktools.ai.persistence._recovery_commands import RuntimeRecoveryCommands
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 
@@ -95,7 +95,7 @@ def _tool(now: datetime, *, operation_id: str = "tool-operation") -> ToolOperati
     )
 
 
-def _commands(state: RuntimeState) -> RuntimeRecoveryCommands:
+def _commands(state: Persistence) -> RuntimeRecoveryCommands:
     return RuntimeRecoveryCommands(
         state.execution.executions,
         state.execution.events,
@@ -131,8 +131,8 @@ def _resolution_operation(
 
 @pytest.mark.asyncio
 async def test_recovery_status_and_resume_are_durable_nonterminal_events() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="execution-recovery", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = _execution(now)
@@ -171,8 +171,8 @@ async def test_recovery_status_and_resume_are_durable_nonterminal_events() -> No
 
 @pytest.mark.asyncio
 async def test_recovery_cancel_intent_fences_stale_resume() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="recovery-cancel", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = _execution(now)
@@ -236,8 +236,8 @@ async def test_recovery_cancel_intent_fences_stale_resume() -> None:
 async def test_recovery_cancel_claim_reports_concurrent_intent_as_conflict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="recovery-cancel-race", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = _execution(now)
@@ -296,8 +296,8 @@ async def test_recovery_cancel_claim_reports_concurrent_intent_as_conflict(
 
 @pytest.mark.asyncio
 async def test_not_applied_resolution_reopens_tool_with_next_fence() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="tool-resolution", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     try:
@@ -366,8 +366,8 @@ async def test_applied_and_failed_effect_resolutions_persist_tool_truth(
     error_code: str | None,
     error_payload: StoredPayload | None,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="tool-resolution-terminal", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     try:
@@ -408,8 +408,8 @@ async def test_tool_effect_resolution_rejects_stale_fence_and_key_reuse(
     conflict: str,
     expected_error: ErrorCode,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="tool-resolution-conflict", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     try:
@@ -443,8 +443,8 @@ async def test_tool_effect_resolution_rejects_stale_fence_and_key_reuse(
 
 @pytest.mark.asyncio
 async def test_active_restart_admits_a_new_history_producer_and_fences_predecessor() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="restart-producer", tenant_id="tenant")
     execution = _execution(datetime.now(timezone.utc))
     try:
@@ -483,8 +483,8 @@ async def test_active_restart_admits_a_new_history_producer_and_fences_predecess
 @pytest.mark.asyncio
 @pytest.mark.parametrize("unrelated_update", (False, True))
 async def test_resume_recovers_its_own_lost_commit_acknowledgement(monkeypatch, unrelated_update) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="resume-ack", tenant_id="tenant")
     execution = _execution(datetime.now(timezone.utc))
     try:
@@ -525,8 +525,8 @@ async def test_producer_guard_batches_known_keys_and_reuses_transaction_records(
 ) -> None:
     from sqlalchemy import event
 
-    state = RuntimeStorage.sqlite(tmp_path / "producer-guard.db")
-    state = RuntimeState(state)
+    state = PersistenceStorage.sqlite(tmp_path / "producer-guard.db")
+    state = Persistence(state)
     await state.initialize(namespace="producer-guard", tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -590,7 +590,7 @@ async def test_producer_guard_batch_preserves_fail_closed_checks(
     from .test_incremental_projection_boundaries import _storage
 
     state = _storage(backend, tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="producer-guard-failure", tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -632,7 +632,7 @@ async def test_recovery_write_failure_rolls_back_its_operation_receipt(
 ) -> None:
     from .test_incremental_projection_boundaries import _storage
 
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="recovery-write-rollback", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = replace(_execution(now), status=ExecutionStatus.RECOVERY_REQUIRED)
@@ -711,7 +711,7 @@ async def test_recovery_repository_rejects_stale_state_before_receipt_admission(
     from linktools.ai.core import OperationLedgerRecord
     from .test_incremental_projection_boundaries import _storage
 
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="recovery-admission-fence", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = replace(_execution(now), status=ExecutionStatus.RECOVERY_REQUIRED)

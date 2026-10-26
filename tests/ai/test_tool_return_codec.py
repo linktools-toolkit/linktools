@@ -18,8 +18,8 @@ from linktools.ai.capability import SkillSourceRegistry
 from linktools.ai.core import PromptLimits
 from linktools.ai.runtime import _agent_executor as agent_executor
 from linktools.ai.runtime._agent_executor import AgentExecutor, _AgentRunScope
-from linktools.ai.runtime.state._contracts import LoadedModelContext
-from linktools.ai.runtime._tool_return_codec import (
+from linktools.ai.persistence.contracts import LoadedModelContext
+from linktools.ai.model._tool_return_codec import (
     decode_tool_return_content,
     encode_tool_return_content,
     rehydrate_deferred_tool_results,

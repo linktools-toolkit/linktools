@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Child metadata reads retain authorization and consistent read boundaries."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from dataclasses import replace
 from pathlib import Path
 
@@ -11,7 +11,7 @@ from sqlalchemy import event
 
 from linktools.ai.core import ExecutionLineageKind
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state._execution_repositories import ExecutionRepositoryImpl
+from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
 
 from .test_execution_result_read_io import _PRINCIPAL, _seed, _service
 from .test_incremental_projection_boundaries import _storage
@@ -24,7 +24,7 @@ async def test_children_read_observes_authorization_changes_outside_read_scope(
     tmp_path: Path, backend: str,
 ) -> None:
     state = _storage(backend, tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="children-read", tenant_id="tenant")
     try:
         parent = await _seed(state)
@@ -49,7 +49,7 @@ async def test_children_metadata_uses_fewer_sql_read_setups_without_skipping_que
     tmp_path: Path,
 ) -> None:
     state = _storage("sqlite", tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="children-read", tenant_id="tenant")
     try:
         await _seed(state)
@@ -95,7 +95,7 @@ async def test_children_read_fails_closed_when_parent_disappears_after_authoriza
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
     state = _storage(backend, tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="children-read", tenant_id="tenant")
     try:
         await _seed(state)
@@ -122,7 +122,7 @@ async def test_children_read_rejects_unauthorized_parent_before_child_query(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, denial: str,
 ) -> None:
     state = _storage(backend, tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="children-read", tenant_id="tenant")
     try:
         await _seed(state)
@@ -151,12 +151,12 @@ async def test_children_read_rejects_unauthorized_parent_before_child_query(
 @pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
 async def test_children_read_works_with_read_only_storage(tmp_path: Path, backend: str) -> None:
     state = _storage(backend, tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="children-read", tenant_id="tenant")
     await _seed(state)
     await state.close()
     reader = _storage(backend, tmp_path)
-    reader = RuntimeState(reader)
+    reader = Persistence(reader)
     await reader.initialize(namespace="children-read", tenant_id="tenant", read_only=True)
     try:
         assert await _service(reader).list_children("execution", principal=_PRINCIPAL) == ()

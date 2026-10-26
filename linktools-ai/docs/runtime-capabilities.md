@@ -8,6 +8,7 @@ behavior and Runtime-wide policy; there is no separate registration system.
 ```python
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import Persistence
 
 # GlobalRateLimit is owned by the application; see the executable example below.
 quota = GlobalRateLimit(
@@ -19,8 +20,8 @@ group.model("default", binding)
 group.agent("default", allow_capabilities=())
 
 capture = await group.capture()
-async with Runtime.open(
-    "application", storage=storage, features=capture,
+async with Persistence.open("application", storage=storage) as persistence, Runtime.open(
+    persistence=persistence, features=capture,
 ) as runtime:
     ...
 ```
@@ -102,27 +103,31 @@ Admission freezes the execution's conversation, checkpoint and trace guarantees.
 Reopening with a different capability set does not upgrade, downgrade or
 reinterpret that execution, including idempotent start replay. Runtime-wide
 request policies, such as rate limits, still use current host configuration.
-Task, Evaluation and Artifact remain Runtime services; they activate business
-work on actual use or required recovery, not through capability wrappers.
-Shared storage provisioning is independent of service activation.
+TaskEngine and Evaluations are independent composition contexts, not capability
+wrappers. TaskEngine recovery is explicit; opening it does not launch pending
+graphs. Shared storage provisioning is independent of producer activation.
 
 ### Automatic Runtime metrics
 
 `Metrics` remains the shared dataset for Agent, Task, Evaluation and application
-recording. Supply the borrowed dataset at the sole Runtime entry point:
+recording. Supply it independently to each producer that should record:
 
 ```python
-async with Runtime.open("app", storage=storage, features=group, metrics=metrics) as runtime:
+from linktools.ai.task_engine import TaskEngine
+
+async with Persistence.open("app", storage=storage) as persistence, Runtime.open(
+    persistence=persistence, features=group, metrics=metrics,
+) as runtime, TaskEngine.open(*tasks, persistence=persistence, metrics=metrics) as engine:
     ...
 ```
 
-The optional `Runtime.open(metrics=...)` resource enables automatic Agent and Task
-recording, including evaluation work in that Runtime, independently of Agent filtering. Without it, Runtime creates no
-automatic recorder. Application calls on the dataset remain available directly.
-One per-Runtime service owns its recorder and drain lifecycle. Closing Runtime
-does not close the shared dataset, engine or cache. `metrics=None` disables
-automatic recording. Read-only history and snapshots never activate recording.
-Metrics retain their own batching; a conversation turn does not force a metrics flush.
+`Runtime.open(metrics=...)` records Agent observations, while
+`TaskEngine.open(metrics=...)` records Task observations, including evaluation
+execution. Each producer owns its own recorder and drain lifecycle. Closing one
+does not close the peer, shared dataset, engine or cache. `metrics=None` disables
+that producer's automatic recording; application calls on the dataset remain
+available. Read-only history and snapshots never activate recording. Metrics
+retain their own batching; a conversation turn does not force a metrics flush.
 
 `TraceCapability()` retains structured execution evidence and model-request
 metadata without original HTTP bodies. Opt into
@@ -135,16 +140,16 @@ Checkpoint recovery keeps its structured context independently of this option.
 `StorageRoute` and `StorageRetentionMode` are imported from `linktools.ai.storage`.
 A route bundles its backend with an optional borrowed hot-read cache, for example
 `StorageRoute.sqlite("state.db", cache=cache)`. Cache identity is not part of
-persistence identity. Session and Conversation use the root `RuntimeStorage`
+persistence identity. Session and Conversation use the root `PersistenceStorage`
 resource; `ExecutionCapability(retain_history=True)` only selects context retention. Set
-`RuntimeStoragePlan(conversation=route, ...)` to customize that domain.
+`PersistencePlan(conversation=route, ...)` to customize that domain.
 For plan-based construction, caches live on the routes rather than a second
-`RuntimeStorage` cache argument. Convenience factories such as
-`RuntimeStorage.sqlite(path, cache=cache)` apply the cache to their generated routes.
+`PersistenceStorage` cache argument. Convenience factories such as
+`PersistenceStorage.sqlite(path, cache=cache)` apply the cache to their generated routes.
 
-`CheckpointCapability(storage=route)` and
-`TraceCapability(storage=route, commit=CommitPolicy.batch(buffer=buffer, batch_size=128, flush_interval=3.0))`
-configure their archives. Omitted storage inherits the Runtime backend and cache
+`PersistencePlan(checkpoint=route, trace=route, ...)` configures archive routes;
+`CheckpointCapability()` and `TraceCapability(commit=...)` only configure behavior.
+Omitted archive routes inherit the execution backend and cache
 with separate logical partitions. An explicit route supplies the complete
 resource: `cache=None` disables that route's cache instead of inheriting it.
 Trace and Checkpoint routes must share the execution StateStorageGroup;
@@ -155,22 +160,23 @@ remain borrowed resources.
 
 The workspace ACP convenience entry point accepts the same execution declaration:
 `ACPApplication.for_workspace(workspace, features=features, storage=storage,
-execution=ExecutionCapability(retain_history=True, coordination=cache))`. Without
+execution=ExecutionCapability(retain_history=True))`. Supply coordination through
+`PersistenceStorage(..., coordination=cache)` or its convenience factories. Without
 an explicit execution declaration, ACP defaults to retaining history. An explicit
-declaration controls retention as well as commit and coordination; workspace
+declaration controls retention and commit; workspace
 capability remains built in. A cache attached only to storage does not enable
 turn or stream coordination.
 
-`ExecutionCapability(coordination=cache)` explicitly supplies shared turn
+`PersistenceStorage(..., coordination=cache)` explicitly supplies shared turn
 coordination and live streams. The execution route cache only serves hot
 execution record reads. Session metadata/display and Conversation content
 use the Conversation route cache; shortcut storage factories apply the supplied
 hot cache to their routes. Pending-turn visibility comes through the explicit
 coordination channel, not through the hot cache.
 A module resource override cannot create a separate producer ownership
-namespace. Reuse the root storage plan and the same features with
-`RuntimeHistory.open(features=...)` and `RuntimeSnapshot.create()` to read and
-export all custom routes without activating hooks or Metrics recorders.
+namespace. Pass the shared Persistence to `History.open(persistence=...)` and
+`Snapshot.create(persistence=...)` to read and export all custom routes without
+activating Agent hooks or Metrics recorders.
 Restored portable generations use their local routes and caches.
 
 Shared filesystem group manifests, locks and empty domain metadata are provisioned
@@ -259,8 +265,11 @@ Execution is required and installed by default. Register one explicit
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import CommitPolicy
 
+from linktools.ai.persistence import PersistenceStorage
+
+storage = PersistenceStorage.sqlite("state.db", coordination=shared_cache)
 features.capability(ExecutionCapability(
-    commit=CommitPolicy.terminal(), coordination=shared_cache,
+    commit=CommitPolicy.terminal(),
 ), scope="runtime")
 ```
 
@@ -285,14 +294,14 @@ routes are rejected during initialization. No distributed transaction is implied
 from linktools.ai.capability import ExecutionCapability, TraceCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import Persistence, PersistenceStorage
 
 features = RuntimeFeatures("traced-chat")
 features.agent("default", model="default")
 features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()))
 features.capability(TraceCapability(commit=CommitPolicy.terminal()))
-storage = RuntimeStorage.sqlite("chat.db")
-# Pass storage and features to Runtime.open with your model configuration.
+storage = PersistenceStorage.sqlite("chat.db")
+# Open Persistence with storage, then Runtime with persistence and features.
 # Required admission/fencing writes remain; the final trace tail shares the
 # conversation/execution terminal transaction.
 ```

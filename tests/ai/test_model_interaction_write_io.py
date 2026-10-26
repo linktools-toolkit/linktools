@@ -9,8 +9,8 @@ import pytest
 from sqlalchemy import event
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._contracts import RuntimePayloadRef
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.contracts import RuntimePayloadRef
 from linktools.ai.storage import StoredPayload
 
 from .test_model_interaction_records import _prepared, _running, _terminal
@@ -27,7 +27,7 @@ async def test_execution_interaction_lifecycle_bounds_record_reads(
         prepared = replace(
             _prepared(admitted),
             request_envelope=RuntimePayloadRef(
-                StoredPayload.inline_bytes(b"{}"), RuntimeDomain.TRACE,
+                StoredPayload.inline_bytes(b"{}"), PersistenceDomain.TRACE,
             ),
         )
         engine = (

@@ -10,12 +10,12 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import event
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state._execution_repositories import ExecutionRepositoryImpl
-from linktools.ai.runtime.state._retention import RuntimeRetentionController
-from linktools.ai.runtime.state._store import active_state_scope
+from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
+from linktools.ai.persistence._retention import RuntimeRetentionController
+from linktools.ai.persistence.state import active_state_scope
 
 from .test_incremental_projection_boundaries import _storage
 from .test_step_projection import _execution as _projection_execution
@@ -55,7 +55,7 @@ def _controller(repository, calls):
 async def test_retention_cleanup_observes_committed_closure(
     tmp_path: Path, backend: str, condition: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -80,7 +80,7 @@ async def test_retention_cleanup_observes_committed_closure(
 async def test_retention_failure_does_not_start_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
 ) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -95,7 +95,7 @@ async def test_retention_failure_does_not_start_cleanup(
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             monkeypatch.setattr(repository, "get", fail)
         elif failure == "cas":
-            from linktools.ai.runtime.state._sql import _SqlTransaction
+            from linktools.ai.persistence._sql import _SqlTransaction
             async def fail(*args, **kwargs):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             monkeypatch.setattr(_SqlTransaction, "replace_record", fail)
@@ -110,7 +110,7 @@ async def test_retention_failure_does_not_start_cleanup(
 
 
 async def test_builtin_retention_avoids_owner_reread_and_custom_owner_keeps_fallback(tmp_path: Path) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -149,7 +149,7 @@ async def test_builtin_retention_avoids_owner_reread_and_custom_owner_keeps_fall
 async def test_retention_unknown_commit_does_not_clean_until_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
 ) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -185,7 +185,7 @@ async def test_terminal_policy_hint_still_requires_source_closure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     conversation: bool, closed: bool, held: bool,
 ) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         repository = state.execution.executions

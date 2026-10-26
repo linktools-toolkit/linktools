@@ -29,9 +29,9 @@ from linktools.ai.capability import (
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state import _codec as runtime_codec
-from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence import codec as runtime_codec
+from linktools.ai.persistence.contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec, SkillSpec
 from linktools.ai.storage import StorageEntryRevision, StoredPayload
 from pydantic_ai import Tool
@@ -300,7 +300,7 @@ def test_binding_asset_versions_are_not_runtime_object_dependencies() -> None:
     assert tuple(
         runtime_codec.iter_runtime_object_refs(
             runtime_codec._encode_persisted_domain(_execution(binding=binding_contract)),
-            default_domain=RuntimeDomain.EXECUTION,
+            default_domain=PersistenceDomain.EXECUTION,
         )
     ) == ()
 

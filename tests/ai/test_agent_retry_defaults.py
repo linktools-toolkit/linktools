@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Retry defaults resolve once into the durable Agent binding."""
 from ._runtime_test_helpers import model_features
 from linktools.ai.model import create_model
@@ -81,15 +83,14 @@ def test_unresolved_retry_limits_cannot_enter_durable_binding() -> None:
 
 @pytest.mark.asyncio
 async def test_runtime_reconfiguration_does_not_change_restored_retry_limits() -> None:
-    from linktools.ai.runtime import Runtime, RuntimeStorage
+    from linktools.ai.runtime import Runtime
+    from linktools.ai.persistence import PersistenceStorage
 
     first = RuntimeFeatures("retries", defaults={"agent": {"tool_retries": 6, "output_retries": 4}})
     first.agent("agent")
     first.agent("disabled", tool_retries=0, output_retries=0)
     models = create_model(protocol='openai', model="gpt-test")
-    async with Runtime.open(
-        "retry-binding", storage=RuntimeStorage.in_memory(), features=model_features(models, first),
-    ) as runtime:
+    async with Persistence.open('retry-binding', storage=PersistenceStorage.in_memory()) as persistence_90, Runtime.open(persistence=persistence_90, features=model_features(models, first)) as runtime:
         compiled = runtime._catalog.root_agent("agent")
         assert (compiled.spec.tool_retries, compiled.spec.output_retries) == (6, 4)
         disabled = runtime._catalog.root_agent("disabled")
@@ -97,9 +98,7 @@ async def test_runtime_reconfiguration_does_not_change_restored_retry_limits() -
         payload = runtime._compiler.bind(compiled).binding_contract.to_payload()
     second = RuntimeFeatures("retries", defaults={"agent": {"tool_retries": 9, "output_retries": 8}})
     second.agent("agent")
-    async with Runtime.open(
-        "retry-binding", storage=RuntimeStorage.in_memory(), features=model_features(models, second),
-    ) as runtime:
+    async with Persistence.open('retry-binding', storage=PersistenceStorage.in_memory()) as persistence_100, Runtime.open(persistence=persistence_100, features=model_features(models, second)) as runtime:
         fresh = runtime._catalog.root_agent("agent")
         assert (fresh.spec.tool_retries, fresh.spec.output_retries) == (9, 8)
         restored = runtime._compiler.restore(AgentBindingContract.from_payload(payload))

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Durable TaskGraph state-machine regression coverage."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from pathlib import Path
 
 import pytest
@@ -11,7 +11,7 @@ from ._task_test_helpers import admit_graph
 from linktools.ai.core import TaskStatus, canonical_sha256
 from linktools.ai.errors import ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task import TaskGraph, TaskNode
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -24,12 +24,12 @@ async def test_reconcile_propagates_transitive_blocked_state(
 ) -> None:
     engine = None
     if backend == "memory":
-        state = RuntimeStorage.in_memory()
+        state = PersistenceStorage.in_memory()
     else:
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
         await provision_database(engine)
-        state = RuntimeStorage.sql(engine)
-    state = RuntimeState(state)
+        state = PersistenceStorage.sql(engine)
+    state = Persistence(state)
     await state.initialize(namespace=f"task-reconcile-{backend}", tenant_id="tenant")
     try:
         graph = TaskGraph(

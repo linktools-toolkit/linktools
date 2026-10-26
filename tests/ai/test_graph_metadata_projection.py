@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Graph observers reconcile safe metadata from the real Runtime owners."""
 from ._runtime_test_helpers import model_features
 
@@ -15,11 +17,12 @@ from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionDeltaType, JsonValue, TaskStatus
-from linktools.ai.runtime import (
-    AgentTaskInput, ExecutionTreeEvent, Runtime, RuntimeStorage,
-    TaskGraphProjection, TaskGraphRunEvent, TaskModelProjection,
-)
-from linktools.ai.runtime._watch_cursor import decode_graph_watch_cursor
+from linktools.ai.inputs import AgentTaskInput
+from linktools.ai.execution import ExecutionTreeEvent, TaskGraphProjection, TaskGraphRunEvent, TaskModelProjection
+from linktools.ai.runtime import Runtime
+from linktools.ai.task_engine import TaskEngine
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.observe.cursors import decode_graph_watch_cursor
 from linktools.ai.storage import FilesystemObjectStore
 from linktools.ai.task import (
     Task, TaskEvent, TaskExpander, TaskExpansionContext, TaskGraph,
@@ -31,20 +34,17 @@ from .test_task_sqlite_cas_convergence import _provision_sqlite
 
 
 @asynccontextmanager
-async def _runtime(tmp_path: Path, *, backend: str = "filesystem", models=None) -> AsyncIterator[Runtime]:
+async def _runtime(tmp_path: Path, *, backend: str = "filesystem", models=None) -> AsyncIterator[tuple[Runtime, TaskEngine]]:
     if backend == "sqlite":
         database = tmp_path / "state.sqlite"
         await _provision_sqlite(database)
-        storage = RuntimeStorage.sqlite(database, object_store=FilesystemObjectStore(tmp_path / "objects"))
+        storage = PersistenceStorage.sqlite(database, object_store=FilesystemObjectStore(tmp_path / "objects"))
     else:
-        storage = RuntimeStorage.filesystem(tmp_path)
+        storage = PersistenceStorage.filesystem(tmp_path)
     group = RuntimeFeatures("metadata")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open(
-        "metadata-projection",
-        storage=storage, features=model_features(FixtureModels() if models is None else models, group),
-    ) as runtime:
-        yield runtime
+    async with Persistence.open('metadata-projection', storage=storage) as persistence_43, Runtime.open(persistence=persistence_43, features=model_features(FixtureModels() if models is None else models, group)) as runtime, TaskEngine.open(persistence=persistence_43, context=runtime.context) as runtime_engine:
+        yield runtime, runtime_engine
 
 
 async def _collect(stream: AsyncIterator[TaskGraphRunEvent]) -> list[TaskGraphRunEvent]:
@@ -59,9 +59,9 @@ async def _collect(stream: AsyncIterator[TaskGraphRunEvent]) -> list[TaskGraphRu
 async def test_terminal_graph_reconnect_repeats_safe_metadata_without_replaying_acknowledged_events(
     tmp_path: Path, backend: str, include_content: bool,
 ) -> None:
-    async with _runtime(tmp_path, backend=backend) as runtime:
-        task = runtime.tasks.from_agent("metadata.respond", runtime.agents.get())
-        run = await runtime.tasks.bind(task).start(TaskGraph("terminal-metadata", (
+    async with _runtime(tmp_path, backend=backend) as (runtime, runtime_engine):
+        task = Task.from_agent("metadata.respond", runtime.agents.get())
+        run = await runtime_engine.with_definitions(task).start(TaskGraph("terminal-metadata", (
             TaskNode("agent", task=task, input=AgentTaskInput("private-input-marker")),
         )), idempotency_key="terminal")
         assert (await run.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED
@@ -134,8 +134,8 @@ async def test_dynamic_graph_projection_defines_unbound_nodes_before_execution_u
         return "expand"
 
     root_task = Task("metadata.expand-source", expand_source, effect_policy="none")
-    async with _runtime(tmp_path, models=ControlledModels()) as runtime:
-        agent_task = runtime.tasks.from_agent("metadata.dynamic-agent", runtime.agents.get())
+    async with _runtime(tmp_path, models=ControlledModels()) as (runtime, runtime_engine):
+        agent_task = Task.from_agent("metadata.dynamic-agent", runtime.agents.get())
 
         def expand(context: TaskExpansionContext) -> tuple[TaskNode, ...]:
             return (
@@ -144,7 +144,7 @@ async def test_dynamic_graph_projection_defines_unbound_nodes_before_execution_u
             )
 
         expander = TaskExpander("metadata.expand", expand)
-        run = await runtime.tasks.bind(root_task, agent_task, expander).start(TaskGraph("dynamic-metadata", (
+        run = await runtime_engine.with_definitions(root_task, agent_task, expander).start(TaskGraph("dynamic-metadata", (
             TaskNode("root", task=root_task, expander=expander),
         )), idempotency_key="dynamic")
         await asyncio.wait_for(entered.wait(), 10)
@@ -217,9 +217,9 @@ async def test_running_graph_projects_request_finish_without_a_new_model_sequenc
         return "held"
 
     hold_task = Task("metadata.hold", hold_graph, effect_policy="none")
-    async with _runtime(tmp_path, models=ControlledModels()) as runtime:
-        agent_task = runtime.tasks.from_agent("metadata.running-agent", runtime.agents.get())
-        run = await runtime.tasks.bind(agent_task, hold_task).start(TaskGraph("running-metadata", (
+    async with _runtime(tmp_path, models=ControlledModels()) as (runtime, runtime_engine):
+        agent_task = Task.from_agent("metadata.running-agent", runtime.agents.get())
+        run = await runtime_engine.with_definitions(agent_task, hold_task).start(TaskGraph("running-metadata", (
             TaskNode("agent", task=agent_task, input=AgentTaskInput("private-request-marker")),
             TaskNode("hold", ("agent",), task=hold_task),
         )), idempotency_key="running")
@@ -282,14 +282,14 @@ async def test_graph_wait_final_projection_closes_at_nonterminal_authoritative_b
         "metadata.uncertain", uncertain_output,
         effect_policy="non_replay_safe", output_type=ExpectedOutput,
     )
-    async with _runtime(tmp_path) as runtime:
-        agent_task = runtime.tasks.from_agent("metadata.boundary-agent", runtime.agents.get())
+    async with _runtime(tmp_path) as (runtime, runtime_engine):
+        agent_task = Task.from_agent("metadata.boundary-agent", runtime.agents.get())
         stop = (
             TaskNode.wait("stop", dependencies=("agent",))
             if boundary is TaskStatus.WAITING
             else TaskNode("stop", ("agent",), task=uncertain)
         )
-        run = await runtime.tasks.bind(agent_task, uncertain).start(TaskGraph("boundary-metadata", (
+        run = await runtime_engine.with_definitions(agent_task, uncertain).start(TaskGraph("boundary-metadata", (
             TaskNode("agent", task=agent_task, input=AgentTaskInput("finish model before boundary")), stop,
         )), idempotency_key="boundary")
         assert (await run.wait(timeout_seconds=10)).result.wait_status is boundary
@@ -314,12 +314,12 @@ async def test_graph_wait_final_projection_closes_at_nonterminal_authoritative_b
 async def test_final_graph_projection_keeps_newer_ack_without_replacing_waiter_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _runtime(tmp_path) as runtime:
-        agent_task = runtime.tasks.from_agent("metadata.resumed-agent", runtime.agents.get())
-        run = await runtime.tasks.bind(agent_task).start(TaskGraph("resumed-metadata", (
+    async with _runtime(tmp_path) as (runtime, runtime_engine):
+        agent_task = Task.from_agent("metadata.resumed-agent", runtime.agents.get())
+        run = await runtime_engine.with_definitions(agent_task).start(TaskGraph("resumed-metadata", (
             TaskNode.wait("input"),
             TaskNode("agent", ("input",), task=agent_task, input=AgentTaskInput("resume after input")),
-        )), idempotency_key="resume")
+        )), idempotency_key="resume", principal=runtime.default_principal)
         boundary = (await run.wait(include_content=True, timeout_seconds=10)).result
         assert boundary.wait_status is TaskStatus.WAITING
         wait_id = next(state.execution_id for state in boundary.node_states if state.node_id == "input")
@@ -339,7 +339,7 @@ async def test_final_graph_projection_keeps_newer_ack_without_replacing_waiter_s
             if isinstance(event.event, TaskEvent) and event.event.event_seq == completed.event_seq:
                 delivered_newer.set()
 
-        monkeypatch.setattr(runtime._graph_service, "wait", stopped_waiter)
+        monkeypatch.setattr(runtime_engine._graph_service, "wait", stopped_waiter)
         outcome = await run.wait(on_event=on_event, include_content=True, timeout_seconds=5)
         assert outcome.result is boundary
         assert outcome.result.wait_status is TaskStatus.WAITING
@@ -358,18 +358,18 @@ async def test_final_graph_projection_keeps_newer_ack_without_replacing_waiter_s
 async def test_graph_observers_keep_independent_ack_and_bound_metadata_reads_for_text_bursts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _runtime(tmp_path) as runtime:
-        task = runtime.tasks.from_agent("metadata.burst-agent", runtime.agents.get())
-        engine = runtime.tasks.bind(task)
+    async with _runtime(tmp_path) as (runtime, runtime_engine):
+        task = Task.from_agent("metadata.burst-agent", runtime.agents.get())
+        engine = runtime_engine.with_definitions(task)
         run = await engine.start(TaskGraph("burst-metadata", (
             TaskNode("agent", task=task, input=AgentTaskInput("one model request")),
         )), idempotency_key="burst")
         assert (await run.wait(timeout_seconds=10)).result.wait_status is TaskStatus.SUCCEEDED
         counters = {"graph_state": 0, "model_cutoffs": 0, "model_rows": 0}
-        original_state = runtime._graph_service.state
+        original_state = runtime_engine._graph_service.state
         original_cutoffs = runtime.history.capture_model_interaction_cutoffs
         original_rows = runtime.history.read_model_interaction_metadata
-        original_tree = runtime._watch_execution_tree
+        original_tree = engine._watch_execution_tree
 
         async def state(*args, **kwargs):
             counters["graph_state"] += 1
@@ -400,10 +400,10 @@ async def test_graph_observers_keep_independent_ack_and_bound_metadata_reads_for
             finally:
                 await stream.aclose()
 
-        monkeypatch.setattr(runtime._graph_service, "state", state)
+        monkeypatch.setattr(runtime_engine._graph_service, "state", state)
         monkeypatch.setattr(runtime.history, "capture_model_interaction_cutoffs", cutoffs)
         monkeypatch.setattr(runtime.history, "read_model_interaction_metadata", rows)
-        monkeypatch.setattr(runtime, "_watch_execution_tree", tree)
+        monkeypatch.setattr(engine, "_watch_execution_tree", tree)
         run = await engine.get(run.graph_id)
         before = asyncio.all_tasks()
 
@@ -444,13 +444,13 @@ async def test_graph_observers_keep_independent_ack_and_bound_metadata_reads_for
 async def test_terminal_graph_wait_acknowledges_delayed_initial_projection_before_final(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _runtime(tmp_path) as runtime:
-        task = runtime.tasks.from_agent("metadata.delayed-initial", runtime.agents.get())
-        run = await runtime.tasks.bind(task).start(TaskGraph("delayed-initial", (
+    async with _runtime(tmp_path) as (runtime, runtime_engine):
+        task = Task.from_agent("metadata.delayed-initial", runtime.agents.get())
+        run = await runtime_engine.with_definitions(task).start(TaskGraph("delayed-initial", (
             TaskNode("agent", task=task, input=AgentTaskInput("already terminal")),
         )), idempotency_key="delayed-initial")
         assert (await run.wait(timeout_seconds=10)).result.wait_status is TaskStatus.SUCCEEDED
-        original = runtime._graph_service.state
+        original = runtime_engine._graph_service.state
         reads = 0
 
         async def state(*args, **kwargs):
@@ -460,7 +460,7 @@ async def test_terminal_graph_wait_acknowledges_delayed_initial_projection_befor
                 await asyncio.sleep(0.01)
             return await original(*args, **kwargs)
 
-        monkeypatch.setattr(runtime._graph_service, "state", state)
+        monkeypatch.setattr(runtime_engine._graph_service, "state", state)
         projections: list[TaskGraphProjection] = []
         acknowledged_initial = False
 
@@ -486,9 +486,9 @@ async def test_terminal_graph_wait_acknowledges_delayed_initial_projection_befor
 async def test_standalone_final_watch_close_releases_subscriptions(
     tmp_path: Path, checkpoint: bool,
 ) -> None:
-    async with _runtime(tmp_path) as runtime:
-        task = runtime.tasks.from_agent("metadata.close", runtime.agents.get())
-        run = await runtime.tasks.bind(task).start(TaskGraph("close-final-watch", (
+    async with _runtime(tmp_path) as (runtime, runtime_engine):
+        task = Task.from_agent("metadata.close", runtime.agents.get())
+        run = await runtime_engine.with_definitions(task).start(TaskGraph("close-final-watch", (
             TaskNode("agent", task=task, input=AgentTaskInput("done")),
         )), idempotency_key="close-final")
         await run.wait(timeout_seconds=5)
@@ -515,9 +515,9 @@ async def test_graph_final_metadata_remains_available_without_live_notifications
 ) -> None:
     from linktools.ai.errors import AIError, ErrorCode
 
-    async with _runtime(tmp_path) as runtime:
-        task = runtime.tasks.from_agent("metadata.finite", runtime.agents.get())
-        run = await runtime.tasks.bind(task).start(TaskGraph("finite-metadata", (
+    async with _runtime(tmp_path) as (runtime, runtime_engine):
+        task = Task.from_agent("metadata.finite", runtime.agents.get())
+        run = await runtime_engine.with_definitions(task).start(TaskGraph("finite-metadata", (
             TaskNode("agent", task=task, input=AgentTaskInput("finished")),
         )), idempotency_key="finite")
         assert (await run.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED

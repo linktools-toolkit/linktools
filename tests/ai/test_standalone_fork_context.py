@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """A terminal standalone run retains exact model context without a durable trace."""
 from ._runtime_test_helpers import model_features
 
@@ -19,13 +21,15 @@ from linktools.ai.capability import ExecutionCapability, AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ExecutionInputContext, Runtime, RuntimeStorage
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._step_archive import _decode_step, _encode_step
+from linktools.ai.execution import ExecutionInputContext
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._step_archive import _decode_step, _encode_step
 from linktools.ai.workspace import Workspace
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.core import CommitPolicy
-from linktools.ai.runtime._message import encode_model_messages
+from linktools.ai.model.messages import encode_model_messages
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
 from .test_pending_turn_commit import _turn_state
@@ -67,11 +71,11 @@ async def test_standalone_fork_preserves_actual_tools_and_imported_context_after
 
     def storage():
         cache = InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None
-        return (RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache) if backend == "sqlite"
-                else RuntimeStorage.filesystem(tmp_path, cache=cache))
+        return (PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache) if backend == "sqlite"
+                else PersistenceStorage.filesystem(tmp_path, cache=cache))
 
     state = storage()
-    async with Runtime.open("standalone-fork", storage=state, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('standalone-fork', storage=state) as persistence_74, Runtime.open(persistence=persistence_74, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         with capture_run_messages() as actual:
             source = await runtime.agents.get().start("source", input_context=imported)
             assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -81,15 +85,15 @@ async def test_standalone_fork_preserves_actual_tools_and_imported_context_after
         assert record is not None and not record.durable_trace and not record.restart_checkpoints
         run_id = agent_run_id(namespace=runtime.namespace, tenant_id=runtime.tenant_id,
                               execution_id=source_id, agent_run_seq=record.agent_run_seq)
-        archive = runtime._state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        archive = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)
         checkpoint = await archive.latest_checkpoint(agent_run_id=run_id)
         assert checkpoint is not None
         assert encode_model_messages(tuple(checkpoint.context_messages or checkpoint.messages)) == expected
         assert await archive.checkpoint_count(agent_run_id=run_id) == 1
         assert await archive.list_events(agent_run_id=run_id) == []
-        assert await runtime._state.run_store.read_store(RuntimeDomain.TRACE).get_agent_run(agent_run_id=run_id) is None
+        assert await runtime._run_store.read_store(PersistenceDomain.TRACE).get_agent_run(agent_run_id=run_id) is None
 
-    async with Runtime.open("standalone-fork", storage=storage(), features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('standalone-fork', storage=storage()) as persistence_92, Runtime.open(persistence=persistence_92, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         original = await runtime.executions.get(source_id)
         fork = await original.fork("fork")
         assert (await fork.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -112,11 +116,11 @@ async def test_terminal_standalone_tool_context_joins_one_physical_write_transac
 
     cache = InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)
     group = RuntimeFeatures("one-fork-boundary")
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
     group.tool(lookup, effect_policy="none")
     group.agent("default", model="default", allow_tools=("lookup",))
-    state = RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache)
-    async with Runtime.open("one-fork-boundary", storage=state, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    state = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache)
+    async with Persistence.open('one-fork-boundary', storage=state) as persistence_119, Runtime.open(persistence=persistence_119, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         transactions = set()
 
         def capture(connection, _cursor, statement, _parameters, _context, _many):
@@ -168,7 +172,7 @@ async def test_pending_confirmation_rejects_missing_or_corrupt_fork_context(tmp_
     async with _turn_state("sqlite", tmp_path) as state:
         turn = _standalone(state)
         await _commit(state, turn)
-        await _damage_fork_context(state.storage.run_store.read_store(RuntimeDomain.CHECKPOINT).state_store, damage)
+        await _damage_fork_context(state.storage.run_store.read_store(PersistenceDomain.CHECKPOINT).state_store, damage)
         with pytest.raises(AIError) as raised:
             await state.commands.read_pending_turn(turn.reservation, expected_session=None)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -190,14 +194,14 @@ async def test_reopened_standalone_fork_rejects_mismatched_checkpoint_binding(
     group.agent("default", model="default", allow_tools=())
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     models = _Models(_UsageFunctionModel(model))
-    storage = RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None)
-    async with Runtime.open("corrupt-fork", storage=storage, features=model_features(models, group)) as runtime:
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None)
+    async with Persistence.open('corrupt-fork', storage=storage) as persistence_194, Runtime.open(persistence=persistence_194, features=model_features(models, group)) as runtime:
         source = await runtime.agents.get().start("source")
         assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
         source_id = source.execution_id
-        await _damage_fork_context(runtime._state.run_store.read_store(RuntimeDomain.CHECKPOINT).state_store, damage)
+        await _damage_fork_context(runtime._run_store.read_store(PersistenceDomain.CHECKPOINT).state_store, damage)
     with pytest.raises(AIError) as raised:
-        async with Runtime.open("corrupt-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None), features=model_features(models, group)) as runtime:
+        async with Persistence.open('corrupt-fork', storage=PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None)) as persistence_200, Runtime.open(persistence=persistence_200, features=model_features(models, group)) as runtime:
             source = await runtime.executions.get(source_id)
             fork = await source.fork("fork")
             await fork.wait(timeout_seconds=5)
@@ -221,9 +225,9 @@ async def test_standalone_fork_keeps_actual_file_result_after_file_changes(tmp_p
     workspace = Workspace.load(tmp_path)
     cache = InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None
     group = workspace_features("file-fork", workspace=workspace)
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal() if cached else CommitPolicy.sync(), coordination=cache), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal() if cached else CommitPolicy.sync()), scope="runtime")
     group.agent("default", model="default", allow_tools=("read_file",))
-    async with Runtime.open("file-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache), features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('file-fork', storage=PersistenceStorage.sqlite(tmp_path / 'state.db', cache=cache, coordination=cache)) as persistence_226, Runtime.open(persistence=persistence_226, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         with capture_run_messages() as messages:
             source = await runtime.agents.get().start("read")
             assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -250,9 +254,9 @@ async def test_unfinished_standalone_run_never_publishes_a_complete_fork_seed(tm
     group = RuntimeFeatures("incomplete-fork")
     group.agent("default", model="default", allow_tools=())
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    storage = RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     with pytest.raises(AIError) as raised:
-        async with Runtime.open("incomplete-fork", storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+        async with Persistence.open('incomplete-fork', storage=storage) as persistence_255, Runtime.open(persistence=persistence_255, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
             source = await runtime.agents.get().start("source")
             await asyncio.wait_for(entered.wait(), 5)
             if state == "failed":
@@ -266,7 +270,7 @@ async def test_unfinished_standalone_run_never_publishes_a_complete_fork_seed(tm
             finally:
                 run_id = agent_run_id(namespace=runtime.namespace, tenant_id=runtime.tenant_id,
                                       execution_id=source.execution_id, agent_run_seq=1)
-                archive = runtime._state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+                archive = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)
                 assert await archive.latest_checkpoint(agent_run_id=run_id) is None
                 if state == "running":
                     await source.cancel()
@@ -284,12 +288,12 @@ async def test_standalone_fork_reopens_with_the_same_thinking_policy(tmp_path, t
         profile={"supports_thinking": True},
     )
     features = model_features(_Models(model), group)
-    storage = RuntimeStorage.sqlite(tmp_path / "thinking.db")
-    async with Runtime.open("thinking-fork", storage=storage, features=features) as runtime:
+    storage = PersistenceStorage.sqlite(tmp_path / "thinking.db")
+    async with Persistence.open('thinking-fork', storage=storage) as persistence_288, Runtime.open(persistence=persistence_288, features=features) as runtime:
         source = await runtime.agents.get().start("source", thinking=thinking)
         assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
         source_id = source.execution_id
-    async with Runtime.open("thinking-fork", storage=storage, features=features) as runtime:
+    async with Persistence.open('thinking-fork', storage=storage) as persistence_292, Runtime.open(persistence=persistence_292, features=features) as runtime:
         source = await runtime.executions.get(source_id)
         fork = await source.fork("continue")
         assert (await fork.wait()).result.status is ExecutionStatus.SUCCEEDED

@@ -9,8 +9,8 @@ from pydantic_ai.messages import BinaryContent, ModelRequest, TextContent, UserP
 
 from linktools.ai.core import PromptLimits, WorkspaceFileInput
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._attachment import request_attachment_facts
-from linktools.ai.runtime._input import (
+from linktools.ai.model._attachment import request_attachment_facts
+from linktools.ai.inputs import (
     ExecutionInputMaterializer,
     captured_input_files,
     captured_input_prompt,

@@ -19,7 +19,7 @@ from pydantic_ai.tools import RunContext as PydanticRunContext
 from ..errors import AIError, ErrorCode
 from ._agent_run_recorder import AgentRunRecorder
 from ._run_context import RunContextCapture
-from .state._step_contracts import AgentRunRecord
+from linktools.ai.persistence.runs import AgentRunRecord
 
 
 @dataclass(kw_only=True, eq=False)

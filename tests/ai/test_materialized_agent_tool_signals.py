@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """End-to-end model-facing tool signal composition regressions."""
 from ._runtime_test_helpers import model_features
 
@@ -21,7 +23,8 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics, Observation
 from linktools.ai.observe._memory import InMemoryMetricStore
 from linktools.ai.capability import TraceCapability
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.workspace import (
     Workspace,
     WorkspacePolicy,
@@ -92,15 +95,10 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
     )
     metric_store = InMemoryMetricStore()
     metrics = Metrics.from_store(metric_store, namespace="composition")
-    state = RuntimeStorage.in_memory()
+    state = PersistenceStorage.in_memory()
     started = datetime.now(timezone.utc) - timedelta(seconds=1)
 
-    async with Runtime.open(
-        "default",
-        metrics=metrics,   # type: ignore[arg-type]
-        storage=state,
-        features=model_features(_CompositionModels(), application),
-    ) as runtime:
+    async with Persistence.open('default', storage=state) as persistence_98, Runtime.open(persistence=persistence_98, metrics=metrics, features=model_features(_CompositionModels(), application)) as runtime:
         result = (await runtime.agents.get("default").run(
             "prompt",
             timeout_seconds=10,

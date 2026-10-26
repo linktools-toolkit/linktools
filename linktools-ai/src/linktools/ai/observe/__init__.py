@@ -22,7 +22,10 @@ from ._model import (
 from ._sql import build_metrics_sql_metadata
 from ._store import MetricStore
 
+from ._wait import WaitResult
+
 __all__ = [
+    "WaitResult",
     "MetricRecorderStatus",
     "MetricFlushResult",
     "MetricAggregation",

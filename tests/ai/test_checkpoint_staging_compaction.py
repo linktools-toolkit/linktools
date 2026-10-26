@@ -8,9 +8,9 @@ import pytest
 
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
-from linktools.ai.runtime._transcript_staging import MessageArchive
-from linktools.ai.runtime.state._step_archive import StagingAgentRunStore, _ProjectionOffset
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
+from linktools.ai.persistence._transcript_staging import MessageArchive
+from linktools.ai.persistence._step_archive import StagingAgentRunStore, _ProjectionOffset
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
 
 
 def test_checkpoint_staging_bodies_shared_and_capture_survives_trim(monkeypatch):
@@ -67,16 +67,16 @@ def test_message_staging_releases_unreferenced_context_and_returns_independent_v
 
 
 def test_checkpoint_staging_waits_for_slowest_configured_consumer():
-    from linktools.ai.runtime.state._plan import RuntimeDomain
-    from linktools.ai.runtime.state._step_archive import InMemoryStepArchive
-    from linktools.ai.runtime.state._steps import RuntimeAgentRunStore
+    from linktools.ai.persistence._plan import PersistenceDomain
+    from linktools.ai.persistence._step_archive import InMemoryStepArchive
+    from linktools.ai.persistence.runs import RuntimeAgentRunStore
 
     staging = StagingAgentRunStore()
     staging.register_agent_run_local(AgentRunRecord(agent_run_id="run"))
     owner = RuntimeAgentRunStore(
-        staging, conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
-        execution_archive=InMemoryStepArchive(RuntimeDomain.TRACE),
-        recovery_archive=InMemoryStepArchive(RuntimeDomain.CHECKPOINT),
+        staging, conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
+        execution_archive=InMemoryStepArchive(PersistenceDomain.TRACE),
+        recovery_archive=InMemoryStepArchive(PersistenceDomain.CHECKPOINT),
     )
     for index in range(4):
         staging.save_checkpoint_local(AgentRunCheckpoint(
@@ -110,7 +110,7 @@ def test_message_staging_slice_does_not_pin_excluded_prefix():
 
 
 def test_message_staging_sequential_read_does_not_repeat_index_traversal(monkeypatch):
-    from linktools.ai.runtime._transcript_staging import MessageSnapshot
+    from linktools.ai.persistence._transcript_staging import MessageSnapshot
 
     snapshot = MessageArchive().snapshot([ModelRequest(parts=[UserPromptPart(str(i))]) for i in range(128)])
 
@@ -124,10 +124,10 @@ def test_message_staging_sequential_read_does_not_repeat_index_traversal(monkeyp
 @pytest.mark.asyncio
 async def test_memory_archive_counts_and_ranges_do_not_decode_whole_checkpoint(monkeypatch):
     from linktools.ai.runtime import _transcript_staging
-    from linktools.ai.runtime.state._plan import RuntimeDomain
-    from linktools.ai.runtime.state._step_archive import InMemoryStepArchive
+    from linktools.ai.persistence._plan import PersistenceDomain
+    from linktools.ai.persistence._step_archive import InMemoryStepArchive
 
-    archive = InMemoryStepArchive(RuntimeDomain.CONVERSATION)
+    archive = InMemoryStepArchive(PersistenceDomain.CONVERSATION)
     archive.register_agent_run_local(AgentRunRecord(agent_run_id="run"))
     archive.save_checkpoint_local(AgentRunCheckpoint(
         "run", 0, [ModelRequest(parts=[UserPromptPart(str(i))]) for i in range(100)],

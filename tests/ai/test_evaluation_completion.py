@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Evaluation completion preserves execution outcomes and graph recovery independently."""
-from ._runtime_test_helpers import model_features
+
+from linktools.ai.persistence import Persistence
+from linktools.ai.task_engine import TaskEngine
+from linktools.ai.evaluation_engine import Evaluations
 
 from dataclasses import replace
 from pathlib import Path
@@ -13,10 +16,10 @@ from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationSpec,
     RescoreRequest, StartEvaluationRequest, evaluation_completion,
 )
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task import Task
 from .test_evaluation_consumers import (
-    CONTEXT, PRINCIPAL, FixtureModels, echo, exact, rule_scorer,
+    CONTEXT, PRINCIPAL, echo, exact, rule_scorer,
 )
 
 
@@ -26,19 +29,20 @@ async def test_target_graph_recovery_does_not_hide_successful_execution(
 ) -> None:
     target = Task("completion.target", echo, effect_policy="none")
     scorer = Task("completion.score", exact, effect_policy="none")
-    async with Runtime.open("completion", features=model_features(FixtureModels()),
-                            storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
-        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("completion", 1), (
+    async with (
+        Persistence.open('completion', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_29,
+        TaskEngine.open(target, scorer, persistence=persistence_29, context=CONTEXT) as engine,
+        Evaluations.open(engine) as evaluations,
+    ):
+        dataset = await evaluations.publish_dataset(DatasetSpec(DatasetRef("completion", 1), (
             CaseSpec.task(CaseRef("completion", "one", 1), input={"answer": "yes"}, expected="yes"),
         )), principal=PRINCIPAL, idempotency_key="dataset")
-        run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-            (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),)), PRINCIPAL, "start"),
-            engine=runtime.tasks.bind(target, scorer))
+        run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
+            (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),)), PRINCIPAL, "start"))
         assert (await run.wait(timeout_seconds=30)).result.completion == "complete"
-        rescored = await run.rescore(RescoreRequest((rule_scorer(scorer),), "rescore"),
-                                     engine=runtime.tasks.bind(scorer))
+        rescored = await run.rescore(RescoreRequest((rule_scorer(scorer),), "rescore"))
         assert (await rescored.wait(timeout_seconds=30)).result.completion == "complete"
-        owner = runtime.evaluations
+        owner = evaluations
         read_state = owner._graph_state
 
         async def recovery_state(intent, principal):
@@ -58,7 +62,7 @@ async def test_target_graph_recovery_does_not_hide_successful_execution(
         report = await run.create_report()
         assert report.completion == "needs_attention"
         assert report.candidates[0].succeeded == 1
-        assert (await runtime.evaluations.get_report(report.report_id, principal=PRINCIPAL)).trials == trials
+        assert (await evaluations.get_report(report.report_id, principal=PRINCIPAL)).trials == trials
         rescored_view = await rescored.inspect()
         assert rescored_view.completion == "complete"
         assert rescored_view.needs_attention == ()
@@ -92,12 +96,12 @@ async def test_inspect_preserves_scorer_graph_read_boundaries_without_saved_scor
     from linktools.ai.core import service_principal
     from linktools.ai.errors import AIError, ErrorCode
     from linktools.ai.evaluation import TargetTrialRef, TrialView
-    from linktools.ai.runtime._evaluation import RuntimeEvaluations
-    from linktools.ai.runtime.state._evaluation_records import EvaluationLaunchIntent
+    from linktools.ai.evaluation_engine._service import Evaluations
+    from linktools.ai.persistence._evaluation_records import EvaluationLaunchIntent
     from linktools.ai.task import TaskGraph, TaskGraphAdmission, TaskGraphRequest, TaskGraphState, TaskGraphSubmission, TaskNode, TaskNodeView, TaskRef
     from .test_evaluation_persistence import experiment
 
-    service = object.__new__(RuntimeEvaluations)
+    service = object.__new__(Evaluations)
     service._namespace = "evaluation"
     record = experiment()
     principal = record.manifest.principal

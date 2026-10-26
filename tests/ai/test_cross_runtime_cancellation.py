@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Remote terminal ownership releases the previous producer's local tail."""
 from ._runtime_test_helpers import model_features
 
@@ -12,12 +14,13 @@ from pydantic_ai.models.function import FunctionModel
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.capability import ExecutionCapability, TraceCapability
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.storage import InMemoryCacheBackend
-from linktools.ai.runtime import RuntimeDomain
+from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.core import CommitPolicy
 from linktools.ai.runtime._local import LocalExecutionBackend
-from linktools.ai.runtime.service_api import CancelExecutionRequest
+from linktools.ai.execution import CancelExecutionRequest
 
 from .test_live_history_readback_integration import _Models
 
@@ -59,20 +62,14 @@ async def test_remote_cancel_releases_revoked_producer_staging(
 
         monkeypatch.setattr(LocalExecutionBackend, "_commit_success", pause_success)
 
-    owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
+    owner_storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     group = RuntimeFeatures("remote-cancel-release")
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    group.capability(TraceCapability(storage=owner_storage.plan.route(RuntimeDomain.TRACE), commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=3.0)), scope="runtime")
+    group.capability(TraceCapability(commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=3.0)), scope="runtime")
     group.agent("default", model="default", allow_tools=())
-    remote_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
+    remote_storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     try:
-        async with Runtime.open(
-            "remote-cancel-release",
-            storage=owner_storage, features=model_features(_Models(FunctionModel(stream_function=model)), group),
-        ) as owner, Runtime.open(
-            "remote-cancel-release",
-            storage=remote_storage, features=model_features(_Models(FunctionModel(stream_function=model)), group),
-        ) as remote:
+        async with Persistence.open('remote-cancel-release', storage=owner_storage) as persistence_69, Runtime.open(persistence=persistence_69, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as owner, Persistence.open('remote-cancel-release', storage=remote_storage) as persistence_72, Runtime.open(persistence=persistence_72, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as remote:
             await owner.agents.get("default").create_session("session")
             session = owner.agents.get("default").session("session")
             for turn in range(3):
@@ -110,10 +107,10 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                 while_active = await owner.executions.inspect(execution.execution_id, principal=owner.default_principal)
                 assert while_active.status is ExecutionStatus.CANCELLING
                 assert pending_head.state.value == "open"
-                assert owner._state.run_store._staging._runs
+                assert owner._run_store._staging._runs
                 backend = owner._execution_service.runtime_backend()
                 worker = backend._tasks[execution.execution_id]
-                run_stores = (owner._state.run_store, remote._state.run_store)
+                run_stores = (owner._run_store, remote._run_store)
                 observation_tasks = {
                     buffer.scope._writer
                     for store in run_stores for buffer in store.trace_persistence._buffers.values()
@@ -169,7 +166,7 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                     execution.execution_id, tenant_id=tenant,
                 ) == sealed
                 assert (await execution.history(include_content=True)).items == history.items
-                run_store = owner._state.run_store
+                run_store = owner._run_store
                 assert run_store.trace_persistence.dirty == set()
                 assert run_store.trace_persistence.offsets == {}
                 assert run_store._durability_flights == {}
@@ -244,18 +241,12 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
     group.tool(fast, effect_policy="replay_safe")
     group.tool(slow, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("fast", "slow"))
-    owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
-    async with Runtime.open(
-        "individual-tool-cancel",
-        storage=owner_storage, features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as owner, Runtime.open(
-        "individual-tool-cancel",
-        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as remote:
+    owner_storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
+    async with Persistence.open('individual-tool-cancel', storage=owner_storage) as persistence_248, Runtime.open(persistence=persistence_248, features=model_features(_Models(_UsageFunctionModel(model)), group)) as owner, Persistence.open('individual-tool-cancel', storage=PersistenceStorage.sqlite(tmp_path / 'runtime.db')) as persistence_251, Runtime.open(persistence=persistence_251, features=model_features(_Models(_UsageFunctionModel(model)), group)) as remote:
         execution = await owner.agents.get("default").start("run both")
         try:
             await asyncio.wait_for(asyncio.gather(fast_entered.wait(), slow_entered.wait()), 10)
-            await owner._state.run_store.flush_dirty_execution_projections(
+            await owner._run_store.flush_dirty_execution_projections(
                 execution_id=execution.execution_id,
             )
             outcome = await remote.executions.cancel(
@@ -298,7 +289,7 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
 
     from linktools.ai.capability import AgentContext
     from linktools.ai.errors import AIError, ErrorCode
-    from linktools.ai.runtime.state._sql import _SqlTransaction
+    from linktools.ai.persistence._sql import _SqlTransaction
 
     from ._runtime_test_helpers import _UsageFunctionModel
 
@@ -316,9 +307,9 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
         del messages, info
         return ModelResponse(parts=[ToolCallPart("tool", {}, tool_call_id="call")])
 
-    owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
+    owner_storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     group = RuntimeFeatures("projection-cancel-conflict")
-    group.capability(TraceCapability(storage=owner_storage.plan.route(RuntimeDomain.TRACE), commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=60.0)), scope="runtime")
+    group.capability(TraceCapability(commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=60.0)), scope="runtime")
     group.tool(tool, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("tool",))
     original_replace = _SqlTransaction.replace_record
@@ -333,13 +324,7 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
         )
 
     monkeypatch.setattr(_SqlTransaction, "replace_record", project_before_cancel_replace)
-    async with Runtime.open(
-        "projection-cancel-conflict",
-        storage=owner_storage, features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as owner, Runtime.open(
-        "projection-cancel-conflict",
-        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as remote:
+    async with Persistence.open('projection-cancel-conflict', storage=owner_storage) as persistence_336, Runtime.open(persistence=persistence_336, features=model_features(_Models(_UsageFunctionModel(model)), group)) as owner, Persistence.open('projection-cancel-conflict', storage=PersistenceStorage.sqlite(tmp_path / 'runtime.db')) as persistence_339, Runtime.open(persistence=persistence_339, features=model_features(_Models(_UsageFunctionModel(model)), group)) as remote:
         execution = await owner.agents.get("default").start("run tool")
         try:
             await asyncio.wait_for(entered.wait(), 10)
@@ -352,7 +337,7 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
 
             async def project_after_cancel_read() -> None:
                 await cancel_read.wait()
-                await owner._state.run_store.flush_dirty_execution_projections(
+                await owner._run_store.flush_dirty_execution_projections(
                     execution_id=execution.execution_id,
                 )
 

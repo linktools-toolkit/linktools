@@ -9,11 +9,11 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.ai.core import ExecutionDeltaType, ExecutionLineageKind, Principal
-from linktools.ai.runtime._agent import Execution
-from linktools.ai.runtime._event import DefaultEventService, ExecutionDelta, LiveExecutionEventBroker
-from linktools.ai.runtime._shared_stream import shared_stream_positions
-from linktools.ai.runtime._watch_cursor import decode_execution_watch_cursor, get_preview_positions
-from linktools.ai.runtime.service_api import ExecutionTreeEvent
+from linktools.ai.execution import Execution
+from linktools.ai.execution.events import DefaultEventService, ExecutionDelta, LiveExecutionEventBroker
+from linktools.ai.execution.stream import shared_stream_positions
+from linktools.ai.observe.cursors import decode_execution_watch_cursor, get_preview_positions
+from linktools.ai.execution import ExecutionTreeEvent
 
 
 @asynccontextmanager
@@ -118,7 +118,7 @@ async def test_local_trimmed_preview_resets_and_rebuilds_retained_range():
 
 @pytest.mark.asyncio
 async def test_local_resume_position_ahead_of_retained_head_resets():
-    from linktools.ai.runtime._watch_cursor import encode_execution_watch_cursor
+    from linktools.ai.observe.cursors import encode_execution_watch_cursor
 
     broker = LiveExecutionEventBroker()
     broker.register_local_producer("execution", 0)

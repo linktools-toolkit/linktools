@@ -12,7 +12,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from linktools.ai.capability import AgentContext, workspace_capabilities
 from linktools.ai.core import Principal, PromptLimits
 from linktools.ai.runtime._compaction import CompactionCapability
-from linktools.ai.runtime._message import binary_content_usage
+from linktools.ai.model.messages import binary_content_usage
 from linktools.ai.workspace import Workspace
 
 

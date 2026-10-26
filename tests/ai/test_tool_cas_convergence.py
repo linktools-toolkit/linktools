@@ -8,15 +8,15 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.core import ExecutionStatus, ToolOperationStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
-from linktools.ai.runtime.state import RuntimeStorage
-from linktools.ai.runtime.state._commands import RuntimeStateCommands
-from linktools.ai.runtime.state._contracts import ToolOperationAdmission
-from linktools.ai.runtime.state._repositories import ToolRepositoryImpl
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.commands import StateCommands
+from linktools.ai.persistence.contracts import ToolOperationAdmission
+from linktools.ai.persistence.repositories import ToolRepositoryImpl
 from linktools.ai.storage import FilesystemObjectStore, StoredPayload
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -93,7 +93,7 @@ async def test_sqlite_materializes_convergent_tool_repository(tmp_path) -> None:
     await provision_runtime_database(engine)
     await engine.dispose()
 
-    state = RuntimeState(RuntimeStorage.sqlite(
+    state = Persistence(PersistenceStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     ))
@@ -145,7 +145,7 @@ async def test_sqlite_materializes_convergent_tool_repository(tmp_path) -> None:
 async def test_expired_tool_claim_becomes_effect_unknown_without_replay(
     tmp_path,
 ) -> None:
-    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "expired-tool-claim.db"))
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "expired-tool-claim.db"))
     await state.initialize(namespace="tool-expired-claim", tenant_id="tenant")
     try:
         repository = state.recovery.tools
@@ -171,7 +171,7 @@ async def test_expired_tool_claim_becomes_effect_unknown_without_replay(
 
 @pytest.mark.asyncio
 async def test_expired_replay_safe_claim_returns_to_pending() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="tool-expired-replay-safe", tenant_id="tenant")
     try:
         repository = state.recovery.tools
@@ -197,7 +197,7 @@ async def test_expired_replay_safe_claim_returns_to_pending() -> None:
 
 @pytest.mark.asyncio
 async def test_live_tool_claim_is_not_reconciled_early() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="tool-live-claim", tenant_id="tenant")
     try:
         repository = state.recovery.tools
@@ -349,7 +349,7 @@ class _CommandTools:
 @pytest.mark.asyncio
 async def test_tool_terminal_command_retries_after_outer_transaction_exits() -> None:
     tools = _CommandTools(_record())
-    commands = object.__new__(RuntimeStateCommands)
+    commands = object.__new__(StateCommands)
     commands._tools = tools
     commands._observe_cancellation = True
     commands._execution = _CommandExecution(tools.state_store)
@@ -374,7 +374,7 @@ async def test_tool_terminal_command_retries_after_outer_transaction_exits() -> 
 @pytest.mark.asyncio
 async def test_tool_terminal_command_preserves_new_owner_after_conflict() -> None:
     tools = _CommandTools(_record(owner="new-owner", fence=2))
-    commands = object.__new__(RuntimeStateCommands)
+    commands = object.__new__(StateCommands)
     commands._tools = tools
     commands._observe_cancellation = True
     commands._execution = _CommandExecution(tools.state_store)
@@ -537,7 +537,7 @@ async def test_tool_bridge_requires_terminal_owner_and_fence_identity() -> None:
 
 @pytest.mark.asyncio
 async def test_expired_non_replay_safe_admission_commits_unknown_before_raising() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="tool-cas", tenant_id="tenant")
     try:
         repository = state.recovery.tools

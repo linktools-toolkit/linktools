@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Consumption and next-turn admission bypass unexpired observation records."""
 from ._runtime_test_helpers import model_features
 
@@ -12,8 +14,9 @@ from pydantic_ai.models.function import FunctionModel
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.capability import ExecutionCapability, CheckpointCapability
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime.service_api import CancelExecutionRequest
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.execution import CancelExecutionRequest
 from linktools.ai.storage import InMemoryCacheBackend, _write_cache
 
 from .test_live_history_readback_integration import _Models
@@ -44,11 +47,9 @@ async def test_committed_results_and_next_turn_ignore_remote_observation_cache(
     group.capability(CheckpointCapability(), scope="runtime")
     database = tmp_path / "runtime.db"
     models = _Models(FunctionModel(stream_function=model))
-    owner_storage = RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))
-    reader_storage = RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))
-    async with Runtime.open("committed-read", storage=owner_storage, features=model_features(models, group)) as owner, Runtime.open(
-        "committed-read", storage=reader_storage, features=model_features(models, group),
-    ) as reader:
+    owner_storage = PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))
+    reader_storage = PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))
+    async with Persistence.open('committed-read', storage=owner_storage) as persistence_49, Runtime.open(persistence=persistence_49, features=model_features(models, group)) as owner, Persistence.open('committed-read', storage=reader_storage) as persistence_49, Runtime.open(persistence=persistence_49, features=model_features(models, group)) as reader:
         principal = owner.default_principal
         await owner.agents.get().create_session("session")
         first = await owner.agents.get().session("session").start("first", idempotency_key="first")
@@ -93,17 +94,14 @@ async def test_terminal_consumption_reuses_confirmed_status_for_handoff(
     group = RuntimeFeatures("terminal-consumption")
     group.agent("default", model="default", allow_tools=())
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Runtime.open(
-        "terminal-consumption",
-        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), features=model_features(_Models(FunctionModel(stream_function=model)), group),
-    ) as runtime:
+    async with Persistence.open('terminal-consumption', storage=PersistenceStorage.sqlite(tmp_path / 'runtime.db')) as persistence_96, Runtime.open(persistence=persistence_96, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as runtime:
         await runtime.agents.get().create_session("session")
         execution = await runtime.agents.get().session("session").start(
             "first", idempotency_key="first",
         )
         await execution.wait()
         service = runtime._execution_service
-        load = service._load_execution
+        load = service.load_execution
         confirmed = False
 
         async def load_once(execution_id, *, tenant_id):
@@ -115,7 +113,7 @@ async def test_terminal_consumption_reuses_confirmed_status_for_handoff(
             confirmed = True
             return value
 
-        monkeypatch.setattr(service, "_load_execution", load_once)
+        monkeypatch.setattr(service, "load_execution", load_once)
         result = await getattr(service, query)(
             execution.execution_id, principal=runtime.default_principal,
         )

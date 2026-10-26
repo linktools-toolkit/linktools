@@ -11,8 +11,8 @@ from pydantic_ai.messages import BinaryContent, ModelRequest, ToolReturnPart
 
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._message import decode_model_messages, encode_model_messages
-from linktools.ai.runtime._model_interaction import project_public_messages
+from linktools.ai.model.messages import decode_model_messages, encode_model_messages
+from linktools.ai.persistence._model_interaction import project_public_messages
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationDecision
 from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
 

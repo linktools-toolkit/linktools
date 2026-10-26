@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Absent system prompts never become empty provider or history messages."""
 from ._runtime_test_helpers import model_features
 
@@ -11,7 +13,9 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, Syst
 from pydantic_ai.models.function import AgentInfo
 
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.runtime import ExecutionInputContext, Runtime, RuntimeStorage
+from linktools.ai.execution import ExecutionInputContext
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.spec import AgentSpec
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
@@ -46,8 +50,7 @@ async def test_system_prompt_presence_matches_provider_observation_and_history(
         options["system_prompt"] = "Keep this system prompt"
     group.agent("default", **options)
     group.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open("system-prompts",
-                            storage=RuntimeStorage.filesystem(tmp_path), features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('system-prompts', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_49, Runtime.open(persistence=persistence_49, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         agent = runtime.agents.get()
         if case == "derive-none":
             agent = agent.derive(system_prompt=None)
@@ -87,8 +90,7 @@ async def test_imported_system_history_respects_explicit_replacement(
         ModelResponse(parts=[TextPart("previous")]),
     ), replace_history_system_prompt=replace_system)
     group.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open("imported-system",
-                            storage=RuntimeStorage.filesystem(tmp_path), features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('imported-system', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_90, Runtime.open(persistence=persistence_90, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get().start("question", input_context=imported)
         result = await execution.wait(timeout_seconds=10)
         assert result.result.status == "SUCCEEDED"
@@ -133,8 +135,7 @@ async def test_openai_http_capture_preserves_only_configured_system_content(
         options["system_prompt"] = system_prompt
     group.agent("default", **options)
     group.capability(TraceCapability(record_http_bodies=True), scope="runtime")
-    async with Runtime.open("http-system", storage=RuntimeStorage.filesystem(tmp_path),
-                            features=model_features(registry, group)) as runtime:
+    async with Persistence.open('http-system', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_136, Runtime.open(persistence=persistence_136, features=model_features(registry, group)) as runtime:
         execution = await runtime.agents.get().start("question")
         result = await execution.wait(timeout_seconds=10)
         assert result.result.status == "SUCCEEDED"

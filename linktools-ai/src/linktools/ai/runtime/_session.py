@@ -27,14 +27,14 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..storage import CacheBackend
-from ._session_display_cache import SessionDisplayCache
-from ._session_timeline import (
+from ..history import SessionDisplayCache
+from ..history import (
     capture_session_refresh,
     project_captured_session_timeline,
     project_session_timeline,
 )
-from ._input import _InputFileSource, stored_user_input_view
-from .service_api import (
+from ..inputs import InputFileSource, stored_user_input_view
+from linktools.ai.execution import (
     CancelExecutionRequest,
     ExecutionHandle,
     ExecutionRequest,
@@ -46,17 +46,13 @@ from .service_api import (
     SessionTurn,
     SessionView,
 )
-from .state._object_router import runtime_object_source_reads
-from .state._contracts import (
-    ConversationCursor,
-    ConversationRepositories,
-    ExecutionRecord,
-    ExecutionRepository,
-    SessionRecord,
-)
-from .state._conversation_repositories import SessionRepositoryImpl
-from .state._execution_repositories import ExecutionRepositoryImpl
-from .state._store import active_state_scope
+from linktools.ai.persistence.objects import runtime_object_source_reads
+from linktools.ai.session import ConversationCursor, SessionRecord
+from linktools.ai.persistence.contracts import ConversationRepositories, ExecutionRepository
+from linktools.ai.execution import ExecutionRecord
+from linktools.ai.persistence.repositories import SessionRepositoryImpl
+from linktools.ai.persistence.repositories import ExecutionRepositoryImpl
+from linktools.ai.persistence.state import active_state_scope
 
 
 
@@ -153,7 +149,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         enabled: bool = True,
         transcript_store: "_SessionTranscriptStore | None" = None,
         release_terminal: SessionReleaseCallback | None = None,
-        workspace_access: _InputFileSource | None = None,
+        workspace_access: InputFileSource | None = None,
         cache: CacheBackend | None = None,
         pending_session_execution: SessionPendingExecutionLookup[ExecutionRecord] | None = None,
     ) -> None:

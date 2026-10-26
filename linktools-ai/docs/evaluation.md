@@ -1,13 +1,13 @@
 # Evaluation
 
-`runtime.evaluations` evaluates existing Tasks, Agent-backed Tasks, and native
-TaskGraphs. Dataset, scoring, evidence, and report values live in
-`linktools.ai.evaluation`; execution still uses `runtime.tasks`. There is no
-separate candidate or judge runtime.
+`Evaluations.open(engine)` evaluates existing Tasks, Agent-backed Tasks, and
+native TaskGraphs through a borrowed TaskEngine. Dataset, scoring, evidence and
+report values live in `linktools.ai.evaluation`; orchestration lives in
+`linktools.ai.evaluation_engine`. Function-only evaluations need no Agent Runtime.
 
 ## An offline evaluation, end to end
 
-This complete example needs no model credentials or network calls. It uses an
+This complete example needs no model credentials or network calls. It uses
 no model declarations, durable filesystem storage, two cases, and a rule scorer.
 Run it in an environment with `linktools-ai` installed. The state directory is
 retained so the same requests can be reopened or retried.
@@ -24,7 +24,9 @@ from linktools.ai.evaluation import (
     DimensionContract, EvaluationSpec, ScorerSpec, ScoringInput,
     ScoreBundle, StartEvaluationRequest, export_report,
 )
-from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeStorage
+from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.task_engine import TaskEngine
+from linktools.ai.evaluation_engine import Evaluations
 from linktools.ai.task import Task, TaskNodeContext
 
 
@@ -48,13 +50,14 @@ async def main() -> None:
     dimension = DimensionContract("exact_match", "boolean", "higher", 0, 1)
     scorer = ScorerSpec("exact", judge.ref, (dimension,))
 
-    async with Runtime.open(
+    async with Persistence.open(
         "evaluation-guide",
-            storage=RuntimeStorage.filesystem(Path("evaluation-state")),
-        context=RuntimeContext(None, tenant_id="example"),
-    ) as runtime:
-        engine = runtime.tasks.bind(target, judge)
-        dataset = await runtime.evaluations.publish_dataset(
+        storage=PersistenceStorage.filesystem(Path("evaluation-state")),
+        tenant_id="example",
+    ) as persistence, TaskEngine.open(
+        target, judge, persistence=persistence,
+    ) as engine, Evaluations.open(engine) as evaluations:
+        dataset = await evaluations.publish_dataset(
             DatasetSpec(DatasetRef("echo-cases", 1), cases=(
                 CaseSpec.task(CaseRef("echo-cases", "text", 1),
                               input={"answer": "yes"}, expected="yes"),
@@ -70,14 +73,14 @@ async def main() -> None:
             principal,
             "evaluate-echo-cases-v1",
         )
-        run = await runtime.evaluations.start(request, engine=engine)
+        run = await evaluations.start(request)
         view = (await run.wait(timeout_seconds=10)).result
         assert view.completion == "complete", view.needs_attention
         report = await run.create_report()
         assert report.scores[0].valid == report.scores[0].planned == 2
         assert report.scores[0].mean == report.scores[0].coverage == 1.0
         print(export_report(report, format="markdown"))
-        assert await runtime.evaluations.get_report(
+        assert await evaluations.get_report(
             report.report_id, principal=principal
         ) == report
 
@@ -97,7 +100,7 @@ visible trial page instead of repeatedly calculating and discarding a full repor
 `TrialView.execution_status` preserves the native execution outcome, while
 `graph_status` separately reports its target graph. A successful execution can
 still have a graph that requires recovery; the evaluation then needs attention.
-The pure `evaluation_completion()` projection is shared by Runtime and report
+The pure `evaluation_completion()` projection is shared by orchestration and report
 builders, with orchestration supplying its pending launches and control facts.
 
 The same idempotency key and request return the same resource; changed request
@@ -107,7 +110,7 @@ revision when changing their meaning. Bind Python Tasks again after reopening;
 persistence does not serialize Python functions.
 
 If cancellation arrives before the application has saved the experiment ID, use
-`await runtime.evaluations.cancel_admission(request, engine=engine)` with the same
+`await evaluations.cancel_admission(request)` with the same
 frozen `StartEvaluationRequest` and idempotency key that `start()` would use.
 It returns the authoritative `EvaluationRun` and initiates cancellation itself.
 A missing admission is atomically reserved with its existing cancellation gate
@@ -124,14 +127,13 @@ retry the same operation rather than interpreting a missing local experiment ID
 as proof that no native admission exists.
 
 Evaluation actions require an authorized principal and enforce tenant/owner
-boundaries. The example explicitly uses a service principal; the default Runtime
-principal is not authorized for evaluation by default. Production applications
-should pass their `AuthorizationPolicy` from `linktools.ai.core` to
-`RuntimeFeatures("evaluation", authorization=policy)` and pass the declaration as
-`Runtime.open(..., features=features)`. Use real caller identities. Omitting
-`authorization`, or passing `None`, retains `TenantAuthorizationPolicy` with the
-Runtime tenant. The supplied instance is shared by evaluation, input capture,
-TaskGraph, execution, session, artifact, and borrowed `runtime.history` services.
+boundaries. The example explicitly uses a service principal. Production
+applications pass their `AuthorizationPolicy` from `linktools.ai.core` to
+`TaskEngine.open(..., authorization=policy)`; Evaluations borrows that policy.
+Use real caller identities. Omitting authorization retains
+`TenantAuthorizationPolicy` with the Persistence tenant. For Agent-backed Tasks,
+configure the Agent Runtime's policy through `RuntimeFeatures(authorization=policy)`
+as well: Task admission and Agent execution remain distinct authorization boundaries.
 
 A system publisher can own a shared `DatasetRef` while each operator owns their
 own experiments. Grant `EVALUATION_DATASET_READ` only for approved dataset IDs
@@ -142,25 +144,24 @@ read grant alone does not grant capture access or relax authorization for other
 resources.
 
 Policies are application configuration, not persisted execution data. Inject the
-policy on every reopened Runtime and worker. For a separately opened read-only
-history reader, use the same policy-bearing capture with
-`RuntimeHistory.open(..., features=captured)` too.
+policy on every reopened TaskEngine and Agent Runtime. For a separately opened
+read-only history reader, use `History.open(persistence=persistence, authorization=policy)`.
 Recovery permission belongs to the recovery actor; resumed execution retains the
 principal originally admitted with its graph.
 
 The remaining snippets are focused extensions: run asynchronous calls inside an
-open Runtime and reuse or replace the example's Tasks, principal, and dimension.
+open Evaluations context and reuse or replace the example's Tasks, principal, and dimension.
 
 ## Current trial reads
 
 ```python
-page = await runtime.evaluations.current_trials(
+page = await evaluations.current_trials(
     run.experiment_id, principal=principal, limit=50,
 )
-trial = await runtime.evaluations.read_trial(
+trial = await evaluations.read_trial(
     run.experiment_id, page.items[0].trial.trial_id, principal=principal,
 )
-case = await runtime.evaluations.get_case(trial.case_ref, principal=principal)
+case = await evaluations.get_case(trial.case_ref, principal=principal)
 ```
 
 `run.current_trials(...)` and `run.read_trial(trial_id)` delegate to the same
@@ -196,9 +197,10 @@ do not interchange their cursors with current-page cursors.
 ## Trial resource contexts
 
 Pass `trial_scope=...` to `start`, `cancel_admission`, `reconcile`, or `rescore`
-when each target/scorer submission needs its own Runtime and application
-resources. The callback is an asynchronous context manager accepting an
-`EvaluationTrialScope` and yielding a `TaskEngine`. Native evaluation registers
+when each target/scorer submission needs its own TaskEngine and application
+resources (and an Agent Runtime when Agent Tasks are used). The callback is an
+asynchronous context manager accepting an `EvaluationTrialScope` from
+`linktools.ai.evaluation_engine` and yielding a `TaskEngine`. Native evaluation registers
 the durable launch intent before entering the context; a cancelled admission
 does not open one merely to perform cancellation.
 
@@ -225,15 +227,15 @@ open the resource context. Context-entry failure remains observable as
 `needs_attention`, and a new recovery key does not make the old trial fresh.
 Shared SQL does not transfer application-generated files between hosts.
 
-The yielded engine must belong to a separate Runtime with the same namespace,
-tenant, retained storage plan, and object-store identities as the coordinating
-Runtime. Use separate `RuntimeStorage.sql(shared_engine)` or SQLite wrappers,
-not the same RuntimeStorage instance. An externally supplied SQL engine remains
-borrowed and is not disposed by closing one trial. Filesystem storage retains
-its existing exclusive-writer restriction. Rebind Agent Tasks through the child
-Runtime's `tasks.from_agent`/`from_agent_capture` APIs; a runner bound to the
-planning Runtime cannot be reused in the child. Definitions must match the
-frozen contracts used during preflight.
+The yielded engine must use the same namespace, tenant, retained storage plan,
+and object-store identities as the coordinating engine. It may borrow the same
+Persistence in-process; a separate worker opens its own Persistence scope with
+matching durable routes. An externally supplied SQL engine remains borrowed and
+is not disposed by closing one trial. Filesystem storage retains its existing
+exclusive-writer restriction. For Agent trials, bind `Task.from_agent(...)` to
+the child Runtime's Agent, using `runtime.agents.restore(binding)` when restoring
+an admitted binding. Do not reuse a port bound to the planning Runtime. Definitions
+must match the frozen contracts used during preflight.
 
 Open child Runtimes with `auto_recover=False`. The default remains `True`; the
 flag only disables startup-wide reconciliation. Explicit graph/execution
@@ -244,7 +246,7 @@ stopped before requesting takeover.
 
 The callback is trusted application setup, not a sandbox or an effect-policy
 override. Existing fixture, tool, and external-effect admission rules remain in
-force. The coordinating Runtime validates storage, authorization, and frozen
+force. Evaluations validates storage, authorization, and frozen
 definitions; the yielded engine must preserve those contracts. Explicit
 `external_effects="live"` permits declared effects in Runtimes with or without
 application state and a Workspace. Neither their absence nor separate Runtime
@@ -267,7 +269,7 @@ still be finishing its own context exit. It does not certify remote resource
 closure. Cleanup failures remain visible and are not converted into successful
 resource release. Use of a scope is part of the admitted evaluation meaning:
 reopening a scoped evaluation without its callback fails rather than silently
-falling back to the planning Runtime. Existing unscoped evaluations retain their
+falling back to the coordinating TaskEngine. Existing unscoped evaluations retain their
 original meaning.
 
 Context exit stops new local engine use and waits for already issued native
@@ -279,7 +281,7 @@ receipt has finished settling.
 Human decisions are persisted before resuming a scorer. For a scoped run, a
 coordinator without that locally opened context leaves the decision for its
 owning coordinator or explicit reconciliation to apply; it does not execute the
-scorer on the planning Runtime.
+scorer on the coordinating TaskEngine.
 
 Context exit and evaluation retention do not recursively delete persistent
 workspace directories. Retention continues to own native evaluation records,
@@ -468,12 +470,14 @@ An existing Agent becomes a candidate or scorer through the same Task adapter:
 ```python
 from linktools.ai.evaluation import EvaluationPolicy
 
-agent_target = runtime.tasks.from_agent("example.agent", runtime.agents.get("answer"))
-agent_judge = runtime.tasks.from_agent("example.judge", runtime.agents.get("judge"))
+agent_target = Task.from_agent("example.agent", runtime.agents.get("answer"))
+agent_judge = Task.from_agent("example.judge", runtime.agents.get("judge"))
 agent_candidate = CandidateSpec("answer", task=agent_target.ref)
 model_scorer = ScorerSpec("judge", agent_judge.ref, (dimension,),
                          rubric={"criterion": "Answer matches the reference"})
-engine = runtime.tasks.bind(agent_target, agent_judge)
+async with TaskEngine.open(agent_target, agent_judge, persistence=persistence) as engine:
+    async with Evaluations.open(engine) as evaluations:
+        ...
 ```
 
 The default `EvaluationPolicy` is `model_mode="fixture_only"`,
@@ -530,7 +534,7 @@ same capture:
 
 ```python
 from linktools.ai.agent import AgentInputCaptureRef
-from linktools.ai.runtime import CaptureInputRequest
+from linktools.ai.inputs import CaptureInputRequest
 
 capture = await runtime.executions.capture_input(
     source_execution_id,
@@ -539,15 +543,17 @@ capture = await runtime.executions.capture_input(
 assert isinstance(capture, AgentInputCaptureRef)
 case = CaseSpec.from_capture(CaseRef("historical-cases", "source", 1),
                              capture=capture, expected="reference answer")
-historical = await runtime.tasks.from_agent_capture(
-    "example.historical", capture, principal=principal,
+captured_input = await engine.inputs.read_agent(capture, principal=principal)
+assert captured_input.binding is not None
+historical = Task.from_agent(
+    "example.historical", runtime.agents.restore(captured_input.binding),
 )
 candidate = CandidateSpec("original", task=historical.ref)
 ```
 
 Alternatively, use that case with an explicitly chosen current Agent-backed
 Task to test changed behavior. Input capture and behavior selection are separate.
-`from_agent_capture` restores the original binding, including structured output
+`runtime.agents.restore(captured_input.binding)` restores the original binding, including structured output
 and captured child Agent revisions, instructions, output contracts and selected
 dependencies. Execution does not substitute current child declarations after
 Runtime is reopened. An explicit Task node output override changes only the root
@@ -580,9 +586,9 @@ states. Their implementation still comes from a Task bound to the engine.
 For a graph capture, use:
 
 ```python
-from linktools.ai.runtime import CaptureGraphRequest
+from linktools.ai.inputs import CaptureGraphRequest
 
-source_graph = await runtime.tasks.capture_graph(
+source_graph = await engine.inputs.capture_graph(
     source_graph_id,
     CaptureGraphRequest(principal, "capture-graph-v1", context_policy="captured"),
 )
@@ -625,12 +631,12 @@ bytes through the authorized evidence facade:
 from linktools.ai.evaluation import EvidenceAttachmentRef
 
 sample = ScoringInput.from_mapping(context.input)
-evidence = await runtime.evaluations.read_evidence(
+evidence = await evaluations.read_evidence(
     sample.evidence_ref, principal=context.principal,
 )
 for attachment in evidence.attachments:
     if isinstance(attachment, EvidenceAttachmentRef):
-        body = await runtime.evaluations.read_evidence_attachment(
+        body = await evaluations.read_evidence_attachment(
             evidence.ref, attachment.attachment_id, principal=context.principal,
         )
 ```
@@ -648,13 +654,12 @@ that is all they need:
 ```python
 from linktools.ai.evaluation import RescoreRequest
 
-rescored = await run.rescore(
-    RescoreRequest((revised_scorer,), "rescore-v2"),
-    engine=runtime.tasks.bind(revised_judge),
-)
-view = (await rescored.wait(timeout_seconds=10)).result
-assert view.kind == "score_only"
-assert view.source_experiment_id == run.experiment_id
+async with Evaluations.open(engine.with_definitions(revised_judge)) as rescoring:
+    source = await rescoring.get(run.experiment_id, principal=principal)
+    rescored = await source.rescore(RescoreRequest((revised_scorer,), "rescore-v2"))
+    view = (await rescored.wait(timeout_seconds=10)).result
+    assert view.kind == "score_only"
+    assert view.source_experiment_id == run.experiment_id
 ```
 
 `trial_ids=(...)` optionally selects a nonempty set of original trial IDs.
@@ -679,7 +684,7 @@ selection = ScoreComparisonSelection(
     ScoreSelection("exact", "exact_match"),
     ScoreSelection("exact", "exact_match"),
 )
-comparison = await runtime.evaluations.create_comparison_report(
+comparison = await evaluations.create_comparison_report(
     ComparisonSpec(
         CandidateSlotRef(run.experiment_id, "baseline"),
         CandidateSlotRef(run.experiment_id, "candidate"),
@@ -762,8 +767,8 @@ The default human wait deadline is 86,400 seconds; configure
   unattempted slots
 - `wait(timeout_seconds=...)` only bounds the caller's wait. A timeout does not
   cancel the evaluation. Use `cancel(idempotency_key=...)` explicitly
-- Reopen with `runtime.evaluations.get(experiment_id, principal=...)`; resume
-  coordination with `reconcile(experiment_id, engine=..., principal=...,
+- Reopen with `evaluations.get(experiment_id, principal=...)`; resume
+  coordination with `reconcile(experiment_id, principal=...,
   idempotency_key=...)`. Bind matching current definitions first; same-revision
   contract drift is rejected before work can resume
 
@@ -809,7 +814,7 @@ policy = EvaluationPolicy(
     content_retention_seconds=7 * 24 * 3600,
     metadata_retention_seconds=7 * 24 * 3600,
 )
-dataset = await runtime.evaluations.publish_dataset(
+dataset = await evaluations.publish_dataset(
     dataset_spec,
     principal=principal,
     idempotency_key="publish-expiring-dataset-v1",
@@ -845,7 +850,7 @@ Expiry checks deny use before physical cleanup. Cleanup is an explicit authorize
 maintenance operation, not a background timer:
 
 ```python
-result = await runtime.evaluations.purge_expired(
+result = await evaluations.purge_expired(
     principal=principal,
     now=datetime.now(timezone.utc),
     exclusive=application_guard,
@@ -854,7 +859,7 @@ result = await runtime.evaluations.purge_expired(
 ```
 
 `application_guard` must implement the public
-`linktools.ai.runtime.state.SnapshotExclusiveGuard` protocol. Its
+`linktools.ai.snapshot.SnapshotExclusiveGuard` protocol. Its
 `offline_exclusivity()` context must actually quiesce every related writer and
 object-cleanup process during object discovery, reachability checking, and
 deletion; a no-op guard or read-only storage handle is insufficient. Purge first closes admission and

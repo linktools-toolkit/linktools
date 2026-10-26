@@ -244,10 +244,7 @@ async def test_attach_files_rejects_unknown_image_before_read(
 
 def test_native_file_results_keep_parallel_attachment_provenance() -> None:
     from pydantic_ai.messages import ModelRequest, ToolReturnPart, UserPromptPart
-    from linktools.ai.runtime._attachment import (
-        bind_tool_return_attachments, has_binary_attachment_metadata,
-        request_attachment_facts,
-    )
+    from linktools.ai.model._attachment import bind_tool_return_attachments, has_binary_attachment_metadata, request_attachment_facts
 
     receipt = {"files": [{"path": "one.png", "mime_type": "image/png", "size": 3,
                            "sha256": "8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c"}]}

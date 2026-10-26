@@ -11,13 +11,13 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 from sqlalchemy import event
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeDomain
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime.state._archive import PreparedArchive
-from linktools.ai.runtime.state._step_archive import PreparedAgentRunCheckpointBatch, StateStepArchive
-from linktools.ai.runtime.state._sql import _SqlTransaction
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
-from linktools.ai.runtime.state._store import active_state_scope
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence._archive import PreparedArchive
+from linktools.ai.persistence._step_archive import PreparedAgentRunCheckpointBatch, StateStepArchive
+from linktools.ai.persistence._sql import _SqlTransaction
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
+from linktools.ai.persistence.state import active_state_scope
 
 from .test_incremental_projection_boundaries import _storage
 
@@ -64,9 +64,9 @@ async def _assert_prepared_values_equal(
 async def test_checkpoint_metadata_batches_reads_without_changing_prepared_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="checkpoint-metadata", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     engine = archive.state_store.storage_group.context.engine.sync_engine
     statements: list[str] = []
@@ -142,9 +142,9 @@ async def test_checkpoint_metadata_batches_reads_without_changing_prepared_value
 async def test_checkpoint_relocation_keeps_integrity_failures(
     tmp_path: Path, backend: str, failure: str, composed: bool,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="checkpoint-metadata", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     checkpoint = _checkpoint(1)
     try:
@@ -179,9 +179,9 @@ async def test_checkpoint_relocation_keeps_integrity_failures(
 async def test_checkpoint_preparation_rereads_after_body_io_and_commit_rejects_stale_append(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, composed: bool,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="checkpoint-metadata", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     try:
         await archive.materialize_checkpoint(run, _checkpoint(1))
@@ -226,10 +226,10 @@ async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_on
     for baseline in (True, False):
         path = tmp_path / str(baseline)
         path.mkdir()
-        state = RuntimeState(_storage("sqlite", path))
+        state = Persistence(_storage("sqlite", path))
         await state.initialize(namespace="checkpoint-commit", tenant_id="tenant")
-        domain = (RuntimeDomain.CONVERSATION if case == "conversation" else
-                  RuntimeDomain.TRACE if case == "execution" else RuntimeDomain.CHECKPOINT)
+        domain = (PersistenceDomain.CONVERSATION if case == "conversation" else
+                  PersistenceDomain.TRACE if case == "execution" else PersistenceDomain.CHECKPOINT)
         archive = state.run_store.read_store(domain)
         run = AgentRunRecord("run")
         engine = archive.state_store.storage_group.context.engine.sync_engine
@@ -246,7 +246,7 @@ async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_on
             statements.append(statement.split()[0].upper())
 
         try:
-            if domain is RuntimeDomain.TRACE:
+            if domain is PersistenceDomain.TRACE:
                 execution = replace(_execution(), revision=1)
                 repository = state.execution.executions
                 await repository.create_with_history_head(execution)
@@ -258,7 +258,7 @@ async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_on
             prepared, = (await archive.prepare_checkpoints(run, (_checkpoint(1),))).checkpoints
 
             async def commit():
-                if domain is RuntimeDomain.TRACE:
+                if domain is PersistenceDomain.TRACE:
                     await archive.sync_prepared_projection(
                         run, events=(), checkpoints=(prepared,), execution_id="execution",
                         producer_generation=1,
@@ -279,7 +279,7 @@ async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_on
             counts.append(statements.count("SELECT"))
             latest = await archive.latest_checkpoint(agent_run_id="run")
             assert latest is not None and latest.messages == _checkpoint(1).messages
-            if domain is not RuntimeDomain.TRACE:
+            if domain is not PersistenceDomain.TRACE:
                 statements.clear()
                 event.listen(engine, "before_cursor_execute", capture)
                 try:
@@ -295,9 +295,9 @@ async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_on
 async def test_checkpoint_projection_stale_version_rolls_back_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="checkpoint-stale-projection", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     try:
         await archive.materialize_checkpoint(run, _checkpoint(1))
@@ -332,9 +332,9 @@ async def test_checkpoint_projection_stale_version_rolls_back_commit(
 async def test_run_admission_does_not_read_context_projection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="checkpoint-admission", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     projection_key = archive.transcript_repository.projection_key("run")
     get_record, get_records = _SqlTransaction.get_record, _SqlTransaction.get_records
 

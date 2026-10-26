@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Producer revocation is established from one authoritative metadata view."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from dataclasses import replace
 from pathlib import Path
@@ -12,12 +12,12 @@ from sqlalchemy import event
 
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.persistence.contracts import (
     ExecutionHistoryHeadRecord, ExecutionHistorySealRecord, ExecutionHistoryState,
 )
-from linktools.ai.runtime.state._execution_repositories import ExecutionRepositoryImpl
-from linktools.ai.runtime.state._store import active_state_scope, active_state_transaction
+from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
+from linktools.ai.persistence.state import active_state_scope, active_state_transaction
 from linktools.ai.storage import InMemoryCacheBackend, StoredPayload
 
 from .test_step_projection import _execution
@@ -40,10 +40,10 @@ from .test_step_projection import _execution
 async def test_revoked_producer_check_uses_one_sql_metadata_snapshot(
     tmp_path: Path, outcome: str, expected: ErrorCode | None, terminal_hint: bool,
 ) -> None:
-    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "producer.db"))
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "producer.db"))
     await state.initialize(namespace="producer-read", tenant_id="tenant")
     repository = state.execution.executions
-    archive = state.run_store.read_store(RuntimeDomain.TRACE)
+    archive = state.run_store.read_store(PersistenceDomain.TRACE)
     seal = ExecutionHistorySealRecord("execution", (), 0)
     open_head = outcome in {"new_generation", "same_generation"}
     closed = outcome in {"closed", "cancelled"}
@@ -94,10 +94,10 @@ async def test_revoked_producer_check_uses_one_sql_metadata_snapshot(
 async def test_newer_producer_keeps_head_only_read(
     tmp_path: Path, body_size: int, hint_kind: str,
 ) -> None:
-    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "newer.db"))
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "newer.db"))
     await state.initialize(namespace="producer-read", tenant_id="tenant")
     repository = state.execution.executions
-    archive = state.run_store.read_store(RuntimeDomain.TRACE)
+    archive = state.run_store.read_store(PersistenceDomain.TRACE)
     execution = _execution()
     execution = replace(execution, stored_user_input=replace(
         execution.stored_user_input, payload=StoredPayload.inline_text("x" * body_size),
@@ -140,14 +140,14 @@ async def test_terminal_hint_cannot_replace_current_tenant_proof(tmp_path: Path,
         actual = _execution()
         await repository.create_with_history_head(actual)
         # A same-ID terminal record from elsewhere is only a fetch hint.
-        foreign = RuntimeState(RuntimeStorage.in_memory())
+        foreign = Persistence(PersistenceStorage.in_memory())
         await foreign.initialize(namespace="model-control", tenant_id="other")
         try:
             hint = replace(actual, status=ExecutionStatus.SUCCEEDED, durable_trace=False)
             await foreign.execution.executions.create(hint)
             hint = await foreign.execution.executions.get("execution", tenant_id="other")
             await repository.observe_execution_control("execution", tenant_id="tenant")
-            archive = state.run_store.read_store(RuntimeDomain.TRACE)
+            archive = state.run_store.read_store(PersistenceDomain.TRACE)
             with pytest.raises(AIError) as raised:
                 await archive.require_revoked_execution_producer(
                     execution_id="execution", producer_generation=0, terminal_execution=hint,
@@ -160,7 +160,7 @@ async def test_terminal_hint_cannot_replace_current_tenant_proof(tmp_path: Path,
 
 @pytest.mark.asyncio
 async def test_custom_repository_keeps_head_first_with_terminal_hint(tmp_path: Path) -> None:
-    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "custom.db"))
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "custom.db"))
     await state.initialize(namespace="producer-read", tenant_id="tenant")
     source = state.execution.executions.state_store
     calls = []
@@ -184,7 +184,7 @@ async def test_custom_repository_keeps_head_first_with_terminal_hint(tmp_path: P
     await repository.create(execution)
     head = ExecutionHistoryHeadRecord("execution", ExecutionHistoryState.CLOSED, 0, None, 1)
     await source.mutate(lambda tx: repository.insert_history_head_in_transaction(tx, head))
-    archive = state.run_store.read_store(RuntimeDomain.TRACE)
+    archive = state.run_store.read_store(PersistenceDomain.TRACE)
     archive._execution_repository = repository
     try:
         await archive.require_revoked_execution_producer(
@@ -199,7 +199,7 @@ async def test_custom_repository_keeps_head_first_with_terminal_hint(tmp_path: P
 async def test_cancelled_control_observation_does_not_grant_proof(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "cancel.db"))
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "cancel.db"))
     await state.initialize(namespace="producer-read", tenant_id="tenant")
     repository = state.execution.executions
     execution = replace(_execution(), status=ExecutionStatus.SUCCEEDED, durable_trace=False)
@@ -216,7 +216,7 @@ async def test_cancelled_control_observation_does_not_grant_proof(
         await asyncio.Event().wait()
 
     monkeypatch.setattr(repository, "observe_execution_control", observe)
-    archive = state.run_store.read_store(RuntimeDomain.TRACE)
+    archive = state.run_store.read_store(PersistenceDomain.TRACE)
     task = asyncio.create_task(archive.require_revoked_execution_producer(
         execution_id="execution", producer_generation=1, terminal_execution=execution,
     ))
@@ -237,8 +237,8 @@ async def test_cancelled_control_observation_does_not_grant_proof(
 @pytest.mark.asyncio
 async def test_terminal_hint_and_cached_pair_do_not_hide_missing_source(tmp_path: Path) -> None:
     path = tmp_path / "stale.db"
-    state = RuntimeState(RuntimeStorage.sqlite(path, cache=InMemoryCacheBackend(max_bytes=1000000)))
-    remote = RuntimeState(RuntimeStorage.sqlite(path))
+    state = Persistence(PersistenceStorage.sqlite(path, cache=InMemoryCacheBackend(max_bytes=1000000)))
+    remote = Persistence(PersistenceStorage.sqlite(path))
     await state.initialize(namespace="producer-read", tenant_id="tenant")
     await remote.initialize(namespace="producer-read", tenant_id="tenant")
     repository = state.execution.executions
@@ -249,7 +249,7 @@ async def test_terminal_hint_and_cached_pair_do_not_hide_missing_source(tmp_path
     assert await repository.observe_execution_control("execution", tenant_id="tenant") == (execution, head)
     source = remote.execution.executions
     await source.state_store.mutate(lambda tx: tx.delete_record(source._key("execution", "execution")))
-    archive = state.run_store.read_store(RuntimeDomain.TRACE)
+    archive = state.run_store.read_store(PersistenceDomain.TRACE)
     try:
         with pytest.raises(AIError) as raised:
             await archive.require_revoked_execution_producer(
@@ -263,9 +263,9 @@ async def test_terminal_hint_and_cached_pair_do_not_hide_missing_source(tmp_path
 
 @pytest.mark.asyncio
 async def test_terminal_hint_preserves_unresolved_durability_flight() -> None:
-    from linktools.ai.runtime.state._step_contracts import AgentRunRecord
+    from linktools.ai.persistence._step_contracts import AgentRunRecord
 
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="unknown-producer", tenant_id="tenant")
     store = state.run_store
     store.bind_execution_producer("run", execution_id="execution", producer_generation=1)

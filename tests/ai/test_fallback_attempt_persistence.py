@@ -12,13 +12,7 @@ from pydantic_ai.messages import ModelRequestAttempt, ModelResponse, TextPart
 
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._message import (
-    decode_model_messages,
-    encode_model_messages,
-    model_attempts_usage,
-    model_response_usage,
-    project_model_response_attempts,
-)
+from linktools.ai.model.messages import decode_model_messages, encode_model_messages, model_attempts_usage, model_response_usage, project_model_response_attempts
 
 
 def _attempt(*, error: str | None = None, usage: RequestUsage | None = None) -> object:

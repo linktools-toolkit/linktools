@@ -5,57 +5,17 @@
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
 
+from ..agent import AgentBindingContract
 from ..core import BudgetUsage, Principal
-from ._wait import WaitResult
-from ._input_capture import CaptureInputRequest, ExecutionInputCaptureRef, RuntimeInputCaptures
-from .recovery import (
-    ExecutionRecoveryEffect,
-    ResolveToolEffectRequest,
-    ToolEffectResolutionResult,
-)
-from .service_api import (
-    ApprovalDecisionRequest,
-    ApprovalDecisionResult,
-    ApprovalView,
-    ArtifactDownload,
-    ArtifactView,
-    CancelExecutionRequest,
-    CancelExecutionResult,
-    CloseSessionRequest,
-    CreateSessionRequest,
-    ExecutionEvent,
-    ExecutionHandle,
-    ExecutionHistoryItem,
-    ExecutionResult,
-    ExecutionTraceItem,
-    ExecutionTreeEvent,
-    ExecutionObservationEvent,
-    ExecutionView,
-    ExternalCallView,
-    ExternalResolution,
-    ExternalSupplyRequest,
-    ExternalSupplyResult,
-    ForkExecutionRequest,
-    ForkSessionRequest,
-    ListExecutionRequest,
-    ListSessionRequest,
-    ModelInteractionItem,
-    Page,
-    RetryExecutionRequest,
-    SessionDetail,
-    SessionHistoryItem,
-    SessionTurn,
-    SessionView,
-    TranscriptItem,
-    UpdateSessionRequest,
-    UsageReadCutoff,
-    ExecutionService,
-    SessionService,
-)
+from linktools.ai.observe import WaitResult
+from ..inputs import CaptureInputRequest, ExecutionInputCaptureRef, InputCaptures
+from linktools.ai.execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
+from linktools.ai.execution import ApprovalDecisionRequest, ApprovalDecisionResult, ApprovalView, ArtifactDownload, ArtifactView, CancelExecutionRequest, CancelExecutionResult, CloseSessionRequest, CreateSessionRequest, ExecutionEvent, ExecutionHandle, ExecutionHistoryItem, ExecutionResult, ExecutionTraceItem, ExecutionTreeEvent, ExecutionObservationEvent, ExecutionView, ExternalCallView, ExternalResolution, ExternalSupplyRequest, ExternalSupplyResult, ForkExecutionRequest, ForkSessionRequest, ListExecutionRequest, ListSessionRequest, ModelInteractionItem, Page, RetryExecutionRequest, SessionDetail, SessionHistoryItem, SessionTurn, SessionView, TranscriptItem, UpdateSessionRequest, UsageReadCutoff, ExecutionService, SessionService
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
-    from ._agent import Agent, Execution, Session
+    from ._agent import Agent, Session
+    from ..execution import Execution
     from ..observe import MetricRecorderStatus, MetricFlushResult
     from ._runtime_service import Runtime
 
@@ -63,11 +23,16 @@ AppT = TypeVar("AppT")
 
 
 class RuntimeAgents(Generic[AppT]):
-    def __init__(self, get_agent: Callable[[str], "Agent[AppT]"]) -> None:
+    def __init__(self, get_agent: Callable[[str], "Agent[AppT]"], restore_agent: Callable[[AgentBindingContract], "Agent[AppT]"]) -> None:
         self._get_agent = get_agent
+        self._restore_agent = restore_agent
 
     def get(self, agent_id: str = "default") -> "Agent[AppT]":
         return self._get_agent(agent_id)
+
+    def restore(self, binding: AgentBindingContract) -> "Agent[AppT]":
+        """Restore the immutable behavior recorded with a prior execution."""
+        return self._restore_agent(binding)
 
 
 class RuntimeExecutions(Generic[AppT]):
@@ -75,7 +40,7 @@ class RuntimeExecutions(Generic[AppT]):
         self,
         service: ExecutionService,
         get_execution: Callable[[str, Principal | None], Awaitable["Execution[AppT]"]],
-        input_captures: RuntimeInputCaptures | None = None,
+        input_captures: InputCaptures | None = None,
         *,
         ensure_open: Callable[[], None] = lambda: None,
     ) -> None:

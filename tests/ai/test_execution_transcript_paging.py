@@ -17,9 +17,9 @@ from linktools.ai.core import (
     agent_conversation_id as make_agent_conversation_id,
     agent_run_id as make_agent_run_id,
 )
-from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
-from linktools.ai.runtime.state._contracts import ExecutionRecord
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord
+from linktools.ai.history._projection import StepExecutionHistoryReader
+from linktools.ai.persistence.contracts import ExecutionRecord
+from linktools.ai.persistence._step_contracts import AgentRunRecord
 from linktools.ai.spec import AgentSpec
 
 from ._runtime_test_helpers import execution_owner_fields
@@ -141,7 +141,7 @@ class _RangedStore:
         return iterate()
 
     async def capture_history(self, agent_run_ids, *, include_pending=False):
-        from linktools.ai.runtime.state._step_contracts import AgentRunHistoryCapture
+        from linktools.ai.persistence._step_contracts import AgentRunHistoryCapture
 
         del include_pending
         result = {}

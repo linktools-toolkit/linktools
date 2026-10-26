@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 
 from linktools.ai.core import (
     OperationKind,
@@ -21,29 +21,31 @@ from linktools.ai.core import (
     canonical_sha256,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeSnapshot, RuntimeStorage
-from linktools.ai.runtime import _snapshot as runtime_snapshot_module
-from linktools.ai.runtime.state import RuntimeDomain, SnapshotLimits
-from linktools.ai.runtime.state import _snapshot_operations as runtime_storage_snapshot_module
-from linktools.ai.runtime.state import _codec as runtime_storage_codec
-from linktools.ai.runtime.state._codec import (
+from linktools.ai.snapshot import Snapshot
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.snapshot import _snapshot as runtime_snapshot_module
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.snapshots import SnapshotLimits
+from linktools.ai.persistence import snapshots as runtime_storage_snapshot_module
+from linktools.ai.persistence import codec as runtime_storage_codec
+from linktools.ai.persistence.codec import (
     _encode_persisted_domain,
     encode_envelope,
     encode_record,
     wire_type_id,
 )
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence.contracts import (
     ExecutionRecord,
     SessionRecord,
     ToolOperationRecord,
 )
-from linktools.ai.runtime.state._repository_common import domain_data, project_record
-from linktools.ai.runtime.state import _snapshot_validation as snapshot_validation
-from linktools.ai.runtime.state._snapshot_validation import (
+from linktools.ai.persistence._repository_common import domain_data, project_record
+from linktools.ai.persistence import _snapshot_validation as snapshot_validation
+from linktools.ai.persistence._snapshot_validation import (
     canonical_snapshot_indexes,
     validate_snapshot_domain,
 )
-from linktools.ai.runtime.state._store import (
+from linktools.ai.persistence.state import (
     StoredAlias,
     StoredFact,
     StoredOperation,
@@ -129,7 +131,7 @@ async def test_runtime_snapshot_entrypoints_reject_wrong_object_store_owner(
     limits = SnapshotLimits(max_entries=100, max_bytes=1024 * 1024)
 
     with pytest.raises(AIError) as state_error:
-        await RuntimeState.restore_snapshot(
+        await Persistence.restore_snapshot(
             reference,
             object_store=store,
             root=tmp_path / "state",
@@ -138,7 +140,7 @@ async def test_runtime_snapshot_entrypoints_reject_wrong_object_store_owner(
     assert state_error.value.code is ErrorCode.STORAGE_OWNER_MISMATCH
 
     with pytest.raises(AIError) as runtime_error:
-        await RuntimeSnapshot.verify(
+        await Snapshot.verify(
             reference,
             object_store=store,
             limits=limits,
@@ -267,7 +269,7 @@ def test_snapshot_task_capture_dependencies_reject_invalid_manifests(
             runtime_storage_codec.iter_runtime_object_dependencies(
                 reference,
                 payload,
-                default_domain=RuntimeDomain.TASK,
+                default_domain=PersistenceDomain.TASK,
             )
         )
 
@@ -279,11 +281,11 @@ async def test_runtime_storage_snapshot_identity_ignores_target_store(
     tmp_path,
 ) -> None:
     root = tmp_path / "runtime"
-    writable = RuntimeState(RuntimeStorage.from_root(root))
+    writable = Persistence(PersistenceStorage.from_root(root))
     await writable.initialize(namespace="runtime", tenant_id="tenant")
     await writable.close()
 
-    state = RuntimeState(RuntimeStorage.from_root(root))
+    state = Persistence(PersistenceStorage.from_root(root))
     await state.initialize(namespace="runtime", tenant_id="tenant", read_only=True)
     limits = SnapshotLimits(max_entries=1000, max_bytes=1024 * 1024)
     first = InMemoryObjectStore("snapshot-a")
@@ -302,7 +304,7 @@ async def test_runtime_storage_snapshot_identity_ignores_target_store(
 @pytest.mark.asyncio
 async def test_runtime_snapshot_identity_ignores_target_store(tmp_path) -> None:
     root = tmp_path / "runtime"
-    writable = RuntimeState(RuntimeStorage.from_root(root))
+    writable = Persistence(PersistenceStorage.from_root(root))
     await writable.initialize(namespace="runtime", tenant_id="tenant")
     await writable.close()
     workspace_root = tmp_path / "workspace"
@@ -313,24 +315,21 @@ async def test_runtime_snapshot_identity_ignores_target_store(tmp_path) -> None:
     limits = SnapshotLimits(max_entries=1000, max_bytes=1024 * 1024)
     first = InMemoryObjectStore("snapshot-a")
     second = InMemoryObjectStore("snapshot-b")
-    first_ref = await RuntimeSnapshot.create(
-        "runtime",
-        tenant_id="tenant",
-        storage=RuntimeStorage.from_root(root),
-        object_store=first,
-        workspace=workspace,
-        exclusive=_SnapshotGuard(),
-        limits=limits,
-    )
-    second_ref = await RuntimeSnapshot.create(
-        "runtime",
-        tenant_id="tenant",
-        storage=RuntimeStorage.from_root(root),
-        object_store=second,
-        workspace=workspace,
-        exclusive=_SnapshotGuard(),
-        limits=limits,
-    )
+    async with Persistence.open("runtime", storage=PersistenceStorage.from_root(root), tenant_id="tenant", read_only=True) as persistence:
+        first_ref = await Snapshot.create(
+            persistence=persistence,
+            object_store=first,
+            workspace=workspace,
+            exclusive=_SnapshotGuard(),
+            limits=limits,
+        )
+        second_ref = await Snapshot.create(
+            persistence=persistence,
+            object_store=second,
+            workspace=workspace,
+            exclusive=_SnapshotGuard(),
+            limits=limits,
+        )
 
     assert first_ref.key == second_ref.key
     assert first_ref.digest == second_ref.digest
@@ -364,7 +363,7 @@ async def test_runtime_snapshot_rejects_coerced_object_ref_fields() -> None:
     )
 
     with pytest.raises(AIError) as raised:
-        await RuntimeSnapshot.verify(
+        await Snapshot.verify(
             ref,
             object_store=store,
             limits=SnapshotLimits(max_entries=10, max_bytes=4096),
@@ -400,7 +399,7 @@ async def test_runtime_snapshot_rejects_coerced_format_version() -> None:
     )
 
     with pytest.raises(AIError) as raised:
-        await RuntimeSnapshot.verify(
+        await Snapshot.verify(
             ref,
             object_store=store,
             limits=SnapshotLimits(max_entries=10, max_bytes=4096),
@@ -478,7 +477,7 @@ async def test_runtime_storage_restore_rejects_mismatched_logical_record_key_bef
     target = tmp_path / "restored"
 
     with pytest.raises(AIError) as raised:
-        await RuntimeState.restore_snapshot(
+        await Persistence.restore_snapshot(
             ref,
             object_store=store,
             root=target,
@@ -513,7 +512,7 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
     record = project_record(
         namespace="runtime",
         tenant_id="tenant",
-        domain=RuntimeDomain.RECOVERY,
+        domain=PersistenceDomain.RECOVERY,
         kind="tool_operation",
         identity=operation.tool_operation_id,
         value=operation,
@@ -523,7 +522,7 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
     aliases, sequences = canonical_snapshot_indexes(
         namespace="runtime",
         tenant_id="tenant",
-        domain=RuntimeDomain.RECOVERY,
+        domain=PersistenceDomain.RECOVERY,
         records=(record,),
         facts=(),
         operations=(),
@@ -532,7 +531,7 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
     expected_alias = alias_digest(
         "runtime",
         "tenant",
-        RuntimeDomain.RECOVERY.value,
+        PersistenceDomain.RECOVERY.value,
         "tool_call",
         [operation.agent_run_id, operation.tool_call_id],
     )
@@ -542,7 +541,7 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
     validate_snapshot_domain(
         namespace="runtime",
         tenant_id="tenant",
-        domain=RuntimeDomain.RECOVERY,
+        domain=PersistenceDomain.RECOVERY,
         records=(record,),
         aliases=aliases,
         facts=(),
@@ -553,7 +552,7 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
         validate_snapshot_domain(
             namespace="runtime",
             tenant_id="tenant",
-            domain=RuntimeDomain.RECOVERY,
+            domain=PersistenceDomain.RECOVERY,
             records=(record,),
             aliases=(StoredAlias(b"x" * 32, record.key_digest),),
             facts=(),
@@ -585,13 +584,13 @@ def test_snapshot_operation_sequence_is_rebuilt_from_ledger_anchor() -> None:
         operation_key(
             "runtime",
             "tenant",
-            RuntimeDomain.CONVERSATION.value,
+            PersistenceDomain.CONVERSATION.value,
             operation.operation_id,
         ),
         stream_digest(
             "runtime",
             "tenant",
-            RuntimeDomain.CONVERSATION.value,
+            PersistenceDomain.CONVERSATION.value,
             "operation",
             [operation.resource_kind.value, operation.resource_id],
         ),
@@ -604,7 +603,7 @@ def test_snapshot_operation_sequence_is_rebuilt_from_ledger_anchor() -> None:
     aliases, sequences = canonical_snapshot_indexes(
         namespace="runtime",
         tenant_id="tenant",
-        domain=RuntimeDomain.CONVERSATION,
+        domain=PersistenceDomain.CONVERSATION,
         records=(),
         facts=(),
         operations=(stored,),
@@ -615,7 +614,7 @@ def test_snapshot_operation_sequence_is_rebuilt_from_ledger_anchor() -> None:
         sequence_key(
             "runtime",
             "tenant",
-            RuntimeDomain.CONVERSATION.value,
+            PersistenceDomain.CONVERSATION.value,
             "operation",
             [operation.resource_kind.value, operation.resource_id],
         ): 7
@@ -635,7 +634,7 @@ def _execution_fact(owner_key: bytes, sequence: int = 1) -> StoredFact:
         stream_digest(
             "runtime",
             "tenant",
-            RuntimeDomain.EXECUTION.value,
+            PersistenceDomain.EXECUTION.value,
             "execution",
             "execution",
         ),
@@ -654,7 +653,7 @@ def test_snapshot_execution_facts_do_not_create_sequence_rows() -> None:
     sequences = snapshot_validation._canonical_sequences(
         "runtime",
         "tenant",
-        RuntimeDomain.EXECUTION,
+        PersistenceDomain.EXECUTION,
         (_execution_fact(owner_key),),
         (),
         {owner_key: execution},
@@ -684,7 +683,7 @@ def test_snapshot_rejects_truncated_execution_event_stream() -> None:
         snapshot_validation._validate_facts(
             "runtime",
             "tenant",
-            RuntimeDomain.EXECUTION,
+            PersistenceDomain.EXECUTION,
             (_execution_fact(owner_key),),
             {owner_key: owner_record},
             {owner_key: execution},

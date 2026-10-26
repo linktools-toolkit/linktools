@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from linktools.ai.task_engine import TaskEngine
+
+from linktools.ai.persistence import Persistence
+
+from linktools.ai.core import ExecutionContext
 """Invalid admission and closed Runtime requests fail before side effects."""
 from ._runtime_test_helpers import model_features
 
@@ -12,14 +17,22 @@ import pytest
 
 from linktools.ai.core import Page, Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Agent, Execution, Runtime, RuntimeContext, RuntimeStorage, TaskGraphRun
-from linktools.ai.runtime.service_api import (
-    CancelExecutionRequest, CloseSessionRequest, CreateSessionRequest,
-    ExecutionTreeEvent, ForkExecutionRequest, ForkSessionRequest,
-    RetryExecutionRequest, UpdateSessionRequest,
+from linktools.ai.runtime import Agent, Runtime
+from linktools.ai.execution import Execution
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.task_engine import TaskGraphRun
+from linktools.ai.execution import (
+    CancelExecutionRequest,
+    CloseSessionRequest,
+    CreateSessionRequest,
+    ExecutionTreeEvent,
+    ForkExecutionRequest,
+    ForkSessionRequest,
+    RetryExecutionRequest,
+    UpdateSessionRequest,
 )
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._memory import InMemoryStateStorageGroup, InMemoryStateStore
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._memory import InMemoryStateStorageGroup, InMemoryStateStore
 from linktools.ai.task import TaskEffectResolution, TaskGraph, TaskGraphInfo, TaskGraphState
 
 from ._runtime_test_helpers import RuntimeUsageModels
@@ -39,17 +52,17 @@ async def _reject_side_effect(*args: object, **kwargs: object) -> None:
 async def test_invalid_convenience_keys_never_activate_or_write(
     key: object, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    storage = RuntimeStorage.in_memory()
-    async with Runtime.open("admission-validation", features=model_features(RuntimeUsageModels()), storage=storage) as runtime:
+    storage = PersistenceStorage.in_memory()
+    async with Persistence.open('admission-validation', storage=storage) as persistence_45, Runtime.open(persistence=persistence_45, features=model_features(RuntimeUsageModels())) as runtime, TaskEngine.open(persistence=persistence_45, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         agent = runtime.agents.get()
         session = agent.session("session")
         principal = runtime.default_principal
-        execution = Execution(runtime, "execution", principal, _unused_watch)
-        task_execution = Execution(runtime, "task-execution", principal, _unused_watch,
-            _task_cancel=lambda supplied_key, force: runtime._cancel_task_execution(
+        execution = Execution(runtime._execution_binding, "execution", principal, _unused_watch)
+        task_execution = Execution(runtime._execution_binding, "task-execution", principal, _unused_watch,
+            _task_cancel=lambda supplied_key, force: runtime_engine._cancel_task_execution(
                 "graph", "node", "task-execution", principal, supplied_key, force))
-        engine = runtime.tasks.bind()
-        graph = TaskGraphRun(runtime, runtime._graph_service, "graph", principal, _unused_watch, engine)
+        engine = runtime_engine.with_definitions()
+        graph = TaskGraphRun(engine, engine._graph_service, "graph", principal, _unused_watch)
         operations = (
             lambda: agent.start("prompt", idempotency_key=key),
             lambda: agent.run("prompt", idempotency_key=key),
@@ -78,8 +91,8 @@ async def test_invalid_convenience_keys_never_activate_or_write(
             guarded.setattr(InMemoryStateStorageGroup, "mutate", _reject_side_effect)
             guarded.setattr(runtime, "_resolve_agent_binding", _reject_side_effect)
             guarded.setattr(engine, "_activate_graph", _reject_side_effect)
-            guarded.setattr(runtime._task_node_runtime, "activate_graph", _reject_side_effect)
-            for domain in RuntimeDomain:
+            guarded.setattr(runtime_engine._task_node_runtime, "activate_graph", _reject_side_effect)
+            for domain in PersistenceDomain:
                 guarded.setattr(runtime._state.object_store(domain), "put", _reject_side_effect)
             for operation in operations:
                 with pytest.raises(AIError) as raised:
@@ -89,8 +102,7 @@ async def test_invalid_convenience_keys_never_activate_or_write(
 
 @pytest.mark.asyncio
 async def test_omitted_keys_generate_independent_admissions_and_explicit_keys_replay() -> None:
-    async with Runtime.open("generated-keys", features=model_features(RuntimeUsageModels()),
-                            storage=RuntimeStorage.in_memory()) as runtime:
+    async with Persistence.open('generated-keys', storage=PersistenceStorage.in_memory()) as persistence_94, Runtime.open(persistence=persistence_94, features=model_features(RuntimeUsageModels())) as runtime:
         agent = runtime.agents.get()
         first = await agent.start("prompt")
         await first.wait()
@@ -109,9 +121,9 @@ def _readable_runtime() -> Runtime[None]:
 
     service = SimpleNamespace(history=history)
     stub = object()
-    return Runtime(stub, stub, service, service, stub,
-        SimpleNamespace(_bind_observation=lambda *args: None), stub, stub, stub, stub, None,
-        namespace="closed-runtime", context=RuntimeContext(None))
+    return Runtime(stub, stub, service, service, stub, stub, stub, stub, None,
+        persistence=SimpleNamespace(namespace="closed-runtime", tenant_id="default"),
+        run_store=stub, context=ExecutionContext(None))
 
 
 @pytest.mark.asyncio
@@ -121,8 +133,13 @@ async def test_closed_runtime_rejects_admission_control_and_observation_nonretry
     principal = runtime.default_principal
     agent = Agent(runtime, "default", 1)
     session = agent.session("session")
-    execution = Execution(runtime, "execution", principal, _unused_watch)
-    graph = TaskGraphRun(runtime, runtime._graph_service, "graph", principal, _unused_watch)
+    execution = Execution(runtime._execution_binding, "execution", principal, _unused_watch)
+    engine = object.__new__(TaskEngine)
+    engine._owner = engine
+    engine._persistence = SimpleNamespace(ready=True)
+    engine._closed = not closing
+    engine._closing = closing
+    graph = TaskGraphRun(engine, SimpleNamespace(), "graph", principal, _unused_watch)
     if closing:
         runtime._closing = True
     else:
@@ -165,14 +182,19 @@ async def test_closed_runtime_rejects_admission_control_and_observation_nonretry
 
 @pytest.mark.asyncio
 async def test_graph_state_content_mode_selects_existing_public_types() -> None:
-    runtime = _readable_runtime()
+    engine = object.__new__(TaskEngine)
+    engine._owner = engine
+    engine._persistence = SimpleNamespace(ready=True)
+    engine._closed = False
+    engine._closing = False
+    principal = Principal("reader", "default")
     expected = TaskGraphState("graph", TaskStatus.SUCCEEDED, (), (), 7)
 
     async def state(graph_id: str, *, principal: Principal) -> TaskGraphState:
         return expected
 
-    run = TaskGraphRun(runtime, SimpleNamespace(state=state), "graph",
-        runtime.default_principal, _unused_watch)
+    run = TaskGraphRun(engine, SimpleNamespace(state=state), "graph",
+        principal, _unused_watch)
     assert isinstance(await run.state(), TaskGraphInfo)
     assert isinstance(await run.state(include_content=False), TaskGraphInfo)
     assert await run.state(include_content=True) is expected

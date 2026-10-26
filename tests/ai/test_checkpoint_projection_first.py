@@ -10,10 +10,10 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 
-from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
-from linktools.ai.runtime._message import SummaryPromptPart, encode_model_messages
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.model.messages import SummaryPromptPart, encode_model_messages
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
 from linktools.ai.storage import InMemoryObjectStore
 
 pytestmark = pytest.mark.asyncio
@@ -23,9 +23,9 @@ pytestmark = pytest.mark.asyncio
 async def test_projection_first_keeps_raw_transcript_and_exact_projected_context(
     tmp_path: Path, variant: str,
 ) -> None:
-    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "state.db"))
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "state.db"))
     await state.initialize(namespace="projection-first", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     now = run.started_at
     first = ModelRequest(parts=[UserPromptPart("question", timestamp=now)])
@@ -67,9 +67,9 @@ async def test_cancel_between_projection_and_chunks_leaves_no_owner_publication_
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     objects = InMemoryObjectStore("projection-first")
-    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "state.db", object_store=objects))
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "state.db", object_store=objects))
     await state.initialize(namespace="projection-first", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     body = "".join(random.Random(43).choices("abcdefghijklmnopqrstuvwxyz0123456789", k=32768))
     message = ModelRequest(parts=[UserPromptPart(body, timestamp=run.started_at)])

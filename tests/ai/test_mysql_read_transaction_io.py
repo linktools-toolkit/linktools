@@ -214,8 +214,8 @@ async def test_mysql_group_read_reuses_snapshot_and_restores_borrowed_engine(_se
     from dataclasses import replace
 
     from linktools.ai.migrate import provision_database
-    from linktools.ai.runtime.state._sql import SqlStateStore
-    from linktools.ai.runtime.state._store import StoredRecord, active_state_scope
+    from linktools.ai.persistence._sql import SqlStateStore
+    from linktools.ai.persistence.state import StoredRecord, active_state_scope
 
     _, command = _server
     socket = next(value.split("=", 1)[1] for value in command if value.startswith("--socket="))

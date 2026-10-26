@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Native keyed recovery preserves one producer through uncertain outcomes."""
 from ._runtime_test_helpers import model_features
 
@@ -13,13 +15,14 @@ from pathlib import Path
 import pytest
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.core import (
     ExecutionStatus, OperationKind, OperationLedgerInput, OperationStatus,
     ResourceKind, SessionStatus, agent_conversation_id, idempotency_key_digest,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 
 from .test_live_history_readback_integration import _Models
 from ._runtime_process_test_helpers import _NAMESPACE, _RuntimeProcess, _capabilities
@@ -29,7 +32,7 @@ from ._runtime_process_test_helpers import _NAMESPACE, _RuntimeProcess, _capabil
 async def _recoverable(
     tmp_path: Path, *, phase: str = "active", model_error: bool = False,
     model_started: asyncio.Event | None = None,
-) -> AsyncIterator[tuple[Runtime, Runtime, RuntimeState, str, list[int], asyncio.Event]]:
+) -> AsyncIterator[tuple[Runtime, Runtime, Persistence, str, list[int], asyncio.Event]]:
     database = tmp_path / "runtime.db"
     owner = _RuntimeProcess(database, phase=phase)
     execution_id = owner.initial["execution_id"]
@@ -48,16 +51,10 @@ async def _recoverable(
             raise RuntimeError("offline business failure")
         yield "recovered"
 
-    state = RuntimeStorage.sqlite(database)
-    other_state = RuntimeStorage.sqlite(database)
+    state = PersistenceStorage.sqlite(database)
+    other_state = PersistenceStorage.sqlite(database)
     try:
-        async with Runtime.open(
-            _NAMESPACE,
-            storage=state, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities()),
-        ) as runtime, Runtime.open(
-            _NAMESPACE,
-            storage=other_state, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities()),
-        ) as other:
+        async with Persistence.open(_NAMESPACE, storage=state) as persistence_54, Runtime.open(persistence=persistence_54, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as runtime, Persistence.open(_NAMESPACE, storage=other_state) as persistence_57, Runtime.open(persistence=persistence_57, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as other:
             try:
                 yield runtime, other, runtime._state, execution_id, calls, release
             finally:
@@ -66,12 +63,12 @@ async def _recoverable(
         release.set()
 
 
-async def _head(state: RuntimeState, execution_id: str):
+async def _head(state: Persistence, execution_id: str):
     return await state.execution.executions.get_history_head(execution_id, tenant_id="default")
 
 
 async def _flush_started_model(
-    state: RuntimeState, execution_id: str, started: asyncio.Event,
+    state: Persistence, execution_id: str, started: asyncio.Event,
 ) -> None:
     # Receipt settlement only confirms launch. Freeze the blocked model's
     # registration projection before comparing heads across control replays.
@@ -84,7 +81,7 @@ async def _flush_started_model(
         await state.run_store.flush_execution_projection(run.agent_run_id, execution_id=execution_id)
 
 
-async def _receipt(state: RuntimeState, key: str):
+async def _receipt(state: Persistence, key: str):
     return await state.execution.operations.get(idempotency_key_digest(key), tenant_id="default")
 
 
@@ -541,7 +538,7 @@ async def test_confirmed_launch_receipt_is_independent_of_fast_business_terminal
 async def test_admitted_recovery_rejects_changed_owner_or_execution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str,
 ) -> None:
-    from linktools.ai.runtime.state._contracts import ExecutionHistoryState
+    from linktools.ai.persistence.contracts import ExecutionHistoryState
     from linktools.ai.storage import StoredPayload
 
     async with _recoverable(tmp_path) as (runtime, other, state, execution_id, calls, release):

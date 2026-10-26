@@ -7,7 +7,7 @@ import asyncio
 from dataclasses import replace
 
 import pytest
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.agent import AgentBinding, AgentCompiler
 from linktools.ai.core import (
     ExecutionStatus,
@@ -18,14 +18,15 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.model import create_model
-from linktools.ai.runtime import ExecutionRequest, RuntimeDomain, RuntimeStorage
-from linktools.ai.runtime._event import LiveExecutionEventBroker
+from linktools.ai.execution import ExecutionRequest
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.execution.events import LiveExecutionEventBroker
 from linktools.ai.runtime._execution import (
     CancelEffectOutcome,
     DefaultExecutionService,
     _ExecutionRuntimeBridge,
 )
-from linktools.ai.runtime.state._contracts import ExecutionRecord
+from linktools.ai.persistence.contracts import ExecutionRecord
 from linktools.ai.spec import AgentSpec
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -159,7 +160,7 @@ def _request(
 
 
 def _service(
-    state: RuntimeState,
+    state: Persistence,
     *,
     backend: _Launcher | None = None,
     operation_ids: object | None = None,
@@ -172,7 +173,7 @@ def _service(
         runtime_bridge.bind(backend)
     return DefaultExecutionService(
         state.execution,
-        state.object_store(RuntimeDomain.EXECUTION),
+        state.object_store(PersistenceDomain.EXECUTION),
         TenantAuthorizationPolicy(),
         sessions=state.conversation.sessions,
         catalog=_BindingCatalog(),
@@ -186,7 +187,7 @@ def _service(
 
 @pytest.mark.asyncio
 async def test_execution_start_claim_has_one_launcher_winner() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="service-start", tenant_id="tenant")
     try:
         launcher = _Launcher(state.execution.executions)
@@ -231,7 +232,7 @@ async def test_execution_start_claim_has_one_launcher_winner() -> None:
 
 @pytest.mark.asyncio
 async def test_task_start_holds_immediate_terminal_execution_before_return() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="service-start-handoff", tenant_id="tenant")
     release_started = asyncio.Event()
     release_finished = asyncio.Event()
@@ -288,7 +289,7 @@ async def test_task_start_holds_immediate_terminal_execution_before_return() -> 
 async def test_sql_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
     await provision_database(engine)
-    state = RuntimeState(RuntimeStorage.sql(engine))
+    state = Persistence(PersistenceStorage.sql(engine))
     await state.initialize(namespace="sql-start", tenant_id="tenant")
     try:
         service = _service(state, backend=_Launcher(state.execution.executions))
@@ -306,7 +307,7 @@ async def test_sql_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None
 
 @pytest.mark.asyncio
 async def test_filesystem_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None:
-    state = RuntimeState(RuntimeStorage.filesystem(tmp_path / "runtime"))
+    state = Persistence(PersistenceStorage.filesystem(tmp_path / "runtime"))
     await state.initialize(namespace="filesystem-start", tenant_id="tenant")
     try:
         service = _service(state, backend=_Launcher(state.execution.executions))
@@ -330,7 +331,7 @@ async def test_filesystem_execution_start_keeps_attempt_sequence_zero(tmp_path) 
 
 @pytest.mark.asyncio
 async def test_unbound_runtime_bridge_rejects_runtime_access() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="terminal-verifier", tenant_id="tenant")
     try:
         service = _service(state)

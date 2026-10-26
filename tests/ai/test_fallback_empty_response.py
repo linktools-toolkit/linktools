@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """An observed empty response is distinct from missing provider usage."""
 
 from collections.abc import AsyncIterator
@@ -18,7 +20,8 @@ from pydantic_ai.usage import RequestUsage
 from linktools.ai.capability import TraceCapability
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.model import FallbackBinding
-from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import PersistenceStorage
 
 from .test_runtime_fallback_failures import _Binding
 
@@ -61,9 +64,7 @@ async def test_empty_zero_usage_response_is_not_confused_with_no_response(initia
     features.model("default", FallbackBinding(_Binding(_EmptyThenFailure(initial_response=initial_response))))
     features.capability(TraceCapability(), scope="runtime")
 
-    async with Runtime.open(
-        "empty-fallback-response", features=features, storage=RuntimeStorage.in_memory(),
-    ) as runtime:
+    async with Persistence.open('empty-fallback-response', storage=PersistenceStorage.in_memory()) as persistence_64, Runtime.open(persistence=persistence_64, features=features) as runtime:
         execution = await runtime.agents.get().start("respond")
         result = (await execution.wait(timeout_seconds=10)).result
         interactions = (await execution.model_interactions(include_content=True)).items

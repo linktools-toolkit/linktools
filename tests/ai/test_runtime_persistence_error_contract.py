@@ -11,14 +11,14 @@ from pathlib import Path
 import pytest
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
-from linktools.ai.runtime.state._codec import (
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.persistence.codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
     encode_envelope,
 )
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence.contracts import (
     RuntimePayloadRef,
     SessionRecord,
     TranscriptChunk,
@@ -26,7 +26,7 @@ from linktools.ai.runtime.state._contracts import (
     TranscriptSeekDimension,
     TranscriptSeekRecord,
 )
-from linktools.ai.runtime.state._store import StoredFact
+from linktools.ai.persistence.state import StoredFact
 from linktools.ai.storage import StoredPayload
 
 
@@ -69,7 +69,7 @@ def _transcript_chunk_data() -> dict[str, object]:
         len(raw),
         RuntimePayloadRef(
             StoredPayload.inline_bytes(raw),
-            RuntimeDomain.TRACE,
+            PersistenceDomain.TRACE,
         ),
     )
     return encode_envelope(
@@ -99,11 +99,11 @@ def test_persisted_explicit_null_schema_is_integrity_error() -> None:
 async def test_transcript_decoders_preserve_future_schema_unsupported(
     tmp_path: Path,
 ) -> None:
-    state = RuntimeState(RuntimeStorage.filesystem(tmp_path / "runtime"))
+    state = Persistence(PersistenceStorage.filesystem(tmp_path / "runtime"))
     await state.initialize(namespace="future-transcript-schema", tenant_id="tenant")
     try:
         history = state.run_store.read_store(
-            RuntimeDomain.TRACE
+            PersistenceDomain.TRACE
         ).transcript_repository
 
         head = history.empty_head("owner")

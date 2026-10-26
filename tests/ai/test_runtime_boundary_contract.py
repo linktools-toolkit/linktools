@@ -17,20 +17,20 @@ from linktools.ai.core import (
     ResourceRef,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime._coordinator import _LocalRuntimeCoordinator
-from linktools.ai.runtime._event import DefaultEventService, ExecutionDelta, LiveExecutionEventBroker
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.execution.coordinator import ExecutionStreamCoordinator
+from linktools.ai.execution.events import DefaultEventService, ExecutionDelta, LiveExecutionEventBroker
 from linktools.ai.runtime._execution import (
     DefaultExecutionService,
     _ExecutionRuntimeBridge,
 )
-from linktools.ai.runtime.service_api import ExecutionStreamEvent
+from linktools.ai.execution import ExecutionStreamEvent
 
 
 @pytest_asyncio.fixture
-async def execution_storage() -> AsyncIterator[RuntimeState]:
-    storage = RuntimeState(RuntimeStorage.in_memory())
+async def execution_storage() -> AsyncIterator[Persistence]:
+    storage = Persistence(PersistenceStorage.in_memory())
     await storage.initialize(namespace="boundary", tenant_id="tenant")
     try:
         yield storage
@@ -91,9 +91,9 @@ def _event_service(
 
 def _coordinator(
     authorization: object,
-) -> tuple[_LocalRuntimeCoordinator, LiveExecutionEventBroker]:
+) -> tuple[ExecutionStreamCoordinator, LiveExecutionEventBroker]:
     broker = LiveExecutionEventBroker()
-    coordinator = _LocalRuntimeCoordinator(
+    coordinator = ExecutionStreamCoordinator(
         _ExecutionService(),
         _event_service(authorization, broker),
     )
@@ -261,7 +261,7 @@ async def test_wait_authorizes_before_abandoning_stream() -> None:
         del execution_id, principal, action
         raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
-    service._load_authorized = denied
+    service.load_authorized = denied
     principal = Principal("principal", "tenant", "service")
     with pytest.raises(AIError) as error:
         await DefaultExecutionService.wait.__wrapped__(
@@ -275,7 +275,7 @@ async def test_wait_authorizes_before_abandoning_stream() -> None:
 class _LaunchExecutions:
     tenant_id = "tenant"
 
-    def __init__(self, storage: RuntimeState) -> None:
+    def __init__(self, storage: Persistence) -> None:
         self.state_store = storage.execution.executions.state_store
 
     async def get(self, execution_id: str, *, tenant_id: str) -> object:
@@ -288,9 +288,10 @@ class _LaunchExecutions:
         )
 
 
-def _launch_service(backend: object, storage: RuntimeState) -> tuple[DefaultExecutionService, list[str], list[str]]:
+def _launch_service(backend: object, storage: Persistence) -> tuple[DefaultExecutionService, list[str], list[str]]:
     service = object.__new__(DefaultExecutionService)
     service._state = SimpleNamespace(executions=_LaunchExecutions(storage))
+    service._port = SimpleNamespace(read_source_execution=service._state.executions.get)
     bridge = _ExecutionRuntimeBridge()
     bridge.bind(backend)  # type: ignore[arg-type]
     service._runtime_bridge = bridge
@@ -309,7 +310,7 @@ def _launch_service(backend: object, storage: RuntimeState) -> tuple[DefaultExec
 
 
 @pytest.mark.asyncio
-async def test_launch_normal_return_without_worker_abandons_prepared_stream(execution_storage: RuntimeState) -> None:
+async def test_launch_normal_return_without_worker_abandons_prepared_stream(execution_storage: Persistence) -> None:
     class Backend:
         async def launch(self, request: object, execution: object) -> None:
             del request, execution
@@ -331,7 +332,7 @@ async def test_launch_normal_return_without_worker_abandons_prepared_stream(exec
 
 
 @pytest.mark.asyncio
-async def test_existing_worker_skips_new_prepared_reservation(execution_storage: RuntimeState) -> None:
+async def test_existing_worker_skips_new_prepared_reservation(execution_storage: Persistence) -> None:
     class Backend:
         async def launch(self, request: object, execution: object) -> None:
             del request, execution
@@ -353,7 +354,7 @@ async def test_existing_worker_skips_new_prepared_reservation(execution_storage:
 
 
 @pytest.mark.asyncio
-async def test_cancellation_before_worker_installation_abandons_reservation(execution_storage: RuntimeState) -> None:
+async def test_cancellation_before_worker_installation_abandons_reservation(execution_storage: Persistence) -> None:
     class Backend:
         async def launch(self, request: object, execution: object) -> None:
             del request, execution
@@ -377,7 +378,7 @@ async def test_cancellation_before_worker_installation_abandons_reservation(exec
 
 
 @pytest.mark.asyncio
-async def test_cancellation_after_worker_installation_retains_reservation(execution_storage: RuntimeState) -> None:
+async def test_cancellation_after_worker_installation_retains_reservation(execution_storage: Persistence) -> None:
     class Backend:
         def __init__(self) -> None:
             self.installed = False
@@ -418,7 +419,7 @@ async def test_wait_timeout_includes_initial_authorized_read() -> None:
         await asyncio.sleep(0.05)
         return SimpleNamespace(execution_id="execution", status=ExecutionStatus.STARTED)
 
-    service._load_authorized = slow_authorized
+    service.load_authorized = slow_authorized
     principal = Principal("principal", "tenant", "service")
     with pytest.raises(AIError) as error:
         await DefaultExecutionService.wait.__wrapped__(
@@ -436,7 +437,7 @@ async def test_event_list_authorizes_before_reading_and_preserves_page(denied_at
     from unittest.mock import AsyncMock
 
     from linktools.ai.core import AuthorizationAction
-    from linktools.ai.runtime import ExecutionEvent
+    from linktools.ai.execution import ExecutionEvent
 
     principal = Principal("principal", "tenant", "service")
     header = ResourceRef(ResourceKind.EXECUTION, "execution", "tenant")
@@ -502,7 +503,7 @@ async def test_event_broker_preserves_typed_failures(
     operation: str,
     typed: bool,
 ) -> None:
-    from linktools.ai.runtime.service_api import _ExecutionStreamFailure
+    from linktools.ai.observe.stream import ExecutionStreamFailure
 
     cause = AIError(ErrorCode.STORAGE_UNAVAILABLE) if typed else OSError("broker failed")
     broker = LiveExecutionEventBroker()
@@ -513,7 +514,7 @@ async def test_event_broker_preserves_typed_failures(
 
     monkeypatch.setattr(broker, operation, fail)
     service = _event_service(_AllowAuthorization(), broker)
-    with pytest.raises(AIError if typed else _ExecutionStreamFailure) as raised:
+    with pytest.raises(AIError if typed else ExecutionStreamFailure) as raised:
         await anext(service.stream("execution", principal=Principal("owner", "tenant")))
 
     assert (raised.value if typed else raised.value.cause) is cause
@@ -523,8 +524,8 @@ async def test_event_broker_preserves_typed_failures(
 @pytest.mark.parametrize("operation", ["iterate", "close", "activity"])
 @pytest.mark.parametrize("typed", [False, True])
 async def test_live_subscription_preserves_typed_failures(operation: str, typed: bool) -> None:
-    from linktools.ai.runtime._event import _close_live, _iterate_live, _wait_live_activity
-    from linktools.ai.runtime.service_api import _ExecutionStreamFailure
+    from linktools.ai.execution.events import _close_live, _iterate_live, _wait_live_activity
+    from linktools.ai.observe.stream import ExecutionStreamFailure
 
     cause = AIError(ErrorCode.STORAGE_UNAVAILABLE) if typed else OSError("broker failed")
 
@@ -542,7 +543,7 @@ async def test_live_subscription_preserves_typed_failures(operation: str, typed:
             raise cause
 
     subscription = Subscription()
-    with pytest.raises(AIError if typed else _ExecutionStreamFailure) as raised:
+    with pytest.raises(AIError if typed else ExecutionStreamFailure) as raised:
         if operation == "iterate":
             await anext(_iterate_live(subscription))
         elif operation == "close":
@@ -592,7 +593,7 @@ async def test_live_close_authoritative_error_overrides_optional_broker_error():
 @pytest.mark.asyncio
 async def test_event_stream_close_awaits_owned_live_subscription():
     from linktools.ai.core import ExecutionDeltaType
-    from linktools.ai.runtime._event import ExecutionDelta
+    from linktools.ai.execution.events import ExecutionDelta
     class Live(LiveExecutionEventBroker):
         def __init__(self):
             super().__init__()

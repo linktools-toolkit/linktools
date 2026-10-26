@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """First attempts claim authority only after prepared input is durable."""
 from ._runtime_test_helpers import model_features
 
@@ -7,11 +9,12 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.storage._database import SqlStorageContext
 from pydantic_ai.messages import ModelResponse, TextPart
 
@@ -31,8 +34,8 @@ async def test_first_provider_has_three_metadata_commits_and_original_authority(
     group = RuntimeFeatures('startup')
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent('default', model='default', allow_tools=())
-    state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    async with Runtime.open('startup-boundaries', storage=state, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    state = PersistenceStorage.sqlite(tmp_path / 'state.db')
+    async with Persistence.open('startup-boundaries', storage=state) as persistence_35, Runtime.open(persistence=persistence_35, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         original = SqlStorageContext.run_mutation
         commits = []
@@ -67,11 +70,11 @@ async def test_startup_unknown_commit_never_repeats_provider(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, phase: str,
 ) -> None:
     from linktools.ai.errors import AIError, ErrorCode
-    from linktools.ai.runtime.state._contracts import (
+    from linktools.ai.persistence.contracts import (
         ExecutionRecord,
         RecoveryCheckpoint,
     )
-    from linktools.ai.runtime.state._store import active_state_scope
+    from linktools.ai.persistence.state import active_state_scope
     calls = []
     async def model(messages, info):
         calls.append(messages)
@@ -79,10 +82,10 @@ async def test_startup_unknown_commit_never_repeats_provider(
     group = RuntimeFeatures('startup-ack')
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent('default', model='default', allow_tools=())
-    state = (RuntimeStorage.in_memory() if backend == 'memory' else
-             RuntimeStorage.filesystem(tmp_path / 'state') if backend == 'filesystem' else
-             RuntimeStorage.sqlite(tmp_path / 'state.db'))
-    async with Runtime.open('startup-ack', storage=state, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    state = (PersistenceStorage.in_memory() if backend == 'memory' else
+             PersistenceStorage.filesystem(tmp_path / 'state') if backend == 'filesystem' else
+             PersistenceStorage.sqlite(tmp_path / 'state.db'))
+    async with Persistence.open('startup-ack', storage=state) as persistence_85, Runtime.open(persistence=persistence_85, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         group_type = type(runtime._state.execution.executions.state_store.storage_group)
         original = group_type.mutate
@@ -117,7 +120,7 @@ async def test_startup_unknown_commit_never_repeats_provider(
 async def test_two_runtimes_share_one_first_attempt_after_parallel_preparation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from linktools.ai.runtime._context_archive import ExecutionContextArchive
+    from linktools.ai.inputs import ExecutionContextArchive
     prepared = asyncio.Event()
     release = asyncio.Event()
     preparations = []
@@ -129,11 +132,9 @@ async def test_two_runtimes_share_one_first_attempt_after_parallel_preparation(
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     models = _Models(_UsageFunctionModel(model))
-    first_state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    second_state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    async with Runtime.open('startup-race', storage=first_state, features=model_features(models, group)) as first, Runtime.open(
-        'startup-race', storage=second_state, features=model_features(models, group)
-    ) as second:
+    first_state = PersistenceStorage.sqlite(tmp_path / 'state.db')
+    second_state = PersistenceStorage.sqlite(tmp_path / 'state.db')
+    async with Persistence.open('startup-race', storage=first_state) as persistence_134, Runtime.open(persistence=persistence_134, features=model_features(models, group)) as first, Persistence.open('startup-race', storage=second_state) as persistence_134, Runtime.open(persistence=persistence_134, features=model_features(models, group)) as second:
         await first.agents.get().create_session('session')
         original = ExecutionContextArchive.prepare
         async def prepare(archive, context, **kwargs):
@@ -172,11 +173,9 @@ async def test_busy_admission_keeps_rejected_key_after_owner_finishes(tmp_path: 
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     models = _Models(_UsageFunctionModel(model))
-    first_state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    second_state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    async with Runtime.open('startup-busy', storage=first_state, features=model_features(models, group)) as first, Runtime.open(
-        'startup-busy', storage=second_state, features=model_features(models, group)
-    ) as second:
+    first_state = PersistenceStorage.sqlite(tmp_path / 'state.db')
+    second_state = PersistenceStorage.sqlite(tmp_path / 'state.db')
+    async with Persistence.open('startup-busy', storage=first_state) as persistence_177, Runtime.open(persistence=persistence_177, features=model_features(models, group)) as first, Persistence.open('startup-busy', storage=second_state) as persistence_177, Runtime.open(persistence=persistence_177, features=model_features(models, group)) as second:
         await first.agents.get().create_session('session')
         one = await first.agents.get().session('session').start('question', idempotency_key='owner')
         try:
@@ -200,7 +199,7 @@ async def test_busy_admission_keeps_rejected_key_after_owner_finishes(tmp_path: 
 async def test_cancel_during_context_preparation_never_calls_provider(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from linktools.ai.runtime._context_archive import ExecutionContextArchive
+    from linktools.ai.inputs import ExecutionContextArchive
     preparing = asyncio.Event()
     calls = []
     async def model(messages, info):
@@ -209,8 +208,8 @@ async def test_cancel_during_context_preparation_never_calls_provider(
     group = RuntimeFeatures('startup-cancel')
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent('default', model='default', allow_tools=())
-    state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    async with Runtime.open('startup-cancel', storage=state, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    state = PersistenceStorage.sqlite(tmp_path / 'state.db')
+    async with Persistence.open('startup-cancel', storage=state) as persistence_213, Runtime.open(persistence=persistence_213, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         async def prepare(archive, context, **kwargs):
             preparing.set()
@@ -233,10 +232,10 @@ async def test_preparation_failure_stays_unclaimed_and_can_be_explicitly_cancell
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
 ) -> None:
     from linktools.ai.errors import AIError, ErrorCode
-    from linktools.ai.runtime._context_archive import ExecutionContextArchive
-    from linktools.ai.runtime.state import RuntimeDomain
+    from linktools.ai.inputs import ExecutionContextArchive
+    from linktools.ai.persistence import PersistenceDomain
     from linktools.ai.runtime._local import LocalExecutionBackend
-    from linktools.ai.runtime.state._store import active_state_scope
+    from linktools.ai.persistence.state import active_state_scope
     calls = []
     async def model(messages, info):
         calls.append(messages)
@@ -244,8 +243,8 @@ async def test_preparation_failure_stays_unclaimed_and_can_be_explicitly_cancell
     group = RuntimeFeatures('startup-preparation-failure')
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent('default', model='default', allow_tools=())
-    state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    async with Runtime.open('startup-preparation-failure', storage=state, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    state = PersistenceStorage.sqlite(tmp_path / 'state.db')
+    async with Persistence.open('startup-preparation-failure', storage=state) as persistence_248, Runtime.open(persistence=persistence_248, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session',
             metadata={'large': 'context' * 10_000} if fault == 'object' else None)
         observed = []
@@ -257,7 +256,7 @@ async def test_preparation_failure_stays_unclaimed_and_can_be_explicitly_cancell
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE if fault == 'object' else ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
         with monkeypatch.context() as patch:
             if fault == 'object':
-                patch.setattr(runtime._state.archive_object_store(RuntimeDomain.EXECUTION), 'put', fail)
+                patch.setattr(runtime._state.archive_object_store(PersistenceDomain.EXECUTION), 'put', fail)
             elif fault == 'context':
                 patch.setattr(LocalExecutionBackend, 'load_input_context', fail)
             else:
@@ -278,7 +277,7 @@ async def test_preparation_failure_stays_unclaimed_and_can_be_explicitly_cancell
 async def test_remote_cancel_during_preparation_settles_without_provider(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from linktools.ai.runtime._context_archive import ExecutionContextArchive
+    from linktools.ai.inputs import ExecutionContextArchive
     preparing = asyncio.Event()
     release = asyncio.Event()
     calls = []
@@ -289,11 +288,9 @@ async def test_remote_cancel_during_preparation_settles_without_provider(
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     models = _Models(_UsageFunctionModel(model))
-    first_state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    second_state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    async with Runtime.open('startup-remote-cancel', storage=first_state, features=model_features(models, group)) as first, Runtime.open(
-        'startup-remote-cancel', storage=second_state, features=model_features(models, group)
-    ) as second:
+    first_state = PersistenceStorage.sqlite(tmp_path / 'state.db')
+    second_state = PersistenceStorage.sqlite(tmp_path / 'state.db')
+    async with Persistence.open('startup-remote-cancel', storage=first_state) as persistence_294, Runtime.open(persistence=persistence_294, features=model_features(models, group)) as first, Persistence.open('startup-remote-cancel', storage=second_state) as persistence_294, Runtime.open(persistence=persistence_294, features=model_features(models, group)) as second:
         await first.agents.get().create_session('session')
         original = ExecutionContextArchive.prepare
         async def prepare(archive, context, **kwargs):
@@ -323,21 +320,21 @@ async def test_prepared_attempt_member_conflict_rolls_back_authority_and_context
     from dataclasses import replace
 
     from linktools.ai.errors import AIError, ErrorCode
-    from linktools.ai.runtime.state._contracts import (
+    from linktools.ai.persistence.contracts import (
         AgentAttemptClaim,
         RecoveryCheckpoint,
         RecoveryCheckpointState,
         RuntimePayloadRef,
     )
-    from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
-    from linktools.ai.runtime.state._sql import _SqlTransaction
+    from linktools.ai.persistence._runtime_commands import StateCommands
+    from linktools.ai.persistence._sql import _SqlTransaction
     from linktools.ai.storage import StoredPayload
     from sqlalchemy import update
 
     from .test_checkpoint_write_batches import _snapshot
     from .test_history_projection_conformance import _record
 
-    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / 'state.db'))
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / 'state.db'))
     await state.initialize(namespace='startup-member-cas', tenant_id='tenant')
     try:
         execution = replace(_record(ExecutionStatus.STARTED, 0), revision=1, durable_trace=False)
@@ -345,7 +342,7 @@ async def test_prepared_attempt_member_conflict_rolls_back_authority_and_context
         checkpoint = RecoveryCheckpoint(execution.execution_id, None, RecoveryCheckpointState.ADMITTED,
                                         0, execution.created_at, execution.updated_at)
         await state.recovery.checkpoints.create(checkpoint)
-        commands = RuntimeStateCommands(state.execution.executions, namespace='startup-member-cas',
+        commands = StateCommands(state.execution.executions, namespace='startup-member-cas',
                                         events=state.execution.events, recovery=state.recovery.checkpoints,
                                         background_tasks=set())
         stores = (state.execution.executions.state_store, state.recovery.checkpoints.state_store)
@@ -384,7 +381,7 @@ async def test_deadline_expires_during_preparation_without_dispatch(
 
     from linktools.ai.core import RunBudget
     from linktools.ai.errors import ErrorCode
-    from linktools.ai.runtime._context_archive import ExecutionContextArchive
+    from linktools.ai.inputs import ExecutionContextArchive
 
     preparing, release = asyncio.Event(), asyncio.Event()
     now = datetime.now(timezone.utc)
@@ -400,16 +397,16 @@ async def test_deadline_expires_during_preparation_without_dispatch(
     group = RuntimeFeatures('startup-budget-review')
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent('default', model='default', allow_tools=())
-    state = RuntimeStorage.sqlite(tmp_path / 'state.db')
+    state = PersistenceStorage.sqlite(tmp_path / 'state.db')
     original = ExecutionContextArchive.prepare
     async def prepare(archive, context, **kwargs):
         reference = await original(archive, context, **kwargs)
         preparing.set()
         await release.wait()
         return reference
-    monkeypatch.setattr('linktools.ai.runtime.state._budget.datetime', BudgetClock)
+    monkeypatch.setattr('linktools.ai.persistence._budget.datetime', BudgetClock)
     monkeypatch.setattr(ExecutionContextArchive, 'prepare', prepare)
-    async with Runtime.open('startup-budget-review', storage=state, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('startup-budget-review', storage=state) as persistence_412, Runtime.open(persistence=persistence_412, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question', idempotency_key='key', budget=RunBudget(deadline_at=now + timedelta(seconds=30)))
         await asyncio.wait_for(preparing.wait(), 5)
@@ -432,8 +429,8 @@ async def test_admission_readback_rejects_real_session_partial(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, partial: str,
 ) -> None:
     from linktools.ai.errors import AIError, ErrorCode
-    from linktools.ai.runtime.state._contracts import ExecutionRecord
-    from linktools.ai.runtime.state._store import active_state_scope
+    from linktools.ai.persistence.contracts import ExecutionRecord
+    from linktools.ai.persistence.state import active_state_scope
 
     calls, faults = [], []
     async def model(messages, info):
@@ -442,8 +439,8 @@ async def test_admission_readback_rejects_real_session_partial(
     capabilities = RuntimeFeatures('partial-review')
     capabilities.capability(ExecutionCapability(retain_history=True), scope="runtime")
     capabilities.agent('default', model='default', allow_tools=())
-    state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    async with Runtime.open('partial-review', storage=state, features=model_features(_Models(_UsageFunctionModel(model)), capabilities)) as runtime:
+    state = PersistenceStorage.sqlite(tmp_path / 'state.db')
+    async with Persistence.open('partial-review', storage=state) as persistence_446, Runtime.open(persistence=persistence_446, features=model_features(_Models(_UsageFunctionModel(model)), capabilities)) as runtime:
         session = await runtime.agents.get().create_session('session')
         group = runtime._state.execution.executions.state_store.storage_group
         repository = runtime._state.conversation.sessions

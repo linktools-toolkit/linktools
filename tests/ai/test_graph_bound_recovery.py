@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from linktools.ai.task import Task
+from linktools.ai.task_engine import TaskEngine
+
+from linktools.ai.persistence import Persistence
 """Graph recovery authorizes control separately from bound execution identity."""
 from ._runtime_test_helpers import model_features
 from linktools.ai.model import create_model
 
-from linktools.ai.runtime.state import RuntimeState
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -30,8 +33,9 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime.state._contracts import ExecutionRecord
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.contracts import ExecutionRecord
 from linktools.ai.task import (
     DefaultTaskGraphService,
     RecoverGraphRequest,
@@ -65,7 +69,7 @@ class _GraphAuthorization:
 
 
 class _RecoveryBackend:
-    def __init__(self, storage: RuntimeState) -> None:
+    def __init__(self, storage: Persistence) -> None:
         self.storage = storage
         self.operations = []
         self.claims = {}
@@ -107,27 +111,24 @@ async def _graph_recovery(
     capture_phase: str | None = None,
     capture_status: ExecutionStatus = ExecutionStatus.STARTED,
     error_origin: str = "node",
-) -> AsyncIterator[tuple[Runtime, RuntimeStorage, DefaultTaskGraphService, _RecoveryBackend, _Launcher, _GraphAuthorization]]:
+) -> AsyncIterator[tuple[Runtime, PersistenceStorage, DefaultTaskGraphService, _RecoveryBackend, _Launcher, _GraphAuthorization]]:
     authorization = _GraphAuthorization()
-    storage = RuntimeStorage.in_memory()
+    storage = PersistenceStorage.in_memory()
     capabilities = RuntimeFeatures("bound-recovery", authorization=authorization)
     capabilities.agent("default", model="default", allow_tools=())
-    async with Runtime.open(
-        "bound-recovery",
-        storage=storage, features=model_features(create_model(protocol='openai', model="gpt-test"), capabilities),
-    ) as runtime:
-        task = runtime.tasks.from_agent("test.bound-agent", runtime.agents.get("default"))
+    async with Persistence.open('bound-recovery', storage=storage) as persistence_115, Runtime.open(persistence=persistence_115, features=model_features(create_model(protocol='openai', model='gpt-test'), capabilities)) as runtime, TaskEngine.open(persistence=persistence_115, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        task = Task.from_agent("test.bound-agent", runtime.agents.get("default"))
         graph = TaskGraph("bound-graph", tuple(
             TaskNode(node_id, task=task, input={"prompt": "recover"})
             for node_id in node_ids
         ))
-        submission = await runtime.tasks.bind(task).prepare_submission(
+        submission = await runtime_engine.with_definitions(task).prepare_submission(
             graph, idempotency_key="prepare-bound-graph", principal=_ORIGIN,
         )
         await runtime._state.task.admissions.admit_prepared(submission)
-        runner = runtime._task_node_runtime
+        runner = runtime_engine._task_node_runtime
         assert runner is not None
-        await runner.activate_graph(submission.graph, (task,), ())
+        await runner.activate_graph(submission.graph, (runtime_engine._bind_agent_task(task),), ())
         binding = AgentBindingContract.from_payload(task.contract["config"]["binding_contract"])
         leases = []
         for node_id in node_ids:
@@ -167,7 +168,9 @@ async def _graph_recovery(
         backend = _RecoveryBackend(runtime._state)
         if capture_phase is not None:
             backend.owned.update(f"execution-{node_id}" for node_id in node_ids)
-        runner._recovery_backend = backend
+        execution_service = runtime._execution_service
+        original_backend = execution_service.runtime_backend
+        execution_service.runtime_backend = lambda: backend
         launcher = _Launcher()
         service = DefaultTaskGraphService(
             runtime._state.task, authorization, launcher, preflight=runner,
@@ -175,7 +178,10 @@ async def _graph_recovery(
         )
         authorization.setup = False
         authorization.calls.clear()
-        yield runtime, runtime._state, service, backend, launcher, authorization
+        try:
+            yield runtime, runtime._state, service, backend, launcher, authorization
+        finally:
+            execution_service.runtime_backend = original_backend
 
 
 @pytest.mark.asyncio
@@ -421,7 +427,7 @@ async def test_bound_recovery_retains_validated_contracts_across_terminal_cleanu
     monkeypatch: pytest.MonkeyPatch, changed_binding: bool,
 ) -> None:
     async with _graph_recovery(("first", "second")) as (runtime, storage, service, backend, launcher, _authorization):
-        runner = runtime._task_node_runtime
+        runner = service._preflight
         get_execution = storage.execution.executions.get
         entered, release = asyncio.Event(), asyncio.Event()
 

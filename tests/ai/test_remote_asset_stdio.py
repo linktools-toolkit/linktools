@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Pinned non-file Asset packages execute as isolated, run-owned stdio trees."""
 from ._runtime_test_helpers import model_features
 
@@ -33,7 +35,8 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import ErrorCode
 from linktools.ai.migrate import provision_asset_database
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.spec import mcp_tool_selector
 from linktools.ai.storage import StorageOverlay
 from linktools.ai.workspace import BubblewrapSandbox, LocalSandbox, Sandbox
@@ -331,10 +334,7 @@ async def test_plain_filename_uses_pinned_asset_package_and_preserves_history(
         await _put_package(store, _package(log=log))
         features = _group(store, sandbox)
         features.capability(TraceCapability(), scope="runtime")
-        async with Runtime.open(
-            "asset-stdio", storage=RuntimeStorage.in_memory(),
-            features=model_features(_ProbeModels(), features),
-        ) as runtime:
+        async with Persistence.open('asset-stdio', storage=PersistenceStorage.in_memory()) as persistence_334, Runtime.open(persistence=persistence_334, features=model_features(_ProbeModels(), features)) as runtime:
             await store.put(AssetKey("mcp", "probe/data/value.txt"), b"new-head-data")
             await store.put(AssetKey("mcp", "probe/sibling.py"), b'IMPORTED = "new-head-module"\n')
             result = (await runtime.agents.get("default").run("probe", timeout_seconds=15)).result
@@ -372,10 +372,7 @@ async def test_resource_arguments_use_the_package_working_directory(
         command = sys.executable
     async with _store("memory", tmp_path) as store:
         await _put_package(store, _package(command=command, argument=argument))
-        async with Runtime.open(
-            "asset-resource-argument", storage=RuntimeStorage.in_memory(),
-            features=model_features(_ProbeModels(), _group(store, sandbox)),
-        ) as runtime:
+        async with Persistence.open('asset-resource-argument', storage=PersistenceStorage.in_memory()) as persistence_375, Runtime.open(persistence=persistence_375, features=model_features(_ProbeModels(), _group(store, sandbox))) as runtime:
             result = (await runtime.agents.get("default").run("probe", timeout_seconds=15)).result
             assert result.status is ExecutionStatus.SUCCEEDED, result
             _assert_observation(result.output)
@@ -405,10 +402,7 @@ async def test_concurrent_runs_own_independent_trees_until_their_processes_close
     sandbox = _sandbox(sandbox_kind, monkeypatch)
     async with _store("memory", tmp_path) as store:
         await _put_package(store, _package(command=sys.executable, log=log))
-        async with Runtime.open(
-            "asset-concurrency", storage=RuntimeStorage.in_memory(),
-            features=model_features(_ProbeModels(hold), _group(store, sandbox)),
-        ) as runtime:
+        async with Persistence.open('asset-concurrency', storage=PersistenceStorage.in_memory()) as persistence_408, Runtime.open(persistence=persistence_408, features=model_features(_ProbeModels(hold), _group(store, sandbox))) as runtime:
             first = asyncio.create_task(runtime.agents.get("default").run("first", timeout_seconds=15))
             second = None
             try:
@@ -463,10 +457,7 @@ async def test_startup_outcomes_keep_process_and_resource_lifetimes_ordered(
     sandbox = _sandbox(sandbox_kind, monkeypatch)
     async with _store("memory", tmp_path) as store:
         await _put_package(store, _package(command=sys.executable, log=log, mode=mode))
-        async with Runtime.open(
-            "asset-init-failure", storage=RuntimeStorage.in_memory(),
-            features=model_features(_ProbeModels(), _group(store, sandbox)),
-        ) as runtime:
+        async with Persistence.open('asset-init-failure', storage=PersistenceStorage.in_memory()) as persistence_466, Runtime.open(persistence=persistence_466, features=model_features(_ProbeModels(), _group(store, sandbox))) as runtime:
             execution = await runtime.agents.get("default").start("probe")
             if mode == "hang-init":
                 value = await _wait_started(log)
@@ -505,10 +496,7 @@ async def test_native_directory_package_keeps_original_files(
     await store.initialize()
     sandbox = LocalSandbox()
     try:
-        async with Runtime.open(
-            "native-asset-stdio", storage=RuntimeStorage.in_memory(),
-            features=model_features(_ProbeModels(), _group(store, sandbox)),
-        ) as runtime:
+        async with Persistence.open('native-asset-stdio', storage=PersistenceStorage.in_memory()) as persistence_508, Runtime.open(persistence=persistence_508, features=model_features(_ProbeModels(), _group(store, sandbox))) as runtime:
             result = (await runtime.agents.get("default").run("probe", timeout_seconds=15)).result
             assert result.status is ExecutionStatus.SUCCEEDED, result
             observation = _assert_observation(result.output)

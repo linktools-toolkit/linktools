@@ -5,10 +5,10 @@
 from dataclasses import replace
 
 import pytest
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.core import PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._plan import (
     PlanItem as RuntimePlanItem,
     RuntimePlanStore,
@@ -20,7 +20,7 @@ from linktools.ai.runtime._capabilities import (
 )
 from linktools.ai.runtime._harness_planning import HarnessPlanning
 from linktools.ai.runtime._compaction import CompactionPolicy
-from linktools.ai.runtime.state._steps import (
+from linktools.ai.persistence.runs import (
     StagingAgentRunStore,
 )
 from pydantic_ai.messages import CachePoint, ModelRequest, ModelResponse, UserPromptPart
@@ -131,7 +131,7 @@ async def test_runtime_plan_persistence_adds_no_arbitrary_size_limit() -> None:
 
 
 async def test_runtime_plan_persists_only_the_current_payload_shape() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="plan-shape", tenant_id="tenant")
     try:
         store = RuntimePlanStore(

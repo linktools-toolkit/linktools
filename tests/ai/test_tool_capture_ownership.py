@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Captured tool declarations own execution semantics, not authoring SDK objects."""
 from ._runtime_test_helpers import is_tool_retry, model_features
 
@@ -15,7 +17,8 @@ from pydantic_ai.tools import ToolDefinition
 from linktools.ai.agent import AgentCompiler
 from linktools.ai.capability import CapabilityContribution, tool_metadata
 from linktools.ai.core import ExecutionStatus, JsonValue
-from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.spec import AgentSpec
 
 
@@ -64,9 +67,7 @@ async def test_runtime_uses_registered_tool_semantics_after_authoring_mutation()
     restored = compiler.restore(binding.binding_contract)
     assert restored.binding_contract == binding.binding_contract
 
-    async with Runtime.open(
-        "capture", storage=RuntimeStorage.in_memory(), features=capture,
-    ) as runtime:
+    async with Persistence.open('capture', storage=PersistenceStorage.in_memory()) as persistence_67, Runtime.open(persistence=persistence_67, features=capture) as runtime:
         result = (await runtime.agents.get().run("Call lookup", timeout_seconds=5)).result
         assert result.status is ExecutionStatus.SUCCEEDED
 

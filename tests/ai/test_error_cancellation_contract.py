@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Cancellation and capability error-boundary behavior."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
@@ -15,7 +15,7 @@ from linktools.ai.asset._sql import SqlAssetBackend
 from linktools.ai.capability import SubagentDelegate
 from linktools.ai.core import ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._agent_executor import (
     _cleanup_agent_run_resources,
@@ -23,7 +23,7 @@ from linktools.ai.runtime._agent_executor import (
 )
 from linktools.ai.core import HandoffGate
 from linktools.ai.runtime._local import LocalExecutionBackend
-from linktools.ai.runtime._event import LiveExecutionEventBroker
+from linktools.ai.execution.events import LiveExecutionEventBroker
 from linktools.ai.runtime._pending_turn import _PendingExecutionTurns
 from linktools.ai.runtime._mcp import (
     _MCPBinding,
@@ -46,9 +46,9 @@ from linktools.ai.workspace import BubblewrapSandbox
 
 
 @pytest_asyncio.fixture
-async def execution_storage() -> AsyncIterator[RuntimeState]:
-    storage = RuntimeStorage.in_memory()
-    storage = RuntimeState(storage)
+async def execution_storage() -> AsyncIterator[Persistence]:
+    storage = PersistenceStorage.in_memory()
+    storage = Persistence(storage)
     await storage.initialize(namespace="boundary", tenant_id="tenant")
     try:
         yield storage
@@ -286,7 +286,7 @@ async def test_handoff_gate_recovers_after_cancelled_cleanup() -> None:
 
 
 @pytest.mark.asyncio
-async def test_immediate_terminal_execution_waits_for_task_dependency_hold(execution_storage: RuntimeState) -> None:
+async def test_immediate_terminal_execution_waits_for_task_dependency_hold(execution_storage: Persistence) -> None:
     from linktools.ai.runtime._execution import _ExecutionRuntimeBridge
 
     service = object.__new__(DefaultExecutionService)

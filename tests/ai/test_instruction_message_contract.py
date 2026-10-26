@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Deferred SDK instruction state remains complete across durable history."""
 
 import hashlib
@@ -24,8 +26,9 @@ from pydantic_ai.toolsets import FunctionToolset
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus, canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
-from linktools.ai.runtime._message import decode_model_messages, encode_model_messages
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.model.messages import decode_model_messages, encode_model_messages
 
 _STAMP = datetime(2026, 10, 24, tzinfo=timezone.utc)
 _HASH = hashlib.sha256(b"original").hexdigest()
@@ -235,8 +238,8 @@ async def _runtime_deferred_session(root: str, resumed: bool, backend: str) -> N
     features.capability(_DeferredInstructions(), scope="agent")
     features.capability(_ChangingInstructions(state), scope="agent")
     features.agent("default", instructions="Fixed instructions.", allow_tools=(), allow_skills=(), allow_subagents=())
-    storage = RuntimeStorage.sqlite(Path(root) / "runtime.db") if backend == "sqlite" else RuntimeStorage.filesystem(Path(root))
-    async with Runtime.open("deferred-instructions", features=features, storage=storage) as runtime:
+    storage = PersistenceStorage.sqlite(Path(root) / "runtime.db") if backend == "sqlite" else PersistenceStorage.filesystem(Path(root))
+    async with Persistence.open('deferred-instructions', storage=storage) as persistence_239, Runtime.open(persistence=persistence_239, features=features) as runtime:
         agent = runtime.agents.get()
         session = agent.session("session") if resumed else await agent.create_session("session")
         if resumed:

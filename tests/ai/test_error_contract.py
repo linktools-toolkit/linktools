@@ -11,7 +11,7 @@ import pytest
 from linktools.ai.core import ExecutionStatus, ToolOperationStatus, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import ToolCallFailed, ToolCallRetry
-from linktools.ai.runtime import ExecutionResult
+from linktools.ai.execution import ExecutionResult
 from linktools.ai.runtime._agent_executor import _execution_error
 from linktools.ai.runtime._execution import _terminal_error
 from linktools.ai.runtime._local import _secondary_execution_error

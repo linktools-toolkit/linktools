@@ -20,7 +20,7 @@ from linktools.ai.asset import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime.state._sql import SqlStateStore
+from linktools.ai.persistence._sql import SqlStateStore
 from linktools.ai.storage import (
     FilesystemObjectStore,
     SqlObjectStore,

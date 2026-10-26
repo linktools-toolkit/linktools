@@ -8,9 +8,10 @@ from typing import Protocol
 
 from ..core import JsonValue
 from ..errors import ErrorCode, ErrorDiagnostics
-from .state import RuntimeDomain, CheckpointPersistence
-from .state._contracts import ExecutionRecord
-from .state._steps import ExecutionTerminalSealPlan
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.runs import CheckpointPersistence
+from linktools.ai.execution import ExecutionRecord
+from linktools.ai.persistence.runs import ExecutionTerminalSealPlan
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +32,7 @@ class _AgentRunLifecycle(Protocol):
     async def materialize_from_recovery(
         self,
         *,
-        target: RuntimeDomain,
+        target: PersistenceDomain,
         agent_run_id: str,
         execution_id: "str | None" = None,
     ) -> None: ...

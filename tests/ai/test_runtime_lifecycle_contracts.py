@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.core import ExecutionContext
 """Runtime body and cleanup error precedence coverage."""
 from ._runtime_test_helpers import model_features
 from linktools.ai.model import create_model
@@ -13,22 +15,24 @@ import pytest
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 
-from linktools.ai.runtime import PromptLimits, RuntimeContext, RuntimeHistory, RuntimeStorage
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.history import History
+from linktools.ai.core import PromptLimits
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import Persistence
 from linktools.ai.runtime._runtime_service import _open_runtime
 from linktools.ai.workspace import Workspace
 
 
 @pytest.fixture
-def state_owners(monkeypatch: pytest.MonkeyPatch) -> list[RuntimeState]:
-    owners: list[RuntimeState] = []
-    initialize = RuntimeState.initialize
+def state_owners(monkeypatch: pytest.MonkeyPatch) -> list[Persistence]:
+    owners: list[Persistence] = []
+    initialize = Persistence.initialize
 
-    async def capture(owner: RuntimeState, **kwargs: object) -> None:
+    async def capture(owner: Persistence, **kwargs: object) -> None:
         owners.append(owner)
         await initialize(owner, **kwargs)
 
-    monkeypatch.setattr(RuntimeState, "initialize", capture)
+    monkeypatch.setattr(Persistence, "initialize", capture)
     return owners
 
 
@@ -103,8 +107,8 @@ async def test_runtime_body_error_wins_over_cleanup_error(
     with pytest.raises(ValueError, match="body secret"):
         async with _open_runtime(
             "lifecycle",
-            context=RuntimeContext(None),
-            storage=RuntimeStorage.in_memory(),
+            context=ExecutionContext(None),
+            storage=PersistenceStorage.in_memory(),
             features=model_features(create_model(protocol='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
         ):
             raise ValueError("body secret")
@@ -125,8 +129,8 @@ async def test_runtime_body_error_wins_when_close_succeeds(
     with pytest.raises(ValueError, match="body secret"):
         async with _open_runtime(
             "lifecycle",
-            context=RuntimeContext(None),
-            storage=RuntimeStorage.in_memory(),
+            context=ExecutionContext(None),
+            storage=PersistenceStorage.in_memory(),
             features=model_features(create_model(protocol='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
         ):
             raise ValueError("body secret")
@@ -143,8 +147,8 @@ async def test_runtime_close_error_still_propagates_after_success(
     with pytest.raises(AIError) as raised:
         async with _open_runtime(
             "lifecycle",
-            context=RuntimeContext(None),
-            storage=RuntimeStorage.in_memory(),
+            context=ExecutionContext(None),
+            storage=PersistenceStorage.in_memory(),
             features=model_features(create_model(protocol='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
         ):
             pass
@@ -167,8 +171,8 @@ async def test_runtime_construction_error_wins_when_cleanup_fails(
     with pytest.raises(RuntimeError, match="construction secret"):
         async with _open_runtime(
             "lifecycle",
-            context=RuntimeContext(None),
-            storage=RuntimeStorage.in_memory(),
+            context=ExecutionContext(None),
+            storage=PersistenceStorage.in_memory(),
             features=model_features(create_model(protocol='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
         ):
             pass
@@ -185,8 +189,8 @@ async def test_runtime_cancellation_wins_when_cleanup_fails(
     with pytest.raises(asyncio.CancelledError):
         async with _open_runtime(
             "lifecycle",
-            context=RuntimeContext(None),
-            storage=RuntimeStorage.in_memory(),
+            context=ExecutionContext(None),
+            storage=PersistenceStorage.in_memory(),
             features=model_features(create_model(protocol='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
         ):
             raise asyncio.CancelledError
@@ -206,8 +210,8 @@ async def test_secondary_cleanup_log_excludes_business_payload(
     with pytest.raises(ValueError, match="body secret"):
         async with _open_runtime(
             "lifecycle",
-            context=RuntimeContext(None),
-            storage=RuntimeStorage.in_memory(),
+            context=ExecutionContext(None),
+            storage=PersistenceStorage.in_memory(),
             features=model_features(create_model(protocol='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
         ):
             raise ValueError("body secret")
@@ -221,20 +225,20 @@ async def test_secondary_cleanup_log_excludes_business_payload(
 
 @pytest.mark.asyncio
 async def test_runtime_history_body_error_wins_over_state_close_error(
-    state_owners: list[RuntimeState],
+    state_owners: list[Persistence],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    original_close = RuntimeState.close
+    state = PersistenceStorage.in_memory()
+    original_close = Persistence.close
 
-    async def close_with_failure(_state: RuntimeState) -> None:
+    async def close_with_failure(_state: Persistence) -> None:
         raise RuntimeError("history cleanup secret")
 
-    monkeypatch.setattr(RuntimeState, "close", close_with_failure)
+    monkeypatch.setattr(Persistence, "close", close_with_failure)
     try:
         with pytest.raises(ValueError, match="history body secret"):
-            async with RuntimeHistory.open("lifecycle", storage=state):
+            async with Persistence.open('lifecycle', storage=state, tenant_id="default", read_only=True) as history_persistence_240, History.open(persistence=history_persistence_240):
                 raise ValueError("history body secret")
     finally:
         await original_close(state_owners[0])
@@ -242,13 +246,13 @@ async def test_runtime_history_body_error_wins_over_state_close_error(
 
 @pytest.mark.asyncio
 async def test_runtime_history_body_error_wins_when_close_succeeds(
-    state_owners: list[RuntimeState],
+    state_owners: list[Persistence],
     tmp_path: Path,
 ) -> None:
-    state = RuntimeStorage.in_memory()
+    state = PersistenceStorage.in_memory()
 
     with pytest.raises(ValueError, match="history body secret"):
-        async with RuntimeHistory.open("lifecycle", storage=state):
+        async with Persistence.open('lifecycle', storage=state, tenant_id="default", read_only=True) as history_persistence_254, History.open(persistence=history_persistence_254):
             raise ValueError("history body secret")
 
     assert state_owners[0].ready is False
@@ -256,20 +260,20 @@ async def test_runtime_history_body_error_wins_when_close_succeeds(
 
 @pytest.mark.asyncio
 async def test_runtime_history_close_error_still_propagates_after_success(
-    state_owners: list[RuntimeState],
+    state_owners: list[Persistence],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    original_close = RuntimeState.close
+    state = PersistenceStorage.in_memory()
+    original_close = Persistence.close
 
-    async def close_with_failure(_state: RuntimeState) -> None:
+    async def close_with_failure(_state: Persistence) -> None:
         raise RuntimeError("history cleanup")
 
-    monkeypatch.setattr(RuntimeState, "close", close_with_failure)
+    monkeypatch.setattr(Persistence, "close", close_with_failure)
     try:
         with pytest.raises(RuntimeError, match="history cleanup"):
-            async with RuntimeHistory.open("lifecycle", storage=state):
+            async with Persistence.open('lifecycle', storage=state, tenant_id="default", read_only=True) as history_persistence_275, History.open(persistence=history_persistence_275):
                 pass
     finally:
         await original_close(state_owners[0])
@@ -277,20 +281,20 @@ async def test_runtime_history_close_error_still_propagates_after_success(
 
 @pytest.mark.asyncio
 async def test_runtime_history_cancellation_wins_when_close_fails(
-    state_owners: list[RuntimeState],
+    state_owners: list[Persistence],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    original_close = RuntimeState.close
+    state = PersistenceStorage.in_memory()
+    original_close = Persistence.close
 
-    async def close_with_failure(_state: RuntimeState) -> None:
+    async def close_with_failure(_state: Persistence) -> None:
         raise RuntimeError("history cleanup")
 
-    monkeypatch.setattr(RuntimeState, "close", close_with_failure)
+    monkeypatch.setattr(Persistence, "close", close_with_failure)
     try:
         with pytest.raises(asyncio.CancelledError):
-            async with RuntimeHistory.open("lifecycle", storage=state):
+            async with Persistence.open('lifecycle', storage=state, tenant_id="default", read_only=True) as history_persistence_296, History.open(persistence=history_persistence_296):
                 raise asyncio.CancelledError
     finally:
         await original_close(state_owners[0])
@@ -298,29 +302,29 @@ async def test_runtime_history_cancellation_wins_when_close_fails(
 
 @pytest.mark.asyncio
 async def test_compose_cleans_state_when_build_arguments_fail(
-    state_owners: list[RuntimeState],
+    state_owners: list[Persistence],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import linktools.ai.runtime._factory as factory
 
-    state = RuntimeStorage.in_memory()
+    state = PersistenceStorage.in_memory()
     close_calls = 0
-    original_close = RuntimeState.close
+    original_close = Persistence.close
 
-    async def count_close(current: RuntimeState) -> None:
+    async def count_close(current: Persistence) -> None:
         nonlocal close_calls
         close_calls += 1
         await original_close(current)
 
     def fail_history_reader(
         _namespace: str,
-        _state: RuntimeState,
+        _state: Persistence,
         _grant_key: bytes,
     ) -> None:
         raise RuntimeError("history reader construction failed")
 
-    monkeypatch.setattr(RuntimeState, "close", count_close)
+    monkeypatch.setattr(Persistence, "close", count_close)
     monkeypatch.setattr(factory, "_execution_history_reader", fail_history_reader)
     with pytest.raises(RuntimeError, match="history reader construction failed"):
         await factory.compose_runtime_components(
@@ -339,17 +343,17 @@ async def test_compose_build_cleanup_preserves_construction_error(
 ) -> None:
     import linktools.ai.runtime._factory as factory
 
-    state = RuntimeStorage.in_memory()
+    state = PersistenceStorage.in_memory()
 
     class FailingExecutionService:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             raise RuntimeError("build secret")
 
-    async def fail_close(_state: RuntimeState) -> None:
+    async def fail_close(_state: Persistence) -> None:
         raise RuntimeError("cleanup secret")
 
     monkeypatch.setattr(factory, "DefaultExecutionService", FailingExecutionService)
-    monkeypatch.setattr(RuntimeState, "close", fail_close)
+    monkeypatch.setattr(Persistence, "close", fail_close)
     with pytest.raises(RuntimeError, match="build secret"):
         await factory.compose_runtime_components(
             "lifecycle",
@@ -360,17 +364,17 @@ async def test_compose_build_cleanup_preserves_construction_error(
 
 @pytest.mark.asyncio
 async def test_compose_build_owns_state_after_transfer(
-    state_owners: list[RuntimeState],
+    state_owners: list[Persistence],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import linktools.ai.runtime._factory as factory
 
-    state = RuntimeStorage.in_memory()
+    state = PersistenceStorage.in_memory()
     close_calls = 0
-    original_close = RuntimeState.close
+    original_close = Persistence.close
 
-    async def count_close(current: RuntimeState) -> None:
+    async def count_close(current: Persistence) -> None:
         nonlocal close_calls
         close_calls += 1
         await original_close(current)
@@ -379,7 +383,7 @@ async def test_compose_build_owns_state_after_transfer(
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             raise RuntimeError("build failed")
 
-    monkeypatch.setattr(RuntimeState, "close", count_close)
+    monkeypatch.setattr(Persistence, "close", count_close)
     monkeypatch.setattr(factory, "DefaultExecutionService", FailingExecutionService)
     with pytest.raises(RuntimeError, match="build failed"):
         await factory.compose_runtime_components(
@@ -436,15 +440,15 @@ async def test_compose_cleanup_continues_after_independent_resource_failure(
 
 @pytest.mark.asyncio
 async def test_build_abort_continues_after_input_cleanup_failure(
-    state_owners: list[RuntimeState],
+    state_owners: list[Persistence],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import linktools.ai.runtime._factory as factory
 
-    state = RuntimeStorage.in_memory()
+    state = PersistenceStorage.in_memory()
     state_close_calls = 0
-    original_state_close = RuntimeState.close
+    original_state_close = Persistence.close
 
     class FailingExecutionService:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -453,14 +457,14 @@ async def test_build_abort_continues_after_input_cleanup_failure(
     async def fail_input_close(_input: object) -> None:
         raise RuntimeError("input cleanup failed")
 
-    async def count_state_close(current: RuntimeState) -> None:
+    async def count_state_close(current: Persistence) -> None:
         nonlocal state_close_calls
         state_close_calls += 1
         await original_state_close(current)
 
     monkeypatch.setattr(factory, "DefaultExecutionService", FailingExecutionService)
     monkeypatch.setattr(factory.ExecutionInputMaterializer, "close", fail_input_close)
-    monkeypatch.setattr(RuntimeState, "close", count_state_close)
+    monkeypatch.setattr(Persistence, "close", count_state_close)
 
     with pytest.raises(RuntimeError, match="build failed"):
         await factory.compose_runtime_components(
@@ -475,20 +479,20 @@ async def test_build_abort_continues_after_input_cleanup_failure(
 
 @pytest.mark.asyncio
 async def test_runtime_composition_defers_task_recovery_to_explicit_call(
-    state_owners: list[RuntimeState],
+    state_owners: list[Persistence],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import linktools.ai.runtime._factory as factory
 
-    state = RuntimeStorage.in_memory()
+    state = PersistenceStorage.in_memory()
     state_close_calls = 0
-    original_state_close = RuntimeState.close
+    original_state_close = Persistence.close
 
     async def fail_restore(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("restore failed")
 
-    async def count_state_close(current: RuntimeState) -> None:
+    async def count_state_close(current: Persistence) -> None:
         nonlocal state_close_calls
         state_close_calls += 1
         await original_state_close(current)
@@ -498,7 +502,7 @@ async def test_runtime_composition_defers_task_recovery_to_explicit_call(
         "recover_pending",
         fail_restore,
     )
-    monkeypatch.setattr(RuntimeState, "close", count_state_close)
+    monkeypatch.setattr(Persistence, "close", count_state_close)
 
     try:
         components = await factory.compose_runtime_components(

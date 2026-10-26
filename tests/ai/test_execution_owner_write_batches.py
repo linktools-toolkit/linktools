@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Final owner writes retain fencing while avoiding duplicate guard updates."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
@@ -10,14 +10,21 @@ from pathlib import Path
 import pytest
 from sqlalchemy import event, update
 
-from linktools.ai.core import ExecutionEventType, ExecutionStatus, IdempotencyStatus, ResourceKind, StopReason, UsageMetrics
+from linktools.ai.core import (
+    ExecutionEventType,
+    ExecutionStatus,
+    IdempotencyStatus,
+    ResourceKind,
+    StopReason,
+    UsageMetrics,
+)
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence.contracts import (
     ExecutionHistoryState, ExecutionTerminalCommit, IdempotencyRecord, ResultRecord,
 )
-from linktools.ai.runtime.state._execution_repositories import ExecutionRepositoryImpl
-from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
-from linktools.ai.runtime.state._sql import _SqlTransaction
+from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
+from linktools.ai.persistence._runtime_commands import StateCommands
+from linktools.ai.persistence._sql import _SqlTransaction
 
 from .test_checkpoint_write_batches import _snapshot
 from .test_history_projection_conformance import _record
@@ -61,7 +68,7 @@ def _assert_semantic_snapshot(batch, scalar, reduced_guards):
         assert actual.storage_revision + reduced_guards.get(actual.kind, 0) == expected.storage_revision
         # Idempotency transition timestamps are transaction clock values.
         if actual.kind == "idempotency":
-            from linktools.ai.runtime.state._codec import _decode_enveloped_domain
+            from linktools.ai.persistence.codec import _decode_enveloped_domain
             actual_value = _decode_enveloped_domain(actual.data, IdempotencyRecord)
             expected_value = _decode_enveloped_domain(expected.data, IdempotencyRecord)
             assert replace(actual_value, updated_at=expected_value.updated_at) == expected_value
@@ -81,14 +88,14 @@ async def test_final_control_cas_preserves_business_records_and_uses_fewer_write
             path = tmp_path / str(scalar)
             path.mkdir()
             state = _storage(backend, path)
-            state = RuntimeState(state)
+            state = Persistence(state)
             states.append(state)
             await state.initialize(namespace="owner-final", tenant_id="tenant")
             await _seed(state, current)
             source = state.execution.executions
             repository = (_ScalarExecution(source.state_store, namespace="owner-final", tenant_id="tenant")
                           if scalar else source)
-            commands = RuntimeStateCommands(repository, namespace="owner-final", events=state.execution.events, background_tasks=set())
+            commands = StateCommands(repository, namespace="owner-final", events=state.execution.events, background_tasks=set())
             calls = Counter()
             def capture(_connection, _cursor, statement, _parameters, _context, _many):
                 calls[statement.split()[0]] += 1
@@ -124,7 +131,7 @@ async def test_producer_final_cas_preserves_generation_and_subclass_guard(tmp_pa
         path = tmp_path / str(scalar)
         path.mkdir()
         state = _storage(backend, path)
-        state = RuntimeState(state)
+        state = Persistence(state)
         await state.initialize(namespace="owner-admit", tenant_id="tenant")
         try:
             source = state.execution.executions
@@ -147,13 +154,13 @@ async def test_closed_terminal_any_member_conflict_rolls_back_every_final_value(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, member: str,
 ) -> None:
     state = _storage("sqlite", tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="owner-conflict", tenant_id="tenant")
     current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, durable_trace=False)
     try:
         await _seed(state, current)
         repository = state.execution.executions
-        commands = RuntimeStateCommands(repository, namespace="owner-conflict", events=state.execution.events, background_tasks=set())
+        commands = StateCommands(repository, namespace="owner-conflict", events=state.execution.events, background_tasks=set())
         original = _SqlTransaction.replace_records
         conflicts = []
         async def conflict(transaction, replacements):
@@ -181,7 +188,7 @@ async def test_closed_terminal_any_member_conflict_rolls_back_every_final_value(
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
 async def test_closed_final_cas_is_early_fence_and_later_failure_rolls_back(tmp_path: Path, backend: str) -> None:
     state = _storage(backend, tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="owner-rollback", tenant_id="tenant")
     current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, durable_trace=False)
     try:
@@ -212,7 +219,7 @@ async def test_terminal_keeps_execution_first_when_dialect_updates_members_indiv
     from linktools.ai.storage import SQLiteDialect
 
     state = _storage("sqlite", tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="owner-lock-order", tenant_id="tenant")
     current = replace(_record(ExecutionStatus.STARTED, 1), execution_id="execution-0", root_execution_id="execution-0",
                       revision=1, durable_trace=False)
@@ -222,7 +229,7 @@ async def test_terminal_keeps_execution_first_when_dialect_updates_members_indiv
         execution_key = repository._key("execution", current.execution_id)
         head_key = repository._key("execution_history_head", current.execution_id)
         assert head_key < execution_key
-        commands = RuntimeStateCommands(repository, namespace="owner-lock-order", events=state.execution.events, background_tasks=set())
+        commands = StateCommands(repository, namespace="owner-lock-order", events=state.execution.events, background_tasks=set())
         guard = _SqlTransaction.guard_record
         execute = _SqlTransaction._execute
         writes = []
@@ -261,13 +268,13 @@ async def test_aborted_terminal_batch_retries_whole_owner_write_set(
         pass
 
     state = _storage("sqlite", tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="owner-retry", tenant_id="tenant")
     current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, durable_trace=False)
     try:
         await _seed(state, current)
         repository = state.execution.executions
-        commands = RuntimeStateCommands(repository, namespace="owner-retry", events=state.execution.events, background_tasks=set())
+        commands = StateCommands(repository, namespace="owner-retry", events=state.execution.events, background_tasks=set())
         original = _SqlTransaction.replace_records
         attempts = []
 
@@ -303,7 +310,7 @@ async def test_read_committed_terminal_and_tool_guard_share_execution_first_orde
     from sqlalchemy.engine import URL
     from sqlalchemy.ext.asyncio import create_async_engine
     from linktools.ai.migrate import provision_database
-    from linktools.ai.runtime import RuntimeStorage
+    from linktools.ai.persistence import PersistenceStorage
 
     name, command = _server
     if name == "postgresql":
@@ -315,8 +322,8 @@ async def test_read_committed_terminal_and_tool_guard_share_execution_first_orde
                          query={"unix_socket": socket, "charset": "utf8mb4"})
     engine = create_async_engine(url, isolation_level="READ COMMITTED")
     await provision_database(engine)
-    state = RuntimeStorage.sql(engine)
-    state = RuntimeState(state)
+    state = PersistenceStorage.sql(engine)
+    state = Persistence(state)
     await state.initialize(namespace="owner-lock-order", tenant_id="tenant")
     current = replace(_record(ExecutionStatus.STARTED, 1), execution_id="execution-0", root_execution_id="execution-0",
                       revision=1, durable_trace=False)
@@ -331,7 +338,7 @@ async def test_read_committed_terminal_and_tool_guard_share_execution_first_orde
         execution_key = repository._key("execution", current.execution_id)
         head_key = repository._key("execution_history_head", current.execution_id)
         assert head_key < execution_key
-        commands = RuntimeStateCommands(repository, namespace="owner-lock-order", events=state.execution.events, background_tasks=set())
+        commands = StateCommands(repository, namespace="owner-lock-order", events=state.execution.events, background_tasks=set())
         original = _SqlTransaction.guard_record
 
         async def interleave(transaction, key, *, expected_storage_revision):
@@ -378,16 +385,16 @@ async def test_read_committed_terminal_and_tool_guard_share_execution_first_orde
 async def test_closed_terminal_lost_ack_uses_complete_readback_without_reapplying(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    from linktools.ai.runtime.state._contracts import ExecutionTerminalCommitResult
+    from linktools.ai.persistence.contracts import ExecutionTerminalCommitResult
 
     state = _storage(backend, tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="owner-ack", tenant_id="tenant")
     current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, durable_trace=False)
     try:
         await _seed(state, current)
         repository = state.execution.executions
-        commands = RuntimeStateCommands(repository, namespace="owner-ack", events=state.execution.events, background_tasks=set())
+        commands = StateCommands(repository, namespace="owner-ack", events=state.execution.events, background_tasks=set())
         group_type = type(repository.state_store.storage_group)
         original = group_type.mutate
         commits = []

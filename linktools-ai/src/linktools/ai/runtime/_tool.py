@@ -33,19 +33,12 @@ from ..storage import (
     StoredPayload,
     payload_fits_inline,
 )
-from ._message import decode_model_messages, encode_model_messages
-from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
-from .state import RuntimeDomain
-from .state._contracts import ToolOperationAdmission
-from .state._durability import (
-    CommitObservation,
-    DurableCommitState,
-    run_durable_commit,
-)
-from .state._contracts import (
-    ToolOperationRecord,
-    decode_tool_operation_failure,
-)
+from linktools.ai.model.messages import decode_model_messages, encode_model_messages
+from linktools.ai.persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.contracts import ToolOperationAdmission
+from linktools.ai.persistence.durability import CommitObservation, DurableCommitState, run_durable_commit
+from linktools.ai.persistence.contracts import ToolOperationRecord, decode_tool_operation_failure
 
 _logger = environ.get_logger("ai.runtime.tool")
 TOOL_OPERATION_LEASE_SECONDS = 60
@@ -101,55 +94,7 @@ class ToolOperationBridge(Protocol):
     async def list_operations(self) -> tuple[ToolOperationRecord, ...]: ...
 
 
-class ToolStateRepository(Protocol):
-    async def admit(self, request: ToolOperationAdmission) -> ToolOperationRecord: ...
-    async def reserve(self, record: ToolOperationRecord) -> ToolOperationRecord: ...
-    async def get_operation(
-        self, tool_operation_id: str, *, tenant_id: str
-    ) -> "ToolOperationRecord | None": ...
-    async def list_by_execution(
-        self, execution_id: str, *, tenant_id: str
-    ) -> tuple[ToolOperationRecord, ...]: ...
-    async def get_by_call_ids(
-        self, agent_run_id: str, tool_call_ids: Sequence[str], *, tenant_id: str,
-    ) -> tuple[ToolOperationRecord, ...]: ...
-    async def reconcile_expired_claim(
-        self,
-        tool_operation_id: str,
-        *,
-        tenant_id: str,
-    ) -> ToolOperationRecord: ...
-    async def claim(
-        self, tool_operation_id: str, *, tenant_id: str, owner: str, lease_seconds: int
-    ) -> ToolOperationRecord: ...
-    async def renew(
-        self,
-        tool_operation_id: str,
-        *,
-        tenant_id: str,
-        owner: str,
-        fence: int,
-        lease_seconds: int,
-    ) -> ToolOperationRecord: ...
-    async def fail_payload(
-        self,
-        tool_operation_id: str,
-        *,
-        tenant_id: str,
-        owner: str,
-        fence: int,
-        error_code: str,
-        error_payload: StoredPayload,
-    ) -> ToolOperationRecord: ...
-    async def defer(
-        self,
-        tool_operation_id: str,
-        *,
-        tenant_id: str,
-        owner: str,
-        fence: int,
-    ) -> ToolOperationRecord: ...
-    async def has_by_agent_run(self, agent_run_id: str, *, tenant_id: str) -> bool: ...
+from linktools.ai.persistence.contracts import ToolStateRepository
 
 
 class _ToolOperationRuntimeRepository(Protocol):
@@ -293,7 +238,7 @@ class RuntimeToolOperationBridge:
     ) -> None:
         self._repository = repository
         self._recovery_objects = recovery_objects
-        self._object_keys = RuntimeObjectKeyFactory(namespace)
+        self._object_keys = ObjectKeyFactory(namespace)
         self._tenant_id = validate_tenant_id(tenant_id)
         self._execution_id = validate_resource_id(execution_id)
         self._agent_run_id = agent_run_id
@@ -904,7 +849,7 @@ class RuntimeToolOperationBridge:
         reference = await put_runtime_object(
             self._recovery_objects,
             self._object_keys,
-            RuntimeDomain.RECOVERY,
+            PersistenceDomain.RECOVERY,
             self._tenant_id,
             data,
         )

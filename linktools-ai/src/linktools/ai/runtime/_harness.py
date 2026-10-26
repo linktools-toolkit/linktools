@@ -28,8 +28,8 @@ from ..errors import AIError, ErrorCode
 from ..model import ModelBinding, ModelClientRequestRecorder, ReferencedContent, ReferencedInputModel, model_input_content
 from ..spec import CapabilityRef
 from ._plan import PlanItem, RuntimePlanStore
-from ._user_content_codec import RetiredReferencedContent
-from ._message import project_provider_messages, without_history_system_prompts
+from linktools.ai.model.messages import RetiredReferencedContent
+from linktools.ai.model.messages import project_provider_messages, without_history_system_prompts
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping

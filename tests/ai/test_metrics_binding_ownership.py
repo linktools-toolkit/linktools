@@ -10,7 +10,7 @@ from linktools.ai.core import CommitPolicy
 
 from linktools.ai.observe import Metrics, Observation
 from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.runtime._metrics_service import MetricsService
+from linktools.ai.observe.service import MetricsService
 from linktools.ai.storage import InMemoryCacheBackend
 
 

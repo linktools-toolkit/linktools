@@ -12,10 +12,10 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state._memory import InMemoryStateStore
-from linktools.ai.runtime.state._plan import RuntimeDomain
-from linktools.ai.runtime.state._snapshot import SnapshotLimits
-from linktools.ai.runtime.state._snapshot_operations import (
+from linktools.ai.persistence._memory import InMemoryStateStore
+from linktools.ai.persistence._plan import PersistenceDomain
+from linktools.ai.persistence._snapshot import SnapshotLimits
+from linktools.ai.persistence.snapshots import (
     RuntimeSnapshotOperations,
     SnapshotResources,
     restore_snapshot,
@@ -28,12 +28,12 @@ LIMITS = SnapshotLimits(max_entries=100, max_bytes=100_000)
 
 def resources(*, read_only: bool = True) -> SnapshotResources:
     objects = InMemoryObjectStore()
-    domains = frozenset({RuntimeDomain.EXECUTION, RuntimeDomain.TRACE})
+    domains = frozenset({PersistenceDomain.EXECUTION, PersistenceDomain.TRACE})
     return SnapshotResources(
         namespace="snapshot-operations", tenant_id="tenant",
         durable_domains=domains,
         stores={domain: InMemoryStateStore() for domain in domains},
-        object_stores={domain: objects for domain in RuntimeDomain},
+        object_stores={domain: objects for domain in PersistenceDomain},
         read_only=read_only,
     )
 
@@ -71,7 +71,7 @@ async def test_snapshot_preserves_every_durable_domain_and_closes_restore_scope(
         async def fail_write(_mutation: object) -> None:
             raise OSError("target write failed")
 
-        monkeypatch.setattr(restored.stores[RuntimeDomain.EXECUTION], "mutate", fail_write)
+        monkeypatch.setattr(restored.stores[PersistenceDomain.EXECUTION], "mutate", fail_write)
 
     @asynccontextmanager
     async def open_target(root: Path, namespace: str, tenant_id: str) -> AsyncIterator[SnapshotResources]:
@@ -130,7 +130,7 @@ async def test_snapshot_maintenance_requires_correct_access_mode() -> None:
 @pytest.mark.asyncio
 async def test_object_cleanup_requires_exclusivity_before_deletion() -> None:
     source = resources(read_only=False)
-    objects = source.object_stores[RuntimeDomain.EXECUTION]
+    objects = source.object_stores[PersistenceDomain.EXECUTION]
 
     async def chunks() -> AsyncIterator[bytes]:
         yield b"orphan"
@@ -147,26 +147,26 @@ async def test_object_cleanup_requires_exclusivity_before_deletion() -> None:
 
     with pytest.raises(RuntimeError, match="writers still active"):
         await RuntimeSnapshotOperations(source, require_ready=ready).purge_unreferenced_objects(
-            ((RuntimeDomain.EXECUTION, ref),), exclusive=Unavailable(),
+            ((PersistenceDomain.EXECUTION, ref),), exclusive=Unavailable(),
         )
     assert await objects.stat("orphan") is not None
 
 
 @pytest.mark.asyncio
 async def test_snapshot_keeps_existing_checkpoint_without_a_module_declaration(tmp_path: Path) -> None:
-    from linktools.ai.runtime import RuntimeStorage
-    from linktools.ai.runtime.state import RuntimeState
-    from linktools.ai.runtime.state._step_contracts import AgentRunRecord
+    from linktools.ai.persistence import PersistenceStorage
+    from linktools.ai.persistence import Persistence
+    from linktools.ai.persistence._step_contracts import AgentRunRecord
 
-    configuration = RuntimeStorage.sqlite(tmp_path / "runtime.db")
-    writer = RuntimeState(configuration)
+    configuration = PersistenceStorage.sqlite(tmp_path / "runtime.db")
+    writer = Persistence(configuration)
     await writer.initialize(namespace="checkpoint-snapshot", tenant_id="tenant")
     try:
-        await writer.run_store.read_store(RuntimeDomain.CHECKPOINT).register_agent_run(AgentRunRecord("retained-run"))
+        await writer.run_store.read_store(PersistenceDomain.CHECKPOINT).register_agent_run(AgentRunRecord("retained-run"))
     finally:
         await writer.close()
 
-    reader = RuntimeState(configuration)
+    reader = Persistence(configuration)
     await reader.initialize(namespace="checkpoint-snapshot", tenant_id="tenant", read_only=True)
     archive = InMemoryObjectStore()
     try:
@@ -178,8 +178,8 @@ async def test_snapshot_keeps_existing_checkpoint_without_a_module_declaration(t
     assert manifest["domains"]["checkpoint"]["records"]
 
     restored_root = tmp_path / "restored"
-    await RuntimeState.restore_snapshot(reference, object_store=archive, root=restored_root, limits=LIMITS)
-    restored = RuntimeState(RuntimeStorage.from_root(restored_root))
+    await Persistence.restore_snapshot(reference, object_store=archive, root=restored_root, limits=LIMITS)
+    restored = Persistence(PersistenceStorage.from_root(restored_root))
     await restored.initialize(namespace="checkpoint-snapshot", tenant_id="tenant", read_only=True)
     try:
         roundtrip = await restored.export_snapshot(object_store=archive, limits=LIMITS)

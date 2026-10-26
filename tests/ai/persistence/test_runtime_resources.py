@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RuntimeStorage resource ownership and restart checks."""
+"""PersistenceStorage resource ownership and restart checks."""
 
 import asyncio
 
 import pytest
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -17,12 +17,12 @@ async def test_sqlite_runtime_storage_owns_and_reopens_database(tmp_path) -> Non
     path = tmp_path / "runtime.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(engine)
-    state = RuntimeState(RuntimeStorage.sql(engine))
+    state = Persistence(PersistenceStorage.sql(engine))
     await state.initialize(namespace="runtime", tenant_id="tenant")
     assert state.ready is True
     await state.close()
 
-    reopened = RuntimeState(RuntimeStorage.sql(engine))
+    reopened = Persistence(PersistenceStorage.sql(engine))
     await reopened.initialize(namespace="runtime", tenant_id="tenant")
     assert reopened.ready is True
     await reopened.close()
@@ -31,14 +31,14 @@ async def test_sqlite_runtime_storage_owns_and_reopens_database(tmp_path) -> Non
 
 @pytest.mark.asyncio
 async def test_transient_runtime_storage_closes_repository_and_object_domains() -> None:
-    plan = RuntimeStoragePlan(
+    plan = PersistencePlan(
         **{
             domain.value: StorageRoute.transient()
-            for domain in RuntimeDomain
-            if domain not in {RuntimeDomain.RECOVERY, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}
+            for domain in PersistenceDomain
+            if domain not in {PersistenceDomain.RECOVERY, PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}
         }
     )
-    state = RuntimeState(RuntimeStorage.from_plan(plan))
+    state = Persistence(PersistenceStorage.from_plan(plan))
     await state.initialize(namespace="transient", tenant_id="tenant")
     await state.close()
     await state.close()
@@ -47,7 +47,7 @@ async def test_transient_runtime_storage_closes_repository_and_object_domains() 
 
 @pytest.mark.asyncio
 async def test_runtime_storage_close_cursor_retries_failed_action_and_survives_cancellation() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="close-cursor", tenant_id="tenant")
     calls: list[str] = []
     failed = True
@@ -69,7 +69,7 @@ async def test_runtime_storage_close_cursor_retries_failed_action_and_survives_c
     await state.close()
     assert calls == ["first", "first", "second"]
 
-    cancelled = RuntimeState(RuntimeStorage.in_memory())
+    cancelled = Persistence(PersistenceStorage.in_memory())
     await cancelled.initialize(namespace="close-cancellation", tenant_id="tenant")
     started = asyncio.Event()
     release = asyncio.Event()
@@ -93,11 +93,11 @@ async def test_runtime_storage_close_cursor_retries_failed_action_and_survives_c
 
 
 def test_mixed_runtime_plan_has_explicit_routes(tmp_path) -> None:
-    plan = RuntimeStoragePlan(
+    plan = PersistencePlan(
         conversation=StorageRoute.filesystem(tmp_path / "conversation"),
         execution=StorageRoute.transient(),
         memory=StorageRoute.memory(),
     )
-    assert plan.route(RuntimeDomain.CONVERSATION).retention.value == "durable"
-    assert plan.route(RuntimeDomain.EXECUTION).retention.value == "transient"
-    assert plan.durable_domains == frozenset({RuntimeDomain.CONVERSATION})
+    assert plan.route(PersistenceDomain.CONVERSATION).retention.value == "durable"
+    assert plan.route(PersistenceDomain.EXECUTION).retention.value == "transient"
+    assert plan.durable_domains == frozenset({PersistenceDomain.CONVERSATION})

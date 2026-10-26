@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime.state._archive import PreparedArchive
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence._archive import PreparedArchive
 from .test_incremental_projection_boundaries import _storage
 from .test_shared_content_archive import _archive, _publish
 
@@ -16,7 +16,7 @@ pytestmark = pytest.mark.asyncio
 
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
 async def test_archive_plans_preserve_all_ranges_and_unpublished_occurrences(tmp_path: Path, backend: str) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
     try:
         archive = await _archive(state)
@@ -45,7 +45,7 @@ async def test_prepared_frontier_reuse_does_not_bypass_publication_integrity(tmp
 
     from linktools.ai.errors import AIError, ErrorCode
 
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
     try:
         archive = await _archive(state)
@@ -75,13 +75,13 @@ async def test_empty_model_projection_does_not_open_archive_or_keep_baseline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, has_baseline: bool,
 ) -> None:
     from pydantic_ai.messages import ModelResponse, TextPart
-    from linktools.ai.runtime import RuntimeDomain
-    from linktools.ai.runtime.state._contracts import ContextProjection
+    from linktools.ai.persistence import PersistenceDomain
+    from linktools.ai.persistence.contracts import ContextProjection
 
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="empty-projection", tenant_id="tenant")
     try:
-        repository = state.run_store.read_store(RuntimeDomain.CHECKPOINT).transcript_repository
+        repository = state.run_store.read_store(PersistenceDomain.CHECKPOINT).transcript_repository
         baseline = None
         if has_baseline:
             previous = PreparedArchive()

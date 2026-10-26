@@ -27,7 +27,7 @@ from linktools.ai.model import ModelBinding
 from linktools.ai.core import JsonValue
 from linktools.ai.capability import TraceCapability, CheckpointCapability
 from linktools.ai.runtime._tool_boundary import ManagedToolDescriptor
-from linktools.ai.runtime.state._contracts import StoredUserInput
+from linktools.ai.persistence.contracts import StoredUserInput
 from linktools.ai.storage import StoredPayload
 
 

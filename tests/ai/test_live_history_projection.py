@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Run-local transcript identities and terminal boundary facts."""
 from ._runtime_test_helpers import model_features
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.capability import TraceCapability
 from datetime import datetime, timezone
 from functools import partial
@@ -22,12 +24,12 @@ from linktools.ai.core import (
     agent_conversation_id,
     agent_run_id,
 )
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime._event import project_event_payload
-from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._step_contracts import (
+from linktools.ai.execution.events import project_event_payload
+from linktools.ai.history._projection import StepExecutionHistoryReader
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._step_contracts import (
     AgentRunCheckpoint,
     AgentRunRecord,
 )
@@ -40,7 +42,7 @@ from .test_history_projection_conformance import _record
 async def test_same_call_id_is_scoped_to_run_and_has_no_invented_result(
     outcome: str,
 ) -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         await state.execution.executions.create_with_history_head(
@@ -49,7 +51,7 @@ async def test_same_call_id_is_scoped_to_run_and_has_no_invented_result(
         reader = StepExecutionHistoryReader(
             namespace="history",
             executions=state.execution.executions,
-            store=state.run_store.read_store(RuntimeDomain.TRACE),
+            store=state.run_store.read_store(PersistenceDomain.TRACE),
             notifications=state.run_store,
             cursor_signer=HmacCursorSigner("history", b"history-key"),
         )
@@ -307,11 +309,7 @@ async def test_interrupted_response_preserves_confirmed_native_and_text_part_pos
     group = RuntimeFeatures("partial")
     group.agent("default", model="default")
     group.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open(
-        "partial",
-        storage=RuntimeStorage.in_memory(),
-        features=model_features(_Models(Model(unused)), group),
-    ) as runtime:
+    async with Persistence.open('partial', storage=PersistenceStorage.in_memory()) as persistence_310, Runtime.open(persistence=persistence_310, features=model_features(_Models(Model(unused)), group)) as runtime:
         execution = await runtime.agents.get("default").start("prompt")
         selector = None
         received_tail = False
@@ -366,7 +364,7 @@ async def test_attachment_inclusion_is_readable_from_running_interaction_without
 ):
     from dataclasses import replace
     from types import SimpleNamespace
-    from linktools.ai.runtime.state._contracts import StoredUserInput
+    from linktools.ai.persistence.contracts import StoredUserInput
     from linktools.ai.storage import StoredPayload
     from .test_attachment_facts import _Executions, _fact
     from .test_model_interaction_lifecycle_paging import (
@@ -424,7 +422,7 @@ async def test_attachment_inclusion_is_readable_from_running_interaction_without
 
 @pytest.mark.asyncio
 async def test_resumed_tool_reuses_started_fact_and_restored_arguments() -> None:
-    from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
+    from linktools.ai.persistence._step_archive import StagingAgentRunStore
 
     store = StagingAgentRunStore()
     run = AgentRunRecord("run")

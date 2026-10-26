@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """HTTP body recording is opt-in at capture and remains separate from attempt metadata."""
 from ._runtime_test_helpers import model_features
 
@@ -14,12 +16,14 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.model import ModelClientRequest, ModelClientRequestRecorder, ModelClientResponse
 from linktools.ai.model import _http, _openai
-from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
+from linktools.ai.history import History
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._trace_capture import record_http_bodies_enabled
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._codec import _CURRENT_CODEC, _decode_domain, _encode_persisted_domain
-from linktools.ai.runtime.state._contracts import ModelClientRequestRef
-from linktools.ai.runtime.state._model_client import prepare_client_requests, resolve_client_requests
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.codec import _CURRENT_CODEC, _decode_domain, _encode_persisted_domain
+from linktools.ai.persistence.contracts import ModelClientRequestRef
+from linktools.ai.persistence._model_client import prepare_client_requests, resolve_client_requests
 
 from .test_model_client_request_capture import _model, _binding, _response
 from .test_model_client_response_capture import _invoke
@@ -64,9 +68,9 @@ async def test_disabled_capture_does_not_read_request_body() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('enabled', [False, True])
-@pytest.mark.parametrize('domain', [RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT])
+@pytest.mark.parametrize('domain', [PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT])
 async def test_attempt_policy_and_metadata_roundtrip_without_copying_bodies_to_checkpoint(
-    enabled: bool, domain: RuntimeDomain,
+    enabled: bool, domain: PersistenceDomain,
 ) -> None:
     source = ModelClientRequest(
         'openai', b'request' if enabled else None, record_http_bodies=enabled,
@@ -85,7 +89,7 @@ async def test_attempt_policy_and_metadata_roundtrip_without_copying_bodies_to_c
     assert value.diagnostics == source.diagnostics
     assert value.response is not None and value.response.status_code == 200
     assert value.capture_error is value.response.capture_error is None
-    if domain is RuntimeDomain.TRACE:
+    if domain is PersistenceDomain.TRACE:
         assert value == source
     else:
         assert value.body is value.response.body is None
@@ -123,13 +127,12 @@ async def test_runtime_policy_survives_checkpoint_and_cold_trace_read(
     features.capability(WrapperCapability(TraceCapability(record_http_bodies=enabled), id='wrapped-trace'))
     features.capability(CheckpointCapability())
     root = tmp_path / 'state'
-    async with Runtime.open('body-policy', storage=RuntimeStorage.filesystem(root),
-                            features=model_features(models, features)) as runtime:
+    async with Persistence.open('body-policy', storage=PersistenceStorage.filesystem(root)) as persistence_126, Runtime.open(persistence=persistence_126, features=model_features(models, features)) as runtime:
         execution = await runtime.agents.get().start('question')
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
         execution_id = execution.execution_id
         principal = runtime.default_principal
-    async with RuntimeHistory.open('body-policy', storage=RuntimeStorage.filesystem(root), features=features) as history:
+    async with Persistence.open('body-policy', storage=PersistenceStorage.filesystem(root), tenant_id="default", read_only=True) as history_persistence_134, History.open(persistence=history_persistence_134, authorization=features.authorization) as history:
         items = await history.model_interactions(execution_id, principal=principal, include_client_requests=True)
         attempt = items.items[0].client_requests[0]
         assert attempt.record_http_bodies is enabled

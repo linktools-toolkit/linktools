@@ -10,8 +10,8 @@ from pydantic_ai.messages import BinaryContent, ImageUrl, TextContent, UploadedF
 
 from linktools.ai.core import Principal, PromptLimits, WorkspaceFileInput
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ExecutionRequest
-from linktools.ai.runtime._input import (
+from linktools.ai.execution import ExecutionRequest
+from linktools.ai.inputs import (
     ExecutionInputMaterializer,
     decode_task_prompt_draft,
     decode_user_content_payload,

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Terminal trace joins existing authoritative transactions without delaying safety writes."""
 from ._runtime_test_helpers import model_features
 
@@ -7,6 +9,7 @@ import asyncio
 import json
 from contextvars import ContextVar
 from pathlib import Path
+from dataclasses import replace
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
@@ -19,9 +22,10 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._sql import _SqlTransaction
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._sql import _SqlTransaction
 from linktools.ai.storage._database import SqlStorageContext
 from linktools.ai.storage import InMemoryCacheBackend, StorageRoute
 from .test_explicit_runtime_features import _FeatureModels, _FeatureFunctionModel
@@ -31,15 +35,18 @@ async def _run_observed(path: Path, backend: str, policy: CommitPolicy, monkeypa
     path.mkdir(parents=True, exist_ok=True)
     engine = None
     if backend == "memory":
-        storage = RuntimeStorage.in_memory()
+        storage = PersistenceStorage.in_memory( coordination=InMemoryCacheBackend(max_bytes=65536))
     elif backend == "filesystem":
-        storage = RuntimeStorage.filesystem(path / "state")
+        storage = PersistenceStorage.filesystem(path / "state", coordination=InMemoryCacheBackend(max_bytes=65536))
     elif backend == "sqlite":
-        storage = RuntimeStorage.sqlite(path / "state.db")
+        storage = PersistenceStorage.sqlite(path / "state.db", coordination=InMemoryCacheBackend(max_bytes=65536))
     else:
         engine = create_async_engine(f"sqlite+aiosqlite:///{path / 'state.db'}")
         await provision_runtime_database(engine)
-        storage = RuntimeStorage.sql(engine)
+        storage = PersistenceStorage.sql(engine, coordination=InMemoryCacheBackend(max_bytes=65536))
+    if split:
+        storage = PersistenceStorage(replace(storage.plan, trace=StorageRoute.sqlite(path / "trace.db")),
+                                     object_store=storage.object_store, coordination=storage.coordination)
     entered, release = asyncio.Event(), asyncio.Event()
 
     async def lookup(context: AgentContext[None]) -> str:
@@ -56,8 +63,8 @@ async def _run_observed(path: Path, backend: str, policy: CommitPolicy, monkeypa
     features.tool(lookup, effect_policy="none")
     features.agent("default", model="default", allow_tools=("lookup",))
     for capability in (
-        ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(), coordination=InMemoryCacheBackend(max_bytes=65536)),
-        TraceCapability(commit=policy, storage=StorageRoute.sqlite(path / "trace.db") if split else None),
+        ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()),
+        TraceCapability(commit=policy),
         *((CheckpointCapability(),) if checkpoint else ()),
     ):
         features.capability(capability, scope="runtime")
@@ -74,9 +81,7 @@ async def _run_observed(path: Path, backend: str, policy: CommitPolicy, monkeypa
     event.listen(Engine, "before_cursor_execute", observe_statement)
     original_sql_mutation = SqlStorageContext.run_mutation
     try:
-        async with Runtime.open(
-            "terminal-trace", storage=storage, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), features),
-        ) as runtime:
+        async with Persistence.open('terminal-trace', storage=storage) as persistence_77, Runtime.open(persistence=persistence_77, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), features)) as runtime:
             session = await runtime.agents.get().create_session("session")
             during["sql_mutations"] = []
 
@@ -88,7 +93,7 @@ async def _run_observed(path: Path, backend: str, policy: CommitPolicy, monkeypa
                 return await original_sql_mutation(context, wrapped, **kwargs)
 
             monkeypatch.setattr(SqlStorageContext, "run_mutation", observe_sql)
-            archive = runtime._state.run_store.read_store(RuntimeDomain.TRACE)
+            archive = runtime._run_store.read_store(PersistenceDomain.TRACE)
             repository = runtime._state.execution.executions
             groups = {archive.state_store.storage_group, repository.state_store.storage_group}
             for group in groups:
@@ -129,13 +134,13 @@ async def _run_observed(path: Path, backend: str, policy: CommitPolicy, monkeypa
             execution = await session.start("question")
             try:
                 await asyncio.wait_for(entered.wait(), 5)
-                run_id, = runtime._state.run_store.trace_persistence.offsets
+                run_id, = runtime._run_store.trace_persistence.offsets
                 during["projections"] = len(trace_frames)
                 during["transactions"] = len(frames)
                 during["events"] = await archive.list_events(agent_run_id=run_id)
                 during["execution"] = await repository.get(execution.execution_id, tenant_id=runtime.tenant_id)
                 if checkpoint:
-                    during["checkpoint"] = await runtime._state.run_store.read_store(RuntimeDomain.CHECKPOINT).latest_checkpoint(agent_run_id=run_id)
+                    during["checkpoint"] = await runtime._run_store.read_store(PersistenceDomain.CHECKPOINT).latest_checkpoint(agent_run_id=run_id)
             finally:
                 release.set()
             assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED

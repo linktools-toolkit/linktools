@@ -17,21 +17,15 @@ from linktools.ai.core import (
     TaskStatus,
 )
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
-from linktools.ai.runtime import Execution, Runtime, TaskGraphRun, TaskGraphRunEvent
+from linktools.ai.execution import Execution, TaskGraphRunEvent
+from linktools.ai.runtime import Runtime
+from linktools.ai.task_engine import TaskGraphRun
 from linktools.ai.core import _signed_cursor as _cursor
 from linktools.ai.runtime._domains import RuntimeExecutions, RuntimeSessions
-from linktools.ai.runtime._execution_tree import ExecutionTreeBroker, ExecutionTreeStreamer
-from linktools.ai.runtime._watch_cursor import decode_graph_watch_cursor, encode_graph_watch_cursor
-from linktools.ai.runtime.service_api import (
-    ExecutionEvent,
-    ExecutionStreamEvent,
-    ExecutionTreeEvent,
-    ExecutionView,
-    ModelInteractionReadBoundary,
-    TaskGraphProjection,
-    TaskModelProjection,
-)
-from linktools.ai.runtime.service_api import _ExecutionStreamFailure
+from linktools.ai.execution.tree import ExecutionTreeBroker, ExecutionTreeStreamer
+from linktools.ai.observe.cursors import decode_graph_watch_cursor, encode_graph_watch_cursor
+from linktools.ai.execution import ExecutionEvent, ExecutionStreamEvent, ExecutionTreeEvent, ExecutionView, ModelInteractionReadBoundary, TaskGraphProjection, TaskModelProjection
+from linktools.ai.observe.stream import ExecutionStreamFailure
 from linktools.ai.task import TaskEvent, TaskEventType, TaskGraphState, TaskNode, TaskNodeView
 
 
@@ -1291,7 +1285,7 @@ async def test_task_graph_live_stream_failure_keeps_stream_origin_and_cursor() -
             await delivered_first.wait()
             if False:
                 yield None
-            raise _ExecutionStreamFailure(cause)
+            raise ExecutionStreamFailure(cause)
 
         return values()
 
@@ -1497,7 +1491,7 @@ async def test_task_graph_watch_preserves_cursor_protocol_failures(
     def fail(*args, **kwargs):
         raise cause
 
-    monkeypatch.setattr(f"linktools.ai.runtime._task.{encoding}", fail)
+    monkeypatch.setattr(f"linktools.ai.task_engine._run.{encoding}", fail)
     run = _task_graph_run(_Runtime(), "graph", Principal("owner", "tenant"), _watch_tree)
 
     with pytest.raises(ValueError) as raised:
@@ -1560,7 +1554,7 @@ async def test_task_graph_watch_preserves_same_round_durable_failure() -> None:
 
     def broken_tree(*args, **kwargs):
         async def values():
-            raise _ExecutionStreamFailure(OSError("broker failed"))
+            raise ExecutionStreamFailure(OSError("broker failed"))
             yield
         return values()
 
@@ -1596,7 +1590,7 @@ async def test_task_graph_watch_preserves_authoritative_failure_during_cleanup()
     def broken_tree(*args, **kwargs):
         async def values():
             await started.wait()
-            raise _ExecutionStreamFailure(OSError("broker failed"))
+            raise ExecutionStreamFailure(OSError("broker failed"))
             yield
         return values()
 
@@ -1616,7 +1610,7 @@ async def test_task_graph_watch_preserves_authoritative_failure_during_cleanup()
 @pytest.mark.asyncio
 async def test_graph_live_subagent_root_cursor_binds_selected_execution():
     from types import SimpleNamespace
-    from linktools.ai.runtime._watch_cursor import decode_execution_watch_cursor
+    from linktools.ai.observe.cursors import decode_execution_watch_cursor
     from linktools.ai.task import TaskNode, TaskNodeView
 
     principal = Principal("owner", "tenant")

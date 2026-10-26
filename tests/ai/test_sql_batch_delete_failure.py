@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime.state._sql import SqlStateStore, _SqlTransaction
+from linktools.ai.persistence._sql import SqlStateStore, _SqlTransaction
 from tests.ai.test_state_batch_delete_backends import _digest, _record, _seed
 
 

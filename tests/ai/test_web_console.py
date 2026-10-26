@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Public Web transport parity, local trust boundary, and observer lifetime."""
 from ._runtime_test_helpers import model_features
 
@@ -17,7 +19,9 @@ from linktools.ai.errors import ErrorDiagnostics
 from linktools.ai.observe import Metrics
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
-from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
+from linktools.ai.history import History
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.web import create_app
 from ._runtime_test_helpers import RuntimeUsageModels, _persistence_capabilities
 
@@ -101,10 +105,7 @@ async def test_session_execution_history_trace_result_and_metrics_use_runtime() 
     features = RuntimeFeatures("web-test")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open(
-        "web-test", metrics=metrics, storage=RuntimeStorage.in_memory(),
-        features=model_features(RuntimeUsageModels(), features),
-    ) as runtime:
+    async with Persistence.open('web-test', storage=PersistenceStorage.in_memory()) as persistence_104, Runtime.open(persistence=persistence_104, metrics=metrics, features=model_features(RuntimeUsageModels(), features)) as runtime:
         async with client(create_app(runtime=runtime, metrics=metrics)) as http:
             request = {"session_id": "web-session", "request_id": "new-session", "title": "Review <script>"}
             first = await http.post("/api/sessions", json=request, headers=_HEADERS)
@@ -187,7 +188,7 @@ async def test_rejected_message_needs_new_identity_after_session_owner_finishes(
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
     features = RuntimeFeatures("web-busy")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Runtime.open("web-busy", storage=RuntimeStorage.in_memory(), features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('web-busy', storage=PersistenceStorage.in_memory()) as persistence_190, Runtime.open(persistence=persistence_190, features=model_features(RuntimeUsageModels(), features)) as runtime:
         async with client(create_app(runtime=runtime)) as http:
             created = await http.post("/api/sessions", json={"session_id": "session", "request_id": "create"}, headers=_HEADERS)
             assert created.status_code == 201
@@ -240,7 +241,7 @@ async def test_independent_clients_serialize_session_admission_and_cancel_exact_
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
     features = RuntimeFeatures("web-clients")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Runtime.open("web-clients", storage=RuntimeStorage.in_memory(), features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('web-clients', storage=PersistenceStorage.in_memory()) as persistence_243, Runtime.open(persistence=persistence_243, features=model_features(RuntimeUsageModels(), features)) as runtime:
         app = create_app(runtime=runtime)
         async with client(app) as first, client(app) as second:
             clients = (first, second)
@@ -289,8 +290,7 @@ async def test_independent_clients_serialize_session_admission_and_cancel_exact_
 
 @pytest.mark.asyncio
 async def test_execution_stream_replays_cursor_and_finishes_with_authoritative_snapshot() -> None:
-    async with Runtime.open("web-stream", storage=RuntimeStorage.in_memory(),
-                            features=model_features(RuntimeUsageModels(), _persistence_capabilities(trace=True))) as runtime:
+    async with Persistence.open('web-stream', storage=PersistenceStorage.in_memory()) as persistence_292, Runtime.open(persistence=persistence_292, features=model_features(RuntimeUsageModels(), _persistence_capabilities(trace=True))) as runtime:
         execution = await runtime.agents.get().start("hello")
         await execution.wait()
         async with client(create_app(runtime=runtime)) as http:
@@ -316,14 +316,14 @@ async def test_execution_stream_replays_cursor_and_finishes_with_authoritative_s
 
 @pytest.mark.asyncio
 async def test_read_only_history_requires_no_model_and_never_opens_runtime(tmp_path: Path) -> None:
-    storage = RuntimeStorage.from_root(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path)
     features = RuntimeFeatures("web-history")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Runtime.open("default", storage=storage, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('default', storage=storage) as persistence_322, Runtime.open(persistence=persistence_322, features=model_features(RuntimeUsageModels(), features)) as runtime:
         execution = await runtime.agents.get().start("saved", session_id="session")
         await execution.wait()
         identity = execution.execution_id
-    async with RuntimeHistory.open("default", storage=RuntimeStorage.from_root(tmp_path)) as history:
+    async with Persistence.open('default', storage=PersistenceStorage.from_root(tmp_path), tenant_id="default", read_only=True) as history_persistence_325, History.open(persistence=history_persistence_325) as history:
         async with client(create_app(history=history)) as http:
             assert (await http.get("/api/config")).json()["read_only"]
             sessions = (await http.get("/api/sessions")).json()
@@ -461,10 +461,7 @@ async def test_failed_execution_stream_redacts_diagnostics_without_rewriting_use
         raise ValueError("api_key=provider-secret")
 
     prompt = '{"error_diagnostics":{"exception_message":"user content"}}'
-    async with Runtime.open(
-        "web-failed-stream", storage=RuntimeStorage.in_memory(),
-        features=model_features(_Models(_UsageFunctionModel(fail)), _persistence_capabilities(trace=True)),
-    ) as runtime:
+    async with Persistence.open('web-failed-stream', storage=PersistenceStorage.in_memory()) as persistence_464, Runtime.open(persistence=persistence_464, features=model_features(_Models(_UsageFunctionModel(fail)), _persistence_capabilities(trace=True))) as runtime:
         execution = await runtime.agents.get().start(prompt)
         await execution.wait()
         async with client(create_app(runtime=runtime)) as http:
@@ -483,7 +480,7 @@ async def test_failed_execution_stream_redacts_diagnostics_without_rewriting_use
 
 
 def test_historical_event_diagnostics_keep_full_text_after_current_redaction() -> None:
-    from linktools.ai.runtime import ExecutionStreamEvent
+    from linktools.ai.execution import ExecutionStreamEvent
     from linktools.ai.web._app import _wire
 
     text = repr(json.dumps({"api_key": 'prefix"TAIL_SECRET', "status": 401}))
@@ -638,7 +635,7 @@ async def test_opaque_session_ids_round_trip_through_query_identity() -> None:
     identity = "../team/conversation?notes#你好"
     features = RuntimeFeatures("opaque-web")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Runtime.open("opaque-web", storage=RuntimeStorage.in_memory(), features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('opaque-web', storage=PersistenceStorage.in_memory()) as persistence_641, Runtime.open(persistence=persistence_641, features=model_features(RuntimeUsageModels(), features)) as runtime:
         async with client(create_app(runtime=runtime)) as http:
             created = await http.post("/api/sessions", json={"session_id": identity, "request_id": "create-opaque", "title": "Opaque session"}, headers=_HEADERS)
             assert created.status_code == 201, created.text
@@ -667,10 +664,7 @@ async def test_end_recovery_required_execution_uses_durable_cancel_and_replays_r
     try:
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Runtime.open(
-            "web-end-recovery", storage=RuntimeStorage.in_memory(),
-            features=model_features(_ToolModels(), application),
-        ) as runtime, client(create_app(runtime=runtime)) as http:
+        async with Persistence.open('web-end-recovery', storage=PersistenceStorage.in_memory()) as persistence_670, Runtime.open(persistence=persistence_670, features=model_features(_ToolModels(), application)) as runtime, client(create_app(runtime=runtime)) as http:
             session = await runtime.agents.get("default").create_session("session")
             execution = await session.start("inspect", idempotency_key="turn")
             await asyncio.wait_for(started.wait(), 10)

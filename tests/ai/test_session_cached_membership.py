@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 """Display facts have bounded freshness; authorization decisions never do."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import event
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
 from linktools.ai.storage import InMemoryCacheBackend, _write_cache
 import linktools.ai.runtime._session as session_module
 
@@ -28,8 +28,8 @@ def clock(monkeypatch):
 
 async def test_cached_display_facts_skip_sql_but_recheck_policy_and_local_writes(tmp_path, clock):
     cache = InMemoryCacheBackend(max_bytes=1_000_000)
-    state = RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache)
-    state = RuntimeState(state)
+    state = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache)
+    state = Persistence(state)
     await _prepare(state, body=True)
     allowed = True
     calls = 0
@@ -77,11 +77,11 @@ async def test_cached_display_facts_skip_sql_but_recheck_policy_and_local_writes
 async def test_other_owner_membership_deletion_is_bounded_by_original_three_seconds(tmp_path, clock):
     cache = InMemoryCacheBackend(max_bytes=1_000_000)
     path = tmp_path / "state.db"
-    state = RuntimeStorage.sqlite(path, cache=cache)
-    state = RuntimeState(state)
+    state = PersistenceStorage.sqlite(path, cache=cache)
+    state = Persistence(state)
     await _prepare(state, body=True)
-    other = RuntimeStorage.sqlite(path)
-    other = RuntimeState(other)
+    other = PersistenceStorage.sqlite(path)
+    other = Persistence(other)
     await other.initialize(namespace="display", tenant_id="tenant")
     try:
         service = _service(state, cache)
@@ -108,11 +108,11 @@ async def test_other_owner_membership_deletion_is_bounded_by_original_three_seco
 async def test_newer_whole_display_survives_older_cached_session_revision(tmp_path, clock):
     cache = InMemoryCacheBackend(max_bytes=1_000_000)
     path = tmp_path / "state.db"
-    state = RuntimeStorage.sqlite(path, cache=cache)
-    state = RuntimeState(state)
+    state = PersistenceStorage.sqlite(path, cache=cache)
+    state = Persistence(state)
     await _prepare(state, body=True)
-    other = RuntimeStorage.sqlite(path)
-    other = RuntimeState(other)
+    other = PersistenceStorage.sqlite(path)
+    other = Persistence(other)
     await other.initialize(namespace="display", tenant_id="tenant")
     engine = state.conversation.sessions.state_store.storage_group.context.engine
     statements = []
@@ -142,15 +142,15 @@ async def test_newer_whole_display_survives_older_cached_session_revision(tmp_pa
 async def test_cached_execution_absence_does_not_reject_new_source_display(tmp_path, clock):
     cache = InMemoryCacheBackend(max_bytes=1_000_000)
     path = tmp_path / "state.db"
-    state = RuntimeStorage.sqlite(path, cache=cache)
-    state = RuntimeState(state)
+    state = PersistenceStorage.sqlite(path, cache=cache)
+    state = Persistence(state)
     await state.initialize(
             namespace="display", tenant_id="tenant",
         )
-    other = RuntimeStorage.sqlite(path)
+    other = PersistenceStorage.sqlite(path)
     try:
         assert await state.execution.executions.get_many(("active",), tenant_id="tenant") == {}
-        other = RuntimeState(other)
+        other = Persistence(other)
         await _prepare(other, body=True)
         service = _service(state, cache)
         detail = await service.refresh("session", principal=_PRINCIPAL, max_age=3)
@@ -192,12 +192,12 @@ async def test_cached_canonical_page_projects_live_pending_without_freezing_prog
     from .test_session_timeline import _execution, _session
 
     cache = InMemoryCacheBackend(max_bytes=1_000_000)
-    state = RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache)
+    state = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache)
     if with_history:
-        state = RuntimeState(state)
+        state = Persistence(state)
         await _prepare(state, body=True)
     else:
-        state = RuntimeState(state)
+        state = Persistence(state)
         await state.initialize(
             namespace="display", tenant_id="tenant",
         )

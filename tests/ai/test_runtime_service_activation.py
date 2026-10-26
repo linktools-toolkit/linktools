@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Unused Runtime services perform no business IO or background execution."""
 
 import asyncio
@@ -11,11 +13,14 @@ import pytest
 
 from linktools.ai.core import TaskStatus
 
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime import Runtime
+from linktools.ai.task_engine import TaskEngine
+from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.storage import StorageRoute
-from linktools.ai.runtime.state._store import StateStore
+from linktools.ai.persistence.state import StateStore
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
 
 ValueT = TypeVar("ValueT")
@@ -26,19 +31,16 @@ ValueT = TypeVar("ValueT")
 async def test_idle_services_do_not_read_write_or_launch_workers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    storage = (RuntimeStorage.in_memory() if backend == "memory"
-               else RuntimeStorage.sqlite(tmp_path / "runtime.db"))
-    initialize = RuntimeState.initialize
+    storage = (PersistenceStorage.in_memory() if backend == "memory"
+               else PersistenceStorage.sqlite(tmp_path / "runtime.db"))
+    initialize = Persistence.initialize
 
     async def initialize_and_guard(
-        state: RuntimeState, *, namespace: str, tenant_id: str, read_only: bool = False,
-        module_routes: Mapping[RuntimeDomain, StorageRoute] | None = None,
-        capability_routes: Mapping[str, StorageRoute] | None = None,
+        state: Persistence, *, namespace: str, tenant_id: str, read_only: bool = False,
     ) -> None:
         # Shared schema provisioning is permitted; domain business IO is not.
         await initialize(
             state, namespace=namespace, tenant_id=tenant_id, read_only=read_only,
-            module_routes=module_routes, capability_routes=capability_routes,
         )
         service_stores = {
             state.task.tasks.state_store,
@@ -69,16 +71,16 @@ async def test_idle_services_do_not_read_write_or_launch_workers(
             for name in ("read_many", "mutate"):
                 monkeypatch.setattr(group, name, guard_group_operation(getattr(group, name)))
 
-    monkeypatch.setattr(RuntimeState, "initialize", initialize_and_guard)
-    async with Runtime.open("idle-services", storage=storage) as runtime:
-        assert runtime.tasks is not None
-        assert runtime.evaluations is not None
-        assert runtime.artifacts is not None
+    monkeypatch.setattr(Persistence, "initialize", initialize_and_guard)
+    async with Persistence.open('idle-services', storage=storage) as persistence_73, Runtime.open(persistence=persistence_73) as runtime, TaskEngine.open(persistence=persistence_73) as engine, Evaluations.open(engine) as evaluations:
+        assert engine.persistence is persistence_73
+        assert evaluations is not None
+        assert persistence_73.artifact is not None
         await asyncio.sleep(0)
-        launcher = runtime._graph_service._launcher
+        launcher = engine._graph_service._launcher
         assert launcher is not None
         assert not launcher._graphs
-        assert not runtime.evaluations._watchers
+        assert not evaluations._watchers
     assert not runtime._state.ready
 
 
@@ -92,12 +94,10 @@ async def test_task_service_activates_on_call_without_agent_capabilities() -> No
 
     task = Task("service.activation", run, effect_policy="none")
     graph = TaskGraph("service-activation", (TaskNode("run", task=task),))
-    async with Runtime.open(
-        "service-activation", storage=RuntimeStorage.in_memory(),
-    ) as runtime:
+    async with Persistence.open('service-activation', storage=PersistenceStorage.in_memory()) as persistence_95, TaskEngine.open(task, persistence=persistence_95) as engine, Evaluations.open(engine) as evaluations:
         assert calls == []
-        execution = await runtime.tasks.bind(task).start(graph, idempotency_key="activate")
+        execution = await engine.start(graph, idempotency_key="activate")
         assert (await execution.wait(timeout_seconds=5)).result.status is TaskStatus.SUCCEEDED
         assert await execution.result("run") == "task result"
         assert calls == ["run"]
-        assert not runtime.evaluations._watchers
+        assert not evaluations._watchers

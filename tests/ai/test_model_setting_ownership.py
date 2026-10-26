@@ -15,7 +15,8 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.model import create_model
 from linktools.ai.model import _anthropic, _openai
-from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
+from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
 
 from .test_model_protocols import response, stream_events
 
@@ -135,7 +136,10 @@ async def test_runtime_thinking_is_fallback_not_a_second_native_owner(
     ))
     features.agent("default", model="default")
     features.capability(Thinking(effort="high"))
-    async with Runtime.open("native-owner", storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with (
+        Persistence.open("native-owner", storage=PersistenceStorage.in_memory()) as persistence,
+        Runtime.open(persistence=persistence, features=features) as runtime,
+    ):
         result = await runtime.agents.get().run("hello", timeout_seconds=10)
     assert result.result.status is ExecutionStatus.SUCCEEDED
     for name, value in raw.items():
@@ -334,7 +338,10 @@ async def test_runtime_reports_owner_conflict_as_nonretryable_configuration_erro
         model_settings={"anthropic_effort": "low", "extra_body": {"output_config": {"custom": "private-value"}}},
     ))
     features.agent("default", model="default")
-    async with Runtime.open("owner-conflict", storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with (
+        Persistence.open("owner-conflict", storage=PersistenceStorage.in_memory()) as persistence,
+        Runtime.open(persistence=persistence, features=features) as runtime,
+    ):
         result = await runtime.agents.get().run("hello", timeout_seconds=10)
     assert result.result.status is ExecutionStatus.FAILED
     assert result.result.error_code == ErrorCode.MODEL_CONFIG_INVALID.value

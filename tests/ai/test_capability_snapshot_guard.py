@@ -3,13 +3,14 @@
 """Portable snapshots cannot silently omit optional capability partitions."""
 
 from pathlib import Path
+from dataclasses import replace
 
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime.state._snapshot import SnapshotLimits
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence._snapshot import SnapshotLimits
 from linktools.ai.storage import InMemoryObjectStore, StorageRoute
 
 
@@ -17,14 +18,15 @@ from linktools.ai.storage import InMemoryObjectStore, StorageRoute
 @pytest.mark.parametrize("backend", ("sqlite", "filesystem"))
 @pytest.mark.parametrize("custom", (False, True))
 async def test_portable_snapshot_rejects_custom_partitions_only(tmp_path: Path, backend: str, custom: bool) -> None:
-    storage = RuntimeStorage.sqlite(tmp_path / "state.db") if backend == "sqlite" else RuntimeStorage.filesystem(tmp_path / "state")
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db") if backend == "sqlite" else PersistenceStorage.filesystem(tmp_path / "state")
     route = StorageRoute.sqlite(tmp_path / "state.db") if backend == "sqlite" else StorageRoute.filesystem(tmp_path / "state")
     routes = {"app.audit": route} if custom else {}
-    source = RuntimeState(storage)
-    await source.initialize(namespace="snapshot-capabilities", tenant_id="tenant", capability_routes=routes)
+    storage = PersistenceStorage(replace(storage.plan, capability_routes=routes))
+    source = Persistence(storage)
+    await source.initialize(namespace="snapshot-capabilities", tenant_id="tenant")
     await source.close()
-    offline = RuntimeState(storage)
-    await offline.initialize(namespace="snapshot-capabilities", tenant_id="tenant", capability_routes=routes, read_only=True)
+    offline = Persistence(storage)
+    await offline.initialize(namespace="snapshot-capabilities", tenant_id="tenant", read_only=True)
     try:
         archive = InMemoryObjectStore()
         limits = SnapshotLimits(max_entries=100, max_bytes=100_000)
@@ -48,7 +50,8 @@ async def test_public_snapshot_detects_committed_custom_partitions_without_confi
 ) -> None:
     from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.core import CommitPolicy
-    from linktools.ai.runtime import RuntimeSnapshot, RuntimeHistory
+    from linktools.ai.snapshot import Snapshot
+    from linktools.ai.history import History
     from .test_capability_atomic_writes import _opened
     from .test_runtime_snapshot_operations import Offline
 
@@ -61,18 +64,17 @@ async def test_public_snapshot_detects_committed_custom_partitions_without_confi
         features = RuntimeFeatures("snapshot-capabilities")
         for template in opened.templates:
             features.capability(template)
-    async with RuntimeHistory.open(
-        "atomic-capabilities", tenant_id="default", features=features,
-        storage=(RuntimeStorage.sqlite(tmp_path / "state.db") if backend == "sqlite" else RuntimeStorage.filesystem(tmp_path / "state")),
-    ) as history:
+    async with Persistence.open('atomic-capabilities', storage=PersistenceStorage.sqlite(tmp_path / 'state.db') if backend == 'sqlite' else PersistenceStorage.filesystem(tmp_path / 'state'), tenant_id='default', read_only=True) as history_persistence_65, History.open(persistence=history_persistence_65, authorization=features.authorization) as history:
         assert history is not None
-    with pytest.raises(AIError) as rejected:
-        await RuntimeSnapshot.create(
-            "atomic-capabilities", tenant_id="default",
-            storage=(RuntimeStorage.sqlite(tmp_path / "state.db") if backend == "sqlite" else RuntimeStorage.filesystem(tmp_path / "state")),
-            object_store=InMemoryObjectStore(), features=features if with_features else None,
-            exclusive=Offline(), limits=SnapshotLimits(max_entries=1000, max_bytes=1_000_000),
-        )
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db") if backend == "sqlite" else PersistenceStorage.filesystem(tmp_path / "state")
+    if with_features:
+        storage = PersistenceStorage(replace(storage.plan, capability_routes={
+            identity: route for identity in ("audit", "index") if route is not None
+        }))
+    async with Persistence.open("atomic-capabilities", storage=storage, read_only=True) as persistence:
+        with pytest.raises(AIError) as rejected:
+            await Snapshot.create(persistence=persistence, object_store=InMemoryObjectStore(),
+                                  exclusive=Offline(), limits=SnapshotLimits(max_entries=1000, max_bytes=1_000_000))
     assert rejected.value.code is ErrorCode.SNAPSHOT_UNSUPPORTED
     assert "Capability persistence partitions" in str(rejected.value)
 
@@ -86,7 +88,7 @@ async def test_volatile_custom_writes_do_not_block_durable_core_snapshots(
 ) -> None:
     from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.core import CommitPolicy
-    from linktools.ai.runtime import RuntimeSnapshot
+    from linktools.ai.snapshot import Snapshot
     from .test_capability_atomic_writes import _opened
     from .test_runtime_snapshot_operations import Offline
 
@@ -103,15 +105,17 @@ async def test_volatile_custom_writes_do_not_block_durable_core_snapshots(
         features = RuntimeFeatures("snapshot-capabilities")
         for template in opened.templates:
             features.capability(template)
-    options = dict(
-        tenant_id="default",
-        storage=RuntimeStorage.sqlite(tmp_path / "state.db") if backend == "sqlite" else RuntimeStorage.filesystem(tmp_path / "state"),
-        object_store=InMemoryObjectStore(), features=features if with_features else None,
-        exclusive=Offline(), limits=SnapshotLimits(max_entries=1000, max_bytes=1_000_000),
-    )
-    if mixed:
-        with pytest.raises(AIError) as rejected:
-            await RuntimeSnapshot.create("atomic-capabilities", **options)
-        assert rejected.value.code is ErrorCode.SNAPSHOT_UNSUPPORTED
-    else:
-        assert await RuntimeSnapshot.create("atomic-capabilities", **options)
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db") if backend == "sqlite" else PersistenceStorage.filesystem(tmp_path / "state")
+    if with_features:
+        storage = PersistenceStorage(replace(storage.plan, capability_routes={
+            identity: route for identity, route in zip(("audit", "index"), routes) if route is not None
+        }))
+    async with Persistence.open("atomic-capabilities", storage=storage, read_only=True) as persistence:
+        options = dict(persistence=persistence, object_store=InMemoryObjectStore(),
+                       exclusive=Offline(), limits=SnapshotLimits(max_entries=1000, max_bytes=1_000_000))
+        if mixed:
+            with pytest.raises(AIError) as rejected:
+                await Snapshot.create(**options)
+            assert rejected.value.code is ErrorCode.SNAPSHOT_UNSUPPORTED
+        else:
+            assert await Snapshot.create(**options)

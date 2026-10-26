@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Derived input capture plans retain source authority without preflight writes."""
-from ._runtime_test_helpers import model_features
 
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -11,13 +12,15 @@ import pytest
 
 from linktools.ai.core import JsonValue, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import CaptureInputRequest, Runtime, RuntimeStorage
-from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.inputs import CaptureInputRequest
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.task_engine import TaskEngine
+from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.task import Task, TaskGraph, TaskInvocationInputRef, TaskNode, TaskNodeContext, TaskRef
-from .test_evaluation_consumers import CONTEXT, PRINCIPAL, FixtureModels
+from .test_evaluation_consumers import CONTEXT, PRINCIPAL
 
 
-async def _source_capture(runtime: Runtime) -> TaskInvocationInputRef:
+async def _source_capture(engine: TaskEngine) -> TaskInvocationInputRef:
     async def produce(context: TaskNodeContext[None]) -> JsonValue:
         return "accepted dependency"
 
@@ -26,13 +29,13 @@ async def _source_capture(runtime: Runtime) -> TaskInvocationInputRef:
 
     producer = Task("capture.produce", produce, effect_policy="none")
     consumer = Task("capture.consume", consume, effect_policy="none")
-    run = await runtime.tasks.bind(producer, consumer).start(TaskGraph("source", (
+    run = await engine.with_definitions(producer, consumer).start(TaskGraph("source", (
         TaskNode("value", task=producer),
         TaskNode("read", ("value",), task=consumer, input={"question": "accepted input"}),
     )), principal=PRINCIPAL, idempotency_key="source")
     assert ((await run.wait(timeout_seconds=15)).result).status is TaskStatus.SUCCEEDED
     execution = await run.execution("read")
-    capture = await runtime.executions.capture_input(execution.execution_id,
+    capture = await engine.inputs.capture_input(execution.execution_id,
         CaptureInputRequest(PRINCIPAL, "capture", context_policy="clean"))
     assert isinstance(capture, TaskInvocationInputRef)
     return capture
@@ -42,12 +45,11 @@ async def _source_capture(runtime: Runtime) -> TaskInvocationInputRef:
 async def test_derived_input_description_matches_publication_without_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("input-planning", features=model_features(FixtureModels()), context=CONTEXT,
-                            storage=storage) as runtime:
-        source = await _source_capture(runtime)
-        captures = runtime._input_captures
-        objects = runtime._state.object_store(RuntimeDomain.TASK)
+    storage = PersistenceStorage.filesystem(tmp_path)
+    async with Persistence.open('input-planning', storage=storage, tenant_id='evaluation-consumers') as persistence_46, TaskEngine.open(persistence=persistence_46, context=CONTEXT) as engine:
+        source = await _source_capture(engine)
+        captures = engine.inputs
+        objects = engine.persistence.object_store(PersistenceDomain.TASK)
 
         async def reject_write(*args: object, **kwargs: object) -> object:
             raise AssertionError("input planning must not publish payloads")
@@ -76,10 +78,9 @@ async def test_derived_input_description_matches_publication_without_writes(
 async def test_derived_input_publication_cannot_replace_its_authorized_source(
     tmp_path: Path, changed: str,
 ) -> None:
-    async with Runtime.open("input-authority", features=model_features(FixtureModels()), context=CONTEXT,
-                            storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
-        source = await _source_capture(runtime)
-        captures = runtime._input_captures
+    async with Persistence.open('input-authority', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_79, TaskEngine.open(persistence=persistence_79, context=CONTEXT) as engine:
+        source = await _source_capture(engine)
+        captures = engine.inputs
         contract = await captures.resolve_task_input(source, principal=PRINCIPAL)
         if changed == "execution":
             contract = replace(contract, source_execution_id="different-source")
@@ -102,11 +103,10 @@ async def test_derived_input_publication_cannot_replace_its_authorized_source(
 async def test_owned_input_expiry_fences_only_its_reserved_derivation(
     tmp_path: Path, materialized: bool,
 ) -> None:
-    storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("input-fence", features=model_features(FixtureModels()), context=CONTEXT,
-                            storage=storage) as runtime:
-        source = await _source_capture(runtime)
-        captures = runtime._input_captures
+    storage = PersistenceStorage.filesystem(tmp_path)
+    async with Persistence.open('input-fence', storage=storage, tenant_id='evaluation-consumers') as persistence_106, TaskEngine.open(persistence=persistence_106, context=CONTEXT) as engine:
+        source = await _source_capture(engine)
+        captures = engine.inputs
         contract = await captures.resolve_task_input(source, principal=PRINCIPAL)
         planned = await captures.describe_task_input(contract, principal=PRINCIPAL,
             source_capture=source, idempotency_key="evaluation:expired")
@@ -119,7 +119,7 @@ async def test_owned_input_expiry_fences_only_its_reserved_derivation(
             with pytest.raises(AIError) as retained:
                 await captures.expire_task_input_objects(candidates, principal=PRINCIPAL, now=datetime.now(timezone.utc))
             assert retained.value.code is ErrorCode.STORAGE_CONFLICT
-            await runtime._state.object_store(RuntimeDomain.TASK).delete_object(candidates[0].key, expected_digest=candidates[0].digest)
+            await engine.persistence.object_store(PersistenceDomain.TASK).delete_object(candidates[0].key, expected_digest=candidates[0].digest)
         receipt_objects = tuple(replace(reference, store_id="runtime") for reference in candidates)
         await captures.expire_task_input_objects(receipt_objects, principal=PRINCIPAL, now=datetime.now(timezone.utc))
         with pytest.raises(AIError) as rejected:
@@ -137,10 +137,9 @@ async def test_owned_input_expiry_fences_only_its_reserved_derivation(
 
 @pytest.mark.asyncio
 async def test_retained_input_capture_cannot_be_expired_before_object_cleanup(tmp_path: Path) -> None:
-    async with Runtime.open("input-transfer", features=model_features(FixtureModels()), context=CONTEXT,
-                            storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
-        source = await _source_capture(runtime)
-        captures = runtime._input_captures
+    async with Persistence.open('input-transfer', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_140, TaskEngine.open(persistence=persistence_140, context=CONTEXT) as engine:
+        source = await _source_capture(engine)
+        captures = engine.inputs
         derived = await captures.task_input(source, principal=PRINCIPAL, idempotency_key="evaluation:submitted")
         candidates = await captures.task_input_objects((derived,), principal=PRINCIPAL)
         assert len(candidates) == 1

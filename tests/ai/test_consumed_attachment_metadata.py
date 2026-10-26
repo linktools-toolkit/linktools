@@ -26,16 +26,8 @@ from pydantic_ai.models import ModelRequestParameters
 
 from linktools.ai.model import _openai
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime._attachment import (
-    binary_attachment_text,
-    bind_tool_return_attachments,
-    is_binary_attachment_text,
-)
-from linktools.ai.runtime._message import (
-    decode_model_messages,
-    encode_model_messages,
-    project_transient_binary_content,
-)
+from linktools.ai.model._attachment import binary_attachment_text, bind_tool_return_attachments, is_binary_attachment_text
+from linktools.ai.model.messages import decode_model_messages, encode_model_messages, project_transient_binary_content
 
 _BODY = b"\xff\x00\x80image"
 

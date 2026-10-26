@@ -235,10 +235,10 @@ place; diagnostic exception messages remain redacted to protect credentials.
 
 | Command capability | Console surface | Runtime source |
 | --- | --- | --- |
-| `ai-run` | New conversation, composer, planning/thinking/memory/files, live text and tool/subagent progress, Stop, final JSON download | Agent/Session `start`, Execution `watch`/`cancel`, RuntimeHistory `result` |
-| Former `ai-session` | Session list, status/revision/CWD/active execution, paged turns, create/rename/fork/close | RuntimeSessions and RuntimeHistory session APIs |
-| Former `ai-history` | Paged executions, explicit newest-by-time scan, metadata, paged SDK history/transcript, original client requests/responses, SDK prompt architecture, duration/cache usage | RuntimeHistory `list_executions`, `recent_executions`, `inspect_execution`, `history`, `transcript`, `model_interactions` |
-| Former `ai-trace` | Metadata timeline with source execution, run/request/step/tool locators, duration, purpose, token usage and content drill-down | RuntimeHistory `trace` and filtered `history` |
+| `ai-run` | New conversation, composer, planning/thinking/memory/files, live text and tool/subagent progress, Stop, final JSON download | Agent/Session `start`, Execution `watch`/`cancel`, History `result` |
+| Former `ai-session` | Session list, status/revision/CWD/active execution, paged turns, create/rename/fork/close | RuntimeSessions and History session APIs |
+| Former `ai-history` | Paged executions, explicit newest-by-time scan, metadata, paged SDK history/transcript, original client requests/responses, SDK prompt architecture, duration/cache usage | History `list_executions`, `recent_executions`, `inspect_execution`, `history`, `transcript`, `model_interactions` |
+| Former `ai-trace` | Metadata timeline with source execution, run/request/step/tool locators, duration, purpose, token usage and content drill-down | History `trace` and filtered `history` |
 | Former `ai-metrics` | Twelve-metric summary, named metric, time window, dimensions/correlation filters, grouping, aggregation and buckets | Metrics `query` |
 | Former `ai-status` | Runtime & capabilities: workspace/storage locations, model, captured input_mime_types allowlist, credential presence, captured Agent/Tool/Skill/MCP identities | CLI composition and one RuntimeFeatures capture |
 | `ai-acp` | Equivalent explicit session create/load/continue/fork/close/cancel interactions; ACP itself remains a separate stdio transport | The same public Session and Execution APIs |
@@ -323,7 +323,7 @@ mode has no cursor or server filters and is never triggered by refresh/polling.
 To inspect all executions for a session (including non-conversation children),
 use its Session ID filter in Executions rather than only the conversation turns.
 
-Read-only `RuntimeHistory` currently exposes a recent-session list rather than a
+Read-only `History` currently exposes a recent-session list rather than a
 paged session index; the UI labels this limitation. Writable mode uses the
 paged RuntimeSessions API. Browsing an exact session still pages its turns. If
 the Runtime reports unavailable session history, the console reads metadata
@@ -335,7 +335,7 @@ conversation is empty.
 
 The CLI opens resources once, captures RuntimeFeatures once for both inspection
 and Runtime composition, runs one HTTP server, and closes resources after the
-server stops. `create_app` accepts already-open public Runtime/RuntimeHistory and
+server stops. `create_app` accepts already-open public Runtime/History and
 Metrics objects for embedding and testing; the caller owns their lifespan.
 
 Sending a message returns its execution ID independently of the SSE connection.

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Prepared TaskGraph cancellation fences survive admission races and reopen."""
-from ._runtime_test_helpers import model_features
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
+"""Prepared TaskGraph cancellation fences survive admission races and reopen."""
+
+from linktools.ai.persistence import Persistence
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
@@ -15,12 +16,12 @@ from linktools.ai.core import (
     AuthorizationAction, Principal, ResourceKind, ResourceRef, RunBudget, TaskStatus, TenantAuthorizationPolicy,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
-from linktools.ai.runtime.state._codec import (
+from linktools.ai.persistence.codec import (
     _decode_enveloped_domain, _encode_persisted_domain, encode_envelope,
 )
-from linktools.ai.runtime.state._store import OperationQuery, RecordQuery, StateTransaction, stream_digest
+from linktools.ai.persistence.state import OperationQuery, RecordQuery, StateTransaction, stream_digest
 from linktools.ai.task import (
     DefaultTaskGraphService,
     TaskGraph,
@@ -60,14 +61,14 @@ class _Launcher:
         return TaskGraphView(launch.graph_id, TaskStatus.CANCELLED, ())
 
 
-def _storage(backend: str, path: Path) -> RuntimeStorage:
+def _storage(backend: str, path: Path) -> PersistenceStorage:
     if backend == "memory":
-        return RuntimeStorage.in_memory()
+        return PersistenceStorage.in_memory()
     if backend == "filesystem":
-        return RuntimeStorage.filesystem(path)
+        return PersistenceStorage.filesystem(path)
     if backend == "sqlite":
-        return RuntimeStorage.sqlite(path / "state.db")
-    return RuntimeStorage(RuntimeStoragePlan(
+        return PersistenceStorage.sqlite(path / "state.db")
+    return PersistenceStorage(PersistencePlan(
         task=StorageRoute.filesystem(path / "task"),
         evaluation=StorageRoute.sqlite(path / "evaluation.db"),
         execution=StorageRoute.sqlite(path / "execution.db"),
@@ -82,7 +83,7 @@ def _request(graph_id: str = "trial") -> TaskGraphRequest:
     )
 
 
-def _service(state: RuntimeState, launcher: _Launcher) -> DefaultTaskGraphService:
+def _service(state: Persistence, launcher: _Launcher) -> DefaultTaskGraphService:
     return DefaultTaskGraphService(state.task, _Authorization(), launcher)
 
 
@@ -92,7 +93,7 @@ async def test_cancelled_preparation_never_admits_and_releases_sensitive_payload
     backend: str, tmp_path: Path,
 ) -> None:
     state = _storage(backend, tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="submission", tenant_id="tenant")
     try:
         launcher = _Launcher()
@@ -117,7 +118,7 @@ async def test_cancelled_preparation_never_admits_and_releases_sensitive_payload
         if backend != "memory":
             await state.close()
             state = _storage(backend, tmp_path)
-            state = RuntimeState(state)
+            state = Persistence(state)
             await state.initialize(namespace="submission", tenant_id="tenant")
             service = _service(state, launcher)
 
@@ -143,7 +144,7 @@ async def test_submission_cancel_serializes_with_admission_and_blocks_node_claim
     backend: str, tmp_path: Path, admit_first: bool,
 ) -> None:
     state = _storage(backend, tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="submission-race", tenant_id="tenant")
     try:
         launcher = _Launcher()
@@ -180,8 +181,8 @@ async def test_submission_cancel_serializes_with_admission_and_blocks_node_claim
 
 @pytest.mark.asyncio
 async def test_submission_identity_is_registered_and_cannot_be_reassigned() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="submission-identity", tenant_id="tenant")
     try:
         service = _service(state, _Launcher())
@@ -221,8 +222,8 @@ async def test_submission_identity_is_registered_and_cannot_be_reassigned() -> N
 async def test_submission_commit_readback_resolves_lost_response(
     phase: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="submission-unknown", tenant_id="tenant")
     try:
         service = _service(state, _Launcher())
@@ -261,8 +262,8 @@ async def test_submission_commit_readback_resolves_lost_response(
 
 @pytest.mark.asyncio
 async def test_late_scheduler_arm_cannot_claim_after_submission_cancel() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="late-arm", tenant_id="tenant")
     arming = asyncio.Event()
     release = asyncio.Event()
@@ -298,8 +299,8 @@ async def test_late_scheduler_arm_cannot_claim_after_submission_cancel() -> None
 
 @pytest.mark.asyncio
 async def test_submission_cancellation_authorizes_registered_owner() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="submission-owner", tenant_id="tenant")
     try:
         service = DefaultTaskGraphService(state.task, TenantAuthorizationPolicy(), _Launcher())
@@ -325,11 +326,10 @@ async def test_submission_cancellation_authorizes_registered_owner() -> None:
 async def test_submission_identity_and_fence_survive_snapshot_restore(
     phase: str, tmp_path: Path,
 ) -> None:
-    from linktools.ai.runtime import Runtime
-    from linktools.ai.runtime.state import SnapshotLimits
+    from linktools.ai.task_engine import TaskEngine
+    from linktools.ai.persistence.snapshots import SnapshotLimits
     from linktools.ai.storage import InMemoryObjectStore
     from linktools.ai.task import Task, TaskNodeContext
-    from ._runtime_test_helpers import RuntimeUsageModels
 
     calls: list[str] = []
 
@@ -340,11 +340,7 @@ async def test_submission_identity_and_fence_survive_snapshot_restore(
     definition = Task("snapshot-target", execute, effect_policy="none")
     graph = TaskGraph("trial", (TaskNode("target", task=definition),))
     root = tmp_path / "source"
-    async with Runtime.open(
-        "submission-snapshot", features=model_features(RuntimeUsageModels()),
-        storage=RuntimeStorage.from_root(root),
-    ) as runtime:
-        engine = runtime.tasks.bind(definition)
+    async with Persistence.open('submission-snapshot', storage=PersistenceStorage.from_root(root)) as persistence_343, TaskEngine.open(definition, persistence=persistence_343) as engine:
         submission = await engine.prepare_submission(graph, idempotency_key="prepare")
         assert calls == []
         if phase == "admitted":
@@ -353,8 +349,8 @@ async def test_submission_identity_and_fence_survive_snapshot_restore(
         elif phase == "cancelled":
             await engine.cancel_submission(submission.ref, idempotency_key="cancel")
 
-    state = RuntimeStorage.from_root(root)
-    state = RuntimeState(state)
+    state = PersistenceStorage.from_root(root)
+    state = Persistence(state)
     await state.initialize(namespace="submission-snapshot", tenant_id="default", read_only=True)
     objects = InMemoryObjectStore("snapshot")
     limits = SnapshotLimits(10000, 10 * 1024 * 1024)
@@ -363,12 +359,8 @@ async def test_submission_identity_and_fence_survive_snapshot_restore(
     finally:
         await state.close()
     restored_root = tmp_path / "restored"
-    await RuntimeState.restore_snapshot(snapshot, object_store=objects, root=restored_root, limits=limits)
-    async with Runtime.open(
-        "submission-snapshot", features=model_features(RuntimeUsageModels()),
-        storage=RuntimeStorage.from_root(restored_root),
-    ) as runtime:
-        engine = runtime.tasks.bind(definition)
+    await Persistence.restore_snapshot(snapshot, object_store=objects, root=restored_root, limits=limits)
+    async with Persistence.open('submission-snapshot', storage=PersistenceStorage.from_root(restored_root)) as persistence_367, TaskEngine.open(definition, persistence=persistence_367) as engine:
         result = await engine.start_prepared(submission)
         assert result.admitted is (phase != "cancelled")
         if result.admitted:
@@ -382,9 +374,9 @@ async def test_submission_identity_and_fence_survive_snapshot_restore(
 async def test_independent_task_owners_share_the_submission_fence(tmp_path: Path) -> None:
     first = _storage("sqlite", tmp_path)
     second = _storage("sqlite", tmp_path)
-    first = RuntimeState(first)
+    first = Persistence(first)
     await first.initialize(namespace="independent", tenant_id="tenant")
-    second = RuntimeState(second)
+    second = Persistence(second)
     await second.initialize(namespace="independent", tenant_id="tenant")
     try:
         service = _service(first, _Launcher())
@@ -412,9 +404,9 @@ async def test_prepare_disposition_has_one_creator_across_independent_sqlite_own
 ) -> None:
     first = _storage("sqlite", tmp_path)
     second = _storage("sqlite", tmp_path)
-    first = RuntimeState(first)
+    first = Persistence(first)
     await first.initialize(namespace="prepare-disposition", tenant_id="tenant")
-    second = RuntimeState(second)
+    second = Persistence(second)
     await second.initialize(namespace="prepare-disposition", tenant_id="tenant")
     try:
         launchers = (_Launcher(), _Launcher())
@@ -441,8 +433,8 @@ async def test_prepare_disposition_has_one_creator_across_independent_sqlite_own
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ("prepared", "admitted", "cancelled"))
 async def test_prepare_disposition_existing_submission_never_claims_creation(phase: str) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="existing-preparation", tenant_id="tenant")
     try:
         launcher = _Launcher()
@@ -468,7 +460,7 @@ async def test_prepare_disposition_commit_readback_cannot_prove_creator(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = _storage("sqlite", tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="unknown-preparation", tenant_id="tenant")
     try:
         launcher = _Launcher()
@@ -496,8 +488,8 @@ async def test_prepare_disposition_commit_readback_cannot_prove_creator(
 
 @pytest.mark.asyncio
 async def test_prepare_disposition_preserves_single_authorization_and_capture() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="captured-preparation", tenant_id="tenant")
     events: list[str] = []
 
@@ -536,8 +528,8 @@ async def test_prepare_disposition_preserves_single_authorization_and_capture() 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("guard", ("namespace", "authorization", "budget"))
 async def test_prepare_disposition_preserves_guards_before_persistence(guard: str) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="guarded-preparation", tenant_id="tenant")
 
     class Authorization(_Authorization):
@@ -578,8 +570,8 @@ async def test_prepare_disposition_preserves_guards_before_persistence(guard: st
     "task_graph", "task_admission", "task_submission_payload", "admit_operation",
 ))
 async def test_prepare_disposition_missing_head_never_recreates_existing_resources(remaining: str) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="broken-preparation", tenant_id="tenant")
     try:
         launcher = _Launcher()
@@ -598,7 +590,7 @@ async def test_prepare_disposition_missing_head_never_recreates_existing_resourc
                     await transaction.delete_records(tuple(record.key_digest for record in records))
             if remaining != "admit_operation":
                 await transaction.delete_operations(OperationQuery(stream_digest=stream_digest(
-                    submission.namespace, submission.ref.tenant_id, RuntimeDomain.TASK.value,
+                    submission.namespace, submission.ref.tenant_id, PersistenceDomain.TASK.value,
                     "operation", [ResourceKind.TASK_GRAPH.value, submission.graph.graph_id],
                 )))
 

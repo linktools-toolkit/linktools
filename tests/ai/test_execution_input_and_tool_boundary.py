@@ -3,7 +3,7 @@
 """Execution input and final tool-boundary regressions."""
 from linktools.ai.model import create_model
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from dataclasses import fields, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,9 +15,10 @@ from pydantic_ai.toolsets import FunctionToolset
 from linktools.ai.core import HmacCursorSigner, Principal, PromptLimits, TenantAuthorizationPolicy
 from linktools.ai.capability import ToolCallRetry
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ExecutionRequest, RuntimeStorage
+from linktools.ai.execution import ExecutionRequest
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._session import RuntimeSessionService
-from linktools.ai.runtime.service_api import (
+from linktools.ai.execution import (
     CreateSessionRequest,
     ExecutionHandle,
     ForkExecutionRequest,
@@ -25,7 +26,7 @@ from linktools.ai.runtime.service_api import (
     ResumeSessionRequest,
 )
 from linktools.ai.runtime._execution import DefaultExecutionService
-from linktools.ai.runtime._input import (
+from linktools.ai.inputs import (
     ExecutionInputMaterializer,
     stored_input_attachment_views,
     stored_user_input_view,
@@ -412,8 +413,8 @@ async def test_materializer_rejects_invalid_files_before_workspace_access(files:
 
 @pytest.mark.asyncio
 async def test_session_resume_preserves_explicit_execution_input_fields() -> None:
-    storage = RuntimeStorage.in_memory()
-    storage = RuntimeState(storage)
+    storage = PersistenceStorage.in_memory()
+    storage = Persistence(storage)
     await storage.initialize(namespace="resume-input", tenant_id="tenant")
     execution = SimpleNamespace(
         start_for_session=AsyncMock(return_value=ExecutionHandle("execution")),

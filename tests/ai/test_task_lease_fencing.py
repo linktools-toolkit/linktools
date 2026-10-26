@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Regression coverage for vendor-neutral Task lease and fencing semantics."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 
 import pytest
@@ -10,14 +10,14 @@ import pytest
 from ._task_test_helpers import admit_graph
 from linktools.ai.core import TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task import TaskGraph, TaskNode
 
 
 @pytest.mark.asyncio
 async def test_active_foreign_task_lease_cannot_be_stolen() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-lease-test", tenant_id="tenant")
     try:
         repository = state.task.tasks
@@ -54,8 +54,8 @@ async def test_active_foreign_task_lease_cannot_be_stolen() -> None:
 
 @pytest.mark.asyncio
 async def test_expired_task_lease_reclaim_fences_stale_terminal_write() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-reclaim-test", tenant_id="tenant")
     try:
         repository = state.task.tasks

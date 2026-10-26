@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from linktools.ai.persistence import Persistence
+
 import pytest
 from pydantic_ai import Agent, messages as sdk_messages
 from pydantic_ai.capabilities import AbstractCapability, AgentNode, NodeResult
@@ -16,7 +18,8 @@ from pydantic_ai.usage import RequestUsage
 from linktools.ai.capability import AgentContext, TraceCapability
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.model import FallbackBinding
-from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import PersistenceStorage
 
 from .test_runtime_fallback_failures import _Binding
 from .test_runtime_fallback_partial_usage import _PartialThenFailure
@@ -54,9 +57,7 @@ async def test_nested_node_recovery_usage_does_not_enter_failed_request_observat
     features.capability(TraceCapability(), scope="runtime")
     features.capability(_NestedRecoveryCapability(), id="nested-node-recovery", scope="runtime")
 
-    async with Runtime.open(
-        "fallback-node-boundary", features=features, storage=RuntimeStorage.in_memory(),
-    ) as runtime:
+    async with Persistence.open('fallback-node-boundary', storage=PersistenceStorage.in_memory()) as persistence_57, Runtime.open(persistence=persistence_57, features=features) as runtime:
         execution = await runtime.agents.get().start("respond")
         result = (await execution.wait(timeout_seconds=10)).result
         interactions = (await execution.model_interactions(include_content=True)).items

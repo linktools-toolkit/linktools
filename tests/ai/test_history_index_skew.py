@@ -4,8 +4,8 @@
 
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state._contracts import ConversationHistoryIndexNodeRecord
-from linktools.ai.runtime.state._history_index import (
+from linktools.ai.persistence.contracts import ConversationHistoryIndexNodeRecord
+from linktools.ai.persistence._history_index import (
     build_fork_index_node_from_roots,
     resolve_history_range_lazy,
 )

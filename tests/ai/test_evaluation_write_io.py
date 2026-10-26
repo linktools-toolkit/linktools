@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """Batched publication preserves authorization, retention, and transaction truth."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
+from linktools.ai.core import ExecutionContext
 import asyncio
 import getpass
 from collections import Counter
@@ -20,7 +22,9 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import CaseRef, CaseSpec, DatasetRef, DatasetSpec
 from linktools.ai.migrate import provision_database
 
-from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.task_engine import TaskEngine
+from linktools.ai.evaluation_engine import Evaluations
 
 
 _PRINCIPAL = service_principal("evaluation-io", "owner")
@@ -33,59 +37,67 @@ def _dataset(name: str, count: int, *, revision: int = 1) -> DatasetSpec:
     ))
 
 
-async def _assert_publication(runtime: Runtime, peer: Runtime, state: RuntimeState) -> None:
+async def _assert_publication(evaluations: Evaluations, peer: Evaluations, state: Persistence) -> None:
     original = _dataset("atomic", 1)
-    await runtime.evaluations.publish_dataset(original, principal=_PRINCIPAL, idempotency_key="first")
+    await evaluations.publish_dataset(original, principal=_PRINCIPAL, idempotency_key="first")
     extended = DatasetSpec(DatasetRef("atomic", 2), (
         *(_dataset("atomic", 71).cases[1:]),
         CaseSpec.task(original.cases[0].ref, input={"answer": "changed"}),
     ))
     with pytest.raises(AIError) as conflict:
-        await runtime.evaluations.publish_dataset(extended, principal=_PRINCIPAL, idempotency_key="atomic")
+        await evaluations.publish_dataset(extended, principal=_PRINCIPAL, idempotency_key="atomic")
     assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
     assert await state.evaluation.records.get_case(extended.cases[0].ref) is None
     assert await state.evaluation.records.get_dataset(extended.ref) is None
     corrected = DatasetSpec(extended.ref, (*extended.cases[:-1], original.cases[0]))
-    assert await runtime.evaluations.publish_dataset(corrected, principal=_PRINCIPAL, idempotency_key="atomic") == corrected.ref
+    assert await evaluations.publish_dataset(corrected, principal=_PRINCIPAL, idempotency_key="atomic") == corrected.ref
 
     concurrent = _dataset("concurrent", 8)
     results = await asyncio.gather(*(
-        owner.evaluations.publish_dataset(concurrent, principal=_PRINCIPAL, idempotency_key="concurrent")
-        for owner in (runtime, peer)
+        owner.publish_dataset(concurrent, principal=_PRINCIPAL, idempotency_key="concurrent")
+        for owner in (evaluations, peer)
     ), return_exceptions=True)
     assert any(result == concurrent.ref for result in results)
     assert all(result == concurrent.ref or (
         isinstance(result, AIError) and result.code is ErrorCode.STORAGE_CONFLICT
     ) for result in results)
-    for owner in (runtime, peer):
-        assert await owner.evaluations.publish_dataset(concurrent, principal=_PRINCIPAL,
+    for owner in (evaluations, peer):
+        assert await owner.publish_dataset(concurrent, principal=_PRINCIPAL,
                                                        idempotency_key="concurrent") == concurrent.ref
-    page = await peer.evaluations.list_cases(corrected.ref, principal=_PRINCIPAL, limit=100)
+    page = await peer.list_cases(corrected.ref, principal=_PRINCIPAL, limit=100)
     assert tuple(value.ref for value in page.items) == tuple(value.ref for value in corrected.cases)
 
     retained = _dataset("retained", 1)
     expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
-    await runtime.evaluations.publish_dataset(retained, principal=_PRINCIPAL,
+    await evaluations.publish_dataset(retained, principal=_PRINCIPAL,
                                              idempotency_key="retained", content_expires_at=expires_at)
     assert await state.evaluation.records.purge_expired_datasets(
         now=expires_at + timedelta(seconds=1), owner_principal_id=_PRINCIPAL.principal_id, limit=10,
     ) == (retained.ref,)
     assert await state.evaluation.records.dataset_owner(retained.ref) == _PRINCIPAL.principal_id
     with pytest.raises(AIError) as unavailable:
-        await peer.evaluations.publish_dataset(retained, principal=_PRINCIPAL, idempotency_key="resurrect")
+        await peer.publish_dataset(retained, principal=_PRINCIPAL, idempotency_key="resurrect")
     assert unavailable.value.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE
     other = service_principal(_PRINCIPAL.tenant_id, "other")
     with pytest.raises(AIError) as denied:
-        await peer.evaluations.publish_dataset(retained, principal=other, idempotency_key="steal")
+        await peer.publish_dataset(retained, principal=other, idempotency_key="steal")
     assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
 
 
 async def _assert_sql_publication(engine: AsyncEngine) -> None:
     await provision_database(engine)
-    state, peer_state = RuntimeStorage.sql(engine), RuntimeStorage.sql(engine)
-    context = RuntimeContext(None, tenant_id=_PRINCIPAL.tenant_id)
-    async with Runtime.open("evaluation-io", storage=state, context=context) as runtime:
-        async with Runtime.open("evaluation-io", storage=peer_state, context=context) as peer:
+    state, peer_state = PersistenceStorage.sql(engine), PersistenceStorage.sql(engine)
+    context = ExecutionContext(None)
+    async with (
+        Persistence.open('evaluation-io', storage=state, tenant_id=_PRINCIPAL.tenant_id) as persistence_89,
+        TaskEngine.open(persistence=persistence_89, context=context) as task_engine,
+        Evaluations.open(task_engine) as evaluations,
+    ):
+        async with (
+            Persistence.open('evaluation-io', storage=peer_state, tenant_id=_PRINCIPAL.tenant_id) as persistence_90,
+            TaskEngine.open(persistence=persistence_90, context=context) as peer_engine,
+            Evaluations.open(peer_engine) as peer,
+        ):
             statements: list[tuple[str, bool]] = []
             large_parameters: list[int] = []
             def capture(conn, cursor, sql, params, context, many):
@@ -100,14 +112,14 @@ async def _assert_sql_publication(engine: AsyncEngine) -> None:
             event.listen(engine.sync_engine, "before_cursor_execute", capture)
             try:
                 spec = _dataset("counted", 32)
-                await runtime.evaluations.publish_dataset(spec, principal=_PRINCIPAL, idempotency_key="counted")
+                await evaluations.publish_dataset(spec, principal=_PRINCIPAL, idempotency_key="counted")
                 assert not any(many for _, many in statements)
                 counts = Counter(command for command, _ in statements)
                 assert counts["SELECT"] <= 3 * len(spec.cases)
                 assert 0 < counts["INSERT"] <= 4, "publication must not insert once per case"
                 assert counts["UPDATE"] == counts["DELETE"] == 0
                 statements.clear()
-                await runtime.evaluations.publish_dataset(spec, principal=_PRINCIPAL, idempotency_key="counted")
+                await evaluations.publish_dataset(spec, principal=_PRINCIPAL, idempotency_key="counted")
                 counts = Counter(command for command, _ in statements)
                 assert counts["SELECT"] <= 3 * len(spec.cases)
                 assert counts["INSERT"] == counts["UPDATE"] == counts["DELETE"] == 0
@@ -117,14 +129,14 @@ async def _assert_sql_publication(engine: AsyncEngine) -> None:
                 ))
                 statements.clear()
                 large_parameters.clear()
-                await runtime.evaluations.publish_dataset(large, principal=_PRINCIPAL, idempotency_key="large")
+                await evaluations.publish_dataset(large, principal=_PRINCIPAL, idempotency_key="large")
                 assert large_parameters and max(large_parameters) <= 1
                 for case in large.cases:
-                    restored = await runtime._state.evaluation.records.get_case(case.ref)
+                    restored = await persistence_89.evaluation.records.get_case(case.ref)
                     assert restored.input.input["text"] == "x" * 70000
             finally:
                 event.remove(engine.sync_engine, "before_cursor_execute", capture)
-            await _assert_publication(runtime, peer, runtime._state)
+            await _assert_publication(evaluations, peer, persistence_89)
 
 
 @pytest.mark.asyncio
@@ -137,15 +149,22 @@ async def test_publication_batches_preserve_backend_atomicity(tmp_path: Path, ba
         finally:
             await engine.dispose()
         return
-    state = (RuntimeStorage.in_memory() if backend == "memory"
-             else RuntimeStorage.filesystem(tmp_path))
-    context = RuntimeContext(None, tenant_id=_PRINCIPAL.tenant_id)
-    async with Runtime.open("evaluation-io", storage=state, context=context) as runtime:
-        await _assert_publication(runtime, runtime, runtime._state)
+    state = (PersistenceStorage.in_memory() if backend == "memory"
+             else PersistenceStorage.filesystem(tmp_path))
+    context = ExecutionContext(None)
+    async with (
+        Persistence.open('evaluation-io', storage=state, tenant_id=_PRINCIPAL.tenant_id) as persistence_145,
+        TaskEngine.open(persistence=persistence_145, context=context) as task_engine,
+        Evaluations.open(task_engine) as evaluations,
+    ):
+        await _assert_publication(evaluations, evaluations, persistence_145)
     if backend == "filesystem":
-        async with Runtime.open("evaluation-io",
-                                storage=RuntimeStorage.filesystem(tmp_path), context=context) as reopened:
-            cases = await reopened.evaluations.list_cases(DatasetRef("atomic", 2), principal=_PRINCIPAL)
+        async with (
+            Persistence.open('evaluation-io', storage=PersistenceStorage.filesystem(tmp_path), tenant_id=_PRINCIPAL.tenant_id) as persistence_148,
+            TaskEngine.open(persistence=persistence_148, context=context) as reopened_engine,
+            Evaluations.open(reopened_engine) as reopened,
+        ):
+            cases = await reopened.list_cases(DatasetRef("atomic", 2), principal=_PRINCIPAL)
             assert len(cases.items) == 71
 
 

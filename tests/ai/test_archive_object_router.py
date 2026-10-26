@@ -8,8 +8,8 @@ from collections.abc import AsyncIterator, Sequence
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state._object_router import _RuntimeObjectRouter, runtime_object_source_reads
-from linktools.ai.runtime.state._plan import RuntimeDomain
+from linktools.ai.persistence._object_router import _RuntimeObjectRouter, runtime_object_source_reads
+from linktools.ai.persistence._plan import PersistenceDomain
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef
 
 
@@ -44,7 +44,7 @@ class Objects(InMemoryObjectStore):
 @pytest.mark.asyncio
 async def test_archive_cached_reads_validate_source_and_do_not_warm_business_store() -> None:
     archive, business, cache = Objects(), Objects(), Cache()
-    domain = RuntimeDomain.EXECUTION
+    domain = PersistenceDomain.EXECUTION
     router = _RuntimeObjectRouter({domain: business}, archive_stores={domain: archive},
                                   close_guard_stores=(), cache=cache, cache_domains=(domain,))
     payload = b"shared content"

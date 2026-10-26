@@ -10,7 +10,7 @@ from linktools.ai.capability import SubagentCapability, ToolCallFailed, ToolCall
 from linktools.ai.core import ExecutionStatus, Principal, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._subagent import SubagentDispatcher
-from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionResult
+from linktools.ai.execution import ExecutionHandle, ExecutionResult
 from linktools.ai.spec import SubagentRef
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext

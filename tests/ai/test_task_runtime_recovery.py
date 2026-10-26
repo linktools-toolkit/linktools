@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Public Runtime recovery coverage for durable TaskGraph state."""
-from ._runtime_test_helpers import model_features
-from linktools.ai.model import create_model
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
+"""Independent TaskEngine recovery coverage for durable TaskGraph state."""
+
+from linktools.ai.persistence import Persistence
 import asyncio
 from dataclasses import fields
 from pathlib import Path
 
 import pytest
-from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import (
     AuthorizationAction,
     JsonValue,
@@ -24,8 +23,9 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.task_engine import TaskEngine
+from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.task import (
     Task,
     TaskGraph,
@@ -69,11 +69,11 @@ async def test_sqlite_runtime_recovery_preserves_execution_principal_after_expir
             TaskGraphLimits(max_concurrency=1),
         )
     )
-    state = RuntimeStorage.sqlite(
+    state = PersistenceStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(
         namespace="default",
         tenant_id="default",
@@ -122,7 +122,7 @@ async def test_sqlite_runtime_recovery_preserves_execution_principal_after_expir
         async def snapshot_chunks():
             yield snapshot_payload
 
-        await state.object_store(RuntimeDomain.TASK).put(
+        await state.object_store(PersistenceDomain.TASK).put(
             snapshot_key,
             snapshot_chunks(),
             expected_size=len(snapshot_payload),
@@ -156,21 +156,16 @@ async def test_sqlite_runtime_recovery_preserves_execution_principal_after_expir
             await self.default.authorize(principal, action, resource)
 
     authorization = RecoveryAuthorization()
-    reopened = RuntimeStorage.sqlite(
+    reopened = PersistenceStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
-    async with Runtime.open(
-        "default",
-        storage=reopened,
-        features=model_features(create_model(protocol='openai', model="gpt-test"), RuntimeFeatures("authorization", authorization=authorization)),
-    ) as runtime:
-        engine = runtime.tasks.bind(handler)
+    async with Persistence.open('default', storage=reopened) as persistence_163, TaskEngine.open(handler, persistence=persistence_163, authorization=authorization) as engine:
         recovery = await engine.get(graph.graph_id, principal=actor)
         await recovery.recover(idempotency_key="recover-expired-lease")
         run = await engine.get(graph.graph_id, principal=execution_principal)
         result = (await run.wait(timeout_seconds=10)).result
-        page = await runtime._state.task.admissions.list_recoverable_page(
+        page = await engine.persistence.task.admissions.list_recoverable_page(
             cursor=None,
             limit=128,
         )
@@ -213,12 +208,8 @@ async def test_runtime_batch_recovery_keeps_run_only_actor_at_safe_service_bound
     actor = Principal("operator", "default")
     storage_root = tmp_path / "recovery-actor"
 
-    async with Runtime.open(
-        "recovery-actor",
-        features=model_features(create_model(protocol='openai', model="gpt-test")),
-        storage=RuntimeStorage.filesystem(storage_root),
-    ) as runtime:
-        await runtime.tasks.bind(handler).start(
+    async with Persistence.open('recovery-actor', storage=PersistenceStorage.filesystem(storage_root)) as persistence_216, TaskEngine.open(handler, persistence=persistence_216) as engine:
+        await engine.start(
             graph,
             idempotency_key="recovery-actor-run-0001",
             principal=execution_principal,
@@ -242,16 +233,12 @@ async def test_runtime_batch_recovery_keeps_run_only_actor_at_safe_service_bound
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
     authorization = RecoveryAuthorization()
-    async with Runtime.open(
-        "recovery-actor",
-        storage=RuntimeStorage.filesystem(storage_root),
-        features=model_features(create_model(protocol='openai', model="gpt-test"), RuntimeFeatures("authorization", authorization=authorization)),
-    ) as runtime:
+    async with Persistence.open('recovery-actor', storage=PersistenceStorage.filesystem(storage_root)) as persistence_245, TaskEngine.open(handler, persistence=persistence_245, authorization=authorization) as engine:
         with pytest.raises(AIError) as read_denied:
-            await runtime._graph_service.state(graph.graph_id, principal=actor)
+            await engine._graph_service.state(graph.graph_id, principal=actor)
         assert read_denied.value.code is ErrorCode.AUTHORIZATION_DENIED
 
-        recovery_nodes = await runtime._graph_service.recovery_nodes(
+        recovery_nodes = await engine._graph_service.recovery_nodes(
             graph.graph_id,
             principal=actor,
         )
@@ -262,7 +249,7 @@ async def test_runtime_batch_recovery_keeps_run_only_actor_at_safe_service_bound
         assert "status" not in recovery_fields
         assert "private recovery input" not in repr(recovery_nodes[0])
 
-        page = await runtime.tasks.bind(handler).recover_pending(principal=actor)
+        page = await engine.recover_pending(principal=actor)
 
     assert tuple(result.graph_id for result in page.items) == (graph.graph_id,)
     assert authorization.calls

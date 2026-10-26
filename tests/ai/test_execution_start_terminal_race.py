@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """A terminal transaction between replay reads must not look like corruption."""
 from ._runtime_test_helpers import model_features
 
@@ -12,7 +14,8 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, IdempotencyStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
@@ -37,11 +40,8 @@ async def test_start_replay_refreshes_only_a_mixed_terminal_view(
 
     group = RuntimeFeatures("terminal-race")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    storage = RuntimeStorage.in_memory()
-    async with Runtime.open(
-        "terminal-race",
-        storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as runtime:
+    storage = PersistenceStorage.in_memory()
+    async with Persistence.open('terminal-race', storage=storage) as persistence_41, Runtime.open(persistence=persistence_41, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         agent = runtime.agents.get()
         execution = await agent.start("work", idempotency_key="same")
         await asyncio.wait_for(entered.wait(), 2)

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Dataset batching settings preserve delivery and Runtime ownership."""
 from ._runtime_test_helpers import model_features
 
@@ -12,7 +14,8 @@ import pytest
 from linktools.ai.migrate import provision_metrics_sqlite
 from linktools.ai.observe import MetricRecorder, Metrics, Observation
 from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.storage import BatchWriteScopeFactory, BatchWriteScope, InMemoryCacheBackend
 from linktools.ai.core import CommitPolicy
 from linktools.ai.storage import _write_cache
@@ -126,8 +129,8 @@ async def test_shared_metrics_custom_batching_has_independent_runtime_flush_and_
             return recorder
 
     metrics = RecordingMetrics.sqlite(tmp_path / "shared.sqlite", commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=2**20), batch_size=2, flush_interval=300))
-    async with Runtime.open("first", storage=RuntimeStorage.in_memory(), features=model_features(_FeatureModels()), metrics=metrics) as first:
-        async with Runtime.open("second", storage=RuntimeStorage.in_memory(), features=model_features(_FeatureModels()), metrics=metrics) as second:
+    async with Persistence.open('first', storage=PersistenceStorage.in_memory()) as persistence_129, Runtime.open(persistence=persistence_129, features=model_features(_FeatureModels()), metrics=metrics) as first:
+        async with Persistence.open('second', storage=PersistenceStorage.in_memory()) as persistence_130, Runtime.open(persistence=persistence_130, features=model_features(_FeatureModels()), metrics=metrics) as second:
             assert await recorders[0].try_record(_observation("first"))
             assert await recorders[1].try_record(_observation("second"))
             assert await metrics.get_observation("first") is None

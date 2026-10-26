@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
+from linktools.ai.task_engine import TaskEngine
 """One Runtime result boundary for ordinary, workspace, and MCP tools."""
 
 import asyncio
@@ -29,7 +32,8 @@ from linktools.ai.capability import (
 from linktools.ai.core import ExecutionStatus, ToolOperationStatus, service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ReferencedContent
-from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.capability import RunCallbacks
 from linktools.ai.spec import AgentSpec, CapabilityRef, MCPServerSpec
 from linktools.ai.storage import StorageEntryRevision, StorageOverlay
@@ -262,8 +266,8 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
         features.tool(render, effect_policy=kind)
         selected = "render"
     features.agent("reader", allow_tools=(selected, "finish"), allow_skills=(), allow_subagents=())
-    storage = RuntimeStorage.filesystem(state) if backend == "filesystem" else RuntimeStorage.from_root(state)
-    async with Runtime.open("projection", features=features, storage=storage) as runtime:
+    storage = PersistenceStorage.filesystem(state) if backend == "filesystem" else PersistenceStorage.from_root(state)
+    async with Persistence.open('projection', storage=storage) as persistence_266, Runtime.open(persistence=persistence_266, features=features) as runtime:
         execution = await runtime.agents.get("reader").start("Render page one.", principal=principal)
         result = (await execution.wait(timeout_seconds=15)).result
         assert result.status is ExecutionStatus.SUCCEEDED, result.error_diagnostics
@@ -330,8 +334,7 @@ async def test_projection_failure_preserves_effect_classification(
         selected = "render"
     features.agent("reader", allow_tools=(selected,), allow_skills=(), allow_subagents=())
     state = tmp_path / "state"
-    async with Runtime.open("projection-failure", features=features,
-                            storage=RuntimeStorage.filesystem(state)) as runtime:
+    async with Persistence.open('projection-failure', storage=PersistenceStorage.filesystem(state)) as persistence_333, Runtime.open(persistence=persistence_333, features=features) as runtime:
         execution = await runtime.agents.get("reader").start("Render.")
         try:
             await execution.wait(timeout_seconds=15)
@@ -498,8 +501,7 @@ async def test_projection_receives_validated_python_arguments_without_json_coerc
     features.tool(report, effect_policy="none")
     features.capability(Observe(), id="observe", scope="agent")
     features.agent("reader", allow_tools=("report",), allow_subagents=(), allow_skills=())
-    async with Runtime.open("python-arguments", features=features,
-                            storage=RuntimeStorage.in_memory()) as runtime:
+    async with Persistence.open('python-arguments', storage=PersistenceStorage.in_memory()) as persistence_501, Runtime.open(persistence=persistence_501, features=features) as runtime:
         result = (await runtime.agents.get("reader").run("Report.", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED, result.error_diagnostics
     assert calls == ["report"]
@@ -583,8 +585,8 @@ async def test_authorization_precedes_tool_and_result_processing() -> None:
 @pytest.mark.asyncio
 async def test_captured_execution_rebinds_result_capability_after_runtime_reopen(tmp_path: Path) -> None:
     from pydantic_ai.messages import ToolReturnPart
-    from linktools.ai.runtime import AgentTaskInput, CaptureInputRequest
-    from linktools.ai.task import TaskGraph, TaskNode
+    from linktools.ai.inputs import AgentTaskInput, CaptureInputRequest
+    from linktools.ai.task import Task, TaskGraph, TaskNode
 
     calls, processed = [], []
     principal = service_principal("default", "capture-owner")
@@ -617,17 +619,18 @@ async def test_captured_execution_rebinds_result_capability_after_runtime_reopen
         result.agent("reader", allow_tools=("read_text",), allow_skills=(), allow_subagents=())
         return result
 
-    async with Runtime.open("reopen-projection", features=features("original"),
-                            storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
+    async with Persistence.open('reopen-projection', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_620, Runtime.open(persistence=persistence_620, features=features('original')) as runtime, TaskEngine.open(persistence=persistence_620) as engine:
         source = await runtime.agents.get("reader").start("Inspect the synthetic document.", principal=principal)
         assert (await source.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
         capture = await runtime.executions.capture_input(
             source.execution_id, CaptureInputRequest(principal, "read-capture", "clean"),
         )
-    async with Runtime.open("reopen-projection", features=features("reopened"),
-                            storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
-        task = await runtime.tasks.from_agent_capture("captured-reader", capture, principal=principal)
-        graph = await runtime.tasks.bind(task).start(TaskGraph("captured-result-reader", (
+    async with Persistence.open('reopen-projection', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_627, Runtime.open(persistence=persistence_627, features=features('reopened')) as runtime, TaskEngine.open(persistence=persistence_627) as engine:
+        captured = await engine.inputs.read_agent(capture, principal=principal)
+        captured.require_importable()
+        assert captured.binding is not None
+        task = Task.from_agent("captured-reader", runtime.agents.restore(captured.binding))
+        graph = await engine.with_definitions(task).start(TaskGraph("captured-result-reader", (
             TaskNode("read", task=task, input=AgentTaskInput("Inspect the synthetic document.")),
         )), principal=principal, idempotency_key="captured-result-reader")
         await graph.wait(timeout_seconds=15)

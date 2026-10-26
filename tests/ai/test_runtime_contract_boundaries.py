@@ -329,7 +329,7 @@ import json
 from pydantic import create_model
 from linktools.ai.core import canonical_sha256
 from linktools.ai.runtime._tool import _portable_arguments
-from linktools.ai.runtime._tool_return_codec import tool_return_content_digest
+from linktools.ai.model._tool_return_codec import tool_return_content_digest
 
 Result = create_model("Result", values=(set[str], ...))
 values = {"alpha", "beta", "gamma"}

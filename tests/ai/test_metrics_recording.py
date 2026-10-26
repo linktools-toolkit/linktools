@@ -409,7 +409,7 @@ def test_standalone_metrics_does_not_import_runtime() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("runtime_owned", [False, True])
 async def test_metric_status_reads_preserve_failure_state_across_flush(runtime_owned: bool) -> None:
-    from linktools.ai.runtime._metrics_service import MetricsService
+    from linktools.ai.observe.service import MetricsService
 
     metrics = Metrics.in_memory(commit=CommitPolicy.batch(
         batch_size=128, flush_interval=60.0,

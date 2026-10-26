@@ -14,8 +14,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from linktools.ai.errors import AIError
 from linktools.ai.migrate import provision_database
 from linktools.ai.storage import SQLiteDialect, SqlStorageContext
-from linktools.ai.runtime.state._sql import SqlStateStore, _SqlTransaction
-from linktools.ai.runtime.state._store import RecordReplacement
+from linktools.ai.persistence._sql import SqlStateStore, _SqlTransaction
+from linktools.ai.persistence.state import RecordReplacement
 from tests.ai.test_state_batch_delete_backends import _digest, _record, _seed
 
 

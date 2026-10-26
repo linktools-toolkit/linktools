@@ -31,7 +31,8 @@ ResultT = TypeVar("ResultT")
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
     from linktools.ai.model import ModelBinding, create_model
-    from linktools.ai.runtime import Runtime, RuntimeStorage
+    from linktools.ai.runtime import Runtime
+    from linktools.ai.persistence import PersistenceStorage
 
 MODEL_APIS = ("openai", "openai-responses", "anthropic")
 MODEL_API = ConfigField(name="MODEL_API", cast=str, default=None)
@@ -92,10 +93,10 @@ def _local_runtime_assets(workspace: Workspace) -> AssetStore:
     )
 
 
-def _local_runtime_storage(workspace: Workspace) -> "RuntimeStorage":
-    from linktools.ai.runtime import RuntimeStorage
+def _local_runtime_storage(workspace: Workspace) -> "PersistenceStorage":
+    from linktools.ai.persistence import PersistenceStorage
 
-    return RuntimeStorage.from_root(_local_runtime_root(workspace))
+    return PersistenceStorage.from_root(_local_runtime_root(workspace))
 
 
 async def _local_metrics(workspace: Workspace) -> Metrics:
@@ -236,6 +237,7 @@ async def _open_local_runtime(
     from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
     from linktools.ai.runtime import Runtime
+    from linktools.ai.persistence import Persistence
 
     assets = _local_runtime_assets(workspace)
     await assets.initialize()
@@ -247,9 +249,8 @@ async def _open_local_runtime(
         features.capability(ExecutionCapability(retain_history=True))
         features.capability(CheckpointCapability())
         features.capability(TraceCapability())
-        async with Runtime.open(
-            "default",
-            storage=_local_runtime_storage(workspace),
+        async with Persistence.open("default", storage=_local_runtime_storage(workspace)) as persistence, Runtime.open(
+            persistence=persistence,
             features=features,
             metrics=await _local_metrics(workspace),
         ) as runtime:

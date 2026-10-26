@@ -4,7 +4,8 @@
 
 ```text
 namespace
-    + RuntimeStorage
+    + PersistenceStorage
+        -> Persistence.open(...)
     + one RuntimeFeatures or RuntimeFeaturesCapture
         -> optional, independent Workspace and Sandbox via RuntimeFeatures(...)
         -> Runtime.open(...)
@@ -13,18 +14,20 @@ namespace
         -> CompiledAgent
         -> runtime.agents.get(id)
         -> per-execution AgentBinding
-        -> Agent / Session / Execution / Task / Evaluation / Recovery
+        -> Agent / Session / Execution / Recovery
+    + TaskEngine.open(..., persistence=...)
+        -> Task graphs / Evaluations.open(engine)
 ```
 
 The main ownership rules are:
 
-- `Runtime` owns a stable persistence namespace; it does not require a filesystem Workspace.
+- `Persistence` owns the namespace, tenant and shared storage; Runtime and TaskEngine borrow it without closing each other. Neither requires a filesystem Workspace.
 - `Workspace` owns paths and policy; it is not a persistence identity.
 - `AssetStore` stores raw asset bytes. It does not interpret declarations.
 - `RuntimeFeatures` is the only public registration/discovery composition unit. It can provide a Workspace or Sandbox independently and captures direct registrations and, when store-backed, one declaration view pinned to Asset version references.
 - `AgentSpec` is a runtime-independent Agent declaration.
 - `AgentCompiler` is the sole Agent-level selector. It resolves model, tool, Skill, MCP, capability, and Subagent candidates from the captured Runtime candidate set.
-- `Runtime` is the composition root and owns the service graph.
+- `Runtime` composes Agent execution. TaskEngine, History, Snapshot and Evaluations have independent public entry points.
 - `runtime.agents.get(id)` returns a Runtime-bound `Agent`; it does not compile or register new definitions.
 - `AgentBinding` is created per execution and pins the exact durable semantics, including the output contract.
 - `Session` is bound to `AgentSpec.id`; retry/recovery remain pinned to the exact historical execution binding.
@@ -40,6 +43,10 @@ The callback may inspect public declaration metadata; the SDK does not reserve
 business metadata keys, prescribe a type/tag system or serialize the callback.
 
 ```python
+from linktools.ai.persistence import Persistence
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+
+
 def available(agent, contribution):
     if contribution.kind != "skill":
         return True
@@ -47,8 +54,8 @@ def available(agent, contribution):
     return required is None or bool(set(required) & set(agent.metadata.get("tags", [])))
 
 group = RuntimeFeatures("application", filter=available)
-async with Runtime.open(
-    "application", storage=storage, features=group,
+async with Persistence.open("application", storage=storage) as persistence, Runtime.open(
+    persistence=persistence, features=group,
 ) as runtime:
     ...
 ```
@@ -68,11 +75,10 @@ parameter.
 
 `RuntimeFeatures` also owns the current host authorization policy and prompt
 limits: `RuntimeFeatures("application", authorization=policy, limits=PromptLimits(...))`.
-Capture it once and reuse that capture for `Runtime.open(features=...)`,
-`RuntimeHistory.open(features=...)`, or restored snapshot history. For restored
-history, features supplies only the authorization policy; the restored generation
-owns the storage routes and cache. The policy
-instance remains in process; it is not serialized as an execution identity.
+Capture it once for `Runtime.open(features=...)`. Independently opened History and
+TaskEngine accept the same policy through `authorization=policy`; storage routes
+and tenant identity come from Persistence. The policy instance remains in process;
+it is not serialized as an execution identity.
 Omitting authorization uses the Runtime tenant policy. Prompt limits constrain
 model context and are separate from TaskGraph and snapshot limits.
 
@@ -115,8 +121,8 @@ independently of `allow_capabilities` and `RuntimeFeatures.filter`. Use explicit
 
 ```python
 group.capability(global_rate_limit, id="host.rate-limit")
-async with Runtime.open(
-    "application", storage=storage, features=group,
+async with Persistence.open("application", storage=storage) as persistence, Runtime.open(
+    persistence=persistence, features=group,
 ) as runtime:
     ...
 ```
@@ -130,9 +136,10 @@ Context retention, interrupted-run recovery and detailed trace are independent
 Runtime-scoped opt-ins: `ExecutionCapability(retain_history=True)`,
 `CheckpointCapability()`, and `TraceCapability()`. Durable storage alone enables
 none of these optional guarantees. `Runtime.open(..., metrics=dataset)` independently enables automatic
-Agent and Task observations, including evaluation work in that Runtime. The
-shared dataset remains caller-owned. Task, Evaluation and Artifact remain
-services and need no capability wrappers. Session metadata and display history
+Agent observations. Pass the same dataset to `TaskEngine.open(metrics=dataset)`
+for Task and evaluation execution observations. Each producer owns its recorder
+and drain lifecycle; the shared dataset remains caller-owned. Task and Evaluation
+need no capability wrappers. Session metadata and display history
 are enabled by the default `SessionCapability`; use `SessionCapability(enabled=False)`
 to disable them explicitly. Conversation adds retained model context for future turns
 and execution forks. Execution commit timing belongs to
@@ -144,7 +151,7 @@ boundaries](docs/runtime-capabilities.md#optional-execution-persistence).
 
 See [Task graph authoring](docs/task-graphs.md) for typed JSON results, conditional branches, batch expansion, collection, and submission-time diagnostics.
 
-Use `runtime.evaluations` to evaluate Tasks, Agent-backed Tasks, and native TaskGraphs with retained evidence, rule/model/human scorers, rescoring, and paired reports. See the [evaluation guide](docs/evaluation.md) for an offline end-to-end example and the capture, comparison, authorization, and retention contracts.
+Use `Evaluations.open(engine)` from `linktools.ai.evaluation_engine` to evaluate Tasks, Agent-backed Tasks, and native TaskGraphs with retained evidence, rule/model/human scorers, rescoring, and paired reports. See the [evaluation guide](docs/evaluation.md) for an offline end-to-end example and the capture, comparison, authorization, and retention contracts.
 
 ## 1. Run a workspace
 
@@ -240,18 +247,17 @@ security, persisted history and explicit recovery of stopped executors.
 from linktools.ai import RuntimeFeatures, Runtime, Workspace
 from linktools.ai.capability import WorkspaceCapability
 from linktools.ai.model import create_model
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import Persistence, PersistenceStorage
 
 workspace = Workspace.initialize("/workspace/project")
 binding = create_model(protocol="openai", model="gpt-4o-mini")
-storage = RuntimeStorage.in_memory()
+storage = PersistenceStorage.in_memory()
 features = RuntimeFeatures("workspace")
 features.model("default", binding)
 features.capability(WorkspaceCapability(workspace))
 
-async with Runtime.open(
-    "default",
-    storage=storage,
+async with Persistence.open("default", storage=storage) as persistence, Runtime.open(
+    persistence=persistence,
     features=features,
 ) as runtime:
     result = (await runtime.agents.get("default").run(
@@ -263,7 +269,7 @@ async with Runtime.open(
 
 `Runtime.open()` is the public composition root. The Runtime composition is immutable for the lifetime of the context; registrations are completed before it opens.
 
-Cold `Runtime` and `RuntimeStorage` imports load the complete durable schema set.
+Include the `Runtime` and `PersistenceStorage` imports in startup measurement.
 Include import and `Runtime.open()` initialization in the caller or deployment's
 startup budget, and report readiness only after the context opens successfully.
 `Runtime.open()` imposes no fixed startup deadline. Reuse the opened Runtime for
@@ -354,9 +360,8 @@ application.agent(
     allow_subagents=(),
 )
 
-async with Runtime.open(
-    "default",
-    storage=storage,
+async with Persistence.open("default", storage=storage) as persistence, Runtime.open(
+    persistence=persistence,
     features=application,
 ) as runtime:
     result = (await runtime.agents.get("audit").run("inspect ticket SEC-123")).result
@@ -1205,28 +1210,29 @@ result = (await agent.run(
 
 The Sandbox canonicalizes logical paths before reading them and preserves every input occurrence. Passing the same path twice therefore produces two attachment occurrences with distinct execution-local `attachment_id` values, while their content digests may be identical. The initial model request receives each file as `BinaryContent` together with its canonical Workspace path, and the captured bytes are recovered from Runtime storage rather than reread from the Workspace during retry or recovery. After a complete model response consumes that binary input, Runtime keeps only lightweight file/path context in the active model context, so later agent-loop requests, Session turns, and forks do not repeatedly resend the bytes. The raw transcript remains lossless.
 
-For new Agent configurations, select `read_file` to preview text or attach supported files (`read_file(path=[...])`; use `as_file=True` for whole-text input). See [file tools and model input](docs/file-tools.md) for format capabilities, bounded reads, exact edits, minimal toolsets and migration. The legacy `attach_files(paths=[...])` entry point remains a normal `filesystem.read` Workspace tool: it applies the existing Sandbox, path, approval, and repository-instruction boundaries, preserves duplicate occurrences, reads the current Workspace contents, and sends those files only to the next model request. Runtime binds those occurrences to the originating tool call before the content enters model history, so parallel tool calls do not require transcript-order inference. A later complete model response consumes them under the same transient rule. Agent-backed Task nodes use `runtime.tasks.from_agent(...)` and `AgentTaskInput`; place workspace paths in its `files` field and prompt content in `prompt`. Runtime materializes those inputs at graph admission, or when accepting a dynamically expanded batch, before dependent nodes run. Replaying an accepted graph does not reread the source files; graph state retains the captured input objects. Delegated subagents use the same explicit execution-input rules.
+For new Agent configurations, select `read_file` to preview text or attach supported files (`read_file(path=[...])`; use `as_file=True` for whole-text input). See [file tools and model input](docs/file-tools.md) for format capabilities, bounded reads, exact edits, minimal toolsets and migration. The legacy `attach_files(paths=[...])` entry point remains a normal `filesystem.read` Workspace tool: it applies the existing Sandbox, path, approval, and repository-instruction boundaries, preserves duplicate occurrences, reads the current Workspace contents, and sends those files only to the next model request. Runtime binds those occurrences to the originating tool call before the content enters model history, so parallel tool calls do not require transcript-order inference. A later complete model response consumes them under the same transient rule. Agent-backed Task nodes use `Task.from_agent(...)` and `AgentTaskInput`; place workspace paths in its `files` field and prompt content in `prompt`. TaskEngine materializes those inputs through the bound Agent execution port at graph admission, or when accepting a dynamically expanded batch, before dependent nodes run. Replaying an accepted graph does not reread the source files; graph state retains the captured input objects. Delegated subagents use the same explicit execution-input rules.
 
-Attachment delivery evidence is available through `runtime.history.attachment_facts(...)` and `RuntimeHistory.open(...)`. The structured facts distinguish `accepted` from `included_in_request`, expose known media type/size/digest, request association, and the optional opaque `input_identifier` originally supplied by the caller. Runtime does not interpret or synthesize that identifier for Workspace or `attach_files` inputs, and keeps `processing_status="unknown"` unless it has verifiable provider-specific evidence. External URL references are not downloaded just to manufacture size or digest facts.
+Attachment delivery evidence is available through `runtime.history.attachment_facts(...)` and `History.open(...)`. The structured facts distinguish `accepted` from `included_in_request`, expose known media type/size/digest, request association, and the optional opaque `input_identifier` originally supplied by the caller. Runtime does not interpret or synthesize that identifier for Workspace or `attach_files` inputs, and keeps `processing_status="unknown"` unless it has verifiable provider-specific evidence. External URL references are not downloaded just to manufacture size or digest facts.
 
 ### Agent-backed Task graphs
 
-Bind Agent-backed Task definitions through `runtime.tasks` and put prompt,
+Bind Agent-backed Task definitions through `Task.from_agent` and an independent TaskEngine and put prompt,
 parameters, and Workspace paths in `AgentTaskInput`:
 
 ```python
-from linktools.ai.runtime import AgentTaskInput
-from linktools.ai.task import TaskGraph, TaskNode
+from linktools.ai.inputs import AgentTaskInput
+from linktools.ai.task import Task, TaskGraph, TaskNode
+from linktools.ai.task_engine import TaskEngine
 
-task = runtime.tasks.from_agent("writer-task", runtime.agents.get("writer"))
-engine = runtime.tasks.bind(task)
+task = Task.from_agent("writer-task", runtime.agents.get("writer"))
 graph = TaskGraph(
     "draft-1",
     (TaskNode("draft", task=task, input=AgentTaskInput("Say hello.")),),
 )
-run = await engine.start(graph, idempotency_key="draft-1")
-await run.wait()
-result = await run.result("draft")
+async with TaskEngine.open(task, persistence=persistence) as engine:
+    run = await engine.start(graph, idempotency_key="draft-1")
+    await run.wait()
+    result = await run.result("draft")
 ```
 
 Agent task prompt content supports native user content such as `BinaryContent`
@@ -1258,16 +1264,17 @@ Missing invocation evidence fails closed rather than granting fresh time.
 ### Runtime context and execution queries
 
 `Runtime.open()` is the stable Runtime construction entry point. Use
-`RuntimeContext` to provide the application object, tenant, correlation, and
-low-cardinality metric dimensions for the Runtime lifetime:
+`ExecutionContext` to provide the application object, correlation, and
+low-cardinality metric dimensions. Tenant identity belongs to Persistence:
 
 ```python
-from linktools.ai.runtime import RuntimeContext
+from linktools.ai.core import ExecutionContext
 
-context = RuntimeContext(app, tenant_id="tenant-a")
-async with Runtime.open(
-    "web-chat",
-    storage=storage,
+context = ExecutionContext(app)
+async with Persistence.open(
+    "web-chat", storage=storage, tenant_id="tenant-a",
+) as persistence, Runtime.open(
+    persistence=persistence,
     features=features,
     context=context,
 ) as runtime:
@@ -1286,9 +1293,8 @@ Retry `handoff()` or `close()` to join that same cleanup after a failure.
 
 Handoff requires `CheckpointCapability`, synchronous execution admission, and
 durable execution, recovery and checkpoint storage. Unsupported composition
-raises `CAPABILITY_REQUIRED_MISSING` before closing the Runtime. Active evaluation
-trial coordination is not supported by this lifecycle operation and is rejected
-before shutdown; finish or explicitly close those trials first. A handoff cannot
+raises `CAPABILITY_REQUIRED_MISSING` before closing the Runtime. Evaluation coordination belongs to its own context; close or hand off dependent
+Task engines before handing off the Agent Runtime they borrow. A handoff cannot
 replace an already-started default close and reports an error instead of claiming
 that cancelled executions were preserved.
 
@@ -1325,7 +1331,7 @@ still-running local side effect has been abandoned.
 Execution metadata is available through the authorized public query surface:
 
 ```python
-from linktools.ai.runtime import ListExecutionRequest
+from linktools.ai.execution import ListExecutionRequest
 
 page = await runtime.executions.list(
     ListExecutionRequest(
@@ -1336,10 +1342,12 @@ page = await runtime.executions.list(
 )
 ```
 
-`RuntimeHistory.open()` provides the same read-only execution metadata and
+`History.open()` provides the same read-only execution metadata and
 history projections without loading model bindings or compiling Agents. Pass the
-same `features=` declaration or capture when capabilities configure custom storage
-routes or caches; read-only opening does not activate hooks or metrics recording.
+same Persistence and explicit authorization policy. Routes and caches belong to
+Persistence; read-only opening does not activate hooks or metrics recording.
+Independent History cannot read another producer's transient body staging; use
+`runtime.history` for its local transient view and inspect availability flags.
 Use `list_sessions(principal=..., cursor=..., limit=...)` for a paginated session
 list. `messages(session_id, principal=..., cursor=..., limit=...)` returns an ordered
 `Page[ModelMessage]` from a fixed committed history prefix, including system,
@@ -1482,31 +1490,30 @@ compatibility commitment exists.
 
 ## 7. Runtime storage
 
-`Runtime.open()` requires an explicit `RuntimeStorage`; storage selection belongs to the application:
+`Persistence.open()` binds explicit storage, namespace and tenant. Runtime borrows that scope; storage selection belongs to the application:
 
 ```python
 from pathlib import Path
 
 from linktools.ai import Runtime
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import Persistence, PersistenceStorage
 
 runtime_root = Path("/var/lib/linktools/runtime")
-storage = RuntimeStorage.sqlite(runtime_root / "runtime.db")
+storage = PersistenceStorage.sqlite(runtime_root / "runtime.db")
 
-async with Runtime.open(
-    "service-runtime",
-    storage=storage,
+async with Persistence.open("service-runtime", storage=storage) as persistence, Runtime.open(
+    persistence=persistence,
     features=features,
 ) as runtime:
     ...
 ```
 
-`RuntimeStorage` supports in-memory, filesystem, SQLite, and SQL backends. Repository domains keep their ownership, transaction, recovery, and retention rules; `Runtime.open()` consumes the storage composition directly. Use the same `features=` declaration or capture for `Runtime.open`, `RuntimeHistory.open` and `RuntimeSnapshot.create` when configuring module routes. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only `RuntimeStorage` handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only `RuntimeStorage`, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. RuntimeStorage snapshots include Runtime-owned objects only. Skill and MCP resource bytes remain Asset-owned and are persisted as Asset version references in
-binding metadata; portable RuntimeStorage restore therefore requires the
+`PersistenceStorage` supports in-memory, filesystem, SQLite, and SQL backends. Repository domains keep their ownership, transaction, recovery, and retention rules; `Persistence.open()` owns the storage composition. Pass the same Persistence to Runtime, TaskEngine, `History.open(persistence=...)` and `Snapshot.create(persistence=...)`; readers do not need Agent features or activate executors. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only `PersistenceStorage` handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only `PersistenceStorage`, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. Snapshots include Persistence-owned objects only. Skill and MCP resource bytes remain Asset-owned and are persisted as Asset version references in
+binding metadata; portable PersistenceStorage restore therefore requires the
 corresponding Asset history to remain available through the AssetStore supplied
 when the Runtime is reopened.
 
-SQLite-backed `RuntimeStorage` supports the built-in durable TaskGraph scheduler without a SQLite-specific launcher or an external lock. Normal internal Task optimistic-CAS races are reread and converged by the Task domain. Durable ToolOperation terminal persistence is also lease-aware: a same-lease heartbeat racing terminal persistence is reconciled without replaying the tool effect. Genuine ownership, fence, idempotency, tool-result, effect-unknown, integrity, and storage errors remain observable. A newly created local SQLite database initializes its Runtime and `ai_objects` schema; an existing SQLite database is opened without automatic schema validation and is never implicitly migrated or repaired. When `object_store` is omitted, durable SQLite Runtime objects are stored in the same database through the built-in `ai_objects` and `ai_object_chunks` tables. An explicitly supplied ObjectStore remains available when object payloads should live outside SQLite. External SQL backends still require explicit schema provisioning/migration. Process workers must initialize their own Runtime and SQL engine inside the worker process; initialized Runtime, engine, session, or connection objects must not be reused after `fork()`.
+SQLite-backed `PersistenceStorage` supports the built-in durable TaskGraph scheduler without a SQLite-specific launcher or an external lock. Normal internal Task optimistic-CAS races are reread and converged by the Task domain. Durable ToolOperation terminal persistence is also lease-aware: a same-lease heartbeat racing terminal persistence is reconciled without replaying the tool effect. Genuine ownership, fence, idempotency, tool-result, effect-unknown, integrity, and storage errors remain observable. A newly created local SQLite database initializes its Runtime and `ai_objects` schema; an existing SQLite database is opened without automatic schema validation and is never implicitly migrated or repaired. When `object_store` is omitted, durable SQLite Runtime objects are stored in the same database through the built-in `ai_objects` and `ai_object_chunks` tables. An explicitly supplied ObjectStore remains available when object payloads should live outside SQLite. External SQL backends still require explicit schema provisioning/migration. Process workers must initialize their own Runtime and SQL engine inside the worker process; initialized Runtime, engine, session, or connection objects must not be reused after `fork()`.
 
 SQL Runtime, Asset, and Metrics initialization and ordinary reads do not inspect
 table schemas by default. Schema diagnostics are an explicit deployment or
@@ -1526,12 +1533,12 @@ public domain selection as provisioning; include ObjectStore tables when the
 Runtime uses its default SQL ObjectStore:
 
 ```python
-from linktools.ai.runtime import RuntimeDomain
-from linktools.ai.runtime.state.schema import build_runtime_sql_metadata
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.schema import build_runtime_sql_metadata
 from linktools.ai.storage import build_object_sql_metadata, validate_sql
 
 metadata = build_runtime_sql_metadata(frozenset({
-    RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION,
+    PersistenceDomain.CONVERSATION, PersistenceDomain.EXECUTION,
 }))
 build_object_sql_metadata(metadata=metadata)
 await validate_sql(engine, metadata)
@@ -1556,7 +1563,7 @@ request context projection; it never rewrites the raw transcript.
 
 ### Workspace relocation
 
-Workspace has no independent persistent identity. `Workspace.root`, Runtime storage paths, SQLite paths, SQL endpoints, ObjectStore locations, and storage topology are deployment details. The Runtime persistence identity remains the explicit `namespace` plus tenant supplied to `Runtime.open()` / `RuntimeStorage`.
+Workspace has no independent persistent identity. `Workspace.root`, Runtime storage paths, SQLite paths, SQL endpoints, ObjectStore locations, and storage topology are deployment details. The Runtime persistence identity remains the explicit `namespace` plus tenant supplied to `Persistence.open()`.
 
 Moving a Workspace therefore does not require preserving or regenerating a Workspace ID. Restore Workspace files and Runtime storage consistently, reopen the Runtime with the same logical namespace and tenant, and normal durable recovery continues to use the captured execution inputs and
 Asset-version-pinned Skill resources. A separate `Runtime.restore()` migration step is not required.

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """A durable retention closure proves publication across process boundaries."""
 from ._runtime_test_helpers import model_features
 
@@ -8,12 +10,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeHistory
-from linktools.ai.runtime.state import RuntimeStorage, RuntimeStoragePlan
-from linktools.ai.runtime.state._store import active_state_scope
+from linktools.ai.history import History
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage, PersistencePlan
+from linktools.ai.persistence.state import active_state_scope
 from linktools.ai.storage import StorageRoute
 
 from .test_conversation_output_retention import _NAMESPACE, _features, _models
@@ -25,7 +28,7 @@ pytestmark = pytest.mark.asyncio
 
 @pytest.mark.parametrize("cached", ("absent", "pending"))
 async def test_stale_unadmitted_cache_cannot_prove_publication(tmp_path, monkeypatch, cached):
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="retention-io", tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -99,22 +102,18 @@ async def test_stale_unadmitted_cache_cannot_prove_publication(tmp_path, monkeyp
 
 @pytest.mark.parametrize("split", (False, True))
 async def test_closed_public_results_reuse_proof_across_runtime(tmp_path, monkeypatch, split):
-    plan = RuntimeStoragePlan(
+    plan = PersistencePlan(
         execution=StorageRoute.sqlite(tmp_path / "execution.db"),
         conversation=StorageRoute.sqlite(tmp_path / ("conversation.db" if split else "execution.db")),
     )
-    async with Runtime.open(
-        _NAMESPACE, storage=RuntimeStorage.from_plan(plan), features=model_features(_models(), _features()),
-    ) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_plan(plan)) as persistence_106, Runtime.open(persistence=persistence_106, features=model_features(_models(), _features())) as runtime:
         session = await runtime.agents.get().create_session("s")
         result = (await session.run("retained input", timeout_seconds=5)).result
         principal = runtime.default_principal
         execution_id = result.execution_id
 
-    storage = RuntimeStorage.from_plan(plan)
-    async with Runtime.open(
-        _NAMESPACE, storage=storage, features=model_features(_models(), _features()),
-    ) as runtime:
+    storage = PersistenceStorage.from_plan(plan)
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_115, Runtime.open(persistence=persistence_115, features=model_features(_models(), _features())) as runtime:
         record = await runtime._state.execution.executions.get(execution_id, tenant_id=principal.tenant_id)
         assert record.retention_closed
         receipt_reads = []
@@ -143,7 +142,7 @@ async def test_closed_public_results_reuse_proof_across_runtime(tmp_path, monkey
         await sessions.state_store.mutate(corrupt)
         assert (await runtime.executions.result(execution_id, principal=principal)).output == result.output
 
-    async with RuntimeHistory.open(_NAMESPACE, storage=RuntimeStorage.from_plan(plan)) as history:
+    async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_plan(plan), tenant_id="default", read_only=True) as history_persistence_145, History.open(persistence=history_persistence_145) as history:
         assert (await history.result(execution_id, principal=principal)).output == result.output
         with pytest.raises(AIError) as raised:
             await history.session_timeline("s", principal=principal)
@@ -152,7 +151,7 @@ async def test_closed_public_results_reuse_proof_across_runtime(tmp_path, monkey
 
 @pytest.mark.parametrize("committed", (False, True))
 async def test_unknown_close_preserves_only_durable_publication_proof(tmp_path, monkeypatch, committed):
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="retention-io", tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -187,7 +186,7 @@ async def test_unknown_close_preserves_only_durable_publication_proof(tmp_path, 
 
 
 async def test_dependency_hold_added_after_source_confirmation_prevents_close(tmp_path, monkeypatch):
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="retention-io", tenant_id="tenant")
     try:
         repository = state.execution.executions

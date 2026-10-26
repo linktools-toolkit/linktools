@@ -57,10 +57,8 @@ from linktools.ai.runtime._tool_boundary import (
     managed_tool_descriptor_from_metadata,
     BoundaryToolset,
 )
-from linktools.ai.runtime.state import (
-    RuntimeDomain,
-    runtime_domain_uses_object_store,
-)
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.objects import runtime_domain_uses_object_store
 from linktools.ai.spec import (
     AgentSpec,
     AgentSpecAdapter,
@@ -607,19 +605,19 @@ async def test_business_tool_adapter_preserves_ctx_keyword_for_async_tools() -> 
 
 def test_runtime_domain_object_store_trait_has_one_owner() -> None:
     object_domains = {
-        RuntimeDomain.CONVERSATION,
-        RuntimeDomain.EXECUTION,
-        RuntimeDomain.MEMORY,
-        RuntimeDomain.ARTIFACT,
-        RuntimeDomain.TASK,
-        RuntimeDomain.EVALUATION,
-        RuntimeDomain.RECOVERY,
-        RuntimeDomain.TRACE,
-        RuntimeDomain.CHECKPOINT,
+        PersistenceDomain.CONVERSATION,
+        PersistenceDomain.EXECUTION,
+        PersistenceDomain.MEMORY,
+        PersistenceDomain.ARTIFACT,
+        PersistenceDomain.TASK,
+        PersistenceDomain.EVALUATION,
+        PersistenceDomain.RECOVERY,
+        PersistenceDomain.TRACE,
+        PersistenceDomain.CHECKPOINT,
     }
     assert {
         domain
-        for domain in RuntimeDomain
+        for domain in PersistenceDomain
         if runtime_domain_uses_object_store(domain)
     } == object_domains
 

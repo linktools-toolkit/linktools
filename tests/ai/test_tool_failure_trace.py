@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Tool execution errors remain observable without inventing SDK returns."""
 from ._runtime_test_helpers import model_features
 
@@ -11,7 +13,8 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from linktools.ai.capability import AgentContext, ToolCallFailed, ToolCallRetry
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.capability import TraceCapability
 
 from ._runtime_test_helpers import _UsageFunctionModel
@@ -41,10 +44,7 @@ async def test_tool_failure_trace_is_durable_and_does_not_fabricate_a_return(fai
     group.capability(TraceCapability(), scope="runtime")
     group.tool(broken, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("broken",))
-    async with Runtime.open(
-        "tool-failure-trace",
-        storage=RuntimeStorage.in_memory(), features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as runtime:
+    async with Persistence.open('tool-failure-trace', storage=PersistenceStorage.in_memory()) as persistence_44, Runtime.open(persistence=persistence_44, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get("default").start("Call the tool")
         if failure == "fatal":
             with pytest.raises(AIError) as caught:
@@ -93,11 +93,8 @@ async def test_terminal_seal_and_retention_release_outlast_pending_observation_f
     group = RuntimeFeatures("observation-terminal-drain")
     group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
-    storage = RuntimeStorage.in_memory()
-    async with Runtime.open(
-        "observation-terminal-drain",
-        storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as runtime:
+    storage = PersistenceStorage.in_memory()
+    async with Persistence.open('observation-terminal-drain', storage=storage) as persistence_97, Runtime.open(persistence=persistence_97, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get("default").start("finish")
         try:
             await asyncio.wait_for(entered.wait(), 5)
@@ -170,11 +167,8 @@ async def test_pause_handoff_drains_only_its_execution_while_another_run_is_live
     group.capability(TraceCapability(), scope="runtime")
     group.tool(broken, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("read_file", "broken"))
-    storage = RuntimeStorage.in_memory()
-    async with Runtime.open(
-        "parallel-handoff", storage=storage,
-        features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as runtime:
+    storage = PersistenceStorage.in_memory()
+    async with Persistence.open('parallel-handoff', storage=storage) as persistence_174, Runtime.open(persistence=persistence_174, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         held = await runtime.agents.get("default").start("hold this run")
         try:
             await asyncio.wait_for(entered.wait(), 5)
@@ -200,7 +194,7 @@ async def test_pause_handoff_drains_only_its_execution_while_another_run_is_live
             checkpoint = await runtime._state.recovery.checkpoints.get(held.execution_id, tenant_id=runtime.tenant_id)
             head = await runtime._state.execution.executions.get_history_head(held.execution_id, tenant_id=runtime.tenant_id)
             assert checkpoint is not None and checkpoint.agent_run_id is not None and head is not None
-            await runtime._state.run_store.flush_execution_projection(
+            await runtime._run_store.flush_execution_projection(
                 checkpoint.agent_run_id, execution_id=held.execution_id, producer_generation=head.producer_generation,
             )
             held_history = await held.history(include_content=True)

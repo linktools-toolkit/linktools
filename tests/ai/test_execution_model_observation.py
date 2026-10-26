@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Opt-in execution observations retain independent cursors and finite coverage."""
 from ._runtime_test_helpers import model_features
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 import time
 from dataclasses import replace
@@ -13,13 +15,14 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
-from linktools.ai.runtime import ExecutionObservationEvent, ExecutionTreeEvent, TaskModelProjection
+from linktools.ai.execution import ExecutionObservationEvent, ExecutionTreeEvent, TaskModelProjection
 from linktools.ai.core import _signed_cursor as runtime_cursor
-from linktools.ai.runtime._watch_cursor import (
-    decode_execution_observation_cursor, decode_execution_watch_cursor,
+from linktools.ai.observe.cursors import (
+    decode_execution_observation_cursor,
+    decode_execution_watch_cursor,
     encode_execution_observation_cursor,
 )
-from linktools.ai.runtime.service_api import ModelInteractionItem, ModelInteractionReadBoundary, UsageReadCutoff
+from linktools.ai.execution import ModelInteractionItem, ModelInteractionReadBoundary, UsageReadCutoff
 
 from .test_unified_wait_contract import _Bundle, _NAMESPACE, _PRINCIPAL
 
@@ -69,6 +72,17 @@ class _History:
             agent_run_seq, after_model_request_seq, through_model_request_seq, limit):
         return tuple(self.rows[after_model_request_seq:through_model_request_seq])[:limit]
 
+    async def read_model_interaction_updates(self, execution_id, *, principal, after_cutoffs=(), limit=200):
+        from linktools.ai.execution.ranges import model_interaction_update_ranges
+        boundary = await self.capture_model_interaction_cutoffs(execution_id, principal=principal)
+        rows = []
+        for run, after, through in model_interaction_update_ranges(execution_id, boundary, after_cutoffs, limit, allow_unavailable=not self.durable):
+            rows.extend(await self.read_model_interaction_metadata(
+                execution_id, principal=principal, agent_run_seq=run,
+                after_model_request_seq=after, through_model_request_seq=through, limit=through-after,
+            ))
+        return boundary, tuple(rows)
+
     def update(self, item):
         self.rows[item.model_request_seq - 1] = item
         self.generation += 1
@@ -77,7 +91,10 @@ class _History:
 
 def _bundle():
     bundle = _Bundle()
-    bundle.runtime.history = _History()
+    bundle.runtime.history = bundle.runtime._history = _History()
+    binding = replace(bundle.runtime._execution_binding, history=bundle.runtime.history)
+    bundle.runtime._execution_binding = binding
+    bundle.execution_run = replace(bundle.execution_run, _binding=binding)
     return bundle
 
 
@@ -167,7 +184,7 @@ async def test_runtime_close_owns_standalone_watch_while_consumer_is_paused() ->
     bundle.tree.release.clear()
     stream = bundle.execution_run.watch(include_model_interactions=True)
     await anext(stream)
-    await bundle.runtime.close()
+    await bundle.close()
     assert bundle.storage_closed
     assert bundle.tree.closed.is_set()
     assert all(subscription.closed for subscription in bundle.runtime.history.subscriptions)
@@ -261,7 +278,8 @@ async def test_real_execution_metadata_live_and_final_handoff(backend, durable_t
     from pydantic_ai.messages import ModelResponse, TextPart
     from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.capability import TraceCapability
-    from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
+    from linktools.ai.runtime import Runtime
+    from linktools.ai.persistence import PersistenceStorage, PersistencePlan
     from linktools.ai.storage import StorageRoute
     from .test_live_history_readback_integration import _Models
     from ._runtime_test_helpers import _UsageFunctionModel
@@ -272,19 +290,16 @@ async def test_real_execution_metadata_live_and_final_handoff(backend, durable_t
         return ModelResponse(parts=[TextPart("private response")])
 
     storage = {
-        "memory": lambda: RuntimeStorage.in_memory(),
-        "filesystem": lambda: RuntimeStorage.filesystem(tmp_path / "state"),
-        "sqlite": lambda: RuntimeStorage.sqlite(tmp_path / "state.db"),
-        "transient": lambda: RuntimeStorage(RuntimeStoragePlan(execution=StorageRoute.transient())),
+        "memory": lambda: PersistenceStorage.in_memory(),
+        "filesystem": lambda: PersistenceStorage.filesystem(tmp_path / "state"),
+        "sqlite": lambda: PersistenceStorage.sqlite(tmp_path / "state.db"),
+        "transient": lambda: PersistenceStorage(PersistencePlan(execution=StorageRoute.transient())),
     }[backend]()
     group = RuntimeFeatures[None]("execution-observation")
     if durable_trace:
         group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
-    async with Runtime.open(
-        "execution-observation",
-        storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as runtime:
+    async with Persistence.open('execution-observation', storage=storage) as persistence_284, Runtime.open(persistence=persistence_284, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get().start("private prompt")
         rows = []
         async def observe(event):
@@ -330,11 +345,11 @@ async def test_standalone_runtime_close_propagates_owned_subscription_failure() 
         raise failure
     bundle.runtime.history.subscriptions[0].close = fail_close
     with pytest.raises(AIError) as caught:
-        await bundle.runtime.close()
+        await bundle.close()
     assert caught.value is failure
     assert not bundle.storage_closed
     with pytest.raises(AIError) as retry:
-        await bundle.runtime.close()
+        await bundle.close()
     assert retry.value is failure
     with pytest.raises(AIError):
         await stream.aclose()
@@ -401,13 +416,13 @@ async def test_final_capture_authorization_error_wins_over_subscription_cleanup_
 
 @pytest.mark.asyncio
 async def test_standalone_final_drain_and_close_budgets_retain_noncooperative_capture(monkeypatch) -> None:
-    from linktools.ai.runtime import _observation
+    from linktools.ai.observe import stream as _observation
 
     monkeypatch.setattr(_observation, "_FINAL_DRAIN_TIMEOUT", 0.01)
     bundle = _bundle()
     register = bundle.runtime._register_observation
 
-    def register_short_cleanup(session: _observation._ObservationSession) -> None:
+    def register_short_cleanup(session: _observation.ObservationSession) -> None:
         session.close_timeout = 0.1
         register(session)
 
@@ -444,12 +459,12 @@ async def test_standalone_final_drain_and_close_budgets_retain_noncooperative_ca
     finally:
         release.set()
         await asyncio.gather(pending, return_exceptions=True)
-        await bundle.runtime.close()
+        await bundle.close()
 
 
 @pytest.mark.asyncio
 async def test_standalone_drain_does_not_start_another_read_after_deadline(monkeypatch) -> None:
-    from linktools.ai.runtime import _observation
+    from linktools.ai.observe import stream as _observation
 
     monkeypatch.setattr(_observation, "_FINAL_DRAIN_TIMEOUT", 0.01)
     bundle = _bundle()
@@ -488,11 +503,11 @@ async def test_execution_final_metadata_remains_available_without_live_notificat
 
 @pytest.mark.parametrize("local,durable", [(True, False), (False, True), (False, False)])
 def test_declared_model_coverage_cannot_lose_observed_cutoffs(local, durable) -> None:
-    from linktools.ai.runtime._history_projection import _model_interaction_update_ranges
+    from linktools.ai.history._projection import model_interaction_update_ranges
 
     boundary = ModelInteractionReadBoundary((), (), local, durable)
     with pytest.raises(AIError) as caught:
-        _model_interaction_update_ranges(
+        model_interaction_update_ranges(
             "execution", boundary, (UsageReadCutoff("execution", 1, 1),), 200,
         )
     assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -504,12 +519,12 @@ def test_declared_model_coverage_cannot_lose_observed_cutoffs(local, durable) ->
 async def test_missing_model_coverage_preserves_previously_observed_durable_facts(
     durable: bool, composed: bool,
 ) -> None:
-    from linktools.ai.runtime._graph_projection import _GraphModelProjection
+    from linktools.ai.execution.projection import ModelProjection
 
     bundle = _bundle()
     history = bundle.runtime.history
     history.durable = durable
-    projection = _GraphModelProjection(history, _PRINCIPAL)
+    projection = ModelProjection(history, _PRINCIPAL)
     view, depth, _ = (await bundle.tree.capture("execution", principal=_PRINCIPAL))[0]
     await projection.add("node", view, depth)
     try:
@@ -541,10 +556,10 @@ async def test_missing_model_coverage_preserves_previously_observed_durable_fact
 @pytest.mark.asyncio
 @pytest.mark.parametrize("composed", [False, True])
 async def test_model_cutoff_without_retained_rows_cannot_claim_local_only_coverage(composed: bool) -> None:
-    from linktools.ai.runtime._graph_projection import _GraphModelProjection
+    from linktools.ai.execution.projection import ModelProjection
 
     bundle = _bundle()
-    projection = _GraphModelProjection(bundle.runtime.history, _PRINCIPAL)
+    projection = ModelProjection(bundle.runtime.history, _PRINCIPAL)
     view, depth, _ = (await bundle.tree.capture("execution", principal=_PRINCIPAL))[0]
     await projection.add("node", view, depth)
     projection.high_waters[("execution", 1)] = 1
@@ -574,36 +589,36 @@ async def test_model_cutoff_without_retained_rows_cannot_claim_local_only_covera
 async def test_reopened_model_update_cutoff_uses_admitted_and_routed_durability(
     tmp_path, durable_trace: bool, durable_route: bool, separate_owner: bool,
 ) -> None:
-    from linktools.ai.runtime._runtime_history import RuntimeHistory
+    from linktools.ai.history._history import History
     from .test_model_capture_reads import _NAMESPACE as namespace, _publish, _reader, _service
     from .test_incremental_projection_boundaries import _storage
     from .test_step_projection import _execution
 
     state = _storage("memory", tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace=namespace, tenant_id="tenant")
     other = None
     try:
         await state.execution.executions.create_with_history_head(replace(_execution(), durable_trace=durable_trace))
         if separate_owner:
             other = _storage("memory", tmp_path)
-            other = RuntimeState(other)
+            other = Persistence(other)
             await other.initialize(namespace=namespace, tenant_id="tenant")
             await other.execution.executions.create_with_history_head(_execution())
         reader = _reader(state if other is None else other)
         reader._durable_history_available = durable_route
-        history = RuntimeHistory(_service(state, reader=reader), tenant_id="tenant")
+        history = History(_service(state, reader=reader), tenant_id="tenant")
         after_cutoffs = (UsageReadCutoff("execution", 1, 1),)
         if durable_trace and durable_route:
-            from linktools.ai.runtime import RuntimeDomain
+            from linktools.ai.persistence import PersistenceDomain
 
             run = await _publish(state)
             before, _ = await history.read_model_interaction_updates("execution", principal=_PRINCIPAL)
             assert before.cutoffs == after_cutoffs and before.durable_history_available
-            await state.run_store.read_store(RuntimeDomain.TRACE).release_agent_run(
+            await state.run_store.read_store(PersistenceDomain.TRACE).release_agent_run(
                 run.agent_run_id, execution_id="execution",
             )
-            history = RuntimeHistory(_service(state, reader=_reader(state)), tenant_id="tenant")
+            history = History(_service(state, reader=_reader(state)), tenant_id="tenant")
         request = history.read_model_interaction_updates(
             "execution", principal=_PRINCIPAL, after_cutoffs=after_cutoffs,
         )
@@ -626,9 +641,12 @@ async def test_transient_task_model_observation_keeps_canonical_success_after_st
     from pydantic_ai.messages import ModelResponse, TextPart
     from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.core import TaskStatus
-    from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage, RuntimeStoragePlan
+    from linktools.ai.inputs import AgentTaskInput
+    from linktools.ai.runtime import Runtime
+    from linktools.ai.persistence import PersistenceStorage, PersistencePlan
     from linktools.ai.storage import StorageRoute
-    from linktools.ai.task import TaskGraph, TaskNode
+    from linktools.ai.task import Task, TaskGraph, TaskNode
+    from linktools.ai.task_engine import TaskEngine
     from ._runtime_test_helpers import _UsageFunctionModel
     from .test_live_history_readback_integration import _Models
 
@@ -640,32 +658,30 @@ async def test_transient_task_model_observation_keeps_canonical_success_after_st
 
     group = RuntimeFeatures[None]("transient-task-observation")
     group.agent("default", model="default", allow_tools=())
-    storage = RuntimeStorage(RuntimeStoragePlan(execution=StorageRoute.transient()))
-    async with Runtime.open(
-        "transient-task-observation",
-        storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as runtime:
-        task = runtime.tasks.from_agent("answer", runtime.agents.get())
-        graph = await runtime.tasks.bind(task).start(TaskGraph(
-            "answer", (TaskNode("answer", task=task, input=AgentTaskInput("question")),),
-        ), idempotency_key="once")
-        rows = []
+    storage = PersistenceStorage(PersistencePlan(execution=StorageRoute.transient()))
+    async with Persistence.open('transient-task-observation', storage=storage) as persistence_644, Runtime.open(persistence=persistence_644, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+        task = Task.from_agent("answer", runtime.agents.get())
+        async with TaskEngine.open(task, persistence=persistence_644) as engine:
+            graph = await engine.start(TaskGraph(
+                "answer", (TaskNode("answer", task=task, input=AgentTaskInput("question")),),
+            ), idempotency_key="once")
+            rows = []
 
-        async def observe(event):
-            if isinstance(event.event, TaskModelProjection):
-                rows.append(event.event)
-                if event.event.item.status == "RUNNING":
-                    release.set()
+            async def observe(event):
+                if isinstance(event.event, TaskModelProjection):
+                    rows.append(event.event)
+                    if event.event.item.status == "RUNNING":
+                        release.set()
 
-        try:
-            result = await graph.wait(on_event=observe, timeout_seconds=5)
-        finally:
-            release.set()
-        assert rows and all(row.visibility == "local_staging" for row in rows)
-        assert result.result.status is TaskStatus.SUCCEEDED
-        assert result.observation_error is not None
-        assert result.observation_error.origin == "stream"
-        assert (await graph.wait()).result.status is TaskStatus.SUCCEEDED
+            try:
+                result = await graph.wait(on_event=observe, timeout_seconds=5)
+            finally:
+                release.set()
+            assert rows and all(row.visibility == "local_staging" for row in rows)
+            assert result.result.status is TaskStatus.SUCCEEDED
+            assert result.observation_error is not None
+            assert result.observation_error.origin == "stream"
+            assert (await graph.wait()).result.status is TaskStatus.SUCCEEDED
 
 
 @pytest.mark.asyncio

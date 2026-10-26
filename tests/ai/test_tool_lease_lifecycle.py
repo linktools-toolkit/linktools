@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Tool leaf lifetime keeps its durable claim live and preserves fencing."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -21,8 +21,8 @@ from linktools.ai.runtime import _tool_boundary as boundary_module
 from linktools.ai.runtime._budget import RunBudgetContext
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationDecision
 from linktools.ai.runtime._tool_boundary import BoundaryToolset, ManagedToolDescriptor
-from linktools.ai.runtime.state import RuntimeStorage
-from linktools.ai.runtime.state._memory_transaction import _MemoryTransaction
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence._memory_transaction import _MemoryTransaction
 from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
 
 from ._runtime_test_helpers import tool_run_context, tool_with_metadata
@@ -55,7 +55,7 @@ class _Clock:
 @asynccontextmanager
 async def _runtime(
     monkeypatch: pytest.MonkeyPatch,
-) -> AsyncIterator[tuple[RuntimeState, RuntimeToolOperationBridge, _Clock]]:
+) -> AsyncIterator[tuple[Persistence, RuntimeToolOperationBridge, _Clock]]:
     clock = _Clock()
 
     async def now(transaction: _MemoryTransaction) -> datetime:
@@ -66,8 +66,8 @@ async def _runtime(
     monkeypatch.setattr(
         boundary_module, "asyncio", SimpleNamespace(**{**vars(asyncio), "sleep": clock.sleep})
     )
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="tool-lease", tenant_id="tenant")
     bridge = RuntimeToolOperationBridge(
         state.recovery.tools,

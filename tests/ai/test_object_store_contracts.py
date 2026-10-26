@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime.state._codec import decode_domain, encode_domain
+from linktools.ai.persistence.codec import decode_domain, encode_domain
 from linktools.ai.storage import (
     FilesystemObjectStore,
     InMemoryObjectStore,

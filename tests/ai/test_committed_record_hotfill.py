@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import _sql
+from linktools.ai.persistence import _sql
 from linktools.ai.storage import InMemoryCacheBackend, StorageReadCache, _write_cache
 
 from .test_runtime_record_cache import _record, _store

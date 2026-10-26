@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Checkpoint materialization keeps replay and optimistic ownership checks."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 import getpass
 from pathlib import Path
@@ -14,10 +14,10 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
-from linktools.ai.runtime.state._sql import _SqlTransaction
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
-from linktools.ai.runtime.state._store import FactQuery, StoredFact
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.persistence._sql import _SqlTransaction
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
+from linktools.ai.persistence.state import FactQuery, StoredFact
 
 
 @pytest.mark.asyncio
@@ -26,9 +26,9 @@ async def test_checkpoint_materialization_skips_fresh_fact_read_and_verifies_rep
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'state.db'}")
     await provision_database(engine)
-    state = RuntimeState(RuntimeStorage.sql(engine))
+    state = Persistence(PersistenceStorage.sql(engine))
     await state.initialize(namespace="checkpoint-io", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     checkpoint = AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0)
     statements: list[str] = []
@@ -67,9 +67,9 @@ async def test_checkpoint_owner_fences_commit_after_absent_fact_read(
         query={"host": command[command.index("-h") + 1]},
     ), isolation_level="READ COMMITTED")
     await provision_database(engine)
-    state = RuntimeState(RuntimeStorage.sql(engine))
+    state = Persistence(PersistenceStorage.sql(engine))
     await state.initialize(namespace="checkpoint-race", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     checkpoint = AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0)
     await archive.register_agent_run(run)
@@ -113,9 +113,9 @@ async def test_checkpoint_owner_fences_commit_after_absent_fact_read(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("replay", (False, True))
 async def test_recovery_preparation_bounds_metadata_read_transactions(tmp_path: Path, replay: bool) -> None:
-    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "preparation.db"))
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "preparation.db"))
     await state.initialize(namespace="checkpoint-preparation", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     checkpoint = AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0)
     engine = archive.state_store.storage_group.context.engine.sync_engine
@@ -147,12 +147,12 @@ async def test_checkpoint_relocation_scopes_metadata_without_holding_body_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
     from pydantic_ai.messages import ModelRequest, UserPromptPart
-    from linktools.ai.runtime.state._store import active_state_scope
+    from linktools.ai.persistence.state import active_state_scope
     from .test_incremental_projection_boundaries import _storage
 
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="checkpoint-relocation", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     checkpoint = AgentRunCheckpoint(
         "run", 1, [ModelRequest(parts=[UserPromptPart("retained message")])],
@@ -192,12 +192,12 @@ async def test_checkpoint_relocation_scopes_metadata_without_holding_body_reads(
 async def test_recovery_metadata_cancellation_releases_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    from linktools.ai.runtime.state._store import active_state_scope
+    from linktools.ai.persistence.state import active_state_scope
     from .test_incremental_projection_boundaries import _storage
 
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="checkpoint-cancel", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     checkpoint = AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0)
     count = archive.model_interaction_count

@@ -1,9 +1,10 @@
 # Atomic writes from capabilities
 
 A Runtime-scoped native capability can opt into `CapabilityPersistence` from
-`linktools.ai.runtime.persistence`. It is a structural protocol, not a required
-base class. Configuration remains `storage` and `commit`; `storage=None` uses
-that Runtime's execution route. Register an explicit capability `id` and
+`linktools.ai.persistence`. It is a structural protocol, not a required
+base class. The capability declares `commit`; physical resources belong only to
+`PersistenceStorage.plan`. By default each capability gets an isolated partition
+on the execution route, without a second registration. Register its `id` and
 `revision` through `RuntimeFeatures.capability`.
 
 ```python
@@ -17,13 +18,13 @@ from pydantic_ai.tools import RunContext
 from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy, JsonValue, canonical_json_bytes
-from linktools.ai.runtime.persistence import CapabilityWriter
-from linktools.ai.runtime.state import StateTransaction, StoredRecord
-from linktools.ai.storage import StorageRoute
+from linktools.ai.persistence.capabilities import CapabilityWriter
+from linktools.ai.persistence.state import StateTransaction, StoredRecord
+from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.runtime import Runtime
 
 class RunNote(AbstractCapability[AgentContext[None]]):
-    def __init__(self, *, storage: StorageRoute | None, commit: CommitPolicy) -> None:
-        self.storage = storage
+    def __init__(self, *, commit: CommitPolicy) -> None:
         self.commit = commit
         self.writer: CapabilityWriter | None = None
 
@@ -51,10 +52,13 @@ class RunNote(AbstractCapability[AgentContext[None]]):
 
 features = RuntimeFeatures("notes")
 features.capability(
-    RunNote(storage=None, commit=CommitPolicy.terminal()),
+    RunNote(commit=CommitPolicy.terminal()),
     id="application.run-note", revision=1,
 )
-# Supply features, models and RuntimeStorage to Runtime.open as usual.
+# Register models on features before running agents.
+async with Persistence.open("notes", storage=PersistenceStorage.in_memory()) as persistence:
+    async with Runtime.open(persistence=persistence, features=features) as runtime:
+        ...
 ```
 
 Two different participants use separate domain partitions but can share one
@@ -64,6 +68,13 @@ borrowed write buffer. Policy object identity does not matter. Participating in
 this protocol selects atomic failure handling: a failed domain operation rolls
 back the whole compatible prefix, retains it and raises. Default Metrics writes
 keep their independent best-effort contract.
+
+Custom placement is optional: set `PersistencePlan.capability_routes` using the
+registered capability ID. `trace` and `checkpoint` similarly configure archive
+resources. Runtime features never override the shared physical plan. Multiple
+Runtimes may borrow one Persistence while keeping distinct callback queues,
+staging, revisions and close boundaries. The host closes Persistence after all
+producers; closing one Runtime never closes another producer's shared resources.
 
 ## Commit boundaries
 
@@ -101,8 +112,7 @@ existing durable readback mechanism, not callback retries on guessed outcomes.
 
 ## Scope and recovery limits
 
-Bindings must return independent run-local instances and preserve storage and
-commit settings. A sealed execution rejects later writes or new bindings.
+Bindings must return independent run-local instances and preserve commit settings. A sealed execution rejects later writes or new bindings.
 This initial protocol supports Runtime-scoped declarations only; selecting it on
 an Agent-scoped declaration is rejected. Ordinary Agent capabilities are
 unaffected.
@@ -120,8 +130,9 @@ A Runtime with both volatile and durable custom partitions still rejects export.
 A sticky presence marker in an existing durable core store also prevents export
 after durable custom data has committed, even if the declarations are omitted on reopen.
 Filesystem export also checks existing transaction-group membership before opening
-a reduced resource set. Read-only history must reopen with the same declarations
-to materialize the original filesystem group.
+a reduced resource set. Read-only History borrows Persistence without loading capability callbacks.
+Reopen with the same physical plan for explicitly routed external resources;
+default partitions are discovered inside their existing group.
 The first durable custom transaction includes that marker; a separate core resource
 requires a confirmed marker transaction before the custom transaction starts.
 Once confirmed, the Runtime does not repeat marker operations for later writes.

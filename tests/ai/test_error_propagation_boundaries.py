@@ -16,7 +16,7 @@ from linktools.ai.runtime._agent_executor import _execution_error
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._recovery_coordinator import _RecoveryCoordinator
 from linktools.ai.runtime._subagent import SubagentDispatcher
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence.contracts import (
     RecoveryCheckpointState,
     RecoveryHandoffPhase,
 )

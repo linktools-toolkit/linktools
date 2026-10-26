@@ -10,8 +10,8 @@ import pytest
 
 from linktools.ai.core import ExecutionStatus, canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._pending_coordination import _PendingTurnCoordination
-from linktools.ai.runtime.state._codec import encode_domain
+from linktools.ai.persistence.coordination import PendingTurnCoordination
+from linktools.ai.persistence.codec import encode_domain
 from linktools.ai.storage import InMemoryCacheBackend, TurnCoordination
 from linktools.ai.storage import _cache as cache_module
 
@@ -50,11 +50,11 @@ class _ObservedCache(InMemoryCacheBackend):
         return next(key for key, value in self.writes.items() if "session_id" in json.loads(value))
 
 
-def _helper(cache: object, *, namespace: str = "namespace", tenant_id: str = "tenant") -> _PendingTurnCoordination:
-    return _PendingTurnCoordination(cache, cache, namespace=namespace, tenant_id=tenant_id)
+def _helper(cache: object, *, namespace: str = "namespace", tenant_id: str = "tenant") -> PendingTurnCoordination:
+    return PendingTurnCoordination(cache, cache, namespace=namespace, tenant_id=tenant_id)
 
 
-async def _claim(helper: _PendingTurnCoordination, *, execution_id: str = "execution", owner_id: str = "owner") -> TurnCoordination:
+async def _claim(helper: PendingTurnCoordination, *, execution_id: str = "execution", owner_id: str = "owner") -> TurnCoordination:
     claim = await helper.claim(
         session_key="session", request_key="request", request_digest="digest",
         execution_id=execution_id, owner_id=owner_id, lease_seconds=30,
@@ -76,9 +76,9 @@ class _ContentOnly:
 
 def test_incomplete_borrowed_cache_never_gets_implicit_local_authority() -> None:
     for candidate in (None, object(), _ContentOnly()):
-        assert _PendingTurnCoordination.select(candidate, namespace="runtime", tenant_id="tenant") is None
+        assert PendingTurnCoordination.select(candidate, namespace="runtime", tenant_id="tenant") is None
     cache = InMemoryCacheBackend(max_bytes=1024)
-    assert _PendingTurnCoordination.select(cache, namespace="runtime", tenant_id="tenant") is not None
+    assert PendingTurnCoordination.select(cache, namespace="runtime", tenant_id="tenant") is not None
 
 
 @pytest.mark.asyncio

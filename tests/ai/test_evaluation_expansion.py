@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Dynamic evaluation targets admit and recover their complete bound scope."""
+
+from linktools.ai.persistence import Persistence
+from linktools.ai.task_engine import TaskEngine
+from linktools.ai.evaluation_engine import Evaluations
 from ._runtime_test_helpers import model_features
 
 from pathlib import Path
@@ -14,10 +18,18 @@ from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationPolicy, EvaluationSpec,
     GraphTargetSpec, ScoreBundle, ScoringInput, StartEvaluationRequest,
 )
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task import Task, TaskExpander, TaskGraphTemplate, TaskNode, TaskNodeContext
 
-from .test_evaluation_consumers import EVALUATION_COMPLETION_TIMEOUT_SECONDS, CONTEXT, PRINCIPAL, FixtureModels, exact, rule_scorer
+from .test_evaluation_consumers import (
+    EVALUATION_COMPLETION_TIMEOUT_SECONDS,
+    CONTEXT,
+    PRINCIPAL,
+    FixtureModels,
+    exact,
+    rule_scorer,
+)
 
 
 @pytest.mark.asyncio
@@ -44,22 +56,28 @@ async def test_dynamic_target_rejects_unsafe_bound_definition_before_callbacks(
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     initial = Task("expansion.seed", seed, effect_policy="none")
     scorer = Task("expansion.score", exact, effect_policy="none")
-    async with Runtime.open("unsafe-expansion", context=CONTEXT,
-                            storage=RuntimeStorage.filesystem(tmp_path), features=model_features(models, group)) as runtime:
+    async with (
+        Persistence.open('unsafe-expansion', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_47,
+        Runtime.open(persistence=persistence_47, context=CONTEXT, features=model_features(models, group)) as runtime,
+    ):
         unsafe = (Task("expansion.effect", effect, effect_policy=unsafe_kind) if unsafe_kind != "model"
-                  else runtime.tasks.from_agent("expansion.model", runtime.agents.get()))
+                  else Task.from_agent("expansion.model", runtime.agents.get()))
         expander = TaskExpander("expansion.expand", lambda context: (TaskNode("child", task=unsafe),))
-        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("expansion", 1), cases=(
-            CaseSpec.graph(CaseRef("expansion", "one", 1), inputs={}),
-        )), principal=PRINCIPAL, idempotency_key="dataset")
-        template = TaskGraphTemplate((TaskNode("seed", task=initial, expander=expander.ref),))
-        with pytest.raises(AIError) as rejected:
-            await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-                (CandidateSpec("expanded", graph_template=GraphTargetSpec(template=template, selector="terminal_sinks")),),
-                (rule_scorer(scorer),), policy=EvaluationPolicy(external_effects=external_effects)),
-                PRINCIPAL, "run"), engine=runtime.tasks.bind(initial, unsafe, scorer, expander))
-        assert rejected.value.code is ErrorCode.EVALUATION_INCOMPATIBLE
-        assert calls == [] and models.prompts == []
+        async with (
+            TaskEngine.open(initial, unsafe, scorer, expander, persistence=persistence_47, context=CONTEXT) as engine,
+            Evaluations.open(engine) as evaluations,
+        ):
+            dataset = await evaluations.publish_dataset(DatasetSpec(DatasetRef("expansion", 1), cases=(
+                CaseSpec.graph(CaseRef("expansion", "one", 1), inputs={}),
+            )), principal=PRINCIPAL, idempotency_key="dataset")
+            template = TaskGraphTemplate((TaskNode("seed", task=initial, expander=expander.ref),))
+            with pytest.raises(AIError) as rejected:
+                await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
+                    (CandidateSpec("expanded", graph_template=GraphTargetSpec(template=template, selector="terminal_sinks")),),
+                    (rule_scorer(scorer),), policy=EvaluationPolicy(external_effects=external_effects)),
+                    PRINCIPAL, "run"))
+            assert rejected.value.code is ErrorCode.EVALUATION_INCOMPATIBLE
+            assert calls == [] and models.prompts == []
 
 
 @pytest.mark.asyncio
@@ -86,26 +104,32 @@ async def test_safe_nested_expansion_recovers_only_its_pinned_definition_scope(t
     outer = TaskExpander("expansion.outer", lambda context: (
         TaskNode("child", ("seed",), task=child, input={"answer": "middle"}, expander=nested.ref),))
     definitions = (seed, child, unused, scorer, outer, nested)
-    async with Runtime.open("safe-expansion", features=model_features(FixtureModels()), context=CONTEXT,
-                            storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
-        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("expansion", 1), cases=(
+    async with (
+        Persistence.open('safe-expansion', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_89,
+        TaskEngine.open(*definitions, persistence=persistence_89, context=CONTEXT) as engine,
+        Evaluations.open(engine) as evaluations,
+    ):
+        dataset = await evaluations.publish_dataset(DatasetSpec(DatasetRef("expansion", 1), cases=(
             CaseSpec.graph(CaseRef("expansion", "one", 1), inputs={}, expected="yes"),
         )), principal=PRINCIPAL, idempotency_key="dataset")
         template = TaskGraphTemplate((TaskNode("seed", task=seed, input={"answer": "seed"}, expander=outer.ref),))
-        run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
+        run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("expanded", graph_template=GraphTargetSpec(template=template, selector="terminal_sinks")),),
-            (rule_scorer(scorer),)), PRINCIPAL, "run"), engine=runtime.tasks.bind(*definitions))
+            (rule_scorer(scorer),)), PRINCIPAL, "run"))
         view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
         assert (await run.create_report()).scores[0].mean == 1.0
         trial = (await run.trials()).items[0]
         assert trial.execution_status is TaskStatus.SUCCEEDED
-        evidence = await runtime.evaluations.read_evidence(trial.evidence_ref, principal=PRINCIPAL)
+        evidence = await evaluations.read_evidence(trial.evidence_ref, principal=PRINCIPAL)
         assert evidence.target.node_statuses == {"seed": "succeeded", "child": "succeeded", "leaf": "succeeded"}
         assert evidence.target.outputs["leaf"].value.value == "yes"
         experiment_id = run.experiment_id
-    async with Runtime.open("safe-expansion", features=model_features(FixtureModels()), context=CONTEXT,
-                            storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
+    async with (
+        Persistence.open('safe-expansion', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_107,
+        TaskEngine.open(*definitions, persistence=persistence_107, context=CONTEXT) as engine,
+        Evaluations.open(engine) as evaluations,
+    ):
         changed_task = Task(unused.id, answer, effect_policy="none", cancel=cancel)
         changed_expander = TaskExpander(nested.id, nested.expand, revision=2)
         added_task = Task("expansion.added", answer, effect_policy="non_replay_safe")
@@ -115,11 +139,15 @@ async def test_safe_nested_expansion_recovers_only_its_pinned_definition_scope(t
             (seed, child, unused, scorer, outer, changed_expander),
         )
         for index, replacement in enumerate(replacements):
-            with pytest.raises(AIError) as rejected:
-                await runtime.evaluations.reconcile(experiment_id, engine=runtime.tasks.bind(*replacement),
+            async with (
+                TaskEngine.open(*replacement, persistence=persistence_107, context=CONTEXT) as replaced_engine,
+                Evaluations.open(replaced_engine) as replaced_evaluations,
+            ):
+                with pytest.raises(AIError) as rejected:
+                    await replaced_evaluations.reconcile(experiment_id,
                     principal=PRINCIPAL, idempotency_key=f"changed-{index}")
             assert rejected.value.code is ErrorCode.BINDING_CONFLICT
-        recovered = await runtime.evaluations.reconcile(experiment_id, engine=runtime.tasks.bind(*definitions),
+        recovered = await evaluations.reconcile(experiment_id,
             principal=PRINCIPAL, idempotency_key="unchanged")
         assert (await recovered.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         assert calls == ["seed", "middle", "yes"]

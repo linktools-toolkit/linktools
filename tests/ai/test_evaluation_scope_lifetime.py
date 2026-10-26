@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 
-from linktools.ai.runtime._evaluation_scope import _EnteredTrialScope
+from linktools.ai.evaluation_engine._scope import _EnteredTrialScope
 
 
 @pytest.mark.asyncio

@@ -11,11 +11,11 @@ import pytest
 from linktools.ai.core import JsonValue, ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool import ToolOperationRecord
-from linktools.ai.runtime.state._codec import (
+from linktools.ai.persistence.codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
 )
-from linktools.ai.runtime.state._repository_common import (
+from linktools.ai.persistence._repository_common import (
     _restore_lease_fields,
     domain_data as _domain_data,
 )

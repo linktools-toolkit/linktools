@@ -19,7 +19,7 @@ from linktools.ai.core import (
     UsageMetrics,
 )
 from linktools.ai.errors import AIError, ErrorCode, ErrorDiagnostics
-from linktools.ai.runtime import Execution, ExecutionResult, ExecutionStreamEvent, ExecutionTreeEvent
+from linktools.ai.execution import Execution, ExecutionResult, ExecutionStreamEvent, ExecutionTreeEvent
 from linktools.cli import CommandError
 from linktools.commands.ai.run import _emit_result
 
