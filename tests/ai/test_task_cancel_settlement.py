@@ -58,7 +58,7 @@ async def test_settlement_returns_actual_terminal_status(status) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [TaskStatus.RUNNING, TaskStatus.WAITING, TaskStatus.RECOVERY_REQUIRED])
-async def test_settlement_rejects_nonterminal_wait_stops(status) -> None:
+async def test_settlement_rejects_nonterminal_wait_stops(status, monkeypatch) -> None:
     bundle = _Bundle()
     bundle.graph.result = TaskGraphState("graph", status, (), (), 1)
 
@@ -70,13 +70,57 @@ async def test_settlement_rejects_nonterminal_wait_stops(status) -> None:
     bundle.graph.cancel = cancel
     result = await bundle.graph_run.cancel()
     assert result.status is status
-    with pytest.raises(AIError) as caught:
-        await bundle.graph_run.cancel(settle_timeout_seconds=0.01)
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    read_state = bundle.graph.state
+
+    async def state(graph_id, *, principal):
+        nonlocal now
+        result = await read_state(graph_id, principal=principal)
+        # Exhaust the budget only after the authoritative nonterminal read.
+        now += 0.02
+        return result
+
+    bundle.graph.state = state
+    with monkeypatch.context() as clock:
+        clock.setattr(loop, "time", lambda: now)
+        with pytest.raises(AIError) as caught:
+            await bundle.graph_run.cancel(settle_timeout_seconds=0.01)
     assert caught.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
     assert caught.value.safe_details["reason"] == "deadline_nonterminal"
     assert caught.value.safe_details["graph_status"] == status.value
     assert bundle.graph.wait_calls == 0
     await asyncio.sleep(0)
+    await bundle.close()
+
+
+@pytest.mark.asyncio
+async def test_deadline_before_readback_does_not_reuse_prior_state(monkeypatch) -> None:
+    bundle = _Bundle()
+    bundle.graph.result = TaskGraphState("graph", TaskStatus.WAITING, (), (), 1)
+
+    async def cancel(graph_id, request, *, admission_guard=None):
+        if admission_guard is not None:
+            admission_guard()
+
+    bundle.graph.cancel = cancel
+    result = await bundle.graph_run.cancel()
+    assert result.status is TaskStatus.WAITING
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+
+    async def activate(graph_id, principal):
+        nonlocal now
+        now += 0.02
+
+    bundle.engine._activate_graph = activate
+    with monkeypatch.context() as clock:
+        clock.setattr(loop, "time", lambda: now)
+        with pytest.raises(AIError) as caught:
+            await bundle.graph_run.cancel(settle_timeout_seconds=0.01)
+    assert caught.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+    assert caught.value.safe_details["reason"] == "deadline_unknown"
+    assert "graph_status" not in caught.value.safe_details
     await bundle.close()
 
 
