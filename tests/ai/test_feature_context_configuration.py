@@ -8,7 +8,6 @@ from linktools.ai.core import ExecutionContext
 from ._runtime_test_helpers import model_features
 
 from dataclasses import FrozenInstanceError, replace
-import inspect
 
 import pytest
 from pydantic_ai.capabilities import CombinedCapability, PrefixTools
@@ -40,69 +39,71 @@ class Policy:
 
 
 @pytest.mark.asyncio
-async def test_capture_borrows_dynamic_policy_and_freezes_limits():
+async def test_runtime_borrows_dynamic_policy_and_capture_freezes_limits():
     policy = Policy()
     limits = PromptLimits(max_binary_input_parts=1)
-    capture = await RuntimeFeatures('policy', authorization=policy, limits=limits).capture()
-    assert capture.authorization is policy
+    capture = await RuntimeFeatures('policy', limits=limits).capture()
     assert capture.limits is limits
-    assert 'authorization=' not in repr(capture)
-    assert replace(capture, authorization=Policy()) == capture
     with pytest.raises(FrozenInstanceError):
         capture.limits = PromptLimits()
     with pytest.raises(FrozenInstanceError):
         limits.max_binary_input_parts = 2
-    policy.denied = True
-    with pytest.raises(AIError) as caught:
-        await capture.authorization.authorize(service_principal('tenant', 'actor'), AuthorizationAction.EXECUTION_READ,
-                                              ResourceRef(ResourceKind.EXECUTION, 'execution', 'tenant'))
-    assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
+    async with Runtime.open(
+        'policy', storage=PersistenceStorage.in_memory(),
+        features=capture, authorization=policy,
+    ) as runtime:
+        assert (await runtime.history.list_sessions(principal=runtime.default_principal)).items == ()
+        assert policy.calls
+        policy.denied = True
+        with pytest.raises(AIError) as caught:
+            await runtime.history.list_sessions(principal=runtime.default_principal)
+        assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
 
 
-def test_removed_open_keywords_have_no_aliases():
-    for name in ('authorization', 'limits', 'tool_responses'):
-        assert name not in inspect.signature(Runtime.open).parameters
+def test_runtime_configuration_rejects_misplaced_agent_options():
+    for name in ('limits', 'tool_responses'):
         with pytest.raises(TypeError):
-            Runtime.open(persistence=None, **{name: None})
+            Runtime.open('test', storage=PersistenceStorage.in_memory(), **{name: None})
     with pytest.raises(TypeError):
         RuntimeFeatures('test', limits=object())
 
 
 @pytest.mark.asyncio
-async def test_runtime_uses_captured_policy_and_limits_even_when_filter_rejects_all():
+async def test_runtime_uses_host_policy_and_captured_limits_when_filter_rejects_all():
     policy = Policy()
     limits = PromptLimits(max_binary_input_parts=1)
-    features = RuntimeFeatures('policy', authorization=policy, limits=limits, filter=lambda *_: False)
-    async with Persistence.open('test', storage=PersistenceStorage.in_memory()) as persistence_75, Runtime.open(persistence=persistence_75, features=features) as runtime:
+    features = RuntimeFeatures('policy', limits=limits, filter=lambda *_: False)
+    async with Persistence.open('test', storage=PersistenceStorage.in_memory()) as persistence_75, Runtime.attach(persistence=persistence_75, features=features, authorization=policy) as runtime:
         assert runtime._execution_service._authorization is policy
         assert runtime._session_service._authorization is policy
-        assert not hasattr(runtime, "tasks")
-        assert not hasattr(runtime, "evaluations")
         assert runtime._execution_service._input_materializer._limits is limits
+        assert (await runtime.history.list_sessions(principal=runtime.default_principal)).items == ()
+        policy.denied = True
+        with pytest.raises(AIError) as rejected:
+            await runtime.history.list_sessions(principal=runtime.default_principal)
+        assert rejected.value.code is ErrorCode.AUTHORIZATION_DENIED
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('tenant', ('one', 'two'))
 async def test_default_policy_resolves_per_open_tenant(tenant):
     capture = await RuntimeFeatures('reused').capture()
-    async with Persistence.open('test', storage=PersistenceStorage.in_memory(), tenant_id=tenant) as persistence_86, Runtime.open(persistence=persistence_86, context=ExecutionContext(None), features=capture) as runtime:
+    async with Persistence.open('test', storage=PersistenceStorage.in_memory(), tenant_id=tenant) as persistence_86, Runtime.attach(persistence=persistence_86, context=ExecutionContext(None), features=capture) as runtime:
         policy = runtime._execution_service._authorization
         ref = ResourceRef(ResourceKind.EXECUTION, 'execution', tenant)
         await policy.authorize(service_principal(tenant, 'actor'), AuthorizationAction.EXECUTION_READ, ref)
         with pytest.raises(AIError) as caught:
             await policy.authorize(service_principal('foreign', 'actor'), AuthorizationAction.EXECUTION_READ, ref)
         assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
-    assert capture.authorization is None
 
 
 @pytest.mark.asyncio
-async def test_history_uses_current_capture_policy(tmp_path):
+async def test_history_uses_current_host_policy(tmp_path):
     storage = PersistenceStorage.from_root(tmp_path)
-    async with Persistence.open('test', storage=storage) as persistence_100, Runtime.open(persistence=persistence_100):
+    async with Persistence.open('test', storage=storage):
         pass
     policy = Policy()
-    capture = await RuntimeFeatures('history', authorization=policy).capture()
-    async with Persistence.open('test', storage=PersistenceStorage.from_root(tmp_path), tenant_id="default", read_only=True) as history_persistence_106, History.open(persistence=history_persistence_106, authorization=capture.authorization) as history:
+    async with Persistence.open('test', storage=PersistenceStorage.from_root(tmp_path), tenant_id="default", read_only=True) as history_persistence_106, History.open(persistence=history_persistence_106, authorization=policy) as history:
         assert history._authorization is policy
         assert history._service._authorization is policy
 
@@ -123,11 +124,11 @@ async def test_response_capability_scope_uniqueness_and_bootstrap_consumption():
         with pytest.raises(AIError) as caught:
             features.capability(ToolResponsesCapability(fixture), scope='runtime')
         assert caught.value.code is ErrorCode.CAPABILITY_CONFLICT
-        async with Persistence.open('test', storage=PersistenceStorage.in_memory()) as persistence_125, Runtime.open(persistence=persistence_125, features=features) as runtime:
+        async with Persistence.open('test', storage=PersistenceStorage.in_memory()) as persistence_125, Runtime.attach(persistence=persistence_125, features=features) as runtime:
             assert runtime._execution_service._tool_responses is fixture
         wrapped = RuntimeFeatures('wrapped')
         wrapped.capability(PrefixTools(CombinedCapability([ToolResponsesCapability(fixture)]), prefix='test'), id='wrapped.responses', scope='runtime')
-        async with Persistence.open('wrapped', storage=PersistenceStorage.in_memory()) as persistence_129, Runtime.open(persistence=persistence_129, features=wrapped) as runtime:
+        async with Persistence.open('wrapped', storage=PersistenceStorage.in_memory()) as persistence_129, Runtime.attach(persistence=persistence_129, features=wrapped) as runtime:
             assert runtime._execution_service._tool_responses is fixture
     finally:
         await store.close()
@@ -138,7 +139,7 @@ async def test_captured_limits_reject_oversized_input_before_execution():
     from pydantic_ai import BinaryContent
 
     features = RuntimeFeatures('limits', limits=PromptLimits(max_binary_input_parts=1))
-    async with Persistence.open('test', storage=PersistenceStorage.in_memory()) as persistence_140, Runtime.open(persistence=persistence_140, features=features) as runtime:
+    async with Persistence.open('test', storage=PersistenceStorage.in_memory()) as persistence_140, Runtime.attach(persistence=persistence_140, features=features) as runtime:
         with pytest.raises(AIError) as caught:
             await runtime._execution_service._input_materializer.materialize(
                 (BinaryContent(b'one', media_type='text/plain'), BinaryContent(b'two', media_type='text/plain')), (),
@@ -192,10 +193,9 @@ async def test_restored_history_ignores_source_routes_and_cache(tmp_path, monkey
                       CheckpointCapability(),
                       TraceCapability())
     policy = Policy()
-    group._authorization = policy
     group.model("default", _FeatureModels())
     capture = await group.capture()
-    async with Persistence.open('restore-policy', storage=source_storage()) as persistence_198, Runtime.open(persistence=persistence_198, features=capture) as runtime:
+    async with Persistence.open('restore-policy', storage=source_storage()) as persistence_198, Runtime.attach(persistence=persistence_198, features=capture, authorization=policy) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question')
         await execution.wait(timeout_seconds=5)

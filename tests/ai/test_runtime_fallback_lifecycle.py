@@ -78,7 +78,7 @@ async def test_stopping_active_candidate_closes_every_model_without_fallback(
     primary = _LifecycleModel(primary_stream, name="primary", events=events)
     secondary = _LifecycleModel(secondary_stream, name="secondary", events=events)
     features, _ = _features(primary, secondary)
-    async with Persistence.open('fallback-stop', storage=PersistenceStorage.in_memory()) as persistence_78, Runtime.open(persistence=persistence_78, features=features) as runtime:
+    async with Persistence.open('fallback-stop', storage=PersistenceStorage.in_memory()) as persistence_78, Runtime.attach(persistence=persistence_78, features=features) as runtime:
         execution = await runtime.agents.get().start("respond")
         await asyncio.wait_for(blocked.wait(), 5)
         if stop == "cancel":
@@ -126,7 +126,7 @@ async def test_handoff_after_first_stream_event_fails_without_replaying(boundary
         Primary(stream_function=primary_stream, model_name="primary"),
         FunctionModel(stream_function=secondary_stream, model_name="secondary"),
     )
-    async with Persistence.open('fallback-stream', storage=PersistenceStorage.in_memory()) as persistence_126, Runtime.open(persistence=persistence_126, features=features) as runtime:
+    async with Persistence.open('fallback-stream', storage=PersistenceStorage.in_memory()) as persistence_126, Runtime.attach(persistence=persistence_126, features=features) as runtime:
         execution = await runtime.agents.get().start("respond")
         result = (await execution.wait(timeout_seconds=5)).result
         assert result.status is ExecutionStatus.FAILED
@@ -148,7 +148,7 @@ async def test_non_handoff_failure_and_expired_provider_deadline_do_not_route(fa
 
     primary, secondary = Primary(), _OfflineDecisionModel()
     features, _ = _features(primary, secondary)
-    async with Persistence.open('fallback-failure', storage=PersistenceStorage.in_memory()) as persistence_148, Runtime.open(persistence=persistence_148, features=features) as runtime:
+    async with Persistence.open('fallback-failure', storage=PersistenceStorage.in_memory()) as persistence_148, Runtime.attach(persistence=persistence_148, features=features) as runtime:
         execution = await runtime.agents.get().start("classify", output=_Decision)
         result = (await execution.wait(timeout_seconds=5)).result
         assert result.status is ExecutionStatus.FAILED
@@ -207,7 +207,7 @@ async def test_references_validate_and_hydrate_only_the_selected_candidate(case:
     ))
     features.capability(ReferencedInputsCapability(load), id=_SOURCE.id, revision=_SOURCE.revision, scope="agent")
     content = ReferencedContent(_REF, media_type="application/pdf", source=_SOURCE)
-    async with Persistence.open('fallback-references', storage=PersistenceStorage.in_memory()) as persistence_207, Runtime.open(persistence=persistence_207, features=features) as runtime:
+    async with Persistence.open('fallback-references', storage=PersistenceStorage.in_memory()) as persistence_207, Runtime.attach(persistence=persistence_207, features=features) as runtime:
         execution = await runtime.agents.get().start(["inspect", content])
         result = (await execution.wait(timeout_seconds=5)).result
         if case in {"selected-incompatible", "primary-incompatible"}:
@@ -257,7 +257,7 @@ async def test_suspended_fallback_response_continues_on_its_selected_candidate()
             yield Response(response, model_request_parameters=model_request_parameters, replay_events=True)
 
     features, _ = _features(FunctionModel(stream_function=primary_stream, model_name="primary"), Secondary())
-    async with Persistence.open('fallback-continuation', storage=PersistenceStorage.in_memory()) as persistence_257, Runtime.open(persistence=persistence_257, features=features) as runtime:
+    async with Persistence.open('fallback-continuation', storage=PersistenceStorage.in_memory()) as persistence_257, Runtime.attach(persistence=persistence_257, features=features) as runtime:
         execution = await runtime.agents.get().start("respond")
         result = (await execution.wait(timeout_seconds=5)).result
         assert result.status is ExecutionStatus.SUCCEEDED

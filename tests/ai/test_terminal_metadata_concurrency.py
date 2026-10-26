@@ -146,7 +146,7 @@ async def test_terminal_preserves_concurrent_hold_metadata(
     group.capability(TraceCapability(), scope="runtime")
     if split_session:
         group.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('terminal-metadata', storage=state, tenant_id='evaluation-consumers') as persistence_146, Runtime.open(persistence=persistence_146, context=CONTEXT, features=model_features(FixtureModels(), group)) as runtime:
+    async with Persistence.open('terminal-metadata', storage=state, tenant_id='evaluation-consumers') as persistence_146, Runtime.attach(persistence=persistence_146, context=CONTEXT, features=model_features(FixtureModels(), group)) as runtime:
         agent = runtime.agents.get()
         if split_session:
             await agent.create_session("session", principal=PRINCIPAL)

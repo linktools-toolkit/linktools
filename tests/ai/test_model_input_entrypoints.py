@@ -24,7 +24,7 @@ def test_default_runtime_reads_workspace_inputs_and_environment_model(
     assert binding.model_identity == "openai:testing/inputs"
 
 
-    authored = create_model(protocol='openai',
+    authored = create_model(api='openai',
         model="testing/inputs",
         input_types=["audio", "document", "mime:audio/*", "mime:application/pdf"],
     )

@@ -93,7 +93,7 @@ async def test_rescore_reuses_targets_in_each_reopened_runtime_environment(
     context = replace(CONTEXT, app=object()) if environment in {"app", "both"} else CONTEXT
     async with (
         Persistence.open('rescore-environment', storage=storage, tenant_id=PRINCIPAL.tenant_id) as persistence_85,
-        Runtime.open(persistence=persistence_85, context=context, features=model_features(FixtureModels(), features)),
+        Runtime.attach(persistence=persistence_85, context=context, features=model_features(FixtureModels(), features)),
     ):
         async with TaskEngine.open(scorer, persistence=persistence_85, context=context) as engine, Evaluations.open(engine) as evaluations:
             run = await evaluations.get(experiment_id, principal=PRINCIPAL)
@@ -120,7 +120,7 @@ async def test_agent_input_evidence_reaches_rule_and_model_scorers_without_label
     received: list[ScoringInput] = []
     async with (
         Persistence.open('scoring-input', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_110,
-        Runtime.open(persistence=persistence_110, context=CONTEXT, features=model_features(models, capabilities())) as runtime,
+        Runtime.attach(persistence=persistence_110, context=CONTEXT, features=model_features(models, capabilities())) as runtime,
     ):
         async def score(context: TaskNodeContext[None]) -> JsonValue:
             sample = ScoringInput.from_mapping(context.input)
@@ -182,7 +182,7 @@ async def test_agent_evidence_uses_the_accepted_projected_prompt(tmp_path: Path)
     scorer = Task("semantics.projected-score", score, effect_policy="none")
     async with (
         Persistence.open('projected-input', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_168,
-        Runtime.open(persistence=persistence_168, context=CONTEXT, features=model_features(models, capabilities())) as runtime,
+        Runtime.attach(persistence=persistence_168, context=CONTEXT, features=model_features(models, capabilities())) as runtime,
     ):
         target = Task.from_agent("semantics.projected-target", runtime.agents.get(), build_input=project)
         async with (
@@ -255,7 +255,7 @@ async def test_accepted_human_decision_is_consumed_after_deferred_input_becomes_
     features = workspace_features("workspace", workspace=Workspace.load(tmp_path)) if live else None
     async with (
         Persistence.open('early-human', storage=PersistenceStorage.filesystem(tmp_path), tenant_id=PRINCIPAL.tenant_id) as persistence_233,
-        Runtime.open(persistence=persistence_233, context=context, features=model_features(FixtureModels(), features)),
+        Runtime.attach(persistence=persistence_233, context=context, features=model_features(FixtureModels(), features)),
         TaskEngine.open(target, persistence=persistence_233, context=context) as engine,
     ):
         if stage == "before_waiting":
@@ -548,7 +548,7 @@ async def test_comparison_usage_requirement_accounts_for_scorer_requests(
     rule = Task("semantics.initial-score", score, effect_policy="none")
     async with (
         Persistence.open('scorer-usage', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_506,
-        Runtime.open(persistence=persistence_506, context=CONTEXT, features=model_features(models, capabilities())) as runtime,
+        Runtime.attach(persistence=persistence_506, context=CONTEXT, features=model_features(models, capabilities())) as runtime,
         History.open(persistence=persistence_506, authorization=None) as history,
     ):
         judge = Task.from_agent("semantics.usage-judge", runtime.agents.get())

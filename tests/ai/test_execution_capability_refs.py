@@ -217,7 +217,7 @@ async def test_graph_agent_refs_preserve_derived_binding_after_catalog_change_an
         return {"prepared": True}
 
     application_task = Task("bound-ref-prepare", prepare, effect_policy="none")
-    async with Persistence.open('bound-refs', storage=PersistenceStorage.sqlite(path)) as persistence_206, Runtime.open(persistence=persistence_206, features=capture) as runtime, TaskEngine.open(persistence=persistence_206) as engine:
+    async with Persistence.open('bound-refs', storage=PersistenceStorage.sqlite(path)) as persistence_206, Runtime.attach(persistence=persistence_206, features=capture) as runtime, TaskEngine.open(persistence=persistence_206) as engine:
         derived = runtime.agents.get("root").derive(allow_tools=())
         task = Task.from_agent("bound-ref-agent", derived)
         run = await engine.with_definitions(application_task, task).start(
@@ -239,7 +239,7 @@ async def test_graph_agent_refs_preserve_derived_binding_after_catalog_change_an
 
     changed = RuntimeFeatures("bound-ref-test")
     changed.agent("root", revision=2, allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Persistence.open('bound-refs', storage=PersistenceStorage.sqlite(path)) as persistence_229, Runtime.open(persistence=persistence_229, features=model_features(RuntimeUsageModels(), changed)) as current, TaskEngine.open(persistence=persistence_229) as engine:
+    async with Persistence.open('bound-refs', storage=PersistenceStorage.sqlite(path)) as persistence_229, Runtime.attach(persistence=persistence_229, features=model_features(RuntimeUsageModels(), changed)) as current, TaskEngine.open(persistence=persistence_229) as engine:
         assert current.agents.get("root").derive(model="default").compiled.skill_definitions == ()
         assert (await current.history.inspect_execution(execution_id, principal=principal)).capability_refs == info.capability_refs
     async with Persistence.open('bound-refs', storage=PersistenceStorage.sqlite(path), tenant_id="default", read_only=True) as history_persistence_234, History.open(persistence=history_persistence_234) as history:

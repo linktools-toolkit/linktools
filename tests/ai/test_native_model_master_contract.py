@@ -88,7 +88,7 @@ async def test_native_reference_context_overflow_preserves_permanent_category_wi
         fail(messages, info)
         yield "unreachable"  # pragma: no cover
 
-    binding = create_model(protocol="openai", model="fixture", api_key="synthetic",
+    binding = create_model(api="openai", model="fixture", api_key="synthetic",
                            max_retries=3, retry_delay=0)
     provider = FunctionModel(fail, stream_function=fail_stream)
     monkeypatch.setattr(type(binding), "_build_model", lambda self, settings: provider)
@@ -129,7 +129,7 @@ async def test_native_reference_stream_retries_reuse_hydration_and_count_known_u
         return httpx2.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
 
     clients = _mock_clients(monkeypatch, handle)
-    binding = create_model(protocol="openai", model="fixture", api_key="synthetic",
+    binding = create_model(api="openai", model="fixture", api_key="synthetic",
                            base_url="https://offline.invalid/v1", max_retries=2, retry_delay=0)
     async with Agent(model=binding.materialize(), capabilities=[_contribution(loaded)]) as agent:
         with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
@@ -158,7 +158,7 @@ async def test_native_reference_stream_cleanup_failure_is_omitted_and_never_retr
 ) -> None:
     reference, loaded = _reference(), []
     provider = _ExitProvider(cleanup_error=ModelHTTPError(503, "fixture", body=_BODY.decode()))
-    binding = create_model(protocol="openai", model="fixture", api_key="synthetic",
+    binding = create_model(api="openai", model="fixture", api_key="synthetic",
                            max_retries=3, retry_delay=0)
     monkeypatch.setattr(type(binding), "_build_model", lambda self, settings: provider)
     async with Agent(model=binding.materialize(), capabilities=[_contribution(loaded)]) as agent:
@@ -191,7 +191,7 @@ async def test_runtime_reference_stream_failure_keeps_attempt_coordinates_and_sa
         return httpx2.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
 
     clients = _mock_clients(monkeypatch, handle)
-    binding = create_model(protocol="openai", model="fixture", api_key="synthetic",
+    binding = create_model(api="openai", model="fixture", api_key="synthetic",
                            base_url="https://offline.invalid/v1", max_retries=1, retry_delay=0)
     features = RuntimeFeatures("reference-stream")
     features.model("default", binding)
@@ -200,7 +200,7 @@ async def test_runtime_reference_stream_failure_keeps_attempt_coordinates_and_sa
                         revision=_SOURCE.revision, scope="agent")
     features.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('reference-stream', storage=PersistenceStorage.in_memory()) as persistence_200, Runtime.open(persistence=persistence_200, features=features) as runtime:
+    async with Persistence.open('reference-stream', storage=PersistenceStorage.in_memory()) as persistence_200, Runtime.attach(persistence=persistence_200, features=features) as runtime:
         execution = await runtime.agents.get().start([reference])
         result = (await execution.wait(timeout_seconds=10)).result
         interactions = (await execution.model_interactions(include_content=True, include_client_requests=True)).items

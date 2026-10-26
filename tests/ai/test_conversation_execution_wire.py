@@ -33,7 +33,7 @@ async def test_execution_writer_requires_explicit_conversation(
 ) -> None:
     storage = PersistenceStorage.in_memory()
     features = _features(*(ExecutionCapability(retain_history=True),) if conversation else ())
-    async with Persistence.open('conversation-wire', storage=storage) as persistence_33, Runtime.open(persistence=persistence_33, features=model_features(_FeatureModels(), features)) as runtime:
+    async with Persistence.open('conversation-wire', storage=storage) as persistence_33, Runtime.attach(persistence=persistence_33, features=model_features(_FeatureModels(), features)) as runtime:
         execution = await runtime.agents.get().start("answer")
         await execution.wait(timeout_seconds=5)
         record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)

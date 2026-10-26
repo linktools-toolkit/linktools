@@ -21,7 +21,7 @@ from linktools.ai.spec import DEFAULT_AGENT_RETRIES, AgentSpec, AgentSpecCodec
 
 def _compiler(*, defaults: Mapping[str, JsonValue] | None = None) -> AgentCompiler:
     return AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=(), agents={}, defaults=defaults,
     )
 
@@ -46,7 +46,7 @@ def test_explicit_retry_limits_override_runtime_defaults(value: int) -> None:
 
 def test_direct_compilation_resolves_default_retry_limits() -> None:
     compiler = AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")}, candidates=(), agents={},
+        models={"default": create_model(api='openai', model="gpt-test")}, candidates=(), agents={},
     )
     compiled = compiler.compile(AgentSpec("agent"))
     assert (compiled.spec.tool_retries, compiled.spec.output_retries) == (3, 3)
@@ -89,8 +89,8 @@ async def test_runtime_reconfiguration_does_not_change_restored_retry_limits() -
     first = RuntimeFeatures("retries", defaults={"agent": {"tool_retries": 6, "output_retries": 4}})
     first.agent("agent")
     first.agent("disabled", tool_retries=0, output_retries=0)
-    models = create_model(protocol='openai', model="gpt-test")
-    async with Persistence.open('retry-binding', storage=PersistenceStorage.in_memory()) as persistence_90, Runtime.open(persistence=persistence_90, features=model_features(models, first)) as runtime:
+    models = create_model(api='openai', model="gpt-test")
+    async with Persistence.open('retry-binding', storage=PersistenceStorage.in_memory()) as persistence_90, Runtime.attach(persistence=persistence_90, features=model_features(models, first)) as runtime:
         compiled = runtime._catalog.root_agent("agent")
         assert (compiled.spec.tool_retries, compiled.spec.output_retries) == (6, 4)
         disabled = runtime._catalog.root_agent("disabled")
@@ -98,7 +98,7 @@ async def test_runtime_reconfiguration_does_not_change_restored_retry_limits() -
         payload = runtime._compiler.bind(compiled).binding_contract.to_payload()
     second = RuntimeFeatures("retries", defaults={"agent": {"tool_retries": 9, "output_retries": 8}})
     second.agent("agent")
-    async with Persistence.open('retry-binding', storage=PersistenceStorage.in_memory()) as persistence_100, Runtime.open(persistence=persistence_100, features=model_features(models, second)) as runtime:
+    async with Persistence.open('retry-binding', storage=PersistenceStorage.in_memory()) as persistence_100, Runtime.attach(persistence=persistence_100, features=model_features(models, second)) as runtime:
         fresh = runtime._catalog.root_agent("agent")
         assert (fresh.spec.tool_retries, fresh.spec.output_retries) == (9, 8)
         restored = runtime._compiler.restore(AgentBindingContract.from_payload(payload))
@@ -112,7 +112,7 @@ async def test_runtime_and_direct_agent_resolution_share_one_default() -> None:
     features = RuntimeFeatures("shared-default")
     capture = await features.capture()
     compiler = AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")}, candidates=(), agents={},
+        models={"default": create_model(api='openai', model="gpt-test")}, candidates=(), agents={},
     )
     compiled = compiler.compile(AgentSpec("agent"))
     assert capture.defaults == {}

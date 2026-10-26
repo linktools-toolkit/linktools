@@ -254,7 +254,7 @@ async def test_attachment_cursor_from_request_started_survives_archive_reopen(
     first = None
     started_items = ()
     group.capability(TraceCapability(), scope="runtime")
-    async with Persistence.open('attachment-pagination', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_252, Runtime.open(persistence=persistence_252, features=model_features(models, group)) as runtime:
+    async with Persistence.open('attachment-pagination', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_252, Runtime.attach(persistence=persistence_252, features=model_features(models, group)) as runtime:
         principal = runtime.default_principal
         prompt = ["summarize", BinaryContent(b"initial", media_type="image/png")] if initial_attachment else "summarize"
         execution = await runtime.agents.get().start(prompt, input_context=imported)

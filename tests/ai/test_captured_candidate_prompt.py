@@ -51,7 +51,7 @@ async def test_capture_uses_selected_candidate_prompt_and_preserves_history(
     for name, prompt in (("default", original_prompt), ("candidate", candidate_prompt)):
         group.agent(name, model="default", system_prompt=prompt,
                     allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Persistence.open('fork-candidate', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_47, Runtime.open(persistence=persistence_47, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_47, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('fork-candidate', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_47, Runtime.attach(persistence=persistence_47, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_47, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         if source_kind == "fork":
             first = await runtime.agents.get().start("historical question", principal=PRINCIPAL)
             assert (await first.wait()).result.status is ExecutionStatus.SUCCEEDED

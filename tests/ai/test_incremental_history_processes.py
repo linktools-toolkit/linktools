@@ -57,7 +57,7 @@ def _writer_process(root: str, pipe: Connection) -> None:
         group.tool(slow, effect_policy="replay_safe")
         group.agent("default", model="default", allow_tools=("quick", "slow"))
         group.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('process-history', storage=PersistenceStorage.filesystem(Path(root))) as persistence_56, Runtime.open(persistence=persistence_56, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+        async with Persistence.open('process-history', storage=PersistenceStorage.filesystem(Path(root))) as persistence_56, Runtime.attach(persistence=persistence_56, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
             execution = await runtime.agents.get("default").start("process prompt")
             principal = runtime.default_principal
             pipe.send(("execution", execution.execution_id, principal))

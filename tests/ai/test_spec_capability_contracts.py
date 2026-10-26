@@ -363,7 +363,7 @@ def test_mcp_server_token_collision_fails_at_compiler_boundary(
     )
     with pytest.raises(AIError) as error:
         AgentCompiler(
-            models={"default": create_model(protocol='openai', model="gpt-test")},
+            models={"default": create_model(api='openai', model="gpt-test")},
             candidates=candidates,
             agents={"agent": AgentSpec("agent")},
         )

@@ -35,7 +35,7 @@ async def test_cancelled_reservation_snapshot_restores_and_replays(
     namespace = "cancelled-budget-reservation"
     limits = SnapshotLimits(max_entries=1000, max_bytes=1024 * 1024)
     objects = InMemoryObjectStore("snapshot")
-    async with Persistence.open(namespace, storage=storage) as persistence_35, Runtime.open(persistence=persistence_35, features=model_features(RuntimeUsageModels())) as runtime:
+    async with Persistence.open(namespace, storage=storage) as persistence_35, Runtime.attach(persistence=persistence_35, features=model_features(RuntimeUsageModels())) as runtime:
         store = runtime._state.execution.budgets.state_store
         mutate = store.mutate
         committed = asyncio.Event()
@@ -102,7 +102,7 @@ async def test_cancelled_reservation_snapshot_restores_and_replays(
 
     restored = tmp_path / "restored"
     await Persistence.restore_snapshot(reference, object_store=objects, root=restored, limits=limits)
-    async with Persistence.open(namespace, storage=PersistenceStorage.from_root(restored)) as persistence_102, Runtime.open(persistence=persistence_102, features=model_features(RuntimeUsageModels())) as runtime:
+    async with Persistence.open(namespace, storage=PersistenceStorage.from_root(restored)) as persistence_102, Runtime.attach(persistence=persistence_102, features=model_features(RuntimeUsageModels())) as runtime:
         run = await runtime.agents.get().start("hello", budget=budget, idempotency_key="cancelled")
         assert run.execution_id == reservation.execution.execution_id
         assert (await run.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -123,7 +123,7 @@ async def test_failed_reservation_rolls_back_budget_scope(
     storage = (PersistenceStorage.in_memory() if backend == "memory" else
                PersistenceStorage.filesystem(tmp_path / "source") if backend == "filesystem" else
                PersistenceStorage.sqlite(tmp_path / "source.db"))
-    async with Persistence.open('failed-budget-reservation', storage=storage) as persistence_124, Runtime.open(persistence=persistence_124, features=model_features(RuntimeUsageModels())) as runtime:
+    async with Persistence.open('failed-budget-reservation', storage=storage) as persistence_124, Runtime.attach(persistence=persistence_124, features=model_features(RuntimeUsageModels())) as runtime:
         store = runtime._state.execution.budgets.state_store
         mutate = store.mutate
 

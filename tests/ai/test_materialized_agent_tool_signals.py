@@ -98,7 +98,7 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
     state = PersistenceStorage.in_memory()
     started = datetime.now(timezone.utc) - timedelta(seconds=1)
 
-    async with Persistence.open('default', storage=state) as persistence_98, Runtime.open(persistence=persistence_98, metrics=metrics, features=model_features(_CompositionModels(), application)) as runtime:
+    async with Persistence.open('default', storage=state) as persistence_98, Runtime.attach(persistence=persistence_98, metrics=metrics, features=model_features(_CompositionModels(), application)) as runtime:
         result = (await runtime.agents.get("default").run(
             "prompt",
             timeout_seconds=10,

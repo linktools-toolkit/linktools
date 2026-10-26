@@ -85,7 +85,7 @@ async def test_workspace_path_correction_respects_graph_and_effect_boundaries(
     group.tool(record_effect, effect_policy="non_replay_safe")
     group.agent("default", model="default", allow_tools=("read_file", "record_effect"),
                 tool_retries=2 if retry_limit is None else retry_limit)
-    async with Persistence.open('path-correction', storage=PersistenceStorage.in_memory()) as persistence_82, Runtime.open(persistence=persistence_82, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_82) as engine:
+    async with Persistence.open('path-correction', storage=PersistenceStorage.in_memory()) as persistence_82, Runtime.attach(persistence=persistence_82, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_82) as engine:
         task = Task.from_agent("path.agent", runtime.agents.get())
         run = await engine.with_definitions(task).start(TaskGraph("path-graph", (
             TaskNode("reader", task=task, input=AgentTaskInput("read the files")),

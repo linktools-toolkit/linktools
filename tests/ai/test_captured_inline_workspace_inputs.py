@@ -57,7 +57,7 @@ async def test_capture_reprojects_inline_and_file_attachments_without_live_reads
         assert not isinstance(context.prompt, str)
         return (f"Prepared in {context.graph_id}: ", *context.prompt)
 
-    async with Persistence.open('inline-capture', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_58, Runtime.open(persistence=persistence_58, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_58, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('inline-capture', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_58, Runtime.attach(persistence=persistence_58, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_58, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         target = Task.from_agent("inline.agent", runtime.agents.get(),
                                           build_input=project if projected else None)
         scorer = Task("inline.score", _score_graph, effect_policy="none")
@@ -131,7 +131,7 @@ async def test_irreversible_projection_keeps_fixed_capture_and_rejects_reproject
     async def discard(context: AgentTaskInputContext) -> str:
         return "Projected without the original attachment"
 
-    async with Persistence.open('irreversible-capture', storage=PersistenceStorage.filesystem(tmp_path / 'state'), tenant_id='evaluation-consumers') as persistence_133, Runtime.open(persistence=persistence_133, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_133, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('irreversible-capture', storage=PersistenceStorage.filesystem(tmp_path / 'state'), tenant_id='evaluation-consumers') as persistence_133, Runtime.attach(persistence=persistence_133, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_133, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         target = Task.from_agent("irreversible.agent", runtime.agents.get(), build_input=discard)
         scorer = Task("irreversible.score", _score_graph, effect_policy="none")
         engine = runtime_engine.with_definitions(target, scorer)

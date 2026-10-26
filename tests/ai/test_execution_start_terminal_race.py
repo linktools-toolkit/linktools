@@ -41,7 +41,7 @@ async def test_start_replay_refreshes_only_a_mixed_terminal_view(
     group = RuntimeFeatures("terminal-race")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = PersistenceStorage.in_memory()
-    async with Persistence.open('terminal-race', storage=storage) as persistence_41, Runtime.open(persistence=persistence_41, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('terminal-race', storage=storage) as persistence_41, Runtime.attach(persistence=persistence_41, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         agent = runtime.agents.get()
         execution = await agent.start("work", idempotency_key="same")
         await asyncio.wait_for(entered.wait(), 2)

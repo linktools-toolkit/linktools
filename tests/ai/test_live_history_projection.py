@@ -309,7 +309,7 @@ async def test_interrupted_response_preserves_confirmed_native_and_text_part_pos
     group = RuntimeFeatures("partial")
     group.agent("default", model="default")
     group.capability(TraceCapability(), scope="runtime")
-    async with Persistence.open('partial', storage=PersistenceStorage.in_memory()) as persistence_310, Runtime.open(persistence=persistence_310, features=model_features(_Models(Model(unused)), group)) as runtime:
+    async with Persistence.open('partial', storage=PersistenceStorage.in_memory()) as persistence_310, Runtime.attach(persistence=persistence_310, features=model_features(_Models(Model(unused)), group)) as runtime:
         execution = await runtime.agents.get("default").start("prompt")
         selector = None
         received_tail = False

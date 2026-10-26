@@ -7,7 +7,6 @@ import math
 import secrets
 from dataclasses import replace
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import TYPE_CHECKING, Generic, Protocol, TypedDict, TypeVar, overload
 
 from linktools.core import environ
@@ -32,6 +31,10 @@ from ..core import (
     PrincipalKind,
     ThinkingValue,
     normalize_correlation,
+    AuthorizationPolicy,
+    TenantAuthorizationPolicy,
+    validate_persistence_namespace,
+    validate_tenant_id,
     validate_agent_id,
     validate_resource_id,
 )
@@ -41,6 +44,8 @@ from ..errors import AIError, ErrorCode
 if TYPE_CHECKING:
     from ..inputs import InputCaptures
     from ..history import History
+    from ..asset import AssetStoreReader
+    from ._factory import _AgentLifecycle
 from .agent_execution import AgentExecutionPort
 from ._agent import Agent, Session
 from ..execution import Execution
@@ -51,7 +56,8 @@ from ..execution import ExecutionInputContext
 from ..core import ExecutionContext
 from ..model import normalize_input_files
 from ..inputs import CanonicalUserInput
-from ..observe import Metrics, MetricRecorderStatus, MetricFlushResult
+from ..observe import (Metrics, MetricRecorderStatus, MetricFlushResult, MetricsControl,
+                       RuntimeMetricsStatus, RuntimeMetricsFlushResult)
 from ..observe.service import disabled_metric_status
 from ..execution import (
     ExecutionView,
@@ -70,8 +76,13 @@ from ..execution import (
     UpdateSessionRequest,
     ExecutionTreeEvent,
 )
-from ..persistence import Persistence, PersistenceStatus
+from ..persistence import Persistence, PersistenceStatus, PersistenceStorage
 from ..persistence.runs import RuntimeAgentRunStore
+from ..task import Task, TaskExpander
+from ..task_engine import TaskEngine
+from ..evaluation_engine import Evaluations
+from ._composition_domains import RuntimeTasks, RuntimeEvaluations
+from ._lifecycle import _OpenedDomain, _RuntimeCloseCoordinator
 
 _logger = environ.get_logger("ai.runtime")
 AppT = TypeVar("AppT")
@@ -131,13 +142,180 @@ class RuntimeStatus(TypedDict):
     namespace: str
     tenant_id: str
     storage: tuple[PersistenceStatus, ...] | None
-    metrics: MetricRecorderStatus
+    metrics: RuntimeMetricsStatus
 
 
 class Runtime(Generic[AppT]):
     """Immutable Runtime composition and service graph."""
 
     def __init__(
+        self, *, persistence: Persistence, namespace: str, tenant_id: str,
+        owns_persistence: bool, context: ExecutionContext[AppT] | None = None,
+        features: RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None = None,
+        metrics: Metrics | None = None, authorization: AuthorizationPolicy | None = None,
+        auto_recover: bool = True,
+    ) -> None:
+        if not isinstance(persistence, Persistence):
+            raise TypeError("persistence must be Persistence")
+        if context is not None and not isinstance(context, ExecutionContext):
+            raise TypeError("context must be ExecutionContext")
+        if features is not None and not isinstance(features, (RuntimeFeatures, RuntimeFeaturesCapture)):
+            raise TypeError("features must be RuntimeFeatures or RuntimeFeaturesCapture")
+        if metrics is not None and not isinstance(metrics, Metrics):
+            raise TypeError("metrics must be Metrics or None")
+        if not isinstance(auto_recover, bool):
+            raise TypeError("auto_recover must be bool")
+        self._namespace = validate_persistence_namespace(namespace)
+        self._tenant_id = validate_tenant_id(tenant_id)
+        self._state = persistence
+        self._owns_persistence = owns_persistence
+        self._context = ExecutionContext(None) if context is None else context
+        self._features = features
+        self._metrics_dataset = metrics
+        self._authorization = TenantAuthorizationPolicy(self._tenant_id) if authorization is None else authorization
+        self._auto_recover = auto_recover
+        self._default_principal = Principal("runtime", self._tenant_id, PrincipalKind.LOCAL_TRUSTED.value)
+        self._entered = False
+        self._ready = False
+        self._closed = False
+        self._closing = False
+        self._agent_ready = False
+        self._handoff_requested = False
+        self._close_lock = asyncio.Lock()
+        self._close_task: asyncio.Task[None] | None = None
+        self._close_coordinator: _RuntimeCloseCoordinator | None = None
+        self._agent_lifecycle: _AgentLifecycle | None = None
+        self._close_callback: Callable[[], Awaitable[None]] | None = None
+        self._handoff_callback: Callable[[], Awaitable[None]] | None = None
+        self._metric_control: _MetricControl | None = None
+        self._agent_metric_control = MetricsControl(self._metric_status, self._flush_metrics)
+        self._observation_sessions: set[ObservationSession] = set()
+        self._task_engines: list[TaskEngine[AppT]] = []
+        self._evaluations: list[_OpenedDomain[Evaluations]] = []
+        self.agents = RuntimeAgents(self._get_agent, self._restore_agent)
+        self.tasks = RuntimeTasks(self._bind_tasks)
+        self.evaluations = RuntimeEvaluations(self._bind_evaluations)
+        self.metrics = RuntimeMetrics(self._metric_controls)
+
+    @classmethod
+    def open(
+        cls, namespace: str, *, storage: PersistenceStorage, tenant_id: str = "default",
+        context: ExecutionContext[AppT] | None = None,
+        features: RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None = None,
+        metrics: Metrics | None = None, authorization: AuthorizationPolicy | None = None,
+        auto_recover: bool = True,
+    ) -> "Runtime[AppT]":
+        """Own persistence and only the producer domains explicitly composed here.
+
+        Keep the returned Runtime before entering when the host needs to retry
+        cleanup after an initialization failure. Features opt into the Agent
+        domain; omitting them does not start an Agent producer.
+        """
+        return cls(
+            persistence=Persistence(storage), namespace=namespace, tenant_id=tenant_id,
+            owns_persistence=True, context=context, features=features, metrics=metrics,
+            authorization=authorization, auto_recover=auto_recover,
+        )
+
+    @classmethod
+    def attach(
+        cls, *, persistence: Persistence, context: ExecutionContext[AppT] | None = None,
+        features: RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None = None,
+        metrics: Metrics | None = None, authorization: AuthorizationPolicy | None = None,
+        auto_recover: bool = True,
+    ) -> "Runtime[AppT]":
+        """Borrow an open Persistence; its provider retains its close responsibility."""
+        if not isinstance(persistence, Persistence) or not persistence.ready or persistence.read_only:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "persistence must be open and writable")
+        return cls(
+            persistence=persistence, namespace=persistence.namespace, tenant_id=persistence.tenant_id,
+            owns_persistence=False, context=context, features=features, metrics=metrics,
+            authorization=authorization, auto_recover=auto_recover,
+        )
+
+    async def __aenter__(self) -> "Runtime[AppT]":
+        initializing = False
+        try:
+            async with self._close_lock:
+                if self._entered or self._closing or self._closed:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "Runtime cannot be entered twice")
+                initializing = True
+                self._entered = True
+                if self._owns_persistence:
+                    await self._state.initialize(namespace=self.namespace, tenant_id=self.tenant_id)
+                elif not self._state.ready or self._state.read_only:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                if self._features is not None:
+                    from ._factory import _AgentLifecycle, compose_runtime_components
+
+                    self._agent_lifecycle = _AgentLifecycle()
+                    components = await compose_runtime_components(
+                        persistence=self._state, app=self.app, features=self._features,
+                        metrics=self._metrics_dataset, authorization=self._authorization,
+                        auto_recover=self._auto_recover, lifecycle=self._agent_lifecycle,
+                    )
+                    if components.metric_control is not None:
+                        components.metric_control.configure_runtime_dimensions(self.context.metric_dimensions)
+                    self._bind_agent_components(
+                        components.catalog, components.compiler, components.execution,
+                        components.session, components.approval, components.external,
+                        components.event, components.artifact, components.history,
+                        persistence=self._state, run_store=components.run_store, context=self.context,
+                        close_callback=components.close_callback, handoff_callback=components.handoff_callback,
+                        tree_streamer=components.tree_streamer, metric_control=components.metric_control,
+                        _binding_resolver=components.binding_resolver, input_captures=components.input_captures,
+                    )
+                self._ready = True
+            return self
+        except BaseException as primary:
+            if not initializing:
+                raise
+            try:
+                await await_stream_cleanup(self.close(), None)
+            except BaseException as cleanup_error:
+                _log_secondary_cleanup("runtime.initialize", cleanup_error)
+                raise primary from cleanup_error
+            raise
+
+    async def __aexit__(self, exc_type: object, exc: BaseException | None, traceback: object) -> None:
+        try:
+            await await_stream_cleanup(self.close(), None)
+        except BaseException as cleanup_error:
+            if exc is not None:
+                _log_secondary_cleanup("runtime.body", cleanup_error)
+                raise exc from cleanup_error
+            raise
+
+    async def _bind_tasks(self, *definitions: Task[AppT, object] | TaskExpander) -> TaskEngine[AppT]:
+        async with self._close_lock:
+            self._ensure_open()
+            engine = TaskEngine(
+                *definitions, persistence=self._state, context=self.context,
+                authorization=self._authorization, metrics=self._metrics_dataset,
+            )
+            self._task_engines.append(engine)
+            return engine
+
+    async def _bind_evaluations(
+        self, engine: TaskEngine[AppT], *, assets: Sequence["AssetStoreReader"] = (),
+    ) -> Evaluations:
+        async with self._close_lock:
+            self._ensure_open()
+            manager = Evaluations.open(engine, assets=assets)
+            evaluations = await manager.__aenter__()
+            self._evaluations.append(_OpenedDomain(evaluations, manager))
+            return evaluations
+
+    def _metric_controls(self) -> tuple[MetricsControl, ...]:
+        controls = (() if not self._agent_ready else (self._agent_metric_control,))
+        return (*controls, *(engine.metrics for engine in self._task_engines))
+
+    def _require_agents(self) -> None:
+        if not self._agent_ready:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                          safe_details={"reason": "agent_domain_not_configured"})
+
+    def _bind_agent_components(
         self,
         catalog: AgentCatalog,
         compiler: AgentCompiler,
@@ -179,30 +357,18 @@ class Runtime(Generic[AppT]):
         self._compiler = compiler
         self._execution_service = execution
         self._input_captures = input_captures
-        self.executions = RuntimeExecutions(
+        self._executions = RuntimeExecutions(
             execution, self._get_execution, input_captures, ensure_open=self._ensure_open,
         )
         self._session_service = session
-        self.sessions = RuntimeSessions(session, self._get_session, ensure_open=self._ensure_open)
-        self.approvals = approval
-        self.external_calls = external
-        self.events = event
-        self.artifacts = artifact
-        self.history = history
+        self._sessions = RuntimeSessions(session, self._get_session, ensure_open=self._ensure_open)
+        self._approvals = approval
+        self._external_calls = external
+        self._events = event
+        self._artifacts = artifact
         self._history = history
-        self._namespace = persistence.namespace
-        self._tenant_id = persistence.tenant_id
-        self._context = context
-        self._default_principal = Principal(
-            principal_id="runtime",
-            tenant_id=self._tenant_id,
-            kind=PrincipalKind.LOCAL_TRUSTED.value,
-        )
         self._close_callback = close_callback
         self._handoff_callback = handoff_callback
-        self._handoff_requested = False
-        self.agents = RuntimeAgents(self._get_agent, self._restore_agent)
-        self.metrics = RuntimeMetrics(self._metric_status, self._flush_metrics)
         self._tree_streamer = tree_streamer
         self._metric_control = metric_control
         self._binding_resolver = _binding_resolver
@@ -216,76 +382,42 @@ class Runtime(Generic[AppT]):
             history=history, list_events=None if history is None else history.list_execution_events,
             retry=self._retry_execution, fork=self._fork_execution,
         )
-        self._closed = False
-        self._closing = False
-        self._observation_sessions: set[ObservationSession] = set()
-        self._close_lock = asyncio.Lock()
-        self._close_task: asyncio.Task[None] | None = None
-    @classmethod
-    @overload
-    def open(
-        cls,
-        *,
-        persistence: Persistence,
-        metrics: Metrics | None = None,
-        context: None = None,
-        features: "RuntimeFeatures[None] | RuntimeFeaturesCapture[None] | None" = None,
-        auto_recover: bool = True,
-    ) -> "AbstractAsyncContextManager[Runtime[None]]": ...
+        self._agent_ready = True
 
-    @classmethod
-    @overload
-    def open(
-        cls,
-        *,
-        persistence: Persistence,
-        metrics: Metrics | None = None,
-        context: ExecutionContext[AppT],
-        features: "RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None" = None,
-        auto_recover: bool = True,
-    ) -> "AbstractAsyncContextManager[Runtime[AppT]]": ...
+    @property
+    def executions(self) -> RuntimeExecutions[AppT]:
+        self._require_agents()
+        return self._executions
 
-    @classmethod
-    def open(
-        cls,
-        *,
-        persistence: Persistence,
-        metrics: Metrics | None = None,
-        context: "ExecutionContext[object] | None" = None,
-        features: "RuntimeFeatures[object] | RuntimeFeaturesCapture[object] | None" = None,
-        auto_recover: bool = True,
-    ) -> "AbstractAsyncContextManager[Runtime[object]]":
-        """Open a Runtime, optionally skipping namespace-wide startup recovery.
+    @property
+    def sessions(self) -> RuntimeSessions[AppT]:
+        self._require_agents()
+        return self._sessions
 
-        Explicit execution recovery remains available when disabled.
-        Closing still drains work owned by this Runtime.
+    @property
+    def approvals(self) -> ApprovalService:
+        self._require_agents()
+        return self._approvals
 
-        Optional metrics supplies a borrowed Metrics dataset. One Runtime-owned
-        recorder collects Agent observations; closing the
-        Runtime drains that recorder without closing the dataset. Omitted metrics
-        leaves automatic recording disabled.
+    @property
+    def external_calls(self) -> ExternalService:
+        self._require_agents()
+        return self._external_calls
 
-        Runtime-scoped RuntimeFeatures registrations apply to every agent run,
-        independently of Agent capability selection. They use native hooks and
-        lifecycle. Persistence guarantees are fixed on each admitted execution;
-        reopening under different feature declarations does not reinterpret them.
-        """
-        if metrics is not None and not isinstance(metrics, Metrics):
-            raise TypeError("metrics must be Metrics or None")
-        if not isinstance(auto_recover, bool):
-            raise TypeError("auto_recover must be bool")
-        if not isinstance(persistence, Persistence) or not persistence.ready:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "persistence must be open")
-        root_context = ExecutionContext(None) if context is None else context
-        if not isinstance(root_context, ExecutionContext):
-            raise TypeError("context must be ExecutionContext")
-        return _open_runtime(
-            persistence=persistence,
-            context=root_context,
-            metrics=metrics,
-            features=features,
-            auto_recover=auto_recover,
-        )
+    @property
+    def events(self) -> EventService:
+        self._require_agents()
+        return self._events
+
+    @property
+    def artifacts(self) -> ArtifactService:
+        self._require_agents()
+        return self._artifacts
+
+    @property
+    def history(self) -> "History | None":
+        self._require_agents()
+        return self._history
 
     @property
     def tenant_id(self) -> str:
@@ -391,12 +523,14 @@ class Runtime(Generic[AppT]):
 
     def _get_agent(self, agent_id: str = "default") -> "Agent[AppT]":
         self._ensure_open()
+        self._require_agents()
         validate_agent_id(agent_id)
         root = self._catalog.root_agent(agent_id)
         return Agent(self, root.spec.id, root.spec.revision)
 
     def _restore_agent(self, binding: AgentBindingContract) -> Agent[AppT]:
         self._ensure_open()
+        self._require_agents()
         restored = self._compiler.restore(binding)
         compiled = restored.compiled_agent
         return Agent(self, compiled.spec.id, compiled.spec.revision, compiled, binding)
@@ -725,7 +859,7 @@ class Runtime(Generic[AppT]):
 
 
     def _ensure_open(self) -> None:
-        if self._closed or self._closing:
+        if not self._ready or self._closed or self._closing or not self._state.ready:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, retryable=False)
 
 
@@ -761,7 +895,11 @@ class Runtime(Generic[AppT]):
                     if self._handoff_callback is None:
                         raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING,
                             safe_details={"capability": "durable_runtime_handoff"})
+                    for domain in self._evaluations:
+                        domain.resource.preflight_handoff()
                     self._handoff_requested = True
+                for domain in self._evaluations:
+                    domain.resource.stop_admission()
                 self._closing = True
                 for session in tuple(self._observation_sessions):
                     session.stop()
@@ -817,6 +955,22 @@ class Runtime(Generic[AppT]):
         self._observation_sessions.discard(session)
 
     async def _cleanup(self) -> None:
+        if self._close_coordinator is None:
+            actions: list[Callable[[], Awaitable[None]]] = [
+                *(domain.close for domain in reversed(self._evaluations)),
+                *(engine.close for engine in reversed(self._task_engines)),
+                self._close_agent,
+            ]
+            if self._owns_persistence:
+                actions.append(self._state.close)
+            self._close_coordinator = _RuntimeCloseCoordinator(tuple(actions))
+        await self._close_coordinator.close()
+        async with self._close_lock:
+            self._closed = True
+            self._ready = False
+            _logger.info("runtime close completed: tenant=%s", self.tenant_id)
+
+    async def _close_agent(self) -> None:
         sessions = tuple(self._observation_sessions)
         for session in sessions:
             session.stop()
@@ -825,77 +979,12 @@ class Runtime(Generic[AppT]):
         )
         for session in sessions:
             await session.close(deadline=deadline)
-        callback = self._handoff_callback if self._handoff_requested else self._close_callback
-        if callback is not None:
-            await callback()
-        async with self._close_lock:
-            self._closed = True
-            _logger.info("runtime close completed: tenant=%s", self.tenant_id)
+        if self._agent_lifecycle is not None:
+            if self._handoff_requested:
+                await self._agent_lifecycle.handoff()
+            else:
+                await self._agent_lifecycle.close()
 
-
-
-
-
-
-@asynccontextmanager
-async def _open_runtime(
-    *,
-    persistence: Persistence,
-    context: ExecutionContext[object],
-    features: "RuntimeFeatures[object] | RuntimeFeaturesCapture[object] | None",
-    metrics: Metrics | None = None,
-    auto_recover: bool = True,
-):
-    from ._factory import compose_runtime_components
-
-    components = await compose_runtime_components(
-        persistence=persistence,
-        app=context.app,
-        metrics=metrics,
-        features=features,
-        auto_recover=auto_recover,
-    )
-    try:
-        if components.metric_control is not None:
-            components.metric_control.configure_runtime_dimensions(
-                context.metric_dimensions
-            )
-        runtime = Runtime(
-            components.catalog,
-            components.compiler,
-            components.execution,
-            components.session,
-            components.approval,
-            components.external,
-            components.event,
-            components.artifact,
-            getattr(components, "history", None),
-            persistence=persistence,
-            run_store=components.run_store,
-            context=context,
-            close_callback=components.close_callback,
-            handoff_callback=components.handoff_callback,
-            tree_streamer=components.tree_streamer,
-            metric_control=components.metric_control,
-            _binding_resolver=components.binding_resolver,
-            input_captures=components.input_captures,
-        )
-    except BaseException:
-        try:
-            await await_stream_cleanup(components.close_callback(), None)
-        except BaseException as error:
-            _log_secondary_cleanup("runtime.construct", error)
-        raise
-    try:
-        yield runtime
-    except BaseException:
-        try:
-            await await_stream_cleanup(runtime.close(), None)
-        except BaseException as error:
-            _log_secondary_cleanup("runtime.body", error)
-        raise
-    else:
-        await await_stream_cleanup(runtime.close(), None)
 
 def _log_secondary_cleanup(phase: str, error: BaseException) -> None:
     code = error.code.value if isinstance(error, AIError) else None

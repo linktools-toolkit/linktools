@@ -57,7 +57,7 @@ features.capability(
 )
 # Register models on features before running agents.
 async with Persistence.open("notes", storage=PersistenceStorage.in_memory()) as persistence:
-    async with Runtime.open(persistence=persistence, features=features) as runtime:
+    async with Runtime.attach(persistence=persistence, features=features) as runtime:
         ...
 ```
 

@@ -83,7 +83,7 @@ async def test_captured_task_preserves_child_contract_after_reopen(
     historical_schema = _HistoricalOutput.model_json_schema() if structured_child else None
     historical_output = {"historical_count": 7} if structured_child else {"text": "historical text"}
     storage = PersistenceStorage.filesystem(tmp_path)
-    async with Persistence.open('captured-child', storage=storage) as persistence_80, Runtime.open(persistence=persistence_80, features=_features(1, historical_schema)) as runtime, TaskEngine.open(persistence=persistence_80, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('captured-child', storage=storage) as persistence_80, Runtime.attach(persistence=persistence_80, features=_features(1, historical_schema)) as runtime, TaskEngine.open(persistence=persistence_80, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("capture-owner", runtime.tenant_id)
         source = await runtime.agents.get().start("delegate sample inspection", principal=principal)
         assert (await source.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
@@ -96,7 +96,7 @@ async def test_captured_task_preserves_child_contract_after_reopen(
             source.execution_id, CaptureInputRequest(principal, "capture-parent", "clean"),
         )
 
-    async with Persistence.open('captured-child', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_93, Runtime.open(persistence=persistence_93, features=_features(2, _CurrentOutput.model_json_schema())) as runtime, TaskEngine.open(persistence=persistence_93, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('captured-child', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_93, Runtime.attach(persistence=persistence_93, features=_features(2, _CurrentOutput.model_json_schema())) as runtime, TaskEngine.open(persistence=persistence_93, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         captured_capture = await runtime_engine.inputs.read_agent(capture, principal=principal)
         captured_capture.require_importable()
         captured = Task.from_agent("historical-task", runtime.agents.restore(captured_capture.binding))
@@ -133,7 +133,7 @@ async def test_captured_task_preserves_child_contract_after_reopen(
         assert any(ref.kind == "agent" and ref.id == "child" and ref.revision == 1
                    for ref in historical_root_info.capability_refs)
 
-    async with Persistence.open('captured-child', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_129, Runtime.open(persistence=persistence_129, features=_features(2, _CurrentOutput.model_json_schema())) as runtime, TaskEngine.open(persistence=persistence_129, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('captured-child', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_129, Runtime.attach(persistence=persistence_129, features=_features(2, _CurrentOutput.model_json_schema())) as runtime, TaskEngine.open(persistence=persistence_129, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         readback = await runtime_engine.with_definitions().get(graph_id, principal=principal)
         assert await readback.result("historical") == root_output
         assert (await runtime.executions.result(historical_child_id, principal=principal)).output == historical_output
@@ -144,7 +144,7 @@ async def test_captured_task_preserves_child_contract_after_reopen(
 
 @pytest.mark.asyncio
 async def test_captured_task_rejects_unavailable_child_tool_revision(tmp_path: Path) -> None:
-    async with Persistence.open('captured-tool', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_141, Runtime.open(persistence=persistence_141, features=_features(1, None, tool_revision=1)) as runtime, TaskEngine.open(persistence=persistence_141, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('captured-tool', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_141, Runtime.attach(persistence=persistence_141, features=_features(1, None, tool_revision=1)) as runtime, TaskEngine.open(persistence=persistence_141, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("capture-owner", runtime.tenant_id)
         source = await runtime.agents.get().start("delegate sample inspection", principal=principal)
         assert (await source.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
@@ -160,7 +160,7 @@ async def test_captured_task_rejects_unavailable_child_tool_revision(tmp_path: P
         return _respond(messages, info)
 
     with pytest.raises(AIError) as close_error:
-        async with Persistence.open('captured-tool', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_158, Runtime.open(persistence=persistence_158, features=_features(2, _CurrentOutput.model_json_schema(), tool_revision=2, respond=observe)) as runtime, TaskEngine.open(persistence=persistence_158, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        async with Persistence.open('captured-tool', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_158, Runtime.attach(persistence=persistence_158, features=_features(2, _CurrentOutput.model_json_schema(), tool_revision=2, respond=observe)) as runtime, TaskEngine.open(persistence=persistence_158, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
             captured_capture = await runtime_engine.inputs.read_agent(capture, principal=principal)
             captured_capture.require_importable()
             captured = Task.from_agent("unavailable-child", runtime.agents.restore(captured_capture.binding))

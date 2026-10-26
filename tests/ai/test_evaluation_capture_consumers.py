@@ -83,7 +83,7 @@ async def test_tool_created_child_capture_runs_independently_in_evaluation(tmp_p
     state = tmp_path / "state"
     async with (
         Persistence.open('child-capture-consumer', storage=PersistenceStorage.filesystem(state), tenant_id='evaluation-consumers') as persistence_77,
-        Runtime.open(persistence=persistence_77, context=CONTEXT, features=model_features(models, child_capabilities(1, 'Historical child behavior', workspace=Workspace.load(work)))) as runtime,
+        Runtime.attach(persistence=persistence_77, context=CONTEXT, features=model_features(models, child_capabilities(1, 'Historical child behavior', workspace=Workspace.load(work)))) as runtime,
         History.open(persistence=persistence_77, authorization=None) as history,
     ):
         parent = await runtime.agents.get().start("delegate this work", principal=PRINCIPAL,
@@ -109,7 +109,7 @@ async def test_tool_created_child_capture_runs_independently_in_evaluation(tmp_p
     scorer = Task("consumer.captured-child-score", exact, effect_policy="none")
     async with (
         Persistence.open('child-capture-consumer', storage=PersistenceStorage.filesystem(state), tenant_id='evaluation-consumers') as persistence_100,
-        Runtime.open(persistence=persistence_100, context=CONTEXT, features=model_features(models, child_capabilities(2, 'Changed current child behavior', workspace=Workspace.load(work)))) as runtime,
+        Runtime.attach(persistence=persistence_100, context=CONTEXT, features=model_features(models, child_capabilities(2, 'Changed current child behavior', workspace=Workspace.load(work)))) as runtime,
         History.open(persistence=persistence_100, authorization=None) as history,
     ):
         async with TaskEngine.open(scorer, persistence=persistence_100, context=CONTEXT) as engine:

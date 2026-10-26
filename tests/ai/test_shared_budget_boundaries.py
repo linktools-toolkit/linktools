@@ -231,7 +231,7 @@ async def test_expired_graph_budget_blocks_callable_without_unknown_effect(effec
         calls.append(context.node_id)
         return "done"
 
-    async with Persistence.open('budget-deadline', storage=PersistenceStorage.in_memory()) as persistence_231, Runtime.open(persistence=persistence_231, features=model_features(RuntimeUsageModels())) as runtime, TaskEngine.open(persistence=persistence_231, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('budget-deadline', storage=PersistenceStorage.in_memory()) as persistence_231, Runtime.attach(persistence=persistence_231, features=model_features(RuntimeUsageModels())) as runtime, TaskEngine.open(persistence=persistence_231, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         task = Task("deadline.task", handler, effect_policy=effect_policy)
         engine = runtime_engine.with_definitions(task)
         run = await engine.start(
@@ -300,7 +300,7 @@ async def test_custom_runner_is_gated_before_dispatch(dimension: str) -> None:
     from ._runtime_test_helpers import RuntimeUsageModels
     from .test_task_mixed_node_reliability import _ExecutionBackedContractRunner
 
-    async with Persistence.open('runner-budget', storage=PersistenceStorage.in_memory()) as persistence_301, Runtime.open(persistence=persistence_301, features=model_features(RuntimeUsageModels())) as runtime, TaskEngine.open(persistence=persistence_301, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('runner-budget', storage=PersistenceStorage.in_memory()) as persistence_301, Runtime.attach(persistence=persistence_301, features=model_features(RuntimeUsageModels())) as runtime, TaskEngine.open(persistence=persistence_301, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         runner = _ExecutionBackedContractRunner(runtime._execution_service)
         task = Task.from_runner("budget.runner", runner, contract={
             "version": 1, "type": "budget.runner", "effect_policy": "none",
@@ -330,7 +330,7 @@ async def test_failed_budget_preparation_does_not_leak_scope_into_unbudgeted_gra
         calls.append(context.node_id)
         return "done"
 
-    async with Persistence.open('budget-prepare', storage=PersistenceStorage.in_memory()) as persistence_332, Runtime.open(persistence=persistence_332, features=model_features(RuntimeUsageModels())) as runtime, TaskEngine.open(persistence=persistence_332, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('budget-prepare', storage=PersistenceStorage.in_memory()) as persistence_332, Runtime.attach(persistence=persistence_332, features=model_features(RuntimeUsageModels())) as runtime, TaskEngine.open(persistence=persistence_332, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         task = Task("prepare.task", handler, effect_policy="none")
         engine = runtime_engine.with_definitions(task)
         graph = TaskGraph("same", (TaskNode("node", task=task),))

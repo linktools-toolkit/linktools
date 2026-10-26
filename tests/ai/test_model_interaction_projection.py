@@ -89,7 +89,7 @@ async def test_session_projections_do_not_copy_previous_response_bodies(
     sizes = []
     features = _agent_group()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('response-growth', storage=PersistenceStorage.sqlite(database)) as persistence_92, Runtime.open(persistence=persistence_92, features=model_features(_TextModels(), features)) as runtime:
+    async with Persistence.open('response-growth', storage=PersistenceStorage.sqlite(database)) as persistence_92, Runtime.attach(persistence=persistence_92, features=model_features(_TextModels(), features)) as runtime:
         agent = runtime.agents.get("default")
         await agent.create_session("session")
         for turn in range(8):
@@ -807,13 +807,13 @@ async def _assert_public_interaction(runtime: Runtime[object]) -> None:
 
 @pytest.mark.asyncio
 async def test_execution_model_interactions_are_durable_and_public() -> None:
-    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_813, Runtime.open(persistence=persistence_813, features=model_features(_TextModels(), _agent_group())) as runtime:
+    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_813, Runtime.attach(persistence=persistence_813, features=model_features(_TextModels(), _agent_group())) as runtime:
         await _assert_public_interaction(runtime)
 
 
 @pytest.mark.asyncio
 async def test_execution_model_interactions_support_volatile_memory_state() -> None:
-    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_823, Runtime.open(persistence=persistence_823, features=model_features(_TextModels(), _agent_group())) as runtime:
+    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_823, Runtime.attach(persistence=persistence_823, features=model_features(_TextModels(), _agent_group())) as runtime:
         await _assert_public_interaction(runtime)
 
 

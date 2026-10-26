@@ -113,7 +113,7 @@ class _Response(CompletedStreamedResponse):
 
 
 def _binding(monkeypatch: pytest.MonkeyPatch, provider: _Provider, *, allowed: bool = True):
-    binding = create_model(protocol="openai-responses", model="fixture", api_key="unused", max_retries=0,
+    binding = create_model(api="openai-responses", model="fixture", api_key="unused", max_retries=0,
                            input_types=["mime:application/pdf"] if allowed else [])
     monkeypatch.setattr(type(binding), "_build_model", lambda self, settings: provider)
     return binding

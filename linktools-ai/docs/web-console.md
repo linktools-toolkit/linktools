@@ -333,9 +333,10 @@ conversation is empty.
 
 ## Observation and ownership
 
-The CLI opens resources once, captures RuntimeFeatures once for both inspection
-and Runtime composition, runs one HTTP server, and closes resources after the
-server stops. `create_app` accepts already-open public Runtime/History and
+The CLI captures RuntimeFeatures once for both inspection and composition,
+opens one `Runtime.open(namespace, storage=..., features=capture)` context, and
+runs one HTTP server. Runtime closes its owned Persistence after the server
+stops; the CLI then closes its separately owned AssetStore. `create_app` accepts already-open public Runtime/History and
 Metrics objects for embedding and testing; the caller owns their lifespan.
 
 Sending a message returns its execution ID independently of the SSE connection.

@@ -587,7 +587,7 @@ async def test_remote_only_runtime_uses_host_network_without_opening_sandbox(
 
     monkeypatch.setattr(type(sandbox), "open", forbidden_open)
     async with _serve() as remote:
-        async with Persistence.open('remote-only', storage=PersistenceStorage.in_memory()) as persistence_586, Runtime.open(persistence=persistence_586, features=model_features(_RemoteModels(), _group(_spec(remote), sandbox=sandbox))) as runtime:
+        async with Persistence.open('remote-only', storage=PersistenceStorage.in_memory()) as persistence_586, Runtime.attach(persistence=persistence_586, features=model_features(_RemoteModels(), _group(_spec(remote), sandbox=sandbox))) as runtime:
             result = (await runtime.agents.get("default").run("echo", timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED
         assert remote.effects == ["committed"]
@@ -600,7 +600,7 @@ async def test_unselected_offline_remote_does_not_connect() -> None:
         offline = MCPServerSpec(
             "offline", transport="streamable-http", url="http://127.0.0.1:1/mcp"
         )
-        async with Persistence.open('remote-selection', storage=PersistenceStorage.in_memory()) as persistence_603, Runtime.open(persistence=persistence_603, features=model_features(_RemoteModels(), _group(_spec(remote), offline))) as runtime:
+        async with Persistence.open('remote-selection', storage=PersistenceStorage.in_memory()) as persistence_603, Runtime.attach(persistence=persistence_603, features=model_features(_RemoteModels(), _group(_spec(remote), offline))) as runtime:
             result = (await runtime.agents.get("default").run("echo", timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED
         assert remote.effects == ["committed"]
@@ -616,7 +616,7 @@ async def test_lost_remote_result_requires_confirmation_and_recovery_does_not_re
         storage = PersistenceStorage.filesystem(state_path)
         features = _group(_spec(remote))
         features.capability(CheckpointCapability(), scope="runtime")
-        async with Persistence.open('remote-recovery', storage=storage) as persistence_623, Runtime.open(persistence=persistence_623, features=model_features(_RemoteModels(), features)) as runtime:
+        async with Persistence.open('remote-recovery', storage=storage) as persistence_623, Runtime.attach(persistence=persistence_623, features=model_features(_RemoteModels(), features)) as runtime:
             execution = await runtime.agents.get("default").start("echo")
             with pytest.raises(AIError) as raised:
                 await execution.wait(timeout_seconds=10)
@@ -635,7 +635,7 @@ async def test_lost_remote_result_requires_confirmation_and_recovery_does_not_re
         restored_features = _group(_spec(remote, headers={"X-Rotated": "true"}))
         restored_features.capability(CheckpointCapability(), scope="runtime")
         try:
-            async with Persistence.open('remote-recovery', storage=restored) as persistence_646, Runtime.open(persistence=persistence_646, features=model_features(_RemoteModels(), restored_features)) as runtime:
+            async with Persistence.open('remote-recovery', storage=restored) as persistence_646, Runtime.attach(persistence=persistence_646, features=model_features(_RemoteModels(), restored_features)) as runtime:
                 execution = await runtime.executions.get(execution_id)
                 resolution = await execution.resolve_tool_effect(
                     effect.operation_id,
@@ -728,7 +728,7 @@ async def test_parallel_runtimes_do_not_share_service_credentials() -> None:
     async with _serve() as remote:
 
         async def run(label: str) -> None:
-            async with Persistence.open(f'remote-{label}', storage=PersistenceStorage.in_memory()) as persistence_743, Runtime.open(persistence=persistence_743, features=model_features(_RemoteModels(), _group(_spec(remote, headers={'Authorization': f'Bearer {label}'})))) as runtime:
+            async with Persistence.open(f'remote-{label}', storage=PersistenceStorage.in_memory()) as persistence_743, Runtime.attach(persistence=persistence_743, features=model_features(_RemoteModels(), _group(_spec(remote, headers={'Authorization': f'Bearer {label}'})))) as runtime:
                 result = (await runtime.agents.get("default").run(
                     "echo", timeout_seconds=10
                 )).result
@@ -848,7 +848,7 @@ async def test_mixed_stdio_and_http_keep_separate_process_and_network_boundaries
                 mcp_tool_selector("local", "record"),
             ),
         )
-        async with Persistence.open('mixed-mcp', storage=PersistenceStorage.in_memory()) as persistence_867, Runtime.open(persistence=persistence_867, features=model_features(_MixedModels(), group)) as runtime:
+        async with Persistence.open('mixed-mcp', storage=PersistenceStorage.in_memory()) as persistence_867, Runtime.attach(persistence=persistence_867, features=model_features(_MixedModels(), group)) as runtime:
             result = (await runtime.agents.get("default").run(
                 "call both", timeout_seconds=15
             )).result
@@ -934,7 +934,7 @@ async def test_cleanup_failure_preserves_confirmed_tool_result_and_idempotent_re
     monkeypatch.setattr(Client, "close", failing_close)
     async with _serve() as remote:
         storage = PersistenceStorage.in_memory()
-        async with Persistence.open('remote-cleanup', storage=storage) as persistence_957, Runtime.open(persistence=persistence_957, features=model_features(_RemoteModels(), _group(_spec(remote)))) as runtime:
+        async with Persistence.open('remote-cleanup', storage=storage) as persistence_957, Runtime.attach(persistence=persistence_957, features=model_features(_RemoteModels(), _group(_spec(remote)))) as runtime:
             execution = await runtime.agents.get("default").start(
                 "echo",
                 idempotency_key="confirmed-before-close",
@@ -1023,7 +1023,7 @@ async def test_mixed_runtime_does_not_bypass_failed_local_sandbox() -> None:
                 mcp_server_selector("local"),
             ),
         )
-        async with Persistence.open('mixed-unavailable', storage=PersistenceStorage.in_memory()) as persistence_1050, Runtime.open(persistence=persistence_1050, features=model_features(_MixedModels(), group)) as runtime:
+        async with Persistence.open('mixed-unavailable', storage=PersistenceStorage.in_memory()) as persistence_1050, Runtime.attach(persistence=persistence_1050, features=model_features(_MixedModels(), group)) as runtime:
             result = (await runtime.agents.get("default").run(
                 "call both", timeout_seconds=10
             )).result

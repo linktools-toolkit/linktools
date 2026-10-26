@@ -27,7 +27,7 @@ async def test_ordinary_runs_do_not_allocate_optional_writer_manager() -> None:
 
     features = RuntimeFeatures("ordinary-lifecycle")
     features.agent("default", model="default", allow_tools=())
-    async with Persistence.open('ordinary-lifecycle', storage=PersistenceStorage.in_memory()) as persistence_27, Runtime.open(persistence=persistence_27, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+    async with Persistence.open('ordinary-lifecycle', storage=PersistenceStorage.in_memory()) as persistence_27, Runtime.attach(persistence=persistence_27, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
         for _ in range(12):
             execution = await runtime.agents.get().start("question")
             assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED

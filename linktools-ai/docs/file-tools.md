@@ -76,7 +76,7 @@ cannot substitute its empty allowlist for that contract.
 ```python
 from linktools.ai.model import create_model
 
-binding = create_model(protocol="openai",
+binding = create_model(api="openai",
     model="your-model",
     input_types=["image", "document", "mime:audio/*", "mime:text/csv"],
 )

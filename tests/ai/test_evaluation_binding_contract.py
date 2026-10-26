@@ -37,7 +37,7 @@ async def test_historical_agent_capture_restores_original_structured_output_bind
     scorer = Task("consumer.historical-score", exact, effect_policy="none")
     async with (
         Persistence.open('historical-consumers', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_32,
-        Runtime.open(persistence=persistence_32, context=CONTEXT, features=model_features(models, group)) as runtime,
+        Runtime.attach(persistence=persistence_32, context=CONTEXT, features=model_features(models, group)) as runtime,
     ):
         source = await runtime.agents.get().start("the original question", output=ScoreBundle,
             principal=PRINCIPAL, idempotency_key="historical-source")

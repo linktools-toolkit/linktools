@@ -213,7 +213,7 @@ async def test_terminal_results_survive_restart_through_live_and_read_only_apis(
             object_store=FilesystemObjectStore(tmp_path / "objects"),
         )
     )
-    async with Persistence.open('default', storage=reopened) as persistence_212, Runtime.open(persistence=persistence_212, features=model_features(_DiagnosticModels())) as runtime:
+    async with Persistence.open('default', storage=reopened) as persistence_212, Runtime.attach(persistence=persistence_212, features=model_features(_DiagnosticModels())) as runtime:
         result = await runtime.executions.result(
             started.execution_id,
             principal=runtime.default_principal,

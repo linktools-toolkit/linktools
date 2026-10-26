@@ -49,7 +49,7 @@ async def test_committed_results_and_next_turn_ignore_remote_observation_cache(
     models = _Models(FunctionModel(stream_function=model))
     owner_storage = PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))
     reader_storage = PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))
-    async with Persistence.open('committed-read', storage=owner_storage) as persistence_49, Runtime.open(persistence=persistence_49, features=model_features(models, group)) as owner, Persistence.open('committed-read', storage=reader_storage) as persistence_49, Runtime.open(persistence=persistence_49, features=model_features(models, group)) as reader:
+    async with Persistence.open('committed-read', storage=owner_storage) as persistence_49, Runtime.attach(persistence=persistence_49, features=model_features(models, group)) as owner, Persistence.open('committed-read', storage=reader_storage) as persistence_49, Runtime.attach(persistence=persistence_49, features=model_features(models, group)) as reader:
         principal = owner.default_principal
         await owner.agents.get().create_session("session")
         first = await owner.agents.get().session("session").start("first", idempotency_key="first")
@@ -94,7 +94,7 @@ async def test_terminal_consumption_reuses_confirmed_status_for_handoff(
     group = RuntimeFeatures("terminal-consumption")
     group.agent("default", model="default", allow_tools=())
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('terminal-consumption', storage=PersistenceStorage.sqlite(tmp_path / 'runtime.db')) as persistence_96, Runtime.open(persistence=persistence_96, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as runtime:
+    async with Persistence.open('terminal-consumption', storage=PersistenceStorage.sqlite(tmp_path / 'runtime.db')) as persistence_96, Runtime.attach(persistence=persistence_96, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as runtime:
         await runtime.agents.get().create_session("session")
         execution = await runtime.agents.get().session("session").start(
             "first", idempotency_key="first",

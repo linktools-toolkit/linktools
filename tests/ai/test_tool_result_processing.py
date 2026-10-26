@@ -267,7 +267,7 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
         selected = "render"
     features.agent("reader", allow_tools=(selected, "finish"), allow_skills=(), allow_subagents=())
     storage = PersistenceStorage.filesystem(state) if backend == "filesystem" else PersistenceStorage.from_root(state)
-    async with Persistence.open('projection', storage=storage) as persistence_266, Runtime.open(persistence=persistence_266, features=features) as runtime:
+    async with Persistence.open('projection', storage=storage) as persistence_266, Runtime.attach(persistence=persistence_266, features=features) as runtime:
         execution = await runtime.agents.get("reader").start("Render page one.", principal=principal)
         result = (await execution.wait(timeout_seconds=15)).result
         assert result.status is ExecutionStatus.SUCCEEDED, result.error_diagnostics
@@ -334,7 +334,7 @@ async def test_projection_failure_preserves_effect_classification(
         selected = "render"
     features.agent("reader", allow_tools=(selected,), allow_skills=(), allow_subagents=())
     state = tmp_path / "state"
-    async with Persistence.open('projection-failure', storage=PersistenceStorage.filesystem(state)) as persistence_333, Runtime.open(persistence=persistence_333, features=features) as runtime:
+    async with Persistence.open('projection-failure', storage=PersistenceStorage.filesystem(state)) as persistence_333, Runtime.attach(persistence=persistence_333, features=features) as runtime:
         execution = await runtime.agents.get("reader").start("Render.")
         try:
             await execution.wait(timeout_seconds=15)
@@ -501,7 +501,7 @@ async def test_projection_receives_validated_python_arguments_without_json_coerc
     features.tool(report, effect_policy="none")
     features.capability(Observe(), id="observe", scope="agent")
     features.agent("reader", allow_tools=("report",), allow_subagents=(), allow_skills=())
-    async with Persistence.open('python-arguments', storage=PersistenceStorage.in_memory()) as persistence_501, Runtime.open(persistence=persistence_501, features=features) as runtime:
+    async with Persistence.open('python-arguments', storage=PersistenceStorage.in_memory()) as persistence_501, Runtime.attach(persistence=persistence_501, features=features) as runtime:
         result = (await runtime.agents.get("reader").run("Report.", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED, result.error_diagnostics
     assert calls == ["report"]
@@ -619,13 +619,13 @@ async def test_captured_execution_rebinds_result_capability_after_runtime_reopen
         result.agent("reader", allow_tools=("read_text",), allow_skills=(), allow_subagents=())
         return result
 
-    async with Persistence.open('reopen-projection', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_620, Runtime.open(persistence=persistence_620, features=features('original')) as runtime, TaskEngine.open(persistence=persistence_620) as engine:
+    async with Persistence.open('reopen-projection', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_620, Runtime.attach(persistence=persistence_620, features=features('original')) as runtime, TaskEngine.open(persistence=persistence_620) as engine:
         source = await runtime.agents.get("reader").start("Inspect the synthetic document.", principal=principal)
         assert (await source.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
         capture = await runtime.executions.capture_input(
             source.execution_id, CaptureInputRequest(principal, "read-capture", "clean"),
         )
-    async with Persistence.open('reopen-projection', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_627, Runtime.open(persistence=persistence_627, features=features('reopened')) as runtime, TaskEngine.open(persistence=persistence_627) as engine:
+    async with Persistence.open('reopen-projection', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_627, Runtime.attach(persistence=persistence_627, features=features('reopened')) as runtime, TaskEngine.open(persistence=persistence_627) as engine:
         captured = await engine.inputs.read_agent(capture, principal=principal)
         captured.require_importable()
         assert captured.binding is not None

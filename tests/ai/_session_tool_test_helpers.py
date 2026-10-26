@@ -222,7 +222,7 @@ def _crash_session_process(
         )
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('session-tool-crash', storage=state) as persistence_222, Runtime.open(persistence=persistence_222, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open('session-tool-crash', storage=state) as persistence_222, Runtime.attach(persistence=persistence_222, features=model_features(_ToolModels(), application)) as runtime:
             if phase != "recovered_before_terminal":
                 await runtime.agents.get("default").create_session("session")
             execution = (
@@ -280,7 +280,7 @@ async def _assert_tool_turn_recovers_without_replaying_effect(
     try:
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('session-tool-crash', storage=state) as persistence_284, Runtime.open(persistence=persistence_284, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open('session-tool-crash', storage=state) as persistence_284, Runtime.attach(persistence=persistence_284, features=model_features(_ToolModels(), application)) as runtime:
             session = runtime.agents.get("default").session("session")
             before_replay = await runtime._state.execution.executions.get(
                 execution_id, tenant_id=runtime.default_principal.tenant_id,

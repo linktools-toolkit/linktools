@@ -154,7 +154,7 @@ def _execution(
 
 def _compiler() -> AgentCompiler:
     return AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=(),
         agents={"agent": AgentSpec("agent")},
     )
@@ -322,12 +322,12 @@ def test_agent_declaration_identity_uses_explicit_revision() -> None:
 
 
 def test_model_contract_ignores_openai_prefix_and_connection_config() -> None:
-    plain = create_model(protocol='openai',
+    plain = create_model(api='openai',
         model="gpt-test",
         base_url="https://first.example/v1",
         api_key="first-key",
     )
-    prefixed = create_model(protocol='openai',
+    prefixed = create_model(api='openai',
         model="openai:gpt-test",
         base_url="https://second.example/v1",
         api_key="second-key",
@@ -347,14 +347,14 @@ def test_model_contract_ignores_openai_prefix_and_connection_config() -> None:
 async def test_feature_capture_keeps_replaced_model_connection() -> None:
     features = RuntimeFeatures()
     features.model("default", create_model(
-        protocol="openai", model="gpt-test",
+        api="openai", model="gpt-test",
         base_url="https://first.example/v1", api_key="first-key",
     ))
     first_capture = await features.capture()
     first = first_capture.models["default"]
 
     features.model("default", create_model(
-        protocol="openai", model="gpt-test",
+        api="openai", model="gpt-test",
         base_url="https://second.example/v1", api_key="second-key",
     ))
     second = (await features.capture()).models["default"]
@@ -366,8 +366,8 @@ async def test_feature_capture_keeps_replaced_model_connection() -> None:
 
 def test_agent_identity_ignores_model_but_catalog_uses_current_binding() -> None:
     models = {
-        "first": create_model(protocol="openai", model="gpt-test", base_url="https://first.example/v1"),
-        "second": create_model(protocol="openai", model="gpt-test", base_url="https://second.example/v1"),
+        "first": create_model(api="openai", model="gpt-test", base_url="https://first.example/v1"),
+        "second": create_model(api="openai", model="gpt-test", base_url="https://second.example/v1"),
     }
     compiler = AgentCompiler(
         models=models,
@@ -461,12 +461,12 @@ def test_restore_accepts_tool_configuration_changes_with_same_revision() -> None
     assert first_candidate.revision == second_candidate.revision
 
     first_compiler = AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=(first_candidate,),
         agents={"agent": spec},
     )
     second_compiler = AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=(second_candidate,),
         agents={"agent": spec},
     )
@@ -689,7 +689,7 @@ def _configured_contribution(kind: str, identity: str, revision: int, setting: s
 
 def _contribution_compiler(candidate: CapabilityContribution[object]) -> AgentCompiler:
     return AgentCompiler(
-        models={"default": create_model(protocol="openai", model="gpt-test")},
+        models={"default": create_model(api="openai", model="gpt-test")},
         candidates=(candidate,), agents={"agent": AgentSpec("agent")},
     )
 

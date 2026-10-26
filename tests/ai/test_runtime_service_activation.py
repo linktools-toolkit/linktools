@@ -13,7 +13,7 @@ import pytest
 
 from linktools.ai.core import TaskStatus
 
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.task_engine import TaskEngine
 from linktools.ai.evaluation_engine import Evaluations
 from linktools.ai.persistence import PersistenceStorage
@@ -72,7 +72,7 @@ async def test_idle_services_do_not_read_write_or_launch_workers(
                 monkeypatch.setattr(group, name, guard_group_operation(getattr(group, name)))
 
     monkeypatch.setattr(Persistence, "initialize", initialize_and_guard)
-    async with Persistence.open('idle-services', storage=storage) as persistence_73, Runtime.open(persistence=persistence_73) as runtime, TaskEngine.open(persistence=persistence_73) as engine, Evaluations.open(engine) as evaluations:
+    async with Persistence.open('idle-services', storage=storage) as persistence_73, Runtime.attach(features=RuntimeFeatures(), persistence=persistence_73) as runtime, TaskEngine.open(persistence=persistence_73) as engine, Evaluations.open(engine) as evaluations:
         assert engine.persistence is persistence_73
         assert evaluations is not None
         assert persistence_73.artifact is not None

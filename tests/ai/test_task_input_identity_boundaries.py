@@ -159,7 +159,7 @@ async def test_agent_submission_identity_survives_materialization_and_reopen(tmp
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     input = AgentTaskInput(("inspect", BinaryContent(b"accepted bytes", media_type="text/plain")))
     storage = PersistenceStorage.filesystem(tmp_path)
-    async with Persistence.open('agent-identity', storage=storage) as persistence_158, Runtime.open(persistence=persistence_158, features=model_features(FixtureModels(), features)) as runtime, TaskEngine.open(persistence=persistence_158) as engine:
+    async with Persistence.open('agent-identity', storage=storage) as persistence_158, Runtime.attach(persistence=persistence_158, features=model_features(FixtureModels(), features)) as runtime, TaskEngine.open(persistence=persistence_158) as engine:
         task = Task.from_agent("user.named.worker", runtime.agents.get())
         graph = TaskGraph("agent", (TaskNode("worker", task=task, input=input),))
         engine = engine.with_definitions(task)
@@ -189,7 +189,7 @@ async def test_agent_submission_identity_survives_materialization_and_reopen(tmp
         prepared.admission.validate_graph(TaskGraph("agent", (relocated_node,)))
         identity = prepared.ref
 
-    async with Persistence.open('agent-identity', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_188, Runtime.open(persistence=persistence_188, features=model_features(FixtureModels(), features)) as runtime, TaskEngine.open(persistence=persistence_188) as engine:
+    async with Persistence.open('agent-identity', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_188, Runtime.attach(persistence=persistence_188, features=model_features(FixtureModels(), features)) as runtime, TaskEngine.open(persistence=persistence_188) as engine:
         task = Task.from_agent("user.named.worker", runtime.agents.get())
         graph = TaskGraph("agent", (TaskNode("worker", task=task, input=input),))
         reopened = await engine.with_definitions(task).prepare_submission(graph, idempotency_key="submit")
@@ -257,7 +257,7 @@ async def test_agent_capture_identity_is_bound_to_the_retained_input_digest() ->
     features = RuntimeFeatures("capture-identity")
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     models = FixtureModels()
-    async with Persistence.open('capture-identity', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_256, Runtime.open(persistence=persistence_256, context=CONTEXT, features=model_features(models, features)) as runtime, TaskEngine.open(persistence=persistence_256) as engine:
+    async with Persistence.open('capture-identity', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_256, Runtime.attach(persistence=persistence_256, context=CONTEXT, features=model_features(models, features)) as runtime, TaskEngine.open(persistence=persistence_256) as engine:
         task = Task.from_agent("user.named.worker", runtime.agents.get())
         engine = engine.with_definitions(task)
         source = await engine.start(TaskGraph("source", (TaskNode("worker", task=task, input=AgentTaskInput("accepted")),)),

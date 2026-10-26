@@ -176,7 +176,7 @@ async def test_execution_freezes_materialized_input_once() -> None:
             _request(files=("evidence.txt",))
         )
 
-        model = create_model(protocol='openai',
+        model = create_model(api='openai',
             model="test", input_types=("mime:text/plain",),
         )
         binding = SimpleNamespace(compiled_agent=SimpleNamespace(model=model))

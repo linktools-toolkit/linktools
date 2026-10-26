@@ -64,7 +64,7 @@ async def test_empty_zero_usage_response_is_not_confused_with_no_response(initia
     features.model("default", FallbackBinding(_Binding(_EmptyThenFailure(initial_response=initial_response))))
     features.capability(TraceCapability(), scope="runtime")
 
-    async with Persistence.open('empty-fallback-response', storage=PersistenceStorage.in_memory()) as persistence_64, Runtime.open(persistence=persistence_64, features=features) as runtime:
+    async with Persistence.open('empty-fallback-response', storage=PersistenceStorage.in_memory()) as persistence_64, Runtime.attach(persistence=persistence_64, features=features) as runtime:
         execution = await runtime.agents.get().start("respond")
         result = (await execution.wait(timeout_seconds=10)).result
         interactions = (await execution.model_interactions(include_content=True)).items

@@ -105,8 +105,8 @@ async def test_two_runtimes_observe_preview_before_completion(tmp_path) -> None:
     path = tmp_path / "runtime.db"
     owner_storage = PersistenceStorage.sqlite(path, object_store=objects, cache=backend, coordination=backend)
     reader_storage = PersistenceStorage.sqlite(path, object_store=objects, cache=backend, coordination=backend)
-    async with Persistence.open('shared-preview', storage=owner_storage) as persistence_105, Runtime.open(persistence=persistence_105, metrics=metrics, features=model_features(models, group)) as producer:
-        async with Persistence.open('shared-preview', storage=reader_storage) as persistence_109, Runtime.open(persistence=persistence_109, metrics=metrics, features=model_features(models, group)) as reader:
+    async with Persistence.open('shared-preview', storage=owner_storage) as persistence_105, Runtime.attach(persistence=persistence_105, metrics=metrics, features=model_features(models, group)) as producer:
+        async with Persistence.open('shared-preview', storage=reader_storage) as persistence_109, Runtime.attach(persistence=persistence_109, metrics=metrics, features=model_features(models, group)) as reader:
             assert await producer._state.read_object(PersistenceDomain.EXECUTION, reference) == b"shared cached body"
             assert await reader._state.read_object(PersistenceDomain.EXECUTION, reference) == b"shared cached body"
             assert objects.reads == 1
@@ -162,8 +162,8 @@ async def test_remote_cursor_resumes_preview_without_cancelling_producer(tmp_pat
     group.capability(ExecutionCapability(), scope="runtime")
     models = _Models(FunctionModel(stream_function=model))
     path = tmp_path / "state.db"
-    async with Persistence.open('reconnect', storage=PersistenceStorage.sqlite(path, coordination=backend)) as persistence_168, Runtime.open(persistence=persistence_168, features=model_features(models, group)) as owner:
-        async with Persistence.open('reconnect', storage=PersistenceStorage.sqlite(path, coordination=backend)) as persistence_170, Runtime.open(persistence=persistence_170, features=model_features(models, group)) as other:
+    async with Persistence.open('reconnect', storage=PersistenceStorage.sqlite(path, coordination=backend)) as persistence_168, Runtime.attach(persistence=persistence_168, features=model_features(models, group)) as owner:
+        async with Persistence.open('reconnect', storage=PersistenceStorage.sqlite(path, coordination=backend)) as persistence_170, Runtime.attach(persistence=persistence_170, features=model_features(models, group)) as other:
             execution = await owner.agents.get().start("question")
             remote = await other.executions.get(execution.execution_id)
             stream = remote.watch(include_content=True)
@@ -180,7 +180,7 @@ async def test_remote_cursor_resumes_preview_without_cancelling_producer(tmp_pat
             finally:
                 await stream.aclose()
             assert not release.is_set()
-            async with Persistence.open('reconnect', storage=PersistenceStorage.sqlite(path, coordination=backend)) as persistence_188, Runtime.open(persistence=persistence_188, features=model_features(models, group)) as reconnected:
+            async with Persistence.open('reconnect', storage=PersistenceStorage.sqlite(path, coordination=backend)) as persistence_188, Runtime.attach(persistence=persistence_188, features=model_features(models, group)) as reconnected:
                 remote = await reconnected.executions.get(execution.execution_id)
                 resumed = remote.watch(include_content=True, cursor=cursor)
                 backend.read_entered.clear()
@@ -507,7 +507,7 @@ async def test_waiting_resume_opens_each_durable_admission_once(tmp_path) -> Non
     application.capability(ExecutionCapability(), scope="runtime")
     path = tmp_path / "resume.db"
     state = PersistenceStorage.sqlite(path, coordination=backend)
-    async with Persistence.open('resume-preview', storage=state) as persistence_516, Runtime.open(persistence=persistence_516, features=model_features(_ToolModels(), application)) as owner:
+    async with Persistence.open('resume-preview', storage=state) as persistence_516, Runtime.attach(persistence=persistence_516, features=model_features(_ToolModels(), application)) as owner:
         execution = await owner.agents.get().start("read a file")
         tenant = owner.tenant_id
         await _wait_for_committed(
@@ -525,7 +525,7 @@ async def test_waiting_resume_opens_each_durable_admission_once(tmp_path) -> Non
             decided_at=datetime.now(timezone.utc),
         )
     assert len(backend.open_keys) == 1
-    async with Persistence.open('resume-preview', storage=PersistenceStorage.sqlite(path, coordination=backend)) as persistence_535, Runtime.open(persistence=persistence_535, features=model_features(_ToolModels(), application)) as resumed:
+    async with Persistence.open('resume-preview', storage=PersistenceStorage.sqlite(path, coordination=backend)) as persistence_535, Runtime.attach(persistence=persistence_535, features=model_features(_ToolModels(), application)) as resumed:
         result = await resumed.executions.wait(execution.execution_id,
                                                principal=resumed.default_principal, timeout_seconds=10)
         assert result.result.status is ExecutionStatus.SUCCEEDED
@@ -703,7 +703,7 @@ async def test_nondurable_runtime_keeps_combined_cache_without_opening_shared_st
     group = RuntimeFeatures[None]("local-preview")
     group.capability(ExecutionCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
-    async with Persistence.open('local-preview', storage=storage) as persistence_715, Runtime.open(persistence=persistence_715, features=model_features(_Models(TestModel()), group)) as runtime:
+    async with Persistence.open('local-preview', storage=storage) as persistence_715, Runtime.attach(persistence=persistence_715, features=model_features(_Models(TestModel()), group)) as runtime:
         execution = await runtime.agents.get().run("hello", timeout_seconds=5)
         assert execution.result is not None
         assert storage.plan.route(PersistenceDomain.EXECUTION).cache is cache

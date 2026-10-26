@@ -19,8 +19,9 @@ except ModuleNotFoundError:
 
 from .capability import ExecutionCapability, WorkspaceCapability
 from .runtime import RuntimeFeatures
-from .persistence import Persistence, PersistenceStorage
+from .persistence import PersistenceStorage
 from .core import (
+    AuthorizationPolicy,
     ExecutionDeltaType,
     ExecutionEventType,
     ExecutionStatus,
@@ -224,6 +225,7 @@ class ACPApplication:
     features: RuntimeFeatures
     storage: PersistenceStorage
     execution: ExecutionCapability | None = None
+    authorization: AuthorizationPolicy | None = None
 
     @classmethod
     def for_workspace(
@@ -233,9 +235,10 @@ class ACPApplication:
         features: RuntimeFeatures,
         storage: PersistenceStorage,
         execution: ExecutionCapability | None = None,
+        authorization: AuthorizationPolicy | None = None,
     ) -> "ACPApplication":
         """Assemble workspace and execution capabilities into the given features."""
-        return cls(workspace, features, storage, execution)
+        return cls(workspace, features, storage, execution, authorization)
 
     def __post_init__(self) -> None:
         """Complete this application's feature declarations once, before serving."""
@@ -245,8 +248,9 @@ class ACPApplication:
         )
 
     async def serve(self, *, memory_scope: str) -> None:
-        async with Persistence.open("default", storage=self.storage) as persistence, Runtime.open(
-            persistence=persistence, features=self.features,
+        async with Runtime.open(
+            "default", storage=self.storage, features=self.features,
+            authorization=self.authorization,
         ) as runtime:
             await serve_stdio(
                 ACPAgent(

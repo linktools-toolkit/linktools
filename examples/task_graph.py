@@ -3,8 +3,8 @@
 """Conditional batch expansion and aggregation using public Task APIs."""
 
 from linktools.ai.core import JsonValue
-from linktools.ai.persistence import Persistence, PersistenceStorage
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.runtime import Runtime
 from linktools.ai.task import (
     Task, TaskExpander, TaskExpansionContext, TaskGraph, TaskNode, TaskNodeContext,
 )
@@ -58,12 +58,12 @@ async def run(texts: list[str], *, uppercase: bool = True) -> JsonValue:
         "plan", task=plan_task, input={"texts": list(texts), "uppercase": uppercase},
         expander=batch_expander,
     ),))
-    async with Persistence.open(
+    async with Runtime.open(
         "batch-example", storage=PersistenceStorage.in_memory(),
-    ) as persistence, TaskEngine.open(
-        plan_task, uppercase_task, lowercase_task, collect_task, batch_expander,
-        persistence=persistence,
-    ) as engine:
+    ) as runtime:
+        engine = await runtime.tasks.bind(
+            plan_task, uppercase_task, lowercase_task, collect_task, batch_expander,
+        )
         await engine.describe_submission(graph, idempotency_key="batch")
         execution = await engine.start(graph, idempotency_key="batch")
         await execution.wait(timeout_seconds=10)

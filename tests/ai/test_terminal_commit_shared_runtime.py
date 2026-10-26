@@ -48,7 +48,7 @@ async def test_shared_pending_duplicate_observe_wait_and_one_commit(tmp_path: Pa
         return ModelResponse(parts=[TextPart('answer')])
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / 'state.db'
-    async with Persistence.open('shared-pending', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_48, Runtime.open(persistence=persistence_48, features=model_features(models, _group())) as owner, Persistence.open('shared-pending', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_48, Runtime.open(persistence=persistence_48, features=model_features(models, _group())) as reader:
+    async with Persistence.open('shared-pending', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_48, Runtime.attach(persistence=persistence_48, features=model_features(models, _group())) as owner, Persistence.open('shared-pending', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_48, Runtime.attach(persistence=persistence_48, features=model_features(models, _group())) as reader:
         session = await owner.agents.get().create_session('session')
         original = SqlStorageContext.run_mutation
         commits = []
@@ -130,7 +130,7 @@ async def test_remote_cancel_signals_owner_then_confirms_source(
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / 'state.db'
     reader_storage = PersistenceStorage.sqlite(database, cache=cache, coordination=cache)
-    async with Persistence.open('shared-cancel', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_130, Runtime.open(persistence=persistence_130, features=model_features(models, _group())) as owner, Persistence.open('shared-cancel', storage=reader_storage) as persistence_130, Runtime.open(persistence=persistence_130, features=model_features(models, _group())) as reader:
+    async with Persistence.open('shared-cancel', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_130, Runtime.attach(persistence=persistence_130, features=model_features(models, _group())) as owner, Persistence.open('shared-cancel', storage=reader_storage) as persistence_130, Runtime.attach(persistence=persistence_130, features=model_features(models, _group())) as reader:
         session = await owner.agents.get().create_session('session')
         execution = await session.start('question', idempotency_key='request')
         await asyncio.wait_for(entered.wait(), 5)
@@ -171,7 +171,7 @@ async def test_shared_pending_early_preview_and_canonical_result(tmp_path: Path,
         yield 'world'
     models = _Models(FunctionModel(stream_function=model))
     database = tmp_path / 'state.db'
-    async with Persistence.open('shared-stream', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_171, Runtime.open(persistence=persistence_171, features=model_features(models, _group())) as owner, Persistence.open('shared-stream', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_171, Runtime.open(persistence=persistence_171, features=model_features(models, _group())) as reader:
+    async with Persistence.open('shared-stream', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_171, Runtime.attach(persistence=persistence_171, features=model_features(models, _group())) as owner, Persistence.open('shared-stream', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_171, Runtime.attach(persistence=persistence_171, features=model_features(models, _group())) as reader:
         execution = await owner.agents.get().start('question')
         remote = await reader.executions.get(execution.execution_id)
         observed = remote.watch(include_content=True)
@@ -216,7 +216,7 @@ async def test_lost_pending_lease_never_executes_effect(tmp_path: Path) -> None:
     group.agent('default', model='default', allow_tools=('effect',))
     storage = PersistenceStorage.sqlite(tmp_path / 'state.db', cache=cache, coordination=cache)
     async with Persistence.open("lost-pending", storage=storage) as persistence:
-        opened = Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), group))
+        opened = Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), group))
         runtime = await opened.__aenter__()
         try:
             execution = await runtime.agents.get().start('question')
@@ -242,7 +242,7 @@ async def test_release_failure_does_not_undo_confirmed_success(tmp_path: Path) -
     cache = ReleaseFailure(max_bytes=2**20)
     async def model(messages, info):
         return ModelResponse(parts=[TextPart('answer')])
-    async with Persistence.open('release-failure', storage=PersistenceStorage.sqlite(tmp_path / 'state.db', cache=cache, coordination=cache)) as persistence_241, Runtime.open(persistence=persistence_241, features=model_features(_Models(_UsageFunctionModel(model)), _group())) as runtime:
+    async with Persistence.open('release-failure', storage=PersistenceStorage.sqlite(tmp_path / 'state.db', cache=cache, coordination=cache)) as persistence_241, Runtime.attach(persistence=persistence_241, features=model_features(_Models(_UsageFunctionModel(model)), _group())) as runtime:
         execution = await runtime.agents.get().start('question')
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         assert (await runtime.executions.result(execution.execution_id, principal=runtime.default_principal)).output == {'text': 'answer'}
@@ -260,7 +260,7 @@ async def test_live_dependency_hold_promotes_before_acquisition(tmp_path: Path, 
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / 'state.db'
     reader_storage = PersistenceStorage.sqlite(database, cache=cache, coordination=cache)
-    async with Persistence.open('shared-hold', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_259, Runtime.open(persistence=persistence_259, features=model_features(models, _group())) as owner, Persistence.open('shared-hold', storage=reader_storage) as persistence_259, Runtime.open(persistence=persistence_259, features=model_features(models, _group())) as reader:
+    async with Persistence.open('shared-hold', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_259, Runtime.attach(persistence=persistence_259, features=model_features(models, _group())) as owner, Persistence.open('shared-hold', storage=reader_storage) as persistence_259, Runtime.attach(persistence=persistence_259, features=model_features(models, _group())) as reader:
         execution = await owner.agents.get().start('question')
         await asyncio.wait_for(entered.wait(), 5)
         service = reader.executions._service if remote else owner.executions._service
@@ -289,7 +289,7 @@ async def test_remote_public_capture_promotes_before_source_input_read(tmp_path:
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / 'state.db'
     reader_storage = PersistenceStorage.sqlite(database, cache=cache, coordination=cache)
-    async with Persistence.open('shared-capture', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_288, Runtime.open(persistence=persistence_288, features=model_features(models, _group())) as owner, Persistence.open('shared-capture', storage=reader_storage) as persistence_288, Runtime.open(persistence=persistence_288, features=model_features(models, _group())) as reader:
+    async with Persistence.open('shared-capture', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_288, Runtime.attach(persistence=persistence_288, features=model_features(models, _group())) as owner, Persistence.open('shared-capture', storage=reader_storage) as persistence_288, Runtime.attach(persistence=persistence_288, features=model_features(models, _group())) as reader:
         principal = Principal('user', owner.tenant_id)
         execution = await owner.agents.get().start('question', principal=principal)
         await asyncio.wait_for(entered.wait(), 5)
@@ -316,7 +316,7 @@ async def test_mixed_writers_share_live_session_admission(tmp_path: Path, first_
         return ModelResponse(parts=[TextPart('answer')])
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / 'state.db'
-    async with Persistence.open('mixed-admission', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_315, Runtime.open(persistence=persistence_315, features=model_features(models, _group(first_terminal))) as first, Persistence.open('mixed-admission', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_315, Runtime.open(persistence=persistence_315, features=model_features(models, _group(not first_terminal))) as second:
+    async with Persistence.open('mixed-admission', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_315, Runtime.attach(persistence=persistence_315, features=model_features(models, _group(first_terminal))) as first, Persistence.open('mixed-admission', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_315, Runtime.attach(persistence=persistence_315, features=model_features(models, _group(not first_terminal))) as second:
         session = await first.agents.get().create_session('session')
         execution = await session.start('question', idempotency_key='request')
         await asyncio.wait_for(entered.wait(), 5)
@@ -350,7 +350,7 @@ async def test_lost_promotion_hint_does_not_claim_dependency(tmp_path: Path) -> 
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / 'state.db'
     reader_storage = PersistenceStorage.sqlite(database, cache=cache, coordination=cache)
-    async with Persistence.open('lost-hint', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_349, Runtime.open(persistence=persistence_349, features=model_features(models, _group())) as owner, Persistence.open('lost-hint', storage=reader_storage) as persistence_349, Runtime.open(persistence=persistence_349, features=model_features(models, _group())) as reader:
+    async with Persistence.open('lost-hint', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_349, Runtime.attach(persistence=persistence_349, features=model_features(models, _group())) as owner, Persistence.open('lost-hint', storage=reader_storage) as persistence_349, Runtime.attach(persistence=persistence_349, features=model_features(models, _group())) as reader:
         execution = await owner.agents.get().start('question')
         await asyncio.wait_for(entered.wait(), 5)
         try:
@@ -410,7 +410,7 @@ async def test_source_replay_release_failure_keeps_confirmed_identity(tmp_path: 
     async def model(messages, info):
         calls.append(messages)
         return ModelResponse(parts=[TextPart('answer')])
-    async with Persistence.open('replay-release', storage=PersistenceStorage.sqlite(tmp_path / 'state.db', cache=cache, coordination=cache)) as persistence_409, Runtime.open(persistence=persistence_409, features=model_features(_Models(_UsageFunctionModel(model)), _group())) as runtime:
+    async with Persistence.open('replay-release', storage=PersistenceStorage.sqlite(tmp_path / 'state.db', cache=cache, coordination=cache)) as persistence_409, Runtime.attach(persistence=persistence_409, features=model_features(_Models(_UsageFunctionModel(model)), _group())) as runtime:
         execution = await runtime.agents.get().start('question', idempotency_key='request')
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
         backend, request, reservation = captured[0]

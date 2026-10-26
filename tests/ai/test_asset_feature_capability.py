@@ -226,7 +226,7 @@ async def test_asset_bootstrap_is_consumed_before_native_agent_hooks():
 
         features.model("default", _Models(_UsageFunctionModel(answer)))
         capture = await features.capture()
-        async with Persistence.open('asset-bootstrap', storage=PersistenceStorage.in_memory()) as persistence_226, Runtime.open(persistence=persistence_226, features=capture) as runtime:
+        async with Persistence.open('asset-bootstrap', storage=PersistenceStorage.in_memory()) as persistence_226, Runtime.attach(persistence=persistence_226, features=capture) as runtime:
             assert (await runtime.agents.get().run("question")).result.output == {"text": "answer"}
             assert native_calls
     finally:

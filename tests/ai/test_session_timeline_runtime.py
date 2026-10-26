@@ -29,7 +29,7 @@ async def test_in_memory_session_run_restores_timeline() -> None:
     application.capability(ExecutionCapability(retain_history=True), scope="runtime")
     application.agent("default", model="default", allow_tools=())
 
-    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_27, Runtime.open(persistence=persistence_27, features=model_features(RuntimeUsageModels(), application)) as runtime:
+    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_27, Runtime.attach(persistence=persistence_27, features=model_features(RuntimeUsageModels(), application)) as runtime:
         session = await runtime.agents.get("default").create_session("session")
         first = (await session.run("hello", timeout_seconds=10)).result
         second = (await session.run("again", timeout_seconds=10)).result
@@ -84,7 +84,7 @@ async def test_session_timeline_fork_reads_match_live_and_reopened_history(
         assert oldest.items == expected[:1]
         assert oldest.next_cursor is None
 
-    async with Persistence.open('default', storage=storage) as persistence_86, Runtime.open(persistence=persistence_86, features=model_features(RuntimeUsageModels(), application)) as runtime:
+    async with Persistence.open('default', storage=storage) as persistence_86, Runtime.attach(persistence=persistence_86, features=model_features(RuntimeUsageModels(), application)) as runtime:
         principal = runtime.default_principal
         parent = await runtime.agents.get("default").create_session("parent")
         assert (await parent.timeline()).items == ()

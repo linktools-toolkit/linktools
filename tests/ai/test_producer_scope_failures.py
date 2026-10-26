@@ -27,38 +27,32 @@ async def test_constructor_failure_waits_for_cleanup_and_preserves_original(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import asyncio
-    from dataclasses import replace
     from linktools.ai.persistence import Persistence, PersistenceStorage
-    from linktools.ai.runtime import Runtime
-    from linktools.ai.runtime import _factory, _runtime_service
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+    from linktools.ai.runtime import _factory
 
     entered, release = asyncio.Event(), asyncio.Event()
     holders: list[Persistence] = []
     ready: list[bool] = []
-    original_compose = _factory.compose_runtime_components
+    original_close = _factory._AgentLifecycle.close
 
-    async def compose(**kwargs: object) -> _factory._RuntimeComponents:
-        components = await original_compose(**kwargs)
-
-        async def close() -> None:
-            entered.set()
-            await release.wait()
-            ready.append(holders[0].ready)
-            await components.close_callback()
-            raise RuntimeError("secondary cleanup error")
-
-        return replace(components, close_callback=close)
+    async def close(lifecycle: _factory._AgentLifecycle) -> None:
+        entered.set()
+        await release.wait()
+        ready.append(holders[0].ready)
+        await original_close(lifecycle)
+        raise RuntimeError("secondary cleanup error")
 
     def fail(*args: object, **kwargs: object) -> None:
         raise ValueError("original constructor failure")
 
-    monkeypatch.setattr(_factory, "compose_runtime_components", compose)
-    monkeypatch.setattr(_runtime_service, "Runtime", fail)
+    monkeypatch.setattr(_factory._AgentLifecycle, "close", close)
+    monkeypatch.setattr(Runtime, "_bind_agent_components", fail)
 
     async def run() -> None:
         async with Persistence.open("constructor-failure", storage=PersistenceStorage.in_memory()) as p:
             holders.append(p)
-            async with Runtime.open(persistence=p, auto_recover=False):
+            async with Runtime.attach(features=RuntimeFeatures(), persistence=p, auto_recover=False):
                 pytest.fail("constructor unexpectedly succeeded")
 
     task = asyncio.create_task(run())

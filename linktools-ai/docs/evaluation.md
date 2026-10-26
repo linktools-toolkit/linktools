@@ -1,7 +1,9 @@
 # Evaluation
 
-`Evaluations.open(engine)` evaluates existing Tasks, Agent-backed Tasks, and
-native TaskGraphs through a borrowed TaskEngine. Dataset, scoring, evidence and
+`await runtime.evaluations.bind(engine)` evaluates existing Tasks, Agent-backed
+Tasks, and native TaskGraphs through a Runtime-bound TaskEngine. Runtime owns
+both domain lifecycles. Advanced callers can use `Evaluations.open(engine)` with
+an independently managed TaskEngine. Dataset, scoring, evidence and
 report values live in `linktools.ai.evaluation`; orchestration lives in
 `linktools.ai.evaluation_engine`. Function-only evaluations need no Agent Runtime.
 
@@ -24,9 +26,8 @@ from linktools.ai.evaluation import (
     DimensionContract, EvaluationSpec, ScorerSpec, ScoringInput,
     ScoreBundle, StartEvaluationRequest, export_report,
 )
-from linktools.ai.persistence import Persistence, PersistenceStorage
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.runtime import Runtime
 from linktools.ai.task import Task, TaskNodeContext
 
 
@@ -50,13 +51,13 @@ async def main() -> None:
     dimension = DimensionContract("exact_match", "boolean", "higher", 0, 1)
     scorer = ScorerSpec("exact", judge.ref, (dimension,))
 
-    async with Persistence.open(
+    async with Runtime.open(
         "evaluation-guide",
         storage=PersistenceStorage.filesystem(Path("evaluation-state")),
         tenant_id="example",
-    ) as persistence, TaskEngine.open(
-        target, judge, persistence=persistence,
-    ) as engine, Evaluations.open(engine) as evaluations:
+    ) as runtime:
+        engine = await runtime.tasks.bind(target, judge)
+        evaluations = await runtime.evaluations.bind(engine)
         dataset = await evaluations.publish_dataset(
             DatasetSpec(DatasetRef("echo-cases", 1), cases=(
                 CaseSpec.task(CaseRef("echo-cases", "text", 1),
@@ -129,11 +130,11 @@ as proof that no native admission exists.
 Evaluation actions require an authorized principal and enforce tenant/owner
 boundaries. The example explicitly uses a service principal. Production
 applications pass their `AuthorizationPolicy` from `linktools.ai.core` to
-`TaskEngine.open(..., authorization=policy)`; Evaluations borrows that policy.
-Use real caller identities. Omitting authorization retains
-`TenantAuthorizationPolicy` with the Persistence tenant. For Agent-backed Tasks,
-configure the Agent Runtime's policy through `RuntimeFeatures(authorization=policy)`
-as well: Task admission and Agent execution remain distinct authorization boundaries.
+`Runtime.open(..., authorization=policy)`; its bound TaskEngine and Evaluations
+share that policy. Use real caller identities. Omitting authorization retains
+`TenantAuthorizationPolicy` with the Persistence tenant. Task admission and Agent
+execution remain distinct authorization boundaries. Independently opened
+TaskEngine instances accept `authorization=policy` explicitly.
 
 A system publisher can own a shared `DatasetRef` while each operator owns their
 own experiments. Grant `EVALUATION_DATASET_READ` only for approved dataset IDs
@@ -144,7 +145,7 @@ read grant alone does not grant capture access or relax authorization for other
 resources.
 
 Policies are application configuration, not persisted execution data. Inject the
-policy on every reopened TaskEngine and Agent Runtime. For a separately opened
+policy on every reopened Runtime (and each independently opened TaskEngine). For a separately opened
 read-only history reader, use `History.open(persistence=persistence, authorization=policy)`.
 Recovery permission belongs to the recovery actor; resumed execution retains the
 principal originally admitted with its graph.
@@ -475,9 +476,9 @@ agent_judge = Task.from_agent("example.judge", runtime.agents.get("judge"))
 agent_candidate = CandidateSpec("answer", task=agent_target.ref)
 model_scorer = ScorerSpec("judge", agent_judge.ref, (dimension,),
                          rubric={"criterion": "Answer matches the reference"})
-async with TaskEngine.open(agent_target, agent_judge, persistence=persistence) as engine:
-    async with Evaluations.open(engine) as evaluations:
-        ...
+engine = await runtime.tasks.bind(agent_target, agent_judge)
+evaluations = await runtime.evaluations.bind(engine)
+...
 ```
 
 The default `EvaluationPolicy` is `model_mode="fixture_only"`,

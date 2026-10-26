@@ -80,7 +80,7 @@ async def test_usage_gate_uses_only_selected_scoring_work(monkeypatch: pytest.Mo
     rule = Task("selection.rule", score, effect_policy="none")
     async with (
         Persistence.open('selected-usage', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_68,
-        Runtime.open(persistence=persistence_68, context=CONTEXT, features=model_features(models, capabilities())) as runtime,
+        Runtime.attach(persistence=persistence_68, context=CONTEXT, features=model_features(models, capabilities())) as runtime,
     ):
         judge = Task.from_agent("selection.judge", runtime.agents.get())
         async with (
@@ -130,7 +130,7 @@ async def test_selected_rescore_cannot_hide_unknown_target_usage() -> None:
     rule = Task("selection.failed-target-score", score, effect_policy="none")
     async with (
         Persistence.open('target-usage', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_113,
-        Runtime.open(persistence=persistence_113, context=CONTEXT, features=model_features(models, capabilities())) as runtime,
+        Runtime.attach(persistence=persistence_113, context=CONTEXT, features=model_features(models, capabilities())) as runtime,
     ):
         target = Task.from_agent("selection.failed-target", runtime.agents.get())
         async with (
@@ -175,7 +175,7 @@ async def test_usage_gate_excludes_an_unselected_candidate() -> None:
     target, unrelated = Task("selection.good", good, effect_policy="none"), Task("selection.bad", echo, effect_policy="none")
     async with (
         Persistence.open('candidate-usage', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_153,
-        Runtime.open(persistence=persistence_153, context=CONTEXT, features=model_features(models, capabilities())) as runtime,
+        Runtime.attach(persistence=persistence_153, context=CONTEXT, features=model_features(models, capabilities())) as runtime,
     ):
         judge = Task.from_agent("selection.selective-judge", runtime.agents.get())
         async with (

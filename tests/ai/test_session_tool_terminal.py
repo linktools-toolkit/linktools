@@ -152,7 +152,7 @@ async def test_session_tool_turn_commits_terminal_and_history(
     try:
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('session-tool-terminal', storage=state) as persistence_151, Runtime.open(persistence=persistence_151, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open('session-tool-terminal', storage=state) as persistence_151, Runtime.attach(persistence=persistence_151, features=model_features(_ToolModels(), application)) as runtime:
             await runtime.agents.get("default").create_session("session")
             session = runtime.agents.get("default").session("session")
             execution = await session.start(
@@ -307,7 +307,7 @@ async def test_rejected_session_start_cleans_only_its_admission(
     try:
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('session-admission-cleanup', storage=state) as persistence_310, Runtime.open(persistence=persistence_310, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open('session-admission-cleanup', storage=state) as persistence_310, Runtime.attach(persistence=persistence_310, features=model_features(_ToolModels(), application)) as runtime:
             try:
                 await runtime.agents.get("default").create_session("session")
                 session = runtime.agents.get("default").session("session")
@@ -447,7 +447,7 @@ async def test_split_start_cleanup_failure_remains_recoverable_after_restart(
         application = _application(calls)
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('start-cleanup-restart', storage=state) as persistence_454, Runtime.open(persistence=persistence_454, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open('start-cleanup-restart', storage=state) as persistence_454, Runtime.attach(persistence=persistence_454, features=model_features(_ToolModels(), application)) as runtime:
             original_mutate = runtime._state.conversation.sessions.state_store.mutate
 
             async def conflict_after_session_reservation(
@@ -529,7 +529,7 @@ async def test_split_start_cleanup_failure_remains_recoverable_after_restart(
         application = _application(calls)
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('start-cleanup-restart', storage=reopened) as persistence_540, Runtime.open(persistence=persistence_540, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open('start-cleanup-restart', storage=reopened) as persistence_540, Runtime.attach(persistence=persistence_540, features=model_features(_ToolModels(), application)) as runtime:
             checkpoint = await runtime._state.recovery.checkpoints.get(
                 execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
@@ -578,7 +578,7 @@ async def test_session_start_cancel_before_worker_run_commits_cancelled_terminal
     try:
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('session-start-cancel-before-run', storage=state) as persistence_593, Runtime.open(persistence=persistence_593, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open('session-start-cancel-before-run', storage=state) as persistence_593, Runtime.attach(persistence=persistence_593, features=model_features(_ToolModels(), application)) as runtime:
             await runtime.agents.get("default").create_session("session")
             session = runtime.agents.get("default").session("session")
             before = await runtime._state.conversation.sessions.get(
@@ -692,7 +692,7 @@ async def test_pending_start_cancel_commits_terminal_before_admission(
         application = _application(calls)
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open(f'pending-start-cancel-{storage_mode}', storage=state) as persistence_711, Runtime.open(persistence=persistence_711, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open(f'pending-start-cancel-{storage_mode}', storage=state) as persistence_711, Runtime.attach(persistence=persistence_711, features=model_features(_ToolModels(), application)) as runtime:
             await runtime.agents.get("default").create_session("session")
             session = runtime.agents.get("default").session("session")
             start_task = asyncio.create_task(
@@ -778,7 +778,7 @@ async def test_cancel_during_unknown_tool_effect_preserves_recovery_and_cancel_i
     try:
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('cancel-unknown-tool-effect', storage=state) as persistence_801, Runtime.open(persistence=persistence_801, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open('cancel-unknown-tool-effect', storage=state) as persistence_801, Runtime.attach(persistence=persistence_801, features=model_features(_ToolModels(), application)) as runtime:
             await runtime.agents.get("default").create_session("session")
             session = runtime.agents.get("default").session("session")
             execution = await session.start(
@@ -876,7 +876,7 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
     try:
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('cancel-intent-readback', storage=state) as persistence_903, Runtime.open(persistence=persistence_903, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open('cancel-intent-readback', storage=state) as persistence_903, Runtime.attach(persistence=persistence_903, features=model_features(_ToolModels(), application)) as runtime:
             await runtime.agents.get("default").create_session("session")
             execution = await runtime.agents.get("default").session("session").start(
                 "inspect",
@@ -1173,7 +1173,7 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
     try:
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('session-tool-recovery-resolution', storage=state) as persistence_1204, Runtime.open(persistence=persistence_1204, features=model_features(_RecoveryToolModels(), application)) as runtime:
+        async with Persistence.open('session-tool-recovery-resolution', storage=state) as persistence_1204, Runtime.attach(persistence=persistence_1204, features=model_features(_RecoveryToolModels(), application)) as runtime:
             await runtime.agents.get("default").create_session("session")
             execution = await runtime.agents.get("default").session("session").start(
                 "inspect",
@@ -1238,7 +1238,7 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
         )
         reopened_application.capability(CheckpointCapability(), scope="runtime")
         reopened_application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('session-tool-recovery-resolution', storage=state) as persistence_1273, Runtime.open(persistence=persistence_1273, features=model_features(_RecoveryToolModels(), reopened_application)) as runtime:
+        async with Persistence.open('session-tool-recovery-resolution', storage=state) as persistence_1273, Runtime.attach(persistence=persistence_1273, features=model_features(_RecoveryToolModels(), reopened_application)) as runtime:
             execution = await runtime.executions.get(execution_id)
 
             resolution_result = await execution.resolve_tool_effect(
@@ -1335,7 +1335,7 @@ async def test_no_worker_cancel_intent_survives_replay_and_recovery(
     try:
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('recovery-no-worker-cancel', storage=state) as persistence_1374, Runtime.open(persistence=persistence_1374, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open('recovery-no-worker-cancel', storage=state) as persistence_1374, Runtime.attach(persistence=persistence_1374, features=model_features(_ToolModels(), application)) as runtime:
             await runtime.agents.get("default").create_session("session")
             execution = await runtime.agents.get("default").session("session").start(
                 "inspect",
@@ -1430,7 +1430,7 @@ async def test_cancel_at_unknown_effect_boundaries_stays_nonterminal(
     try:
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open(f'cancel-unknown-boundary-{boundary}', storage=state) as persistence_1473, Runtime.open(persistence=persistence_1473, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open(f'cancel-unknown-boundary-{boundary}', storage=state) as persistence_1473, Runtime.attach(persistence=persistence_1473, features=model_features(_ToolModels(), application)) as runtime:
             if boundary == "unknown_write":
                 repository = runtime._state.recovery.tools
                 original_mark = repository.mark_effect_unknown
@@ -1586,7 +1586,7 @@ async def test_unverified_unknown_effect_write_does_not_terminalize_execution(
     try:
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open(f'unknown-write-{readback}', storage=state) as persistence_1633, Runtime.open(persistence=persistence_1633, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open(f'unknown-write-{readback}', storage=state) as persistence_1633, Runtime.attach(persistence=persistence_1633, features=model_features(_ToolModels(), application)) as runtime:
             repository = runtime._state.recovery.tools
             original_get = repository.get_operation
 
@@ -1689,7 +1689,7 @@ async def test_durable_terminal_survives_local_seal_finalization_failure(
     try:
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('session-tool-terminal-finalize', storage=state) as persistence_1740, Runtime.open(persistence=persistence_1740, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open('session-tool-terminal-finalize', storage=state) as persistence_1740, Runtime.attach(persistence=persistence_1740, features=model_features(_ToolModels(), application)) as runtime:
             await runtime.agents.get("default").create_session("session")
             execution = (
                 await runtime.agents.get("default")
@@ -1769,7 +1769,7 @@ async def test_terminal_commit_error_converges_to_failed_terminal(
     )
     application.capability(CheckpointCapability(), scope="runtime")
     application.capability(TraceCapability(), scope="runtime")
-    async with Persistence.open('session-tool-terminal-failure', storage=PersistenceStorage.in_memory()) as persistence_1824, Runtime.open(persistence=persistence_1824, features=model_features(_ToolModels(), application)) as runtime:
+    async with Persistence.open('session-tool-terminal-failure', storage=PersistenceStorage.in_memory()) as persistence_1824, Runtime.attach(persistence=persistence_1824, features=model_features(_ToolModels(), application)) as runtime:
         await runtime.agents.get("default").create_session("session")
         session = runtime.agents.get("default").session("session")
         execution = await session.start("inspect", idempotency_key="turn-1")
@@ -1922,7 +1922,7 @@ async def test_expired_tool_claim_waits_for_explicit_recovery_after_restart(
     try:
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('session-tool-crash', storage=state) as persistence_1981, Runtime.open(persistence=persistence_1981, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open('session-tool-crash', storage=state) as persistence_1981, Runtime.attach(persistence=persistence_1981, features=model_features(_ToolModels(), application)) as runtime:
             current = await runtime._state.execution.executions.get(
                 execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
@@ -1984,7 +1984,7 @@ async def test_idempotent_replay_does_not_claim_active_tool_execution(
     try:
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('session-tool-crash', storage=state) as persistence_2047, Runtime.open(persistence=persistence_2047, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open('session-tool-crash', storage=state) as persistence_2047, Runtime.attach(persistence=persistence_2047, features=model_features(_ToolModels(), application)) as runtime:
             tools = await runtime._state.recovery.tools.list_by_execution(
                 execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
@@ -2094,7 +2094,7 @@ async def test_split_storage_handoff_reconciles_prepared_checkpoint_after_restar
     try:
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('session-tool-crash', storage=state) as persistence_2161, Runtime.open(persistence=persistence_2161, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open('session-tool-crash', storage=state) as persistence_2161, Runtime.attach(persistence=persistence_2161, features=model_features(_ToolModels(), application)) as runtime:
             session = runtime.agents.get("default").session("session")
             execution = await session.start("inspect", idempotency_key="turn-1")
             result = (await execution.wait(timeout_seconds=15)).result
@@ -2155,7 +2155,7 @@ async def test_split_storage_success_handoff_wins_cancel_race(
     try:
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('split-storage-handoff-cancel-race', storage=state) as persistence_2226, Runtime.open(persistence=persistence_2226, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open('split-storage-handoff-cancel-race', storage=state) as persistence_2226, Runtime.attach(persistence=persistence_2226, features=model_features(_ToolModels(), application)) as runtime:
             assert (
                 runtime._state.execution.executions.state_store.storage_group
                 is runtime._state.recovery.checkpoints.state_store.storage_group
@@ -2474,7 +2474,7 @@ async def test_recovery_preserves_bootstrap_and_effect_confirmation_boundaries(
     application = _application(calls, effect_policy="non_replay_safe", effect_log=effect_log)
     application.capability(CheckpointCapability(), scope="runtime")
     application.capability(TraceCapability(), scope="runtime")
-    async with Persistence.open('session-tool-crash', storage=PersistenceStorage.sqlite(database)) as persistence_2549, Runtime.open(persistence=persistence_2549, features=model_features(_ToolModels(), application)) as runtime:
+    async with Persistence.open('session-tool-crash', storage=PersistenceStorage.sqlite(database)) as persistence_2549, Runtime.attach(persistence=persistence_2549, features=model_features(_ToolModels(), application)) as runtime:
         session = runtime.agents.get("default").session("session")
         if phase == "effect_unconfirmed":
             with pytest.raises(AIError) as raised:
@@ -2532,7 +2532,7 @@ async def test_tool_effect_waits_for_durable_response_checkpoint(
         application = _application(calls)
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('pre-effect-checkpoint', storage=PersistenceStorage.in_memory()) as persistence_2611, Runtime.open(persistence=persistence_2611, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open('pre-effect-checkpoint', storage=PersistenceStorage.in_memory()) as persistence_2611, Runtime.attach(persistence=persistence_2611, features=model_features(_ToolModels(), application)) as runtime:
             await runtime.agents.get("default").create_session("session")
             execution = (
                 await runtime.agents.get("default")
@@ -2576,7 +2576,7 @@ async def test_terminal_transaction_rollback_keeps_session_cursor_unchanged(
         application = _application(calls)
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('session-atomic-terminal', storage=state) as persistence_2659, Runtime.open(persistence=persistence_2659, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open('session-atomic-terminal', storage=state) as persistence_2659, Runtime.attach(persistence=persistence_2659, features=model_features(_ToolModels(), application)) as runtime:
             await runtime.agents.get("default").create_session("session")
             session = runtime.agents.get("default").session("session")
             execution = await session.start("inspect", idempotency_key="turn-1")

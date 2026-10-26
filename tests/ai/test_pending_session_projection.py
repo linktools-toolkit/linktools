@@ -59,7 +59,7 @@ async def _runtimes(tmp_path, *, cache, shared=True):
         for _ in range(2 if shared and cache is not None else 1):
             storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache)
             persistence = await stack.enter_async_context(Persistence.open("pending-session-display", storage=storage))
-            runtime = await stack.enter_async_context(Runtime.open(
+            runtime = await stack.enter_async_context(Runtime.attach(
                 persistence=persistence, features=model_features(models, group()),
             ))
             values.append((runtime, runtime._state))

@@ -89,7 +89,7 @@ async def test_sqlite_retry_preserves_accepted_agent_usage_limit(
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
     application = RuntimeFeatures("application")
     application.agent("default", revision=2, model="default", allow_tools=())
-    async with Persistence.open('older-history', storage=PersistenceStorage.sqlite(path)) as persistence_88, Runtime.open(persistence=persistence_88, features=model_features(helpers.RuntimeUsageModels(), application)) as runtime:
+    async with Persistence.open('older-history', storage=PersistenceStorage.sqlite(path)) as persistence_88, Runtime.attach(persistence=persistence_88, features=model_features(helpers.RuntimeUsageModels(), application)) as runtime:
         original = await runtime.executions.get(execution_id)
         assert await original.budget_usage() is None
         retried = await original.retry("exceed the original output limit")

@@ -103,7 +103,7 @@ class _RequiresExecution(AbstractCapability):
 @pytest.mark.asyncio
 async def test_default_execution_owner_exists_without_implying_history() -> None:
     observer = _RequiresExecution()
-    async with Persistence.open('default-execution-owner', storage=PersistenceStorage.in_memory()) as persistence_103, Runtime.open(persistence=persistence_103, features=model_features(_FeatureModels(), _features(observer))) as runtime:
+    async with Persistence.open('default-execution-owner', storage=PersistenceStorage.in_memory()) as persistence_103, Runtime.attach(persistence=persistence_103, features=model_features(_FeatureModels(), _features(observer))) as runtime:
         execution = await runtime.agents.get().start('task')
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
     assert observer.observed == [False]
@@ -115,7 +115,7 @@ async def test_retained_execution_forks_with_sessions_disabled() -> None:
     declaration = ExecutionCapability(retain_history=True)
     features = _features(WrapperCapability(CombinedCapability([declaration]), id='execution-wrapper'),
                          SessionCapability(enabled=False), observer)
-    async with Persistence.open('sessionless-execution-owner', storage=PersistenceStorage.in_memory()) as persistence_116, Runtime.open(persistence=persistence_116, features=model_features(_FeatureModels(), features)) as runtime:
+    async with Persistence.open('sessionless-execution-owner', storage=PersistenceStorage.in_memory()) as persistence_116, Runtime.attach(persistence=persistence_116, features=model_features(_FeatureModels(), features)) as runtime:
         source = await runtime.agents.get().start('task')
         assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
         fork = await source.fork('follow up')

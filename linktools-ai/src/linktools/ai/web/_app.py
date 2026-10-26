@@ -22,7 +22,7 @@ from linktools.core import environ
 from ..core import Principal, PrincipalKind
 from ..errors import AIError, ErrorCode, ErrorDiagnostics, ObservationError
 from ..model import ModelClientRequest, ModelClientResponse
-from ..observe import MetricAggregation, MetricQuery, Metrics, MetricWindow
+from ..observe import MetricAggregation, MetricQuery, Metrics, MetricWindow, RuntimeMetricsStatus
 from ..history import History
 from ..execution import CreateSessionRequest, ExecutionStreamEvent, ListExecutionRequest, ListSessionRequest, TaskModelProjection, ToolEffectApplied, ToolEffectFailed, ToolEffectNotApplied
 from ..runtime import Runtime
@@ -48,6 +48,21 @@ _HEADERS = {
 
 
 def _wire(value: object, *, diagnostic: bool = False) -> object:
+    if isinstance(value, RuntimeMetricsStatus):
+        return {
+            "recorders": _wire(value.recorders),
+            "enabled": value.enabled,
+            "accepting": value.accepting,
+            "accepted": value.accepted,
+            "persisted": value.persisted,
+            "pending": value.pending,
+            "rejected": value.rejected,
+            "unconfirmed": value.unconfirmed,
+            "write_failures": value.write_failures,
+            "queue_size": value.queue_size,
+            "queue_capacity": value.queue_capacity,
+            "failure_codes": _wire(value.failure_codes),
+        }
     if isinstance(value, ErrorDiagnostics):
         return _wire(value.to_payload(), diagnostic=True)
     if isinstance(value, (ModelClientRequest, ModelClientResponse)):

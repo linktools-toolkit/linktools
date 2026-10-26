@@ -148,9 +148,9 @@ async def test_acp_application_can_serve_again_after_transport_failure(
     from contextlib import asynccontextmanager
 
     import linktools.ai.acp as acp_module
-    from linktools.ai.core import service_principal
+    from linktools.ai.core import AuthorizationPolicy, service_principal
     from linktools.ai.runtime import RuntimeFeatures
-    from linktools.ai.persistence import Persistence, PersistenceStorage
+    from linktools.ai.persistence import PersistenceStorage
     from linktools.ai.workspace import Workspace
 
     from ._runtime_test_helpers import RuntimeUsageModels
@@ -168,11 +168,12 @@ async def test_acp_application_can_serve_again_after_transport_failure(
 
     @asynccontextmanager
     async def open_runtime(
-        *, persistence: Persistence, features: RuntimeFeatures,
+        namespace: str, *, storage: PersistenceStorage, features: RuntimeFeatures,
+        authorization: AuthorizationPolicy | None = None,
     ) -> AsyncIterator[SimpleNamespace]:
-        assert persistence.namespace == "default"
-        assert persistence.ready
-        assert persistence.plan is application.storage.plan
+        assert namespace == "default"
+        assert storage is application.storage
+        assert authorization is application.authorization
         captures.append(await features.capture())
         try:
             yield SimpleNamespace(default_principal=service_principal("default", "acp"))

@@ -396,7 +396,7 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
         effect_policy="none",
     )
 
-    async with Persistence.open('sqlite-dynamic-watch', storage=storage) as persistence_404, Runtime.open(persistence=persistence_404, features=model_features(_TaskTestModels(), _agent_group())) as runtime, TaskEngine.open(persistence=persistence_404) as engine:
+    async with Persistence.open('sqlite-dynamic-watch', storage=storage) as persistence_404, Runtime.attach(persistence=persistence_404, features=model_features(_TaskTestModels(), _agent_group())) as runtime, TaskEngine.open(persistence=persistence_404) as engine:
         agent_task = Task.from_agent(
             "sqlite.watch.agent",
             runtime.agents.get("default"),
@@ -584,7 +584,7 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
-    async with Persistence.open('sqlite-dynamic-watch', storage=reopened_storage) as persistence_592, Runtime.open(persistence=persistence_592, features=model_features(_TaskTestModels(), _agent_group())) as runtime, TaskEngine.open(persistence=persistence_592) as engine:
+    async with Persistence.open('sqlite-dynamic-watch', storage=reopened_storage) as persistence_592, Runtime.attach(persistence=persistence_592, features=model_features(_TaskTestModels(), _agent_group())) as runtime, TaskEngine.open(persistence=persistence_592) as engine:
         agent_task = Task.from_agent(
             "sqlite.watch.agent",
             runtime.agents.get("default"),
@@ -637,7 +637,7 @@ async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
-    async with Persistence.open('default', storage=state) as persistence_648, Runtime.open(persistence=persistence_648, features=model_features(_TaskTestModels(), _agent_group())) as runtime, TaskEngine.open(persistence=persistence_648) as engine:
+    async with Persistence.open('default', storage=state) as persistence_648, Runtime.attach(persistence=persistence_648, features=model_features(_TaskTestModels(), _agent_group())) as runtime, TaskEngine.open(persistence=persistence_648) as engine:
         task = _agent_task(runtime)
         engine = engine.with_definitions(task)
         for index in range(repetitions):
@@ -718,7 +718,7 @@ async def test_sqlite_public_runtime_task_failure_blocks_dependency(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
-    async with Persistence.open('default', storage=state) as persistence_733, Runtime.open(persistence=persistence_733, features=model_features(_TaskTestModels(), _agent_group())) as runtime, TaskEngine.open(persistence=persistence_733) as engine:
+    async with Persistence.open('default', storage=state) as persistence_733, Runtime.attach(persistence=persistence_733, features=model_features(_TaskTestModels(), _agent_group())) as runtime, TaskEngine.open(persistence=persistence_733) as engine:
         task = _agent_task(runtime)
         engine = engine.with_definitions(task)
         graph = TaskGraph(
@@ -777,7 +777,7 @@ async def test_sqlite_public_runtime_task_wait_timeout_and_cancel(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
-    async with Persistence.open('default', storage=state) as persistence_796, Runtime.open(persistence=persistence_796, features=model_features(_TaskTestModels(), _agent_group())) as runtime, TaskEngine.open(persistence=persistence_796) as engine:
+    async with Persistence.open('default', storage=state) as persistence_796, Runtime.attach(persistence=persistence_796, features=model_features(_TaskTestModels(), _agent_group())) as runtime, TaskEngine.open(persistence=persistence_796) as engine:
         task = _agent_task(runtime)
         engine = engine.with_definitions(task)
         graph = TaskGraph("timeout", (_agent_node(task, "blocked", "blocked"),))

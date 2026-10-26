@@ -83,7 +83,7 @@ async def test_web_client_live_visibility_follows_completed_request_commit(
     group.tool(wait_for_release, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("wait_for_release",))
     group.capability(TraceCapability(record_http_bodies=True, commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=3.0)), scope="runtime")
-    async with Persistence.open('web-client-live', storage=storage) as persistence_82, Runtime.open(persistence=persistence_82, features=model_features(models, group)) as runtime:
+    async with Persistence.open('web-client-live', storage=storage) as persistence_82, Runtime.attach(persistence=persistence_82, features=model_features(models, group)) as runtime:
         commit = runtime._run_store.commit_captured_execution_projection
 
         async def observed_commit(

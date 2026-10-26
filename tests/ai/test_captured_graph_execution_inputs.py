@@ -74,7 +74,7 @@ async def test_projected_graph_capture_reuses_accepted_prompt_and_file_bytes(
     async def project(context: AgentTaskInputContext) -> str:
         return f"Prepared in {context.graph_id}: {context.input['question']}"
 
-    async with Persistence.open('captured-projection', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_73, Runtime.open(persistence=persistence_73, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_73, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('captured-projection', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_73, Runtime.attach(persistence=persistence_73, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_73, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         target = Task.from_agent("captured.agent", runtime.agents.get(), build_input=project)
         scorer = Task("captured.score", _score_graph, effect_policy="none")
         engine = runtime_engine.with_definitions(target, scorer)
@@ -141,7 +141,7 @@ async def test_graph_capture_retains_only_bindings_required_by_its_execution_top
         return (TaskNode("child", ("seed",), task=child_task),)
 
     expander = TaskExpander("captured.expand", expand)
-    async with Persistence.open('captured-topology', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_140, Runtime.open(persistence=persistence_140, features=model_features(FixtureModels()), context=CONTEXT) as runtime, TaskEngine.open(persistence=persistence_140, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('captured-topology', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_140, Runtime.attach(persistence=persistence_140, features=model_features(FixtureModels()), context=CONTEXT) as runtime, TaskEngine.open(persistence=persistence_140, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         engine = runtime_engine.with_definitions(seed_task, child_task, unused, expander)
         source = await engine.start(TaskGraph("source", (
             TaskNode("seed", task=seed_task, expander=expander),
@@ -186,7 +186,7 @@ async def test_graph_capture_rejects_unavailable_projected_input(
     async def project(context: AgentTaskInputContext) -> str:
         return "should never be evaluated"
 
-    async with Persistence.open('unavailable-projection', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_185, Runtime.open(persistence=persistence_185, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_185, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('unavailable-projection', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_185, Runtime.attach(persistence=persistence_185, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_185, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         failure = Task("captured.failure", fail, effect_policy="none")
         target = Task.from_agent("captured.agent", runtime.agents.get(), build_input=project)
         source = await runtime_engine.with_definitions(failure, target).start(TaskGraph("source", (
@@ -229,7 +229,7 @@ async def test_clean_recapture_replays_unstarted_fixed_projected_graph(
             raise AIError(ErrorCode.TASK_NODE_FAILED)
         return "ready"
 
-    async with Persistence.open('recaptured-fixed', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_229, Runtime.open(persistence=persistence_229, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_229, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('recaptured-fixed', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_229, Runtime.attach(persistence=persistence_229, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_229, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         target = Task.from_agent("captured.agent", runtime.agents.get(), build_input=project)
         prepare = Task("captured.prepare", gate, effect_policy="none")
         scorer = Task("captured.score", _score_graph, effect_policy="none")
@@ -311,7 +311,7 @@ async def test_fixed_agent_task_capture_can_reproject_without_live_files(tmp_pat
     async def project(context: AgentTaskInputContext) -> str:
         return f"Prepared in {context.graph_id}: {context.input['question']}"
 
-    async with Persistence.open('recaptured-projection', storage=PersistenceStorage.filesystem(tmp_path / 'state'), tenant_id='evaluation-consumers') as persistence_311, Runtime.open(persistence=persistence_311, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_311, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('recaptured-projection', storage=PersistenceStorage.filesystem(tmp_path / 'state'), tenant_id='evaluation-consumers') as persistence_311, Runtime.attach(persistence=persistence_311, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_311, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         task = Task.from_agent("captured.agent", runtime.agents.get(), build_input=project)
         scorer = Task("captured.score", _score_graph, effect_policy="none")
         engine = runtime_engine.with_definitions(task, scorer)
@@ -357,7 +357,7 @@ async def test_clean_unstarted_literal_graph_can_reproject_its_admitted_files(tm
             raise AIError(ErrorCode.TASK_NODE_FAILED)
         return "ready"
 
-    async with Persistence.open('unstarted-literal', storage=PersistenceStorage.filesystem(tmp_path / 'state'), tenant_id='evaluation-consumers') as persistence_358, Runtime.open(persistence=persistence_358, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_358, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('unstarted-literal', storage=PersistenceStorage.filesystem(tmp_path / 'state'), tenant_id='evaluation-consumers') as persistence_358, Runtime.attach(persistence=persistence_358, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_358, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         producer = Task("captured.prepare", prepare, effect_policy="none")
         target = Task.from_agent("captured.agent", runtime.agents.get())
         scorer = Task("captured.score", _score_graph, effect_policy="none")

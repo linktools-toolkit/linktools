@@ -16,7 +16,7 @@ from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, Wra
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
 from ..asset import AssetStoreReader
-from ..core import AuthorizationPolicy, ImmutableJsonMapping, JsonValue, PromptLimits
+from ..core import ImmutableJsonMapping, JsonValue, PromptLimits
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding
 from ..spec import (
@@ -66,7 +66,6 @@ class RuntimeFeaturesCapture(Generic[AppT]):
         default_factory=lambda: MappingProxyType({}), repr=False, compare=False,
     )
     sandbox: "Sandbox | None" = field(default=None, repr=False, compare=False)
-    authorization: AuthorizationPolicy | None = field(default=None, repr=False, compare=False)
     limits: PromptLimits = field(default_factory=PromptLimits)
     defaults: Mapping[str, JsonValue] = field(default_factory=dict)
     filter: Callable[[AgentSpec, CapabilityContribution[object]], bool] | None = field(
@@ -121,7 +120,6 @@ class RuntimeFeatures(Generic[AppT]):
         group_id: str = "default",
         *,
         sandbox: "Sandbox | None" = None,
-        authorization: AuthorizationPolicy | None = None,
         limits: PromptLimits | None = None,
         defaults: Mapping[str, JsonValue] | None = None,
         filter: Callable[[AgentSpec, CapabilityContribution[object]], bool] | None = None,
@@ -130,7 +128,6 @@ class RuntimeFeatures(Generic[AppT]):
             raise ValueError("capability group id must be a non-empty string")
         self._defaults = _freeze_defaults({} if defaults is None else defaults)
         _validate_filter(filter)
-        self._authorization = authorization
         self._limits = PromptLimits() if limits is None else limits
         if not isinstance(self._limits, PromptLimits):
             raise TypeError("limits must be PromptLimits")
@@ -151,11 +148,6 @@ class RuntimeFeatures(Generic[AppT]):
     def defaults(self) -> Mapping[str, JsonValue]:
         """Return frozen, namespaced settings for declaration-time consumers."""
         return self._defaults
-
-    @property
-    def authorization(self) -> AuthorizationPolicy | None:
-        """Return the current borrowed policy without loading declarations."""
-        return self._authorization
 
     @property
     def workspace(self) -> "Workspace | None":
@@ -343,7 +335,7 @@ class RuntimeFeatures(Generic[AppT]):
 
     async def capture(self) -> "RuntimeFeaturesCapture[AppT]":
         """Capture registrations and declarations at one Asset revision."""
-        authorization, limits = self._authorization, self._limits
+        limits = self._limits
         models = MappingProxyType(dict(self._models))
         contributions = list(tuple(self._contributions))
         instruction_documents: list[RepositoryInstructionDocument] = []
@@ -369,7 +361,6 @@ class RuntimeFeatures(Generic[AppT]):
             asset_reader,
             models=models,
             sandbox=self._sandbox,
-            authorization=authorization,
             limits=limits,
             defaults=self._defaults,
             filter=self._filter,

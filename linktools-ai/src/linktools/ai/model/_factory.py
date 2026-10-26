@@ -11,7 +11,7 @@ from ._contract import ModelBinding
 
 def create_model(
     *,
-    protocol: str,
+    api: str,
     model: str,
     input_types: Sequence[str] = (),
     model_settings: Mapping[str, JsonValue] | None = None,
@@ -25,6 +25,7 @@ def create_model(
 ) -> ModelBinding:
     """Construct a binding without creating a client or resolving credentials.
 
+    ``api`` selects openai, openai-responses or anthropic.
     ``model_settings`` accepts JSON-valued SDK settings, including provider-specific
     settings and ``extra_body`` for native fields. Request limits and timeouts
     belong only to ``model_settings``. Transport retries belong to this factory;
@@ -32,18 +33,18 @@ def create_model(
     stays in connection parameters;
     request-body values are durable configuration and must not contain secrets.
     """
-    if protocol == "openai":
+    if api == "openai":
         from ._openai import _OpenAIModelBinding as binding_type
-    elif protocol == "openai-responses":
+    elif api == "openai-responses":
         from ._openai import _OpenAIResponsesModelBinding as binding_type
-    elif protocol == "anthropic":
+    elif api == "anthropic":
         from ._anthropic import _AnthropicModelBinding as binding_type
     else:
         raise AIError(
             ErrorCode.MODEL_CONFIG_INVALID,
-            "Unsupported model protocol; expected openai, openai-responses or anthropic",
+            "Unsupported model API; expected openai, openai-responses or anthropic",
             retryable=False,
-            safe_details={"reason": "unsupported_model_protocol"},
+            safe_details={"reason": "unsupported_model_api"},
         )
     return binding_type(
         model=model,

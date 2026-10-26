@@ -113,7 +113,7 @@ async def test_runtime_records_compaction_and_agent_dispatches_separately(
     storage = PersistenceStorage.in_memory()
     features = _agents()
     features.capability(TraceCapability(record_http_bodies=True), scope="runtime")
-    async with Persistence.open('default', storage=storage) as persistence_112, Runtime.open(persistence=persistence_112, features=model_features(models, features)) as runtime:
+    async with Persistence.open('default', storage=storage) as persistence_112, Runtime.attach(persistence=persistence_112, features=model_features(models, features)) as runtime:
         execution = await runtime.agents.get("default").start(
             "continue", input_context=ExecutionInputContext.from_messages(history),
             budget=RunBudget(model_requests=2) if budgeted else None,
@@ -169,7 +169,7 @@ async def test_runtime_flushes_original_attempts_only_at_request_completion(
     storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "state.db")
     features = _agents()
     features.capability(TraceCapability(record_http_bodies=record_http_bodies), scope="runtime")
-    async with Persistence.open('default', storage=storage) as persistence_168, Runtime.open(persistence=persistence_168, features=model_features(models, features)) as runtime:
+    async with Persistence.open('default', storage=storage) as persistence_168, Runtime.attach(persistence=persistence_168, features=model_features(models, features)) as runtime:
         execution = await runtime.agents.get("default").start("original prompt")
         if outcome == "cancel":
             await asyncio.wait_for(stream.blocked.wait(), 5)
@@ -252,7 +252,7 @@ async def test_concurrent_subagents_keep_original_attempts_with_their_own_execut
     group.agent("child", model="default", allow_tools=(), allow_subagents=())
     storage = PersistenceStorage.in_memory()
     principal = Principal("owner", "default")
-    async with Persistence.open('default', storage=storage) as persistence_251, Runtime.open(persistence=persistence_251, features=model_features(models, group)) as runtime:
+    async with Persistence.open('default', storage=storage) as persistence_251, Runtime.attach(persistence=persistence_251, features=model_features(models, group)) as runtime:
         parents = await asyncio.gather(*(runtime.agents.get("default").start(f"root-{i}", principal=principal) for i in range(2)))
         results = await asyncio.gather(*(execution.wait(timeout_seconds=15) for execution in parents))
         assert all(value.result.status == "SUCCEEDED" for value in results)

@@ -19,6 +19,7 @@ from linktools.ai.core import _signed_cursor
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
 from linktools.ai.evaluation import DatasetRef, EvaluationProgress, EvaluationView
 from linktools.ai.runtime import Agent, Runtime, Session
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.execution import Execution
 from linktools.ai.observe import WaitResult
 from linktools.ai.task_engine import TaskEngine, TaskGraphRun
@@ -155,6 +156,12 @@ class _Evaluations(Evaluations):
 
     def __init__(self) -> None:
         self._closed = False
+        self._accepting = True
+        self._active_controls = 0
+        self._controls_idle = asyncio.Event()
+        self._controls_idle.set()
+        self._close_task = None
+        self._history_context = None
         self._observation_sessions = set()
         self._watchers = {}
         self._trial_scopes = {}
@@ -178,7 +185,19 @@ class _Evaluations(Evaluations):
 
 
 class _Bundle:
-    def __init__(self) -> None:
+    @classmethod
+    async def create(cls) -> "_Bundle":
+        runtime = Runtime.open(
+            _NAMESPACE, storage=PersistenceStorage.in_memory(), tenant_id=_PRINCIPAL.tenant_id,
+        )
+        await runtime.__aenter__()
+        try:
+            return cls(runtime)
+        except BaseException:
+            await runtime.close()
+            raise
+
+    def __init__(self, runtime: Runtime[None]) -> None:
         self.execution = _ExecutionService()
         self.graph = _GraphService()
         self.evaluations = _Evaluations()
@@ -187,8 +206,9 @@ class _Bundle:
         self.streams_closed_at_storage_close = None
         stub = object()
 
-        persistence = SimpleNamespace(namespace=_NAMESPACE, tenant_id=_PRINCIPAL.tenant_id, ready=True)
-        self.runtime = Runtime(
+        persistence = runtime._state
+        self.runtime = runtime
+        runtime._bind_agent_components(
             stub, stub, self.execution, stub, stub, stub, stub, stub, None,
             persistence=persistence, run_store=stub, context=ExecutionContext(None),
             tree_streamer=self.tree,
@@ -271,7 +291,7 @@ async def _ignore(event) -> None:
 @pytest.mark.parametrize("observe", [False, True])
 @pytest.mark.parametrize("include_content", [False, True])
 async def test_each_owner_returns_wait_result_independent_of_callback(owner, observe, include_content) -> None:
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     try:
         outcome = await bundle.wait(
             owner, on_event=_ignore if observe else None, include_event_content=include_content,
@@ -308,7 +328,7 @@ async def test_each_owner_returns_wait_result_independent_of_callback(owner, obs
 @pytest.mark.asyncio
 @pytest.mark.parametrize("include_content", [False, True])
 async def test_graph_wait_ack_survives_cursor_issuance_crossing_a_second(monkeypatch, include_content) -> None:
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     delivered = []
     issued_at = int(time.time())
     monkeypatch.setattr(_signed_cursor, "time", SimpleNamespace(time=lambda: issued_at))
@@ -339,7 +359,7 @@ async def test_graph_wait_ack_survives_cursor_issuance_crossing_a_second(monkeyp
 @pytest.mark.asyncio
 @pytest.mark.parametrize("owner", ["execution", "graph", "evaluation", "facade"])
 async def test_eventless_wait_preserves_input_ack_and_rejects_cursor_without_callback(owner) -> None:
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     cursor = bundle.cursor(owner)
     try:
         with pytest.raises(AIError) as raised:
@@ -356,7 +376,7 @@ async def test_eventless_wait_preserves_input_ack_and_rejects_cursor_without_cal
 @pytest.mark.parametrize("owner", ["execution", "graph", "evaluation", "facade"])
 @pytest.mark.parametrize("wrong", ["owner", "content", "malformed"])
 async def test_terminal_owner_cannot_short_circuit_invalid_cursor(owner, wrong) -> None:
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     cursor = "not-a-cursor" if wrong == "malformed" else bundle.cursor(
         owner, identity="different" if wrong == "owner" else None, include_content=wrong == "content",
     )
@@ -446,7 +466,7 @@ async def test_convenience_wait_preserves_container_and_all_options(owner, metho
 @pytest.mark.asyncio
 @pytest.mark.parametrize("owner", ["execution", "graph", "evaluation"])
 async def test_terminal_owner_validates_cursor_membership_before_authoritative_wait(owner) -> None:
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     broker = ExecutionTreeBroker()
 
     class Reader:
@@ -495,7 +515,7 @@ async def test_terminal_owner_validates_cursor_membership_before_authoritative_w
     {"close_timeout_seconds": 0}, {"include_event_content": 1}, {"on_event": 1},
 ])
 async def test_invalid_wait_options_start_no_work_for_any_owner(owner, options) -> None:
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     try:
         with pytest.raises(AIError) as raised:
             await bundle.wait(owner, **options)
@@ -509,7 +529,7 @@ async def test_invalid_wait_options_start_no_work_for_any_owner(owner, options) 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["manual_close", "protocol_failure"])
 async def test_execution_watch_closes_owned_iterator_on_every_exit(mode) -> None:
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     closed = asyncio.Event()
 
     async def tree(*args, **kwargs):
@@ -538,7 +558,7 @@ async def test_execution_watch_closes_owned_iterator_on_every_exit(mode) -> None
 
 @pytest.mark.asyncio
 async def test_execution_wait_ack_advances_only_after_success_and_live_delta_keeps_watermark() -> None:
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     bundle.execution.release.clear()
 
     async def tree(*args, ready=None, **kwargs):
@@ -573,7 +593,7 @@ async def test_execution_wait_ack_advances_only_after_success_and_live_delta_kee
 @pytest.mark.asyncio
 @pytest.mark.parametrize("observe", [False, True])
 async def test_authoritative_timeout_error_is_never_reclassified_as_sdk_deadline(observe) -> None:
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     cause = TimeoutError("storage-owned timeout")
     bundle.execution.error = cause
     try:
@@ -587,7 +607,7 @@ async def test_authoritative_timeout_error_is_never_reclassified_as_sdk_deadline
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["authority", "contract", "callback"])
 async def test_failure_revealed_during_deadline_cleanup_keeps_its_source_priority(failure) -> None:
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     bundle.execution.release.clear()
     cause = TimeoutError("callback timeout") if failure == "callback" else AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
@@ -633,7 +653,7 @@ async def test_failure_revealed_during_deadline_cleanup_keeps_its_source_priorit
 @pytest.mark.asyncio
 @pytest.mark.parametrize("winner", ["authority", "contract"])
 async def test_execution_failure_outranks_simultaneous_callback_failure(winner) -> None:
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     bundle.execution.release.clear()
     cause = AIError(ErrorCode.AUTHORIZATION_DENIED)
     if winner == "authority":
@@ -664,7 +684,7 @@ async def test_execution_failure_outranks_simultaneous_callback_failure(winner) 
 
 @pytest.mark.asyncio
 async def test_execution_watch_preparation_is_inside_wait_deadline() -> None:
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     entered = asyncio.Event()
     closed = asyncio.Event()
 
@@ -694,7 +714,7 @@ async def test_execution_watch_preparation_is_inside_wait_deadline() -> None:
 async def test_owner_scopes_close_each_wait_before_storage(owner, observe) -> None:
     from dataclasses import replace
 
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     bundle.execution.release.clear()
     bundle.graph.release.clear()
     bundle.evaluations.result = replace(bundle.evaluations.result, completion="running")
@@ -723,7 +743,7 @@ async def test_owner_scopes_close_each_wait_before_storage(owner, observe) -> No
 
 @pytest.mark.asyncio
 async def test_plain_wait_bounds_noncooperative_waiter_cleanup_without_opening_watch() -> None:
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     cancelled = asyncio.Event()
     release = asyncio.Event()
 
@@ -762,7 +782,7 @@ async def test_plain_wait_bounds_noncooperative_waiter_cleanup_without_opening_w
 async def test_evaluation_wait_preserves_all_authoritative_stopping_phases(completion, observe) -> None:
     from dataclasses import replace
 
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     bundle.evaluations.result = replace(bundle.evaluations.result, completion=completion)
     try:
         outcome = await bundle.evaluation_run.wait(on_event=_ignore if observe else None)
@@ -776,7 +796,7 @@ async def test_evaluation_wait_preserves_all_authoritative_stopping_phases(compl
 @pytest.mark.asyncio
 @pytest.mark.parametrize("observe", [False, True])
 async def test_execution_wait_keeps_task_bound_authority_instead_of_using_facade(observe) -> None:
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     calls = []
 
     async def bound_wait(timeout_seconds):
@@ -807,7 +827,7 @@ def test_unified_observation_surface_has_no_redundant_methods_or_result_state() 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("member", ["foreign", "denied", "valid"])
 async def test_optional_root_broker_failure_cannot_skip_execution_cursor_validation(member) -> None:
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     optional = OSError("local child notifications unavailable")
     denied = AIError(ErrorCode.AUTHORIZATION_DENIED)
     inspected = []
@@ -878,7 +898,7 @@ async def test_optional_first_tree_failure_cannot_skip_later_graph_member_valida
     from linktools.ai.observe.stream import ExecutionStreamFailure
     from linktools.ai.task import TaskNode, TaskNodeView
 
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     optional = OSError("first tree broker unavailable")
     cause = AIError(ErrorCode.CURSOR_INVALID if second == "cursor" else ErrorCode.AUTHORIZATION_DENIED)
     checked = []
@@ -940,7 +960,7 @@ async def test_optional_first_tree_failure_cannot_skip_later_graph_member_valida
 async def test_optional_first_graph_failure_cannot_skip_later_evaluation_member_validation(second) -> None:
     from dataclasses import replace
 
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     optional = OSError("first graph broker unavailable")
     cause = AIError(ErrorCode.CURSOR_INVALID if second == "cursor" else ErrorCode.AUTHORIZATION_DENIED)
     checked = []
@@ -1010,7 +1030,7 @@ async def test_wait_cleanup_error_resumes_after_last_acknowledged_callback(owner
     from linktools.ai.observe.stream import ExecutionStreamFailure
     from linktools.ai.task import TaskEvent, TaskEventType
 
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     entered = asyncio.Event()
     released = asyncio.Event()
     committed = []
@@ -1089,7 +1109,7 @@ async def test_wait_cleanup_error_resumes_after_last_acknowledged_callback(owner
 @pytest.mark.asyncio
 @pytest.mark.parametrize("owner", ["execution", "graph", "evaluation", "facade"])
 async def test_sdk_wait_deadline_remains_retryable(owner) -> None:
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     bundle.execution.release.clear()
     bundle.graph.release.clear()
 

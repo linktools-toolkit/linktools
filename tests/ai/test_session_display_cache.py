@@ -824,7 +824,7 @@ async def test_runtime_factory_borrows_display_cache_only_for_durable_domains(tm
     group = RuntimeFeatures[None]("display")
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("agent", model="default", allow_tools=())
-    async with Persistence.open('display', storage=storage, tenant_id='tenant') as persistence_824, Runtime.open(persistence=persistence_824, features=model_features(_Models(TestModel()), group), context=ExecutionContext(None)) as runtime:
+    async with Persistence.open('display', storage=storage, tenant_id='tenant') as persistence_824, Runtime.attach(persistence=persistence_824, features=model_features(_Models(TestModel()), group), context=ExecutionContext(None)) as runtime:
         await runtime._state.conversation.sessions.create(_session())
         await _admit(runtime._state, status=ExecutionStatus.PENDING_START)
         first = await runtime.sessions.refresh("session", principal=_PRINCIPAL, max_age=3)
@@ -931,7 +931,7 @@ async def test_runtime_close_drains_display_io_after_close_waiter_cancellation(t
             return await method(*args)
         finally:
             exited.set()
-    async with Persistence.open('display', storage=storage, tenant_id='tenant') as persistence_932, Runtime.open(persistence=persistence_932, features=model_features(_Models(TestModel()), group), context=ExecutionContext(None)) as runtime:
+    async with Persistence.open('display', storage=storage, tenant_id='tenant') as persistence_932, Runtime.attach(persistence=persistence_932, features=model_features(_Models(TestModel()), group), context=ExecutionContext(None)) as runtime:
         await runtime._state.conversation.sessions.create(_session())
         monkeypatch.setattr(cache, phase, blocked)
         read = asyncio.create_task(runtime.sessions.refresh("session", principal=_PRINCIPAL, max_age=3))
@@ -1121,7 +1121,7 @@ async def test_persistence_owns_record_cache_publication_beyond_runtime_close(tm
     cache = BlockingRecordCache()
     async with Persistence.open("display", storage=PersistenceStorage.sqlite(tmp_path / "record.db", cache=cache),
                                 tenant_id="tenant") as persistence:
-        async with Runtime.open(persistence=persistence, auto_recover=False):
+        async with Runtime.attach(features=RuntimeFeatures(), persistence=persistence, auto_recover=False):
             await persistence.conversation.sessions.create(_session())
             await asyncio.wait_for(entered.wait(), 5)
         assert persistence.ready

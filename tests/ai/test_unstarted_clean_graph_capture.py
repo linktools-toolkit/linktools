@@ -59,7 +59,7 @@ async def test_clean_unstarted_graph_preserves_captured_input_semantics(
             raise AIError(ErrorCode.TASK_NODE_FAILED)
         return "ready"
 
-    async with Persistence.open('clean-input', storage=PersistenceStorage.filesystem(tmp_path / 'state')) as persistence_60, Runtime.open(persistence=persistence_60, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_60, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('clean-input', storage=PersistenceStorage.filesystem(tmp_path / 'state')) as persistence_60, Runtime.attach(persistence=persistence_60, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_60, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
         agent_task = Task.from_agent("clean.agent", runtime.agents.get(),
             build_input=project if task_mode == "projected" else None)

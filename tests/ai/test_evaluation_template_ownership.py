@@ -523,7 +523,7 @@ async def test_agent_graph_case_preserves_template_options_and_checks_prompt_own
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with (
         Persistence.open('agent-case', storage=PersistenceStorage.filesystem(tmp_path), tenant_id=PRINCIPAL.tenant_id) as persistence_467,
-        Runtime.open(persistence=persistence_467, context=CONTEXT, features=model_features(models, group)) as runtime,
+        Runtime.attach(persistence=persistence_467, context=CONTEXT, features=model_features(models, group)) as runtime,
     ):
         target = Task.from_agent("case.agent", runtime.agents.get(), build_input=project)
         judge = Task("case.score", score, effect_policy="none")

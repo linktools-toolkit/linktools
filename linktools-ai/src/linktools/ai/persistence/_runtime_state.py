@@ -108,14 +108,14 @@ class Persistence:
     ) -> AsyncIterator["Persistence"]:
         """Own the storage lifetime shared by independently borrowed producers."""
         state = cls(storage)
+        await state.initialize(
+            namespace=namespace,
+            tenant_id=validate_tenant_id(tenant_id),
+            read_only=read_only,
+        )
         try:
-            await state.initialize(
-                namespace=namespace,
-                tenant_id=validate_tenant_id(tenant_id),
-                read_only=read_only,
-            )
             yield state
-        except BaseException:
+        except BaseException as primary_error:
             try:
                 await await_stream_cleanup(state.close(), None)
             except BaseException as error:
@@ -124,6 +124,7 @@ class Persistence:
                     error.code.value if isinstance(error, AIError) else None,
                     type(error).__name__,
                 )
+                raise primary_error from error
             raise
         else:
             await await_stream_cleanup(state.close(), None)
@@ -286,6 +287,7 @@ class Persistence:
                     object_store=self._external_object_store,
                     read_only=read_only,
                     capability_routes=self._plan.capability_routes,
+                    register_cleanup=self._register_initialization_cleanup,
                 )
                 self._assign_materialized(
                     materialized,
@@ -294,9 +296,21 @@ class Persistence:
                 )
                 self._read_only = read_only
                 self._lifecycle = _RuntimeStateLifecycle.READY
-            except BaseException:
-                self._lifecycle = _RuntimeStateLifecycle.CLOSED
-                raise
+            except BaseException as error:
+                self._lifecycle = _RuntimeStateLifecycle.CLOSING
+                primary_error = error
+            else:
+                return
+        try:
+            await await_stream_cleanup(self.close(), None)
+        except BaseException as cleanup_error:
+            raise primary_error from cleanup_error
+        raise primary_error
+
+    def _register_initialization_cleanup(
+        self, actions: tuple[Callable[[], Awaitable[None]], ...],
+    ) -> None:
+        self._close_actions = (*actions, *self._close_actions)
 
     async def close(self) -> None:
         async with self._lock:

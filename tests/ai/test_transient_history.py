@@ -52,7 +52,7 @@ async def test_transient_execution_reads_live_owner_and_releases_after_handoff(o
     capabilities.tool(echo, effect_policy="replay_safe")
     capabilities.agent("default", model="default", allow_tools=("echo",))
     storage = PersistenceStorage(PersistencePlan(execution=StorageRoute.transient()))
-    async with Persistence.open('transient-history', storage=storage) as persistence_52, Runtime.open(persistence=persistence_52, features=model_features(_Models(_UsageFunctionModel(model)), capabilities)) as runtime:
+    async with Persistence.open('transient-history', storage=storage) as persistence_52, Runtime.attach(persistence=persistence_52, features=model_features(_Models(_UsageFunctionModel(model)), capabilities)) as runtime:
         execution = await runtime.agents.get("default").start("question")
         principal = runtime.default_principal
         subscription = None

@@ -44,7 +44,7 @@ async def test_callable_graph_recapture_uses_current_accepted_input(
     original = Task("capture.original", echo, effect_policy="none")
     current = Task("capture.current", echo, normalize=normalize, effect_policy="none")
     scorer = Task("capture.score", _score, effect_policy="none")
-    async with Persistence.open('callable-graph', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_41, Runtime.open(persistence=persistence_41, features=model_features(FixtureModels()), context=CONTEXT) as runtime, TaskEngine.open(persistence=persistence_41, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('callable-graph', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_41, Runtime.attach(persistence=persistence_41, features=model_features(FixtureModels()), context=CONTEXT) as runtime, TaskEngine.open(persistence=persistence_41, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         engine = runtime_engine.with_definitions(original, current, scorer)
         source = await engine.start(TaskGraph("source", (
             TaskNode("target", task=original, input={"value": 1}),
@@ -114,7 +114,7 @@ async def test_callable_graph_recapture_keeps_live_and_frozen_dependencies() -> 
 
     producer = Task("capture.produce", produce, effect_policy="none")
     consumer = Task("capture.consume", consume, effect_policy="none")
-    async with Persistence.open('callable-dependencies', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_111, Runtime.open(persistence=persistence_111, features=model_features(FixtureModels()), context=CONTEXT) as runtime, TaskEngine.open(persistence=persistence_111, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('callable-dependencies', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_111, Runtime.attach(persistence=persistence_111, features=model_features(FixtureModels()), context=CONTEXT) as runtime, TaskEngine.open(persistence=persistence_111, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         engine = runtime_engine.with_definitions(producer, consumer)
         source = await engine.start(TaskGraph("source", (
             TaskNode("external", task=producer),
@@ -160,7 +160,7 @@ async def test_callable_graph_capture_distinguishes_unstarted_from_missing_invoc
 
     task = Task("capture.echo", echo, effect_policy="none")
     gate = Task("capture.gate", fail, effect_policy="none")
-    async with Persistence.open('callable-unavailable', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_158, Runtime.open(persistence=persistence_158, features=model_features(FixtureModels()), context=CONTEXT) as runtime, TaskEngine.open(persistence=persistence_158, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('callable-unavailable', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_158, Runtime.attach(persistence=persistence_158, features=model_features(FixtureModels()), context=CONTEXT) as runtime, TaskEngine.open(persistence=persistence_158, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         engine = runtime_engine.with_definitions(task, gate)
         source = await engine.start(TaskGraph("source", (TaskNode("target", task=task, input={"value": 1}),)),
                                     principal=PRINCIPAL, idempotency_key="source")

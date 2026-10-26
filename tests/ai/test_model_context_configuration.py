@@ -20,7 +20,7 @@ from linktools.commands.ai.web import command as web_command
 @pytest.mark.parametrize("explicit", (65536, 131072))
 def test_context_window_is_one_explicit_contract_field(protocol, explicit):
     binding = create_model(
-        protocol=protocol,
+        api=protocol,
         model='synthetic',
         api_key='synthetic',
         context_window=explicit,
@@ -38,14 +38,14 @@ def test_context_window_is_one_explicit_contract_field(protocol, explicit):
 @pytest.mark.parametrize("value", (True, False, 0, -1, 1.5, "131072"))
 def test_explicit_context_window_rejects_non_positive_integer_tokens(value):
     with pytest.raises(ValueError, match="context_window"):
-        create_model(protocol="openai", model="synthetic", context_window=value)
+        create_model(api="openai", model="synthetic", context_window=value)
 
 
 def test_context_window_defaults_and_fallback_use_native_profile_resolution():
-    default = create_model(protocol="openai", model="synthetic", api_key="synthetic")
+    default = create_model(api="openai", model="synthetic", api_key="synthetic")
     assert "context_window" not in default.contract
     assert default.materialize().context_window is None
-    candidates = [create_model(protocol="openai", model="synthetic", api_key="synthetic", context_window=size)
+    candidates = [create_model(api="openai", model="synthetic", api_key="synthetic", context_window=size)
                   for size in (131072, 32768)]
     assert FallbackBinding(*candidates, default).materialize().context_window == 32768
     assert FallbackBinding(default).materialize().context_window is None

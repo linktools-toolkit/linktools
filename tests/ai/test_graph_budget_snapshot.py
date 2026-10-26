@@ -38,7 +38,7 @@ async def _create_source(
     root: Path, phase: str,
 ) -> tuple[TaskGraphSubmission, BudgetUsage | None]:
     storage = PersistenceStorage.from_root(root)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_38, Runtime.open(persistence=persistence_38, features=model_features(RuntimeUsageModels())) as runtime, TaskEngine.open(persistence=persistence_38, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_38, Runtime.attach(persistence=persistence_38, features=model_features(RuntimeUsageModels())) as runtime, TaskEngine.open(persistence=persistence_38, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         engine = runtime_engine.with_definitions()
         graph = TaskGraph("empty", ())
         budget = RunBudget(model_requests=3)
@@ -93,7 +93,7 @@ async def test_empty_graph_budget_snapshot_preserves_submission_phase(
         reference, object_store=objects, root=restored, limits=_LIMITS,
     )
     storage = PersistenceStorage.from_root(restored)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_95, Runtime.open(persistence=persistence_95, features=model_features(RuntimeUsageModels())) as runtime, TaskEngine.open(persistence=persistence_95, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_95, Runtime.attach(persistence=persistence_95, features=model_features(RuntimeUsageModels())) as runtime, TaskEngine.open(persistence=persistence_95, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         if phase == "described":
             with pytest.raises(AIError) as missing:
                 await runtime._state.execution.budgets.read("graph:empty")

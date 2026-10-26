@@ -150,7 +150,7 @@ async def test_runtime_capability_shares_backend_across_agents_and_agent_tasks_w
 
     policies = _policies(_group(), _GlobalPolicy(backend))
     policies.model("default", _Models(FunctionModel(stream_function=chunks)))
-    async with Persistence.open('runtime_capability', storage=PersistenceStorage.in_memory()) as persistence_143, Runtime.open(persistence=persistence_143, features=replace(await policies.capture(), filter=lambda _agent, item: item.kind != 'capability')) as runtime, TaskEngine.open(persistence=persistence_143) as engine:
+    async with Persistence.open('runtime_capability', storage=PersistenceStorage.in_memory()) as persistence_143, Runtime.attach(persistence=persistence_143, features=replace(await policies.capture(), filter=lambda _agent, item: item.kind != 'capability')) as runtime, TaskEngine.open(persistence=persistence_143) as engine:
         late = _Unselected()
         late.id = "host.late"
         policies.capability(late, scope="runtime")
@@ -192,7 +192,7 @@ async def test_stream_permit_spans_consumption_and_releases_on_every_exit(outcom
         finally:
             closed.set()
 
-    async with Persistence.open('runtime_capability-stream', storage=PersistenceStorage.in_memory()) as persistence_190, Runtime.open(persistence=persistence_190, features=model_features(_Models(FunctionModel(stream_function=chunks)), _policies(_group(), _GlobalPolicy(backend)))) as runtime:
+    async with Persistence.open('runtime_capability-stream', storage=PersistenceStorage.in_memory()) as persistence_190, Runtime.attach(persistence=persistence_190, features=model_features(_Models(FunctionModel(stream_function=chunks)), _policies(_group(), _GlobalPolicy(backend)))) as runtime:
         execution = await runtime.agents.get().start("go")
         await asyncio.wait_for(streamed.wait(), 3)
         assert backend.active == 1 and backend.released == [] and not closed.is_set()
@@ -219,7 +219,7 @@ async def test_queued_cancellation_does_not_release_another_executions_permit() 
         await finish.wait()
         yield "last"
 
-    async with Persistence.open('runtime_capability-queue', storage=PersistenceStorage.in_memory()) as persistence_220, Runtime.open(persistence=persistence_220, features=model_features(_Models(FunctionModel(stream_function=chunks)), _policies(_group(), _GlobalPolicy(backend)))) as runtime:
+    async with Persistence.open('runtime_capability-queue', storage=PersistenceStorage.in_memory()) as persistence_220, Runtime.attach(persistence=persistence_220, features=model_features(_Models(FunctionModel(stream_function=chunks)), _policies(_group(), _GlobalPolicy(backend)))) as runtime:
         first = await runtime.agents.get().start("first")
         await backend.requested(1)
         second = await runtime.agents.get("worker").start("second")
@@ -241,7 +241,7 @@ async def test_shared_host_backend_spans_runtime_instances() -> None:
         await finish.wait()
         return ModelResponse(parts=[TextPart("done")])
 
-    async with Persistence.open('first', storage=PersistenceStorage.in_memory()) as persistence_245, Runtime.open(persistence=persistence_245, features=model_features(_Models(_UsageFunctionModel(blocked)), _policies(_group(), runtime_capability))) as first_runtime, Persistence.open('second', storage=PersistenceStorage.in_memory()) as persistence_248, Runtime.open(persistence=persistence_248, features=model_features(_Models(_UsageFunctionModel(_immediate)), _policies(_group(), runtime_capability))) as second_runtime:
+    async with Persistence.open('first', storage=PersistenceStorage.in_memory()) as persistence_245, Runtime.attach(persistence=persistence_245, features=model_features(_Models(_UsageFunctionModel(blocked)), _policies(_group(), runtime_capability))) as first_runtime, Persistence.open('second', storage=PersistenceStorage.in_memory()) as persistence_248, Runtime.attach(persistence=persistence_248, features=model_features(_Models(_UsageFunctionModel(_immediate)), _policies(_group(), runtime_capability))) as second_runtime:
         first = await first_runtime.agents.get().start("first")
         await backend.requested(1)
         second = await second_runtime.agents.get().start("second")
@@ -266,7 +266,7 @@ async def test_runtime_capability_sees_logical_model_call_not_each_transport_ret
         return ModelResponse(parts=[TextPart("done")])
 
     model = _RetryingModel(_UsageFunctionModel(transient), max_retries=2, retry_delay=0)
-    async with Persistence.open('runtime_capability-retry', storage=PersistenceStorage.in_memory()) as persistence_276, Runtime.open(persistence=persistence_276, features=model_features(_Models(model), _policies(_group(), _GlobalPolicy(backend)))) as runtime:
+    async with Persistence.open('runtime_capability-retry', storage=PersistenceStorage.in_memory()) as persistence_276, Runtime.attach(persistence=persistence_276, features=model_features(_Models(model), _policies(_group(), _GlobalPolicy(backend)))) as runtime:
         execution = await runtime.agents.get().start("go")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         assert attempts == 3
@@ -290,7 +290,7 @@ async def test_runtime_capability_covers_delegated_agents_and_tool_hooks() -> No
     group.tool(ping, effect_policy="none")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=("child",))
     group.agent("child", model="default", allow_tools=("ping",), allow_skills=(), allow_subagents=())
-    async with Persistence.open('runtime_capability-delegation', storage=PersistenceStorage.in_memory()) as persistence_303, Runtime.open(persistence=persistence_303, features=model_features(_Models(_UsageFunctionModel(model)), _policies(group, _GlobalPolicy(backend)))) as runtime:
+    async with Persistence.open('runtime_capability-delegation', storage=PersistenceStorage.in_memory()) as persistence_303, Runtime.attach(persistence=persistence_303, features=model_features(_Models(_UsageFunctionModel(model)), _policies(group, _GlobalPolicy(backend)))) as runtime:
         execution = await runtime.agents.get().start("go")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         assert {name for _owner, name in backend.tools} == {"delegate_task", "ping"}
@@ -314,7 +314,7 @@ async def test_runtime_capability_rejects_invalid_or_not_always_on_entries(kind:
         runtime_capability = CombinedCapability([runtime_capability], id="linktools.reserved")
     entries = (runtime_capability, runtime_capability) if kind == "duplicate" else (runtime_capability,)
     with pytest.raises((TypeError, AIError)):
-        async with Persistence.open('runtime-policy-invalid', storage=PersistenceStorage.in_memory()) as persistence_330, Runtime.open(persistence=persistence_330, features=model_features(_Models(_UsageFunctionModel(_immediate)), _policies(_group(), *entries))):
+        async with Persistence.open('runtime-policy-invalid', storage=PersistenceStorage.in_memory()) as persistence_330, Runtime.attach(persistence=persistence_330, features=model_features(_Models(_UsageFunctionModel(_immediate)), _policies(_group(), *entries))):
             raise AssertionError("invalid runtime capability was accepted")
 
 
@@ -325,7 +325,7 @@ async def test_selected_capability_cannot_silently_replace_runtime_capability_wi
     group.agent("default", model="default", allow_tools=(), allow_skills=(),
                 allow_subagents=(), allow_capabilities=("host.runtime_capability",))
     with pytest.raises(AIError) as raised:
-        async with Persistence.open('runtime-policy-collision', storage=PersistenceStorage.in_memory()) as persistence_344, Runtime.open(persistence=persistence_344, features=model_features(_Models(_UsageFunctionModel(_immediate)), _policies(group, _GlobalPolicy(backend)))):
+        async with Persistence.open('runtime-policy-collision', storage=PersistenceStorage.in_memory()) as persistence_344, Runtime.attach(persistence=persistence_344, features=model_features(_Models(_UsageFunctionModel(_immediate)), _policies(group, _GlobalPolicy(backend)))):
             raise AssertionError("conflicting runtime capability was accepted")
     assert raised.value.code is ErrorCode.CAPABILITY_CONFLICT
     assert backend.requests == []
@@ -335,7 +335,7 @@ async def test_anonymous_native_capabilities_remain_distinct_in_combined_runtime
     first_backend, second_backend = _Backend(), _Backend()
     first, second = _GlobalPolicy(first_backend), _GlobalPolicy(second_backend)
     first.id = second.id = None
-    async with Persistence.open('runtime_capability-anonymous', storage=PersistenceStorage.in_memory()) as persistence_357, Runtime.open(persistence=persistence_357, features=model_features(_Models(_UsageFunctionModel(_immediate)), _policies(_group(), CombinedCapability([first, second])))) as runtime:
+    async with Persistence.open('runtime_capability-anonymous', storage=PersistenceStorage.in_memory()) as persistence_357, Runtime.attach(persistence=persistence_357, features=model_features(_Models(_UsageFunctionModel(_immediate)), _policies(_group(), CombinedCapability([first, second])))) as runtime:
         execution = await runtime.agents.get().start("go")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         assert first_backend.entered == second_backend.entered == [execution.execution_id]
@@ -345,14 +345,14 @@ async def test_reopened_session_and_historical_retry_use_current_host_runtime_ca
     first_backend, next_backend = _Backend(), _Backend()
     models = _Models(_UsageFunctionModel(_immediate))
     first_features = _policies(_group(), _GlobalPolicy(first_backend), ExecutionCapability(retain_history=True))
-    async with Persistence.open('runtime_capability-reopen', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_370, Runtime.open(persistence=persistence_370, features=model_features(models, first_features)) as runtime:
+    async with Persistence.open('runtime_capability-reopen', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_370, Runtime.attach(persistence=persistence_370, features=model_features(models, first_features)) as runtime:
         first = await runtime.agents.get().start("standalone")
         assert (await first.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         session_first = await runtime.agents.get().session("conversation").start("first")
         assert (await session_first.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
     current = _GlobalPolicy(next_backend)
     current.id = "host.replacement"
-    async with Persistence.open('runtime_capability-reopen', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_380, Runtime.open(persistence=persistence_380, features=model_features(models, _policies(_group(), current, ExecutionCapability(retain_history=True)))) as runtime:
+    async with Persistence.open('runtime_capability-reopen', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_380, Runtime.attach(persistence=persistence_380, features=model_features(models, _policies(_group(), current, ExecutionCapability(retain_history=True)))) as runtime:
         historical = await runtime.executions.get(first.execution_id)
         retry = await historical.retry("retry")
         assert (await retry.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
@@ -378,7 +378,7 @@ async def test_runtime_capability_acquisition_failure_does_not_call_provider() -
         ) -> ModelResponse:
             raise RuntimeError("host backend unavailable")
 
-    async with Persistence.open('runtime_capability-unavailable', storage=PersistenceStorage.in_memory()) as persistence_409, Runtime.open(persistence=persistence_409, features=model_features(_Models(_UsageFunctionModel(model)), _policies(_group(), Unavailable()))) as runtime:
+    async with Persistence.open('runtime_capability-unavailable', storage=PersistenceStorage.in_memory()) as persistence_409, Runtime.attach(persistence=persistence_409, features=model_features(_Models(_UsageFunctionModel(model)), _policies(_group(), Unavailable()))) as runtime:
         execution = await runtime.agents.get().start("go")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.FAILED
         assert provider_calls == 0
@@ -391,7 +391,7 @@ async def test_nested_native_id_conflict_cannot_replace_selected_capability() ->
     group.agent("selected", allow_tools=(), allow_skills=(), allow_subagents=(),
                 allow_capabilities=("host.runtime_capability",))
     policies = _policies(group, CombinedCapability([_GlobalPolicy(backend)]))
-    async with Persistence.open('runtime-policy-nested-collision', storage=PersistenceStorage.in_memory()) as persistence_425, Runtime.open(persistence=persistence_425, features=model_features(_Models(_UsageFunctionModel(_immediate)), policies)) as runtime:
+    async with Persistence.open('runtime-policy-nested-collision', storage=PersistenceStorage.in_memory()) as persistence_425, Runtime.attach(persistence=persistence_425, features=model_features(_Models(_UsageFunctionModel(_immediate)), policies)) as runtime:
         execution = await runtime.agents.get("selected").start("go")
         result = (await execution.wait(timeout_seconds=5)).result
         assert result.status is ExecutionStatus.FAILED
@@ -406,7 +406,7 @@ async def test_runtime_native_ids_are_unique_across_named_combined_registrations
             CombinedCapability([_GlobalPolicy(_Backend())]), id=name, scope="runtime",
         )
     with pytest.raises(AIError) as raised:
-        async with Persistence.open('runtime-policy-native-duplicates', storage=PersistenceStorage.in_memory()) as persistence_443, Runtime.open(persistence=persistence_443, features=model_features(_Models(_UsageFunctionModel(_immediate)), policies)):
+        async with Persistence.open('runtime-policy-native-duplicates', storage=PersistenceStorage.in_memory()) as persistence_443, Runtime.attach(persistence=persistence_443, features=model_features(_Models(_UsageFunctionModel(_immediate)), policies)):
             raise AssertionError("duplicate native runtime IDs were accepted")
     assert raised.value.code is ErrorCode.CAPABILITY_CONFLICT
 

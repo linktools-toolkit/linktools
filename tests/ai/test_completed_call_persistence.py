@@ -136,7 +136,7 @@ async def test_partial_response_is_published_only_at_request_or_shutdown_complet
     execution_id = None
     principal = None
     try:
-        async with Persistence.open('completed-call-persistence', storage=state) as persistence_131, Runtime.open(persistence=persistence_131, features=model_features(_Models(FunctionModel(stream_function=stream)), group)) as runtime:
+        async with Persistence.open('completed-call-persistence', storage=state) as persistence_131, Runtime.attach(persistence=persistence_131, features=model_features(_Models(FunctionModel(stream_function=stream)), group)) as runtime:
             execution = await runtime.agents.get("default").start("Respond slowly")
             execution_id = execution.execution_id
             principal = runtime.default_principal
@@ -235,7 +235,7 @@ async def test_interrupted_tool_arguments_remain_raw_without_tool_execution(
     group.tool(work, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("work",))
     try:
-        async with Persistence.open('partial-tool-arguments', storage=_storage(backend, tmp_path)) as persistence_237, Runtime.open(persistence=persistence_237, features=model_features(_Models(FunctionModel(stream_function=stream)), group)) as runtime:
+        async with Persistence.open('partial-tool-arguments', storage=_storage(backend, tmp_path)) as persistence_237, Runtime.attach(persistence=persistence_237, features=model_features(_Models(FunctionModel(stream_function=stream)), group)) as runtime:
             execution = await runtime.agents.get("default").start("Call work")
             execution_id = execution.execution_id
             principal = runtime.default_principal

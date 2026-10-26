@@ -43,7 +43,7 @@ async def test_pending_session_commits_once_and_retains_canonical_replay(
     group.agent('default', model='default', allow_tools=())
     database = tmp_path / 'state.db'
     storage = PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    async with Persistence.open('pending', storage=storage) as persistence_43, Runtime.open(persistence=persistence_43, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('pending', storage=storage) as persistence_43, Runtime.attach(persistence=persistence_43, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         original = SqlStorageContext.run_mutation
         commits = []
@@ -92,7 +92,7 @@ async def test_pending_session_commits_once_and_retains_canonical_replay(
         assert [part.content for message in calls[-1] for part in message.parts if isinstance(part, UserPromptPart)] == ['first', 'second']
         assert len(commits) == 2
         assert commits[0] == commits[1]
-    async with Persistence.open('pending', storage=PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))) as persistence_92, Runtime.open(persistence=persistence_92, features=model_features(_Models(_UsageFunctionModel(model)), group)) as reopened:
+    async with Persistence.open('pending', storage=PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))) as persistence_92, Runtime.attach(persistence=persistence_92, features=model_features(_Models(_UsageFunctionModel(model)), group)) as reopened:
         replay = await reopened.agents.get().session('session').start('first', idempotency_key='first')
         assert (await replay.wait()).result.output == {'text': 'answer'}
         assert len(calls) == 2
@@ -120,7 +120,7 @@ async def test_actual_effect_promotes_before_invocation_but_read_only_tool_stays
     group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
     group.tool(lookup, effect_policy=effect_policy)
     group.agent('default', model='default', allow_tools=('lookup',))
-    async with Persistence.open('pending-tool', storage=state) as persistence_120, Runtime.open(persistence=persistence_120, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('pending-tool', storage=state) as persistence_120, Runtime.attach(persistence=persistence_120, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         original = SqlStorageContext.run_mutation
         commits = []
@@ -155,7 +155,7 @@ async def test_pending_cancel_promotes_and_quiesces_before_cancelled(tmp_path: P
     group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     state = PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    async with Persistence.open('pending-cancel', storage=state) as persistence_155, Runtime.open(persistence=persistence_155, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('pending-cancel', storage=state) as persistence_155, Runtime.attach(persistence=persistence_155, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question')
         await asyncio.wait_for(entered.wait(), 5)
@@ -182,7 +182,7 @@ async def test_pending_watch_observes_progress_and_confirmed_terminal(tmp_path: 
     group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     state = PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    async with Persistence.open('pending-watch', storage=state) as persistence_182, Runtime.open(persistence=persistence_182, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('pending-watch', storage=state) as persistence_182, Runtime.attach(persistence=persistence_182, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question')
         await asyncio.wait_for(entered.wait(), 5)
@@ -221,7 +221,7 @@ async def test_pending_approval_promotes_before_persisting_frontier(tmp_path: Pa
     group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
     group.agent('default', model='default', allow_tools=('read_file',))
     state = PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    async with Persistence.open('pending-approval', storage=state) as persistence_221, Runtime.open(persistence=persistence_221, features=model_features(_ToolModels(), group)) as runtime:
+    async with Persistence.open('pending-approval', storage=state) as persistence_221, Runtime.attach(persistence=persistence_221, features=model_features(_ToolModels(), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('read a file')
         record = None
@@ -245,7 +245,7 @@ async def test_pending_sessionless_agent_commits_once(tmp_path: Path, monkeypatc
         assert commits == []
         return ModelResponse(parts=[TextPart('answer')])
     state = PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    async with Persistence.open('standalone-pending', storage=state) as persistence_245, Runtime.open(persistence=persistence_245, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('standalone-pending', storage=state) as persistence_245, Runtime.attach(persistence=persistence_245, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         original = SqlStorageContext.run_mutation
         async def count(context, callback, **kwargs):
             result = await original(context, callback, **kwargs)
@@ -271,7 +271,7 @@ async def test_pending_session_force_close_promotes_before_closing(tmp_path: Pat
     group = RuntimeFeatures('close-pending')
     group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
     group.agent('default', model='default', allow_tools=())
-    async with Persistence.open('close-pending', storage=PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))) as persistence_271, Runtime.open(persistence=persistence_271, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('close-pending', storage=PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))) as persistence_271, Runtime.attach(persistence=persistence_271, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question')
         await asyncio.wait_for(entered.wait(), 5)
@@ -295,7 +295,7 @@ async def test_pending_unknown_commit_reconciles_without_replaying_model_or_comm
         calls.append(messages)
         return ModelResponse(parts=[TextPart('answer')])
     state = PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    async with Persistence.open('unknown-pending', storage=state) as persistence_295, Runtime.open(persistence=persistence_295, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('unknown-pending', storage=state) as persistence_295, Runtime.attach(persistence=persistence_295, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         storage_group = runtime._state.execution.executions.state_store.storage_group
         original_mutate = type(storage_group).mutate
@@ -346,7 +346,7 @@ async def test_pending_confirmed_rollback_releases_session_without_fabricating_c
         return ModelResponse(parts=[TextPart('answer')])
     state = PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     async with Persistence.open("rollback-pending", storage=state) as persistence:
-        context = Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), group))
+        context = Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), group))
         runtime = await context.__aenter__()
         try:
             session = await runtime.agents.get().create_session('session')

@@ -58,7 +58,7 @@ async def test_captured_graph_keeps_node_output_contract_after_reopen(tmp_path: 
     scorer = Task("graph.score", score, effect_policy="none")
     async with (
         Persistence.open('structured-graph', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_53,
-        Runtime.open(persistence=persistence_53, context=CONTEXT, features=model_features(models, group)) as runtime,
+        Runtime.attach(persistence=persistence_53, context=CONTEXT, features=model_features(models, group)) as runtime,
     ):
         target = Task.from_agent("graph.target", runtime.agents.get())
         async with TaskEngine.open(target, persistence=persistence_53, context=CONTEXT) as engine:
@@ -71,7 +71,7 @@ async def test_captured_graph_keeps_node_output_contract_after_reopen(tmp_path: 
             capture = await engine.inputs.capture_graph(source.graph_id, CaptureGraphRequest(PRINCIPAL, "capture"))
     async with (
         Persistence.open('structured-graph', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_63,
-        Runtime.open(persistence=persistence_63, context=CONTEXT, features=model_features(models, group)) as runtime,
+        Runtime.attach(persistence=persistence_63, context=CONTEXT, features=model_features(models, group)) as runtime,
     ):
         target = Task.from_agent("graph.target", runtime.agents.get())
         async with (

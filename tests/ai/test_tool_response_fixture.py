@@ -458,7 +458,7 @@ async def test_native_runtime_consumes_fixture_through_durable_mcp_operation(
         group.agent("default", model="default", allow_tools=(mcp_tool_selector("server", "lookup"),))
         group.capability(ToolResponsesCapability(fixture), scope="runtime")
         storage = PersistenceStorage.in_memory()
-        async with Persistence.open('fixture-native-runtime', storage=storage) as persistence_451, Runtime.open(persistence=persistence_451, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+        async with Persistence.open('fixture-native-runtime', storage=storage) as persistence_451, Runtime.attach(persistence=persistence_451, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
             execution = await runtime.agents.get("default").start("Look up the fixture")
             result = (await execution.wait(timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED

@@ -77,7 +77,7 @@ def _runtime_process(
             yield "owner answer"
 
         state = _storage(Path(database), phase)
-        async with Persistence.open(_NAMESPACE, storage=state) as persistence_77, Runtime.open(persistence=persistence_77, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(conversation=mode == 'session')), auto_recover=auto_recover) as runtime:
+        async with Persistence.open(_NAMESPACE, storage=state) as persistence_77, Runtime.attach(persistence=persistence_77, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(conversation=mode == 'session')), auto_recover=auto_recover) as runtime:
             async def snapshot() -> dict[str, object]:
                 assert execution_id is not None
                 tenant = runtime.default_principal.tenant_id

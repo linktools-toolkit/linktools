@@ -283,7 +283,7 @@ async def test_workspace_selector_expands_registered_tool_declarations(
         allow_capabilities=(),
     )
     compiler = AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=snapshot.contributions,
         agents={"agent": spec},
     )
@@ -310,7 +310,7 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
     for selectors in (("new_tool",), ("*", "new_tool")):
         spec = AgentSpec("agent", allow_tools=selectors)
         compiler = AgentCompiler(
-            models={"default": create_model(protocol='openai', model="gpt-test")},
+            models={"default": create_model(api='openai', model="gpt-test")},
             candidates=snapshot.contributions,
             agents={"agent": spec},
         )
@@ -328,7 +328,7 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
         }
         spec = AgentSpec("agent", **kwargs)
         compiler = AgentCompiler(
-            models={"default": create_model(protocol='openai', model="gpt-test")},
+            models={"default": create_model(api='openai', model="gpt-test")},
             candidates=(),
             agents={"agent": spec},
         )
@@ -338,7 +338,7 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
 
     empty = AgentSpec("agent", allow_tools=())
     empty_compiler = AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=(),
         agents={"agent": empty},
     )
@@ -356,7 +356,7 @@ def test_global_tool_wildcard_preserves_exact_mcp_requirement() -> None:
         allow_capabilities=(),
     )
     compiler = AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=(CapabilityContribution.from_declaration(server),),
         agents={"agent": spec},
     )

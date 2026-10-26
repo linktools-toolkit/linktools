@@ -58,7 +58,7 @@ async def test_dynamic_target_rejects_unsafe_bound_definition_before_callbacks(
     scorer = Task("expansion.score", exact, effect_policy="none")
     async with (
         Persistence.open('unsafe-expansion', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_47,
-        Runtime.open(persistence=persistence_47, context=CONTEXT, features=model_features(models, group)) as runtime,
+        Runtime.attach(persistence=persistence_47, context=CONTEXT, features=model_features(models, group)) as runtime,
     ):
         unsafe = (Task("expansion.effect", effect, effect_policy=unsafe_kind) if unsafe_kind != "model"
                   else Task.from_agent("expansion.model", runtime.agents.get()))

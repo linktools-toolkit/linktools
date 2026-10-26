@@ -238,7 +238,7 @@ async def test_terminal_stream_allows_immediate_runtime_close(
         )
 
     try:
-        async with Persistence.open('default', storage=state) as persistence_238, Runtime.open(persistence=persistence_238, features=model_features(_PersistenceTestModels(), _agent_group())) as runtime:
+        async with Persistence.open('default', storage=state) as persistence_238, Runtime.attach(persistence=persistence_238, features=model_features(_PersistenceTestModels(), _agent_group())) as runtime:
             execution = await runtime.agents.get("default").start("hello")
             terminal_events = []
             async for item in execution.watch():
@@ -282,7 +282,7 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
     features = _agent_group()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     try:
-        async with Persistence.open('default', storage=state) as persistence_286, Runtime.open(persistence=persistence_286, features=model_features(_PersistenceTestModels(), features)) as runtime:
+        async with Persistence.open('default', storage=state) as persistence_286, Runtime.attach(persistence=persistence_286, features=model_features(_PersistenceTestModels(), features)) as runtime:
             task = asyncio.create_task(
                 _emit_result(
                     runtime,
@@ -306,7 +306,7 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
     try:
-        async with Persistence.open('default', storage=reopened) as persistence_314, Runtime.open(persistence=persistence_314, features=model_features(_PersistenceTestModels(), features)) as reopened_runtime:
+        async with Persistence.open('default', storage=reopened) as persistence_314, Runtime.attach(persistence=persistence_314, features=model_features(_PersistenceTestModels(), features)) as reopened_runtime:
             pass
     finally:
         await reopened_runtime._state.close()
@@ -328,7 +328,7 @@ async def test_session_runtime_persists_and_reads_terminal_result(
     features = _agent_group()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     try:
-        async with Persistence.open('default', storage=state) as persistence_340, Runtime.open(persistence=persistence_340, features=model_features(_PersistenceTestModels(), features)) as runtime:
+        async with Persistence.open('default', storage=state) as persistence_340, Runtime.attach(persistence=persistence_340, features=model_features(_PersistenceTestModels(), features)) as runtime:
             created = await runtime.agents.get("default").create_session("session")
             loaded = await runtime.sessions.get(
                 created.session_id,

@@ -268,7 +268,7 @@ async def test_failed_runtime_persists_safe_diagnostic_and_logs_no_output_values
     models = _InvalidOutputModels()
     group = RuntimeFeatures("output-diagnostics")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Persistence.open('output-diagnostics', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_267, Runtime.open(persistence=persistence_267, features=model_features(models, group)) as runtime:
+    async with Persistence.open('output-diagnostics', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_267, Runtime.attach(persistence=persistence_267, features=model_features(models, group)) as runtime:
         result = (await runtime.agents.get().run("count", output=Output, timeout_seconds=10)).result
         assert result.status is ExecutionStatus.FAILED
         assert result.error_code == ErrorCode.MODEL_RESPONSE_INVALID.value
@@ -282,7 +282,7 @@ async def test_failed_runtime_persists_safe_diagnostic_and_logs_no_output_values
         execution_id = result.execution_id
     assert "expected integer" in caplog.text
     assert _SECRET not in caplog.text
-    async with Persistence.open('output-diagnostics', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_281, Runtime.open(persistence=persistence_281, features=model_features(models, group)) as runtime:
+    async with Persistence.open('output-diagnostics', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_281, Runtime.attach(persistence=persistence_281, features=model_features(models, group)) as runtime:
         restored = await runtime.history.result(execution_id, principal=runtime.default_principal)
         assert restored.safe_error_details == result.safe_error_details
         assert restored.error_diagnostics == result.error_diagnostics
@@ -317,7 +317,7 @@ async def test_task_group_schema_failure_keeps_branch_frames_without_private_val
     storage = PersistenceStorage.filesystem(tmp_path / "runtime")
     group = RuntimeFeatures("grouped-output-diagnostics")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Persistence.open('grouped-output-diagnostics', storage=storage) as persistence_316, Runtime.open(persistence=persistence_316, features=model_features(GroupedModels(), group)) as runtime:
+    async with Persistence.open('grouped-output-diagnostics', storage=storage) as persistence_316, Runtime.attach(persistence=persistence_316, features=model_features(GroupedModels(), group)) as runtime:
         result = (await runtime.agents.get().run("count", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.FAILED
         assert result.error_code == ErrorCode.INTERNAL_ERROR.value

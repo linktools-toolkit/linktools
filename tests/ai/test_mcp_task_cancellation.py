@@ -47,7 +47,7 @@ async def test_graph_cancel_closes_remote_client_and_preserves_unknown_effect_on
         remote.block_calls = True
         storage = PersistenceStorage.filesystem(state_path)
         try:
-            async with Persistence.open('remote-task-cancellation', storage=storage) as persistence_44, Runtime.open(persistence=persistence_44, features=model_features(_RemoteModels(), _group(_spec(remote)))) as runtime, TaskEngine.open(persistence=persistence_44) as engine:
+            async with Persistence.open('remote-task-cancellation', storage=storage) as persistence_44, Runtime.attach(persistence=persistence_44, features=model_features(_RemoteModels(), _group(_spec(remote)))) as runtime, TaskEngine.open(persistence=persistence_44) as engine:
                 task = Task.from_agent(
                     "remote.echo", runtime.agents.get("default")
                 )
@@ -94,7 +94,7 @@ async def test_graph_cancel_closes_remote_client_and_preserves_unknown_effect_on
 
         restored = PersistenceStorage.filesystem(state_path)
         try:
-            async with Persistence.open('remote-task-cancellation', storage=restored) as persistence_95, Runtime.open(persistence=persistence_95, features=model_features(_RemoteModels(), _group(_spec(remote)))) as runtime, TaskEngine.open(persistence=persistence_95) as engine:
+            async with Persistence.open('remote-task-cancellation', storage=restored) as persistence_95, Runtime.attach(persistence=persistence_95, features=model_features(_RemoteModels(), _group(_spec(remote)))) as runtime, TaskEngine.open(persistence=persistence_95) as engine:
                 task = Task.from_agent(
                     "remote.echo", runtime.agents.get("default")
                 )

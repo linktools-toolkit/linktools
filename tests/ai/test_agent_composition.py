@@ -191,7 +191,7 @@ async def test_binding_preserves_declaration_order_and_capability_registration_o
     )
     spec = AgentSpec("agent")
     compiler = AgentCompiler(
-        models={"default": create_model(protocol='openai', model="test-model")},
+        models={"default": create_model(api='openai', model="test-model")},
         candidates=(*capture.contributions, skill),
         agents={spec.id: spec},
     )

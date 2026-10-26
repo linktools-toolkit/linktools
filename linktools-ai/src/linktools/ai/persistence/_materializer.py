@@ -113,6 +113,7 @@ async def materialize_runtime_storage(
     object_store: ObjectStore | None,
     read_only: bool = False,
     capability_routes: Mapping[str, StorageRoute] | None = None,
+    register_cleanup: Callable[[tuple[Callable[[], Awaitable[None]], ...]], None],
 ) -> _MaterializedRuntimeStorage:
     from ._schema import build_runtime_sql_metadata
 
@@ -152,186 +153,179 @@ async def materialize_runtime_storage(
     stores: dict[PersistenceDomain, StateStore] = {}
     sql_contexts: dict[PersistenceDomain, SqlStorageContext] = {}
     cleanups: list[Callable[[], Awaitable[None]]] = []
-    try:
-        resources = await StorageResourceScope.open(
-            requests, namespace=namespace, tenant_id=tenant_id, read_only=read_only,
+    resources = StorageResourceScope()
+    register_cleanup((resources.close,))
+    await resources.initialize(
+        requests, namespace=namespace, tenant_id=tenant_id, read_only=read_only,
+    )
+    cleanups.append(resources.close)
+    for domain, resource in zip(PersistenceDomain, resources.resources):
+        selected = plan.route(domain).cache
+        cache = selected if isinstance(selected, CacheBackend) else None
+        store: StateStore
+        if isinstance(resource, MemoryResource):
+            store = InMemoryStateStore(resource.group, cache=cache)
+        elif isinstance(resource, FilesystemResource):
+            store = FilesystemStateStore(
+                resource.member_path,
+                namespace=namespace,
+                tenant_id=tenant_id,
+                runtime_domain=domain.value,
+                _range_index=domain is PersistenceDomain.MEMORY,
+                group=resource.group,
+                cache=cache,
+            )
+        else:
+            store = SqlStateStore(
+                resource.context.engine,
+                metadata=resource.metadata,
+                context=resource.context,
+                runtime_domain=domain,
+                group=resource.group,
+                cache=cache,
+                store_digest=state_store_digest(namespace, tenant_id, domain.value),
+            )
+            sql_contexts[domain] = resource.context
+        stores[domain] = store
+        cleanups.append(store.close)
+        register_cleanup((store.close,))
+
+    for (identity, route), resource in zip(participant_routes.items(), resources.resources[len(PersistenceDomain):]):
+        partition = f"capability:{identity}"
+        if isinstance(resource, MemoryResource):
+            store = InMemoryStateStore(resource.group, cache=route.cache)
+        elif isinstance(resource, FilesystemResource):
+            store = FilesystemStateStore(
+                resource.member_path, namespace=namespace, tenant_id=tenant_id,
+                runtime_domain=partition, group=resource.group, cache=route.cache,
+            )
+        else:
+            store = SqlStateStore(
+                resource.context.engine, metadata=resource.metadata, context=resource.context,
+                runtime_domain=partition, group=resource.group, cache=route.cache,
+                store_digest=state_store_digest(namespace, tenant_id, partition),
+            )
+        capability_stores[identity] = store
+        cleanups.append(store.close)
+        register_cleanup((store.close,))
+
+    # Filesystem groups seal their membership when initialization starts.
+    for store in (*stores.values(), *capability_stores.values()):
+        await store.initialize()
+
+    execution_store = stores[PersistenceDomain.EXECUTION]
+    recovery_store = stores[PersistenceDomain.RECOVERY]
+    if execution_store.storage_group is not recovery_store.storage_group:
+        raise AIError(
+            ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+            "execution and recovery must share a StateStorageGroup",
         )
-        cleanups.append(resources.close)
-        for domain, resource in zip(PersistenceDomain, resources.resources):
-            selected = plan.route(domain).cache
-            cache = selected if isinstance(selected, CacheBackend) else None
-            store: StateStore
-            if isinstance(resource, MemoryResource):
-                store = InMemoryStateStore(resource.group, cache=cache)
-            elif isinstance(resource, FilesystemResource):
-                store = FilesystemStateStore(
-                    resource.member_path,
-                    namespace=namespace,
-                    tenant_id=tenant_id,
-                    runtime_domain=domain.value,
-                    _range_index=domain is PersistenceDomain.MEMORY,
-                    group=resource.group,
-                    cache=cache,
-                )
-            else:
-                store = SqlStateStore(
-                    resource.context.engine,
-                    metadata=resource.metadata,
-                    context=resource.context,
-                    runtime_domain=domain,
-                    group=resource.group,
-                    cache=cache,
-                    store_digest=state_store_digest(namespace, tenant_id, domain.value),
-                )
-                sql_contexts[domain] = resource.context
-            stores[domain] = store
-            cleanups.append(store.close)
 
-        for (identity, route), resource in zip(participant_routes.items(), resources.resources[len(PersistenceDomain):]):
-            partition = f"capability:{identity}"
-            if isinstance(resource, MemoryResource):
-                store = InMemoryStateStore(resource.group, cache=route.cache)
-            elif isinstance(resource, FilesystemResource):
-                store = FilesystemStateStore(
-                    resource.member_path, namespace=namespace, tenant_id=tenant_id,
-                    runtime_domain=partition, group=resource.group, cache=route.cache,
-                )
-            else:
-                store = SqlStateStore(
-                    resource.context.engine, metadata=resource.metadata, context=resource.context,
-                    runtime_domain=partition, group=resource.group, cache=route.cache,
-                    store_digest=state_store_digest(namespace, tenant_id, partition),
-                )
-            capability_stores[identity] = store
-            cleanups.append(store.close)
-
-        # Filesystem groups seal their membership when initialization starts.
-        for store in (*stores.values(), *capability_stores.values()):
-            await store.initialize()
-
-        execution_store = stores[PersistenceDomain.EXECUTION]
-        recovery_store = stores[PersistenceDomain.RECOVERY]
-        if execution_store.storage_group is not recovery_store.storage_group:
+    atomic_domains = {PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}
+    for domain in atomic_domains:
+        if stores[domain].storage_group is not execution_store.storage_group:
             raise AIError(
                 ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
-                "execution and recovery must share a StateStorageGroup",
+                f"{domain.value} and execution must share a StateStorageGroup",
             )
 
-        atomic_domains = {PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}
-        for domain in atomic_domains:
-            if stores[domain].storage_group is not execution_store.storage_group:
-                raise AIError(
-                    ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
-                    f"{domain.value} and execution must share a StateStorageGroup",
-                )
-
-        bundles: dict[PersistenceDomain, dict[str, RepositoryBase]] = {
-            domain: build_repository_bundle(
-                stores[domain], namespace=namespace, tenant_id=tenant_id, domain=domain
-            )
-            for domain in PersistenceDomain
-            if domain not in {PersistenceDomain.RECOVERY, PersistenceDomain.TASK, PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}
-        }
-        bundles[PersistenceDomain.RECOVERY] = build_recovery_repository_bundle(
-            recovery_store,
+    bundles: dict[PersistenceDomain, dict[str, RepositoryBase]] = {
+        domain: build_repository_bundle(
+            stores[domain], namespace=namespace, tenant_id=tenant_id, domain=domain
+        )
+        for domain in PersistenceDomain
+        if domain not in {PersistenceDomain.RECOVERY, PersistenceDomain.TASK, PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}
+    }
+    bundles[PersistenceDomain.RECOVERY] = build_recovery_repository_bundle(
+        recovery_store,
+        namespace=namespace,
+        tenant_id=tenant_id,
+    )
+    task_store = stores[PersistenceDomain.TASK]
+    bundles[PersistenceDomain.TASK] = {
+        "operations": OperationLedgerRepositoryImpl(
+            task_store,
             namespace=namespace,
             tenant_id=tenant_id,
-        )
-        task_store = stores[PersistenceDomain.TASK]
-        bundles[PersistenceDomain.TASK] = {
-            "operations": OperationLedgerRepositoryImpl(
-                task_store,
-                namespace=namespace,
-                tenant_id=tenant_id,
-                domain=PersistenceDomain.TASK,
-            ),
-            "tasks": TaskRepositoryImpl(
-                task_store,
-                namespace=namespace,
-                tenant_id=tenant_id,
-            ),
-            "admissions": TaskAdmissionRepositoryImpl(
-                task_store,
-                namespace=namespace,
-                tenant_id=tenant_id,
-            ),
-        }
-        components = tuple(
-            value
-            for bundle in bundles.values()
-            for value in bundle.values()
-        )
-        for component in _unique(components):
-            await component.initialize()
-
-        repositories = _repositories(bundles)
-        objects = build_runtime_object_router(
-            plan, object_store, stores, sql_contexts,
-            namespace=namespace, tenant_id=tenant_id,
-        )
-        run_store = build_runtime_agent_run_store(
-            plan,
-            stores,
-            objects,
-            history_repository=repositories.conversation.histories,
-            execution_repository=repositories.execution.executions,
+            domain=PersistenceDomain.TASK,
+        ),
+        "tasks": TaskRepositoryImpl(
+            task_store,
             namespace=namespace,
             tenant_id=tenant_id,
-        )
-        await run_store.initialize()
-        retention = RuntimeRetentionController(
-            conversation=repositories.conversation,
-            execution=repositories.execution,
-            objects=objects,
-            plan=plan,
+        ),
+        "admissions": TaskAdmissionRepositoryImpl(
+            task_store,
             namespace=namespace,
-        )
-        actions: list[Callable[[], Awaitable[None]]] = [
-            run_store.preflight_close,
-            objects.drain_reads,
-            objects.preflight_close,
-            retention.close,
-            run_store.close,
-            repositories.execution.budgets.close,
-        ]
-        actions.extend(cleanups[1:])
-        actions.append(resources.close)
-        _logger.info(
-            "runtime storage materialized: namespace=%s domains=%s",
-            namespace,
-            ",".join(domain.value for domain in PersistenceDomain),
-        )
-        return _MaterializedRuntimeStorage(
-            conversation=repositories.conversation,
-            execution=repositories.execution,
-            memory=repositories.memory,
-            artifact=repositories.artifact,
-            task=repositories.task,
-            evaluation=repositories.evaluation,
-            recovery=repositories.recovery,
-            objects=objects,
-            run_store=run_store,
-            retention=retention,
-            stores=dict(stores),
-            capability_stores=capability_stores,
-            durable_capability_ids=frozenset(identity for identity, route in participant_routes.items() if route.retention is StorageRetentionMode.DURABLE),
-            close_actions=tuple(actions),
-        )
-    except BaseException:
-        for cleanup in reversed(cleanups):
-            try:
-                await cleanup()
-            except BaseException as error:
-                code = error.code.value if isinstance(error, AIError) else None
-                _logger.error(
-                    "runtime materialization cleanup failed: phase=%s code=%s "
-                    "exception_type=%s",
-                    "runtime.state.materialize",
-                    code,
-                    type(error).__name__,
-                )
-        raise
+            tenant_id=tenant_id,
+        ),
+    }
+    components = tuple(
+        value
+        for bundle in bundles.values()
+        for value in bundle.values()
+    )
+    for component in _unique(components):
+        register_cleanup((component.close,))
+    for component in _unique(components):
+        await component.initialize()
 
+    repositories = _repositories(bundles)
+    objects = build_runtime_object_router(
+        plan, object_store, stores, sql_contexts,
+        namespace=namespace, tenant_id=tenant_id,
+    )
+    register_cleanup((objects.drain_reads, objects.preflight_close))
+    run_store = build_runtime_agent_run_store(
+        plan,
+        stores,
+        objects,
+        history_repository=repositories.conversation.histories,
+        execution_repository=repositories.execution.executions,
+        namespace=namespace,
+        tenant_id=tenant_id,
+    )
+    register_cleanup((run_store.preflight_close, run_store.close))
+    await run_store.initialize()
+    retention = RuntimeRetentionController(
+        conversation=repositories.conversation,
+        execution=repositories.execution,
+        objects=objects,
+        plan=plan,
+        namespace=namespace,
+    )
+    register_cleanup((retention.close,))
+    actions: list[Callable[[], Awaitable[None]]] = [
+        run_store.preflight_close,
+        objects.drain_reads,
+        objects.preflight_close,
+        retention.close,
+        run_store.close,
+        repositories.execution.budgets.close,
+    ]
+    actions.extend(cleanups[1:])
+    actions.append(resources.close)
+    _logger.info(
+        "runtime storage materialized: namespace=%s domains=%s",
+        namespace,
+        ",".join(domain.value for domain in PersistenceDomain),
+    )
+    return _MaterializedRuntimeStorage(
+        conversation=repositories.conversation,
+        execution=repositories.execution,
+        memory=repositories.memory,
+        artifact=repositories.artifact,
+        task=repositories.task,
+        evaluation=repositories.evaluation,
+        recovery=repositories.recovery,
+        objects=objects,
+        run_store=run_store,
+        retention=retention,
+        stores=dict(stores),
+        capability_stores=capability_stores,
+        durable_capability_ids=frozenset(identity for identity, route in participant_routes.items() if route.retention is StorageRetentionMode.DURABLE),
+        close_actions=tuple(actions),
+    )
 
 
 def _repositories(

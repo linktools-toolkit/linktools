@@ -107,7 +107,7 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
     group.agent("default", model="default", allow_tools=("quick", "slow"),
                 system_prompt="Coordinate system prompt", instructions=("Coordinate instructions",))
     group.capability(TraceCapability(), scope="runtime")
-    async with Persistence.open('live-history', storage=PersistenceStorage.in_memory()) as persistence_105, Runtime.open(persistence=persistence_105, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('live-history', storage=PersistenceStorage.in_memory()) as persistence_105, Runtime.attach(persistence=persistence_105, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get("default").start("run both tools")
         principal = runtime.default_principal
 
@@ -272,7 +272,7 @@ async def test_child_event_locator_does_not_mix_same_call_id_in_parent_history()
     group.agent("default", model="default", allow_tools=(), allow_subagents=("child",))
     group.agent("child", model="default", allow_tools=("echo",), allow_subagents=())
     group.capability(TraceCapability(), scope="runtime")
-    async with Persistence.open('child-history', storage=PersistenceStorage.in_memory()) as persistence_273, Runtime.open(persistence=persistence_273, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('child-history', storage=PersistenceStorage.in_memory()) as persistence_273, Runtime.attach(persistence=persistence_273, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get("default").start("delegate")
         principal = runtime.default_principal
 
@@ -330,7 +330,7 @@ async def test_request_raw_part_coordinates_survive_readonly_archive_reopen(tmp_
     group.agent("default", model="default", system_prompt="Coordinate system prompt",
                 instructions=("Coordinate instructions",))
     group.capability(TraceCapability(), scope="runtime")
-    async with Persistence.open('raw-parts', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_334, Runtime.open(persistence=persistence_334, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('raw-parts', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_334, Runtime.attach(persistence=persistence_334, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         principal = runtime.default_principal
         execution = await runtime.agents.get("default").start("run both tools")
         try:

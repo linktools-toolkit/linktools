@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
 
 from ..agent import AgentBindingContract
 from ..core import BudgetUsage, Principal
-from ..observe import WaitResult
+from ..observe import WaitResult, RuntimeMetricsControl
 from ..inputs import CaptureInputRequest, ExecutionInputCaptureRef, InputCaptures
 from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
 from ..execution import ApprovalDecisionRequest, ApprovalDecisionResult, ApprovalView, ArtifactDownload, ArtifactView, CancelExecutionRequest, CancelExecutionResult, CloseSessionRequest, CreateSessionRequest, ExecutionEvent, ExecutionHandle, ExecutionHistoryItem, ExecutionResult, ExecutionTraceItem, ExecutionTreeEvent, ExecutionObservationEvent, ExecutionView, ExternalCallView, ExternalResolution, ExternalSupplyRequest, ExternalSupplyResult, ForkExecutionRequest, ForkSessionRequest, ListExecutionRequest, ListSessionRequest, ModelInteractionItem, Page, RetryExecutionRequest, SessionDetail, SessionHistoryItem, SessionTurn, SessionView, TranscriptItem, UpdateSessionRequest, UsageReadCutoff, ExecutionService, SessionService
@@ -287,20 +287,8 @@ class RuntimeSessions(Generic[AppT]):
         return await self._service.close(session_id, request)
 
 
-class RuntimeMetrics:
-    def __init__(
-        self,
-        status: Callable[[], "MetricRecorderStatus"],
-        flush: Callable[..., Awaitable["MetricFlushResult"]],
-    ) -> None:
-        self._status = status
-        self._flush = flush
-
-    def status(self) -> "MetricRecorderStatus":
-        return self._status()
-
-    async def flush(self, *, timeout_seconds: float = 5.0) -> "MetricFlushResult":
-        return await self._flush(timeout_seconds=timeout_seconds)
+class RuntimeMetrics(RuntimeMetricsControl):
+    """Aggregate metrics for producers created by this Runtime, not borrowed peers."""
 
 
 __all__ = ["RuntimeAgents", "RuntimeExecutions", "RuntimeMetrics", "RuntimeSessions"]

@@ -94,7 +94,7 @@ async def test_trace_response_payload_storage_and_metadata_reads(
         return ModelResponse(parts=[TextPart(content)], timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc))
 
     async with _storage(backend, tmp_path) as storage:
-        async with Persistence.open('response-dedup', storage=storage) as persistence_94, Runtime.open(persistence=persistence_94, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), _features())) as runtime:
+        async with Persistence.open('response-dedup', storage=storage) as persistence_94, Runtime.attach(persistence=persistence_94, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), _features())) as runtime:
             objects = runtime._state.archive_object_store(PersistenceDomain.TRACE)
             domain_objects = runtime._state.object_store(PersistenceDomain.TRACE)
             sources = {"archive": objects}
@@ -233,7 +233,7 @@ async def test_unsuccessful_requests_without_response_preserve_no_response(
         raise AssertionError("cancelled request resumed")
 
     async with _storage(backend, tmp_path) as storage:
-        async with Persistence.open('response-dedup', storage=storage) as persistence_235, Runtime.open(persistence=persistence_235, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), _features())) as runtime:
+        async with Persistence.open('response-dedup', storage=storage) as persistence_235, Runtime.attach(persistence=persistence_235, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), _features())) as runtime:
             execution = await runtime.agents.get().start("question")
             if outcome == "CANCELLED":
                 await asyncio.wait_for(entered.wait(), 5)
@@ -269,7 +269,7 @@ async def test_compaction_response_retains_independent_evidence(
             ModelResponse(parts=[TextPart(f"answer-{index} " + "y" * 240)]),
         ))
     async with _storage(backend, tmp_path) as storage:
-        async with Persistence.open('response-dedup', storage=storage) as persistence_273, Runtime.open(persistence=persistence_273, features=model_features(_FeatureModels(_FeatureFunctionModel(model, profile={'context_window': 1000})), _features())) as runtime:
+        async with Persistence.open('response-dedup', storage=storage) as persistence_273, Runtime.attach(persistence=persistence_273, features=model_features(_FeatureModels(_FeatureFunctionModel(model, profile={'context_window': 1000})), _features())) as runtime:
             execution = await runtime.agents.get().start(
                 "continue", input_context=ExecutionInputContext.from_messages(history),
             )
@@ -441,7 +441,7 @@ async def test_interrupted_partial_response_shares_retained_transcript(
         await asyncio.Event().wait()
 
     async with _storage(backend, tmp_path) as storage:
-        async with Persistence.open('response-dedup', storage=storage) as persistence_447, Runtime.open(persistence=persistence_447, features=model_features(_FeatureModels(FunctionModel(stream_function=stream)), _features())) as runtime:
+        async with Persistence.open('response-dedup', storage=storage) as persistence_447, Runtime.attach(persistence=persistence_447, features=model_features(_FeatureModels(FunctionModel(stream_function=stream)), _features())) as runtime:
             execution = await runtime.agents.get().start("question")
             if outcome == "CANCELLED":
                 await asyncio.wait_for(entered.wait(), 5)

@@ -140,7 +140,7 @@ async def test_imported_request_publishes_prepared_provider_input_at_completion(
     metric_store = InMemoryMetricStore()
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
     metrics = Metrics.from_store(metric_store, namespace="prepared-input")
-    async with Persistence.open('prepared-input', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_130, Runtime.open(persistence=persistence_130, metrics=metrics, features=model_features(_TaskTestModels(), group)) as runtime:
+    async with Persistence.open('prepared-input', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_130, Runtime.attach(persistence=persistence_130, metrics=metrics, features=model_features(_TaskTestModels(), group)) as runtime:
         execution = await runtime.agents.get().start("new question", input_context=imported)
         try:
             await asyncio.wait_for(entered.wait(), timeout=5)

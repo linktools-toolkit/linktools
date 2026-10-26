@@ -23,24 +23,24 @@ Choose the actual API, not a vendor-looking model name:
 ```python
 from linktools.ai.model import create_model
 from linktools.ai.runtime import Runtime, RuntimeFeatures
-from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.persistence import PersistenceStorage
 
 features = RuntimeFeatures()
-features.model("default", create_model(protocol="openai-responses", model="gpt-5"))
-features.model("messages", create_model(protocol="anthropic", model="claude-sonnet-4-5"))
-features.model("compatible", create_model(protocol="openai", model="gateway-model", model_settings={
+features.model("default", create_model(api="openai-responses", model="gpt-5"))
+features.model("messages", create_model(api="anthropic", model="claude-sonnet-4-5"))
+features.model("compatible", create_model(api="openai", model="gateway-model", model_settings={
     "extra_body": {"enable_thinking": True},
 }))
 
-async with Persistence.open("app", storage=PersistenceStorage.in_memory()) as persistence, Runtime.open(
-    persistence=persistence, features=features,
+async with Runtime.open("app", storage=PersistenceStorage.in_memory(),
+    features=features,
 ) as runtime:
     ...
 ```
 
 `create_model` returns a `ModelBinding`, not a registry. It accepts input types,
 JSON-valued SDK model settings, credentials, timeouts and retry/token limits. Missing
-provider extras fail with the matching installation hint. Unknown protocol strings
+provider extras fail with the matching installation hint. Unknown `api` values
 fail with `MODEL_CONFIG_INVALID` without echoing connection values.
 
 The public type values are `openai` (Chat Completions), `openai-responses`, and
@@ -54,7 +54,7 @@ Keep connection/capacity options separate from request settings. For example:
 
 ```python
 features.model("default", lambda: create_model(
-    protocol="openai", model="gateway-model",
+    api="openai", model="gateway-model",
     context_window=131072, model_settings={"max_tokens": 8192, "timeout": 45},
     max_retries=3, retry_delay=5, retry_max_delay=120,
     retry_backoff_factor=4,
@@ -94,7 +94,7 @@ Timeout and both delay values are seconds. Timeout is the provider HTTP timeout,
 not the entire retry/run deadline; existing request/run deadline and cancellation
 ownership remain unchanged. Retry count means additional attempts. Library defaults
 remain timeout/output/context unspecified, two retries, initial delay 1, maximum
-delay 60, and factor 2. The protocol value `openai-responses`, existing
+delay 60, and factor 2. The `api` value `openai-responses`, existing
 `LINKTOOLS_MODEL_API`, and provider-native `OPENAI_*` / `ANTHROPIC_*` connection
 variables retain their meanings. These generic options do not expose arbitrary
 headers or `model_settings` JSON through the CLI.
@@ -105,7 +105,7 @@ an existing `ModelBinding`:
 ```python
 def load_assistant():
     config = load_configuration()
-    return create_model(protocol="anthropic", model=config["model"],
+    return create_model(api="anthropic", model=config["model"],
                         base_url=config["base_url"], api_key=config["api_key"])
 
 features.model("assistant", load_assistant)
@@ -231,7 +231,7 @@ from linktools.ai.model import FallbackBinding, create_model
 from linktools.ai.runtime import RuntimeFeatures
 
 decision_binding = DecisionBinding()
-language_binding = create_model(protocol="openai-responses", model="gpt-5")
+language_binding = create_model(api="openai-responses", model="gpt-5")
 
 features = RuntimeFeatures("decision-fallback")
 features.model("decision-route", lambda: FallbackBinding(
@@ -339,7 +339,7 @@ Use nested `extra_body` for native endpoint fields:
 
 ```python
 binding = create_model(
-    protocol="anthropic", model="claude-opus-4-5",
+    api="anthropic", model="claude-opus-4-5",
     model_settings={
         "max_tokens": 8192,
         "anthropic_thinking": {"type": "enabled", "budget_tokens": 4096},

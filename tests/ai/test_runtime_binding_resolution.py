@@ -42,7 +42,7 @@ from linktools.ai.persistence import Persistence
 from linktools.ai.runtime._agent_binding_resolver import _AgentBindingResolver
 from linktools.ai.core import ExecutionContext
 from linktools.ai.persistence._runtime_identity import task_graph_binding_capture_key
-from linktools.ai.runtime._runtime_service import Runtime
+from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.task_engine import TaskEngine
 from linktools.ai.inputs import TaskGraphBindingCaptureStore
 from linktools.ai.execution import ExecutionHandle, ExecutionRequest
@@ -161,7 +161,7 @@ async def _fixture() -> _BindingFixture:
         ),
     }
     compiler = AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=candidates,
         agents=specs,
     )
@@ -376,41 +376,42 @@ async def test_concurrent_task_capture_keeps_the_first_manifest() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_start_admits_resolved_binding() -> None:
+async def test_runtime_start_admits_resolved_binding(monkeypatch: pytest.MonkeyPatch) -> None:
     fixture = await _fixture()
     try:
         execution = _RecordingExecution()
-        runtime = Runtime(
-            fixture.catalog, fixture.compiler, execution,
-            object(), object(), object(), object(), object(), None,
-            persistence=SimpleNamespace(namespace="namespace", tenant_id="tenant"),
-            run_store=object(), context=ExecutionContext(None),
-            _binding_resolver=fixture.resolver,
-        )
+        async with Runtime.open(
+            "namespace", storage=PersistenceStorage.in_memory(), tenant_id="tenant",
+            features=RuntimeFeatures(),
+        ) as runtime:
+            monkeypatch.setattr(runtime, "_catalog", fixture.catalog)
+            monkeypatch.setattr(runtime, "_compiler", fixture.compiler)
+            monkeypatch.setattr(runtime, "_binding_resolver", fixture.resolver)
+            monkeypatch.setattr(runtime._execution_service, "start", execution.start)
 
-        compiled_agent = fixture.catalog.root_agent("parent")
-        started = await runtime._start_for_agent(
-            compiled_agent.spec.id,
-            compiled_agent.spec.revision,
-            "prompt",
-            files=(),
-            output=None,
-            principal=None,
-            session_id=None,
-            idempotency_key="runtime-resolution",
-            memory_scope=None,
-            mode="run",
-            planning=None,
-            thinking=None,
-        )
+            compiled_agent = fixture.catalog.root_agent("parent")
+            started = await runtime._start_for_agent(
+                compiled_agent.spec.id,
+                compiled_agent.spec.revision,
+                "prompt",
+                files=(),
+                output=None,
+                principal=None,
+                session_id=None,
+                idempotency_key="runtime-resolution",
+                memory_scope=None,
+                mode="run",
+                planning=None,
+                thinking=None,
+            )
 
-        assert started.execution_id == "execution"
-        assert execution.binding_contract is not None
-        assert execution.binding_digest == execution.binding_contract.binding_digest
-        assert execution.resolved_binding is not None
-        assert execution.resolved_binding.binding_contract == execution.binding_contract
-        assert execution.requires_task_invocation_capture is False
-        assert _skill_ref(_resolved_child(execution.binding_contract)).resources
+            assert started.execution_id == "execution"
+            assert execution.binding_contract is not None
+            assert execution.binding_digest == execution.binding_contract.binding_digest
+            assert execution.resolved_binding is not None
+            assert execution.resolved_binding.binding_contract == execution.binding_contract
+            assert execution.requires_task_invocation_capture is False
+            assert _skill_ref(_resolved_child(execution.binding_contract)).resources
     finally:
         await fixture.assets.close()
 
@@ -442,7 +443,7 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
         allow_capabilities=(),
     )
     compiler = AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=(CapabilityContribution.from_declaration(server),),
         agents={specification.id: specification},
     )
@@ -497,7 +498,7 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
         allow_capabilities=(),
     )
     compiler = AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=(CapabilityContribution.from_declaration(server),),
         agents={specification.id: specification},
     )
@@ -582,7 +583,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
             ),
         }
         compiler = AgentCompiler(
-            models={"default": create_model(protocol='openai', model="gpt-test")},
+            models={"default": create_model(api='openai', model="gpt-test")},
             candidates=(contribution,),
             agents=specs,
         )

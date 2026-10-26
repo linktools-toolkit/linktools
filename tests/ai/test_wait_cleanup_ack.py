@@ -41,7 +41,7 @@ async def test_live_wait_acknowledges_callback_cleanup_without_waiting_for_model
 
     group = RuntimeFeatures("wait-cleanup-ack")
     group.agent("default", model="default", allow_tools=())
-    async with Persistence.open('wait-cleanup-ack', storage=PersistenceStorage.in_memory()) as persistence_40, Runtime.open(persistence=persistence_40, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('wait-cleanup-ack', storage=PersistenceStorage.in_memory()) as persistence_40, Runtime.attach(persistence=persistence_40, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get().start("hello")
         await asyncio.wait_for(model_started.wait(), 10)
 

@@ -92,7 +92,7 @@ async def test_agent_node_deadline_cancels_work_and_preserves_unknown_effects(
     group.agent("default", model="default", allow_tools=() if phase in {"model", "subagent"} else ("slow",),
                 allow_skills=(), allow_subagents=("child",) if phase == "subagent" else ())
     group.agent("child", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Persistence.open('deadline', storage=PersistenceStorage.in_memory()) as persistence_89, Runtime.open(persistence=persistence_89, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_89) as engine:
+    async with Persistence.open('deadline', storage=PersistenceStorage.in_memory()) as persistence_89, Runtime.attach(persistence=persistence_89, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_89) as engine:
         task = Task.from_agent("deadline.agent", runtime.agents.get())
         run = await engine.with_definitions(task).start(
             TaskGraph("deadline", (TaskNode("agent", task=task, input=AgentTaskInput("work"), timeout_seconds=0.3),)),
@@ -161,7 +161,7 @@ async def test_agent_node_deadline_uses_tighter_limit_without_replacing_shared_b
 
     group = RuntimeFeatures("deadline-budget")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Persistence.open('deadline-budget', storage=PersistenceStorage.in_memory()) as persistence_161, Runtime.open(persistence=persistence_161, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_161) as engine:
+    async with Persistence.open('deadline-budget', storage=PersistenceStorage.in_memory()) as persistence_161, Runtime.attach(persistence=persistence_161, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_161) as engine:
         task = Task.from_agent("deadline.agent", runtime.agents.get())
         budget = RunBudget(model_requests=4, deadline_at=(
             None if earlier == "none" else current_time + timedelta(seconds=3 if earlier == "node" else 0.3)
@@ -228,7 +228,7 @@ def _start_interrupted_graph(
             return ModelResponse(parts=[TextPart("late")])
 
         group = _recovery_group(subagent)
-        async with Persistence.open('deadline-recovery', storage=PersistenceStorage.sqlite(Path(path)) if backend == 'sqlite' else PersistenceStorage.filesystem(Path(path))) as persistence_230, Runtime.open(persistence=persistence_230, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_230) as engine:
+        async with Persistence.open('deadline-recovery', storage=PersistenceStorage.sqlite(Path(path)) if backend == 'sqlite' else PersistenceStorage.filesystem(Path(path))) as persistence_230, Runtime.attach(persistence=persistence_230, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_230) as engine:
             task = Task.from_agent("deadline.agent", runtime.agents.get())
             run = await engine.with_definitions(task).start(
                 TaskGraph("deadline-recovery", (TaskNode("agent", task=task, input=AgentTaskInput("work"), timeout_seconds=timeout),)),
@@ -322,7 +322,7 @@ async def test_agent_node_recovery_keeps_first_start_deadline(
         "deadline-recovery",
         storage=PersistenceStorage.sqlite(path) if backend == "sqlite" else PersistenceStorage.filesystem(path),
     ))
-    runtime = await owners.enter_async_context(Runtime.open(
+    runtime = await owners.enter_async_context(Runtime.attach(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), group),
     ))
     engine = await owners.enter_async_context(TaskEngine.open(persistence=persistence))
@@ -392,7 +392,7 @@ async def test_agent_recovery_relaunches_with_original_binding(tmp_path: Path, s
 
     group = _recovery_group(subagent)
     storage = PersistenceStorage.sqlite(path) if subagent else PersistenceStorage.filesystem(path)
-    async with Persistence.open('deadline-recovery', storage=storage) as persistence_380, Runtime.open(persistence=persistence_380, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_380) as engine:
+    async with Persistence.open('deadline-recovery', storage=storage) as persistence_380, Runtime.attach(persistence=persistence_380, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_380) as engine:
         original_binding = (await runtime._state.execution.executions.get(
             execution_id, tenant_id=runtime.default_principal.tenant_id,
         )).binding

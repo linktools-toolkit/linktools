@@ -79,7 +79,7 @@ async def test_native_wrapped_workspace_has_one_selected_tool_per_run(tmp_path: 
     features.capability(CombinedCapability([template.prefix_tools("prefix")], id="workspace.bundle"), scope="runtime")
     features.agent("default", allow_tools=("list_files",), allow_capabilities=())
     models = _FeatureModels(TestModel(call_tools=["prefix_list_files"]))
-    async with Persistence.open('workspace-native', storage=PersistenceStorage.in_memory()) as persistence_79, Runtime.open(persistence=persistence_79, features=model_features(models, features)) as runtime:
+    async with Persistence.open('workspace-native', storage=PersistenceStorage.in_memory()) as persistence_79, Runtime.attach(persistence=persistence_79, features=model_features(models, features)) as runtime:
         first, second = await asyncio.gather(
             runtime.agents.get().run("list files", timeout_seconds=10),
             runtime.agents.get().run("list files", timeout_seconds=10),

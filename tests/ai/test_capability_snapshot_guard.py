@@ -64,7 +64,7 @@ async def test_public_snapshot_detects_committed_custom_partitions_without_confi
         features = RuntimeFeatures("snapshot-capabilities")
         for template in opened.templates:
             features.capability(template)
-    async with Persistence.open('atomic-capabilities', storage=PersistenceStorage.sqlite(tmp_path / 'state.db') if backend == 'sqlite' else PersistenceStorage.filesystem(tmp_path / 'state'), tenant_id='default', read_only=True) as history_persistence_65, History.open(persistence=history_persistence_65, authorization=features.authorization) as history:
+    async with Persistence.open('atomic-capabilities', storage=PersistenceStorage.sqlite(tmp_path / 'state.db') if backend == 'sqlite' else PersistenceStorage.filesystem(tmp_path / 'state'), tenant_id='default', read_only=True) as history_persistence_65, History.open(persistence=history_persistence_65, authorization=None) as history:
         assert history is not None
     storage = PersistenceStorage.sqlite(tmp_path / "state.db") if backend == "sqlite" else PersistenceStorage.filesystem(tmp_path / "state")
     if with_features:

@@ -176,7 +176,7 @@ async def test_runtime_shared_failures_preserve_attempts_terminal_event_and_reop
     features.model("default", FallbackBinding(*(Binding() for _ in range(11))))
     features.capability(TraceCapability(), scope="runtime")
     storage = PersistenceStorage.filesystem(tmp_path)
-    async with Persistence.open('alias-persistence', storage=storage) as persistence_176, Runtime.open(persistence=persistence_176, features=features) as runtime:
+    async with Persistence.open('alias-persistence', storage=storage) as persistence_176, Runtime.attach(persistence=persistence_176, features=features) as runtime:
         result = (await runtime.agents.get().run("synthetic offline failure", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.FAILED
         diagnostics = result.error_diagnostics
@@ -190,7 +190,7 @@ async def test_runtime_shared_failures_preserve_attempts_terminal_event_and_reop
         terminal = next(event for event in events.items if event.event_type == ExecutionEventType.EXECUTION_FAILED)
         assert terminal.payload["error_diagnostics"] == diagnostics.to_payload()
         principal = runtime.default_principal
-    async with Persistence.open('alias-persistence', storage=storage) as persistence_190, Runtime.open(persistence=persistence_190, features=features) as runtime:
+    async with Persistence.open('alias-persistence', storage=storage) as persistence_190, Runtime.attach(persistence=persistence_190, features=features) as runtime:
         restored = await runtime.executions.result(result.execution_id, principal=principal)
         assert restored.error_diagnostics == diagnostics
     assert len(calls) == 11

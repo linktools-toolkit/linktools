@@ -349,7 +349,7 @@ async def test_runtime_reads_rules_from_asset_store_not_workspace_storage(
 
     monkeypatch.setattr(runtime_test_helpers, "_runtime_usage_model", record_model)
     try:
-        async with Persistence.open('rule-assets', storage=PersistenceStorage.in_memory()) as persistence_349, Runtime.open(persistence=persistence_349, features=model_features(runtime_test_helpers.RuntimeUsageModels(), workspace_features('rules', assets=store, workspace=Workspace.load(tmp_path)))) as runtime:
+        async with Persistence.open('rule-assets', storage=PersistenceStorage.in_memory()) as persistence_349, Runtime.attach(persistence=persistence_349, features=model_features(runtime_test_helpers.RuntimeUsageModels(), workspace_features('rules', assets=store, workspace=Workspace.load(tmp_path)))) as runtime:
             result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
         assert any("asset-rule" in request for request in observed)

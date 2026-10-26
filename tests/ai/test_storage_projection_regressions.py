@@ -43,7 +43,7 @@ async def test_promotion_archives_accepted_context(
     group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
     group.tool(lookup, effect_policy=effect_policy)
     group.agent('default', model='default', allow_tools=('lookup',))
-    async with Persistence.open('pending-tool', storage=state) as persistence_43, Runtime.open(persistence=persistence_43, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('pending-tool', storage=state) as persistence_43, Runtime.attach(persistence=persistence_43, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         original = SqlStorageContext.run_mutation
         commits = []
@@ -94,7 +94,7 @@ async def test_session_admission_reuses_verified_history_root(tmp_path: Path, mo
     features.capability(ExecutionCapability(retain_history=True,
         commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync()))
     features.agent('default', model='default', allow_tools=())
-    async with Persistence.open('review-context', storage=PersistenceStorage.sqlite(tmp_path / 'context.db', coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if terminal else None)) as persistence_95, Runtime.open(persistence=persistence_95, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+    async with Persistence.open('review-context', storage=PersistenceStorage.sqlite(tmp_path / 'context.db', coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if terminal else None)) as persistence_95, Runtime.attach(persistence=persistence_95, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
         session = await runtime.agents.get().create_session('session')
         for value in ('first', 'second', 'third'):
             result = await session.run(value, timeout_seconds=5)
@@ -149,7 +149,7 @@ async def test_projection_boundary_read_budget(tmp_path: Path, monkeypatch: pyte
     features.capability(CheckpointCapability())
     features.tool(lookup, effect_policy='none')
     features.agent('default', model='default', allow_tools=('lookup',))
-    async with Persistence.open('review-boundaries', storage=PersistenceStorage.sqlite(tmp_path / 'boundaries.db')) as persistence_151, Runtime.open(persistence=persistence_151, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+    async with Persistence.open('review-boundaries', storage=PersistenceStorage.sqlite(tmp_path / 'boundaries.db')) as persistence_151, Runtime.attach(persistence=persistence_151, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
         result = await runtime.agents.get().run('question', timeout_seconds=10)
         assert result.result.status is ExecutionStatus.SUCCEEDED
     summary = {label: {'calls': sum(item[0] == label for item in observed),
@@ -199,7 +199,7 @@ async def test_pending_large_history_is_process_local(tmp_path: Path, monkeypatc
     features = RuntimeFeatures('review-pending-large')
     features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()))
     features.agent('default', model='default', allow_tools=())
-    async with Persistence.open('review-pending-large', storage=PersistenceStorage.sqlite(tmp_path / 'pending.db', coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))) as persistence_203, Runtime.open(persistence=persistence_203, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+    async with Persistence.open('review-pending-large', storage=PersistenceStorage.sqlite(tmp_path / 'pending.db', coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))) as persistence_203, Runtime.attach(persistence=persistence_203, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
         session = await runtime.agents.get().create_session('session')
         assert (await session.run('first')).result.status is ExecutionStatus.SUCCEEDED
         published.clear()

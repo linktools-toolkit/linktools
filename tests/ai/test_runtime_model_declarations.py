@@ -21,14 +21,14 @@ from linktools.ai.runtime import RuntimeFeatures
 @pytest.mark.asyncio
 async def test_model_capture_is_lazy_isolated_and_success_is_shared() -> None:
     calls = []
-    binding = create_model(protocol="openai", model="fixture")
+    binding = create_model(api="openai", model="fixture")
     def load():
         calls.append("load")
         return binding
     features = RuntimeFeatures()
     features.model("assistant", load)
     captured = await features.capture()
-    features.model("assistant", create_model(protocol="anthropic", model="replacement"))
+    features.model("assistant", create_model(api="anthropic", model="replacement"))
     assert calls == []
     resolved = _ModelResolver(captured.models).resolve("assistant")
     assert calls == []
@@ -56,14 +56,14 @@ def test_lazy_model_failure_can_be_retried_and_async_result_is_rejected() -> Non
         attempts.append(1)
         if len(attempts) == 1:
             raise AIError(ErrorCode.MODEL_CONFIG_INVALID, "fixture configuration missing")
-        return create_model(protocol="openai", model="fixture")
+        return create_model(api="openai", model="fixture")
     binding = _ModelResolver({"model": load}).resolve("model")
     with pytest.raises(AIError):
         _ = binding.contract
     assert binding.model_identity == "openai:fixture"
     assert len(attempts) == 2
     async def async_load():
-        return create_model(protocol="openai", model="fixture")
+        return create_model(api="openai", model="fixture")
     with pytest.raises(TypeError):
         _ModelResolver({"async": async_load})
     hidden = _ModelResolver({"async": lambda: async_load()}).resolve("async")
@@ -72,7 +72,7 @@ def test_lazy_model_failure_can_be_retried_and_async_result_is_rejected() -> Non
 
 
 def test_lazy_model_restore_uses_registered_route_and_rejects_missing_route() -> None:
-    binding = create_model(protocol="openai", model="fixture")
+    binding = create_model(api="openai", model="fixture")
     resolver = _ModelResolver({"assistant": lambda: binding})
     assert resolver.resolve("assistant").model_identity == binding.model_identity
     assert resolver.resolve("assistant").model_identity == binding.model_identity
@@ -93,12 +93,12 @@ async def test_runtime_open_compiles_routes_without_eager_model_loading() -> Non
     calls = []
     def load():
         calls.append(1)
-        return create_model(protocol="openai", model="fixture")
+        return create_model(api="openai", model="fixture")
     features = RuntimeFeatures()
     features.model("default", load)
     features.model("unused", lambda: pytest.fail("unused model loaded"))
     features.agent("assistant", model="default")
-    async with Persistence.open('lazy-model-test', storage=PersistenceStorage.in_memory()) as persistence_96, Runtime.open(persistence=persistence_96, features=features) as runtime:
+    async with Persistence.open('lazy-model-test', storage=PersistenceStorage.in_memory()) as persistence_96, Runtime.attach(persistence=persistence_96, features=features) as runtime:
         assert calls == []
         binding = runtime.agents.get("assistant").model
         assert calls == [1]
@@ -139,7 +139,7 @@ async def test_callable_custom_binding_is_not_mistaken_for_a_loader() -> None:
 def test_async_callable_loader_result_is_closed_and_rejected() -> None:
     class Loader:
         async def __call__(self):
-            return create_model(protocol="openai", model="fixture")
+            return create_model(api="openai", model="fixture")
     binding = _ModelResolver({"async": Loader()}).resolve("async")
     with pytest.raises(TypeError):
         _ = binding.contract
@@ -158,7 +158,7 @@ async def test_each_model_resolution_owns_one_immutable_configuration(monkeypatc
     monkeypatch.setattr(_openai, "DefaultAsyncHttpxClient", client)
     def load():
         loads.append(1)
-        return create_model(protocol="openai", model="fixture", api_key=configuration["api_key"])
+        return create_model(api="openai", model="fixture", api_key=configuration["api_key"])
     features = RuntimeFeatures()
     features.model("assistant", load)
     capture = await features.capture()
@@ -188,7 +188,7 @@ def test_cancelled_loader_does_not_poison_first_success() -> None:
         calls.append(1)
         if len(calls) == 1:
             raise asyncio.CancelledError
-        return create_model(protocol="openai", model="fixture")
+        return create_model(api="openai", model="fixture")
     binding = _ModelResolver({"assistant": load}).resolve("assistant")
     with pytest.raises(asyncio.CancelledError):
         _ = binding.contract
@@ -243,7 +243,7 @@ async def test_model_loader_refreshes_each_run_and_reuses_within_tool_rounds(ses
     @features.tool
     def echo(ctx: AgentContext[object]) -> str:
         return "echo"
-    async with Persistence.open('per-run-model', storage=PersistenceStorage.in_memory()) as persistence_240, Runtime.open(persistence=persistence_240, features=features) as runtime:
+    async with Persistence.open('per-run-model', storage=PersistenceStorage.in_memory()) as persistence_240, Runtime.attach(persistence=persistence_240, features=features) as runtime:
         assert loads == []
         agent = runtime.agents.get()
         target = await agent.create_session("session") if session is True else agent
@@ -292,7 +292,7 @@ async def test_task_run_refreshes_configuration_under_the_same_registered_model(
     features = RuntimeFeatures()
     features.model("default", load)
     features.agent("default", model="default")
-    async with Persistence.open('task-model', storage=PersistenceStorage.in_memory()) as persistence_287, Runtime.open(persistence=persistence_287, features=features) as runtime, TaskEngine.open(persistence=persistence_287) as engine:
+    async with Persistence.open('task-model', storage=PersistenceStorage.in_memory()) as persistence_287, Runtime.attach(persistence=persistence_287, features=features) as runtime, TaskEngine.open(persistence=persistence_287) as engine:
         task = Task.from_agent("answer", runtime.agents.get())
         assert loads == ["first"]  # Task declaration freezes the model contract.
         state["credential"] = "second"
@@ -332,7 +332,7 @@ async def test_recovery_uses_one_fresh_binding_for_validation_and_model(tmp_path
         return binding
     features = _capabilities()
     features.model("default", load)
-    async with Persistence.open(_NAMESPACE, storage=_storage(database, phase)) as persistence_326, Runtime.open(persistence=persistence_326, features=features) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=_storage(database, phase)) as persistence_326, Runtime.attach(persistence=persistence_326, features=features) as runtime:
         before = len(loads)
         if phase == "reserved":
             handle = await runtime.agents.get("default").session("session").start("Wait", idempotency_key="start")
@@ -354,14 +354,14 @@ def test_registered_model_identity_is_independent_of_configuration(protocol) -> 
     from linktools.ai.agent import AgentCompiler
     from linktools.ai.spec import AgentSpec
 
-    state = {"binding": create_model(protocol="openai", model="original",
+    state = {"binding": create_model(api="openai", model="original",
                                      model_settings={"extra_body": {"custom": False}})}
     spec = AgentSpec("agent", model="registered")
     compiler = AgentCompiler(models={"registered": lambda: state["binding"]}, candidates=(), agents={"agent": spec})
     compiled = compiler.compile(spec)
     original = compiler.bind(compiled)
     state["binding"] = create_model(
-        protocol=protocol,
+        api=protocol,
         model='replacement',
         model_settings={'max_tokens': 4096, 'extra_body': {'custom': True}},
     )

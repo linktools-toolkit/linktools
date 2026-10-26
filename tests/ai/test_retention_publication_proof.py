@@ -102,14 +102,14 @@ async def test_closed_public_results_reuse_proof_across_runtime(tmp_path, monkey
         execution=StorageRoute.sqlite(tmp_path / "execution.db"),
         conversation=StorageRoute.sqlite(tmp_path / ("conversation.db" if split else "execution.db")),
     )
-    async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_plan(plan)) as persistence_106, Runtime.open(persistence=persistence_106, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_plan(plan)) as persistence_106, Runtime.attach(persistence=persistence_106, features=model_features(_models(), _features())) as runtime:
         session = await runtime.agents.get().create_session("s")
         result = (await session.run("retained input", timeout_seconds=5)).result
         principal = runtime.default_principal
         execution_id = result.execution_id
 
     storage = PersistenceStorage.from_plan(plan)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_115, Runtime.open(persistence=persistence_115, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_115, Runtime.attach(persistence=persistence_115, features=model_features(_models(), _features())) as runtime:
         record = await runtime._state.execution.executions.get(execution_id, tenant_id=principal.tenant_id)
         assert record.retention_closed
         receipt_reads = []

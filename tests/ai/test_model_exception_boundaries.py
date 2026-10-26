@@ -84,7 +84,7 @@ async def test_responses_context_category_uses_available_sdk_structure(
         }, content=body)
 
     clients = _mock_clients(monkeypatch, handle)
-    binding = create_model(protocol="openai-responses", model="fixture", api_key="synthetic",
+    binding = create_model(api="openai-responses", model="fixture", api_key="synthetic",
                            base_url="https://offline.invalid/v1", max_retries=2, retry_delay=0)
     async with binding.materialize() as model:
         with pytest.raises(ModelAPIError) as caught:
@@ -111,7 +111,7 @@ async def test_nonstream_malformed_chat_choices_are_model_response_errors(
         })
 
     clients = _mock_clients(monkeypatch, handle)
-    binding = create_model(protocol="openai", model="fixture", api_key="synthetic",
+    binding = create_model(api="openai", model="fixture", api_key="synthetic",
                            base_url="https://offline.invalid/v1", max_retries=2, retry_delay=0)
     async with binding.materialize() as model:
         with pytest.raises(UnexpectedModelBehavior) as caught:
@@ -133,7 +133,7 @@ async def test_internal_index_error_is_not_reclassified_as_provider_response(mon
         "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
     }))
     monkeypatch.setattr(OpenAIChatModel, "_validate_completion", invalid_hook)
-    binding = create_model(protocol="openai", model="fixture", api_key="synthetic",
+    binding = create_model(api="openai", model="fixture", api_key="synthetic",
                            base_url="https://offline.invalid/v1", max_retries=2, retry_delay=0)
     async with binding.materialize() as model:
         with pytest.raises(IndexError) as caught:
@@ -176,7 +176,7 @@ async def test_empty_output_keeps_sdk_validation_and_correction_budget(
             pass
 
     clients = _mock_clients(monkeypatch, handle)
-    binding = create_model(protocol="openai", model="fixture", api_key="synthetic",
+    binding = create_model(api="openai", model="fixture", api_key="synthetic",
                            base_url="https://offline.invalid/v1", max_retries=2, retry_delay=0)
     async with Agent(binding.materialize(), retries=1) as agent:
         with pytest.raises(UnexpectedModelBehavior) as caught:
@@ -224,7 +224,7 @@ async def test_nonstream_responses_failed_body_keeps_transient_category(
         })
 
     clients = _mock_clients(monkeypatch, handle)
-    binding = create_model(protocol="openai-responses", model="fixture", api_key="synthetic",
+    binding = create_model(api="openai-responses", model="fixture", api_key="synthetic",
                            base_url="https://offline.invalid/v1", max_retries=2, retry_delay=0)
     async with binding.materialize() as model:
         with pytest.raises(ModelAPIError) as caught:

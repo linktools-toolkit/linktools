@@ -35,7 +35,7 @@ async def test_agent_metrics_require_resource_and_keep_batching(enabled, cached)
     store = _RecordingStore()
     metrics = Metrics.from_store(store, commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=2**20) if cached else None))
     features = _definitions()
-    async with Persistence.open('metrics-explicit', storage=PersistenceStorage.in_memory()) as persistence_35, Runtime.open(persistence=persistence_35, features=model_features(_FeatureModels(), features), metrics=metrics if enabled else None) as runtime:
+    async with Persistence.open('metrics-explicit', storage=PersistenceStorage.in_memory()) as persistence_35, Runtime.attach(persistence=persistence_35, features=model_features(_FeatureModels(), features), metrics=metrics if enabled else None) as runtime:
         execution = await runtime.agents.get().start("question")
         await execution.wait(timeout_seconds=5)
         if cached or not enabled:
@@ -53,13 +53,13 @@ async def test_agent_metrics_require_resource_and_keep_batching(enabled, cached)
 
 def test_runtime_metrics_requires_dataset():
     with pytest.raises(TypeError, match="metrics"):
-        Runtime.open(persistence=None, features=model_features(_FeatureModels()), metrics=object())
+        Runtime.open("invalid-metrics", storage=PersistenceStorage.in_memory(), features=model_features(_FeatureModels()), metrics=object())
 
 
 @pytest.mark.asyncio
 async def test_trace_and_checkpoint_do_not_enable_metrics():
     store = _RecordingStore()
-    async with Persistence.open('trace-only', storage=PersistenceStorage.in_memory()) as persistence_59, Runtime.open(persistence=persistence_59, features=model_features(_FeatureModels(), _features(TraceCapability(), CheckpointCapability()))) as runtime:
+    async with Persistence.open('trace-only', storage=PersistenceStorage.in_memory()) as persistence_59, Runtime.attach(persistence=persistence_59, features=model_features(_FeatureModels(), _features(TraceCapability(), CheckpointCapability()))) as runtime:
         execution = await runtime.agents.get().start("question")
         await execution.wait(timeout_seconds=5)
         assert (await execution.model_interactions()).items
@@ -72,7 +72,7 @@ async def test_shared_metrics_survive_other_runtime_close():
     store = _RecordingStore()
     metrics = Metrics.from_store(store, commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=2**20)))
     for namespace in ("first", "second"):
-        async with Persistence.open(namespace, storage=PersistenceStorage.in_memory()) as persistence_72, Runtime.open(persistence=persistence_72, features=model_features(_FeatureModels(), _definitions()), metrics=metrics) as runtime:
+        async with Persistence.open(namespace, storage=PersistenceStorage.in_memory()) as persistence_72, Runtime.attach(persistence=persistence_72, features=model_features(_FeatureModels(), _definitions()), metrics=metrics) as runtime:
             execution = await runtime.agents.get().start("question")
             await execution.wait(timeout_seconds=5)
     assert {item.source_namespace for item in store.observations} == {"first", "second"}
@@ -87,7 +87,7 @@ async def test_tool_metrics_are_not_duplicated():
     features = RuntimeFeatures("tool-metrics")
     features.tool(lookup, effect_policy="none")
     features.agent("default", model="default", allow_tools=("lookup",))
-    async with Persistence.open('tool-metrics', storage=PersistenceStorage.in_memory()) as persistence_87, Runtime.open(persistence=persistence_87, features=model_features(_FeatureModels(TestModel(call_tools=['lookup'])), features), metrics=metrics) as runtime:
+    async with Persistence.open('tool-metrics', storage=PersistenceStorage.in_memory()) as persistence_87, Runtime.attach(persistence=persistence_87, features=model_features(_FeatureModels(TestModel(call_tools=['lookup'])), features), metrics=metrics) as runtime:
         execution = await runtime.agents.get().start("lookup")
         await execution.wait(timeout_seconds=5)
     tools = [item for item in store.observations if item.kind == "linktools.tool.execution"]
@@ -98,7 +98,7 @@ async def test_tool_metrics_are_not_duplicated():
 async def test_concurrent_runs_keep_metric_execution_identity():
     store = _RecordingStore()
     metrics = Metrics.from_store(store)
-    async with Persistence.open('concurrent', storage=PersistenceStorage.in_memory()) as persistence_98, Runtime.open(persistence=persistence_98, features=model_features(_FeatureModels(), _definitions()), metrics=metrics) as runtime:
+    async with Persistence.open('concurrent', storage=PersistenceStorage.in_memory()) as persistence_98, Runtime.attach(persistence=persistence_98, features=model_features(_FeatureModels(), _definitions()), metrics=metrics) as runtime:
         executions = await asyncio.gather(*(runtime.agents.get().start(str(i)) for i in range(3)))
         await asyncio.gather(*(execution.wait(timeout_seconds=5) for execution in executions))
     models = [item for item in store.observations if item.kind == "linktools.model.request"]
@@ -116,7 +116,7 @@ async def test_absent_metrics_does_not_open_recording_and_business_metrics_stay_
     def forbidden_recorder(self):
         pytest.fail("Runtime without metrics must not initialize recording")
     monkeypatch.setattr(Metrics, "recorder", forbidden_recorder)
-    async with Persistence.open('no-metric-owner', storage=PersistenceStorage.in_memory()) as persistence_116, Runtime.open(persistence=persistence_116, features=model_features(_FeatureModels(), _definitions())) as runtime:
+    async with Persistence.open('no-metric-owner', storage=PersistenceStorage.in_memory()) as persistence_116, Runtime.attach(persistence=persistence_116, features=model_features(_FeatureModels(), _definitions())) as runtime:
         await runtime.agents.get().run("question", timeout_seconds=5)
         assert not runtime.metrics.status().enabled
         assert (await runtime.metrics.flush()).completed
@@ -144,5 +144,5 @@ async def test_invalid_metrics_is_rejected_before_recording(monkeypatch):
         pytest.fail("invalid datasets must be rejected before opening a recorder")
     monkeypatch.setattr(Metrics, "recorder", forbidden_recorder)
     with pytest.raises(TypeError, match="metrics"):
-        async with Persistence.open('invalid-metric-dataset', storage=PersistenceStorage.in_memory()) as persistence_147, Runtime.open(persistence=persistence_147, features=model_features(_FeatureModels(), _definitions()), metrics=object()):
+        async with Persistence.open('invalid-metric-dataset', storage=PersistenceStorage.in_memory()) as persistence_147, Runtime.attach(persistence=persistence_147, features=model_features(_FeatureModels(), _definitions()), metrics=object()):
             pytest.fail("invalid metric dataset accepted")

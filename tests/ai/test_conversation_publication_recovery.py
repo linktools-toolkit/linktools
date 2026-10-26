@@ -33,7 +33,7 @@ async def test_unknown_release_must_not_report_success_without_envelope(
         )
     )
     try:
-        async with Persistence.open(_NAMESPACE, storage=storage) as persistence_33, Runtime.open(persistence=persistence_33, features=model_features(_models(), _features())) as runtime:
+        async with Persistence.open(_NAMESPACE, storage=storage) as persistence_33, Runtime.attach(persistence=persistence_33, features=model_features(_models(), _features())) as runtime:
             session = await runtime.agents.get().create_session("s")
             if prior_turn:
                 await session.run("prior committed turn", timeout_seconds=5)
@@ -97,7 +97,7 @@ async def test_unknown_release_must_not_report_success_without_envelope(
             conversation=StorageRoute.sqlite(tmp_path / "c.db"),
         )
     )
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_102, Runtime.open(persistence=persistence_102, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_102, Runtime.attach(persistence=persistence_102, features=model_features(_models(), _features())) as runtime:
         recovered_commits = await runtime._state.conversation.sessions.list_timeline_commits(
             "s", tenant_id=principal.tenant_id, start_turn_seq=seq, end_turn_seq=seq + 1
         )
@@ -122,7 +122,7 @@ async def test_rejected_admitted_start_retains_input(tmp_path, monkeypatch):
             conversation=StorageRoute.sqlite(tmp_path / "c.db"),
         )
     )
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_129, Runtime.open(persistence=persistence_129, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_129, Runtime.attach(persistence=persistence_129, features=model_features(_models(), _features())) as runtime:
         session = await runtime.agents.get().create_session("s")
 
         async def reject(*args, **kwargs):
@@ -160,7 +160,7 @@ async def test_rejected_admitted_start_retains_input(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_closed_result_survives_receipt_corruption_but_timeline_rejects_it(tmp_path):
     storage = PersistenceStorage.sqlite(tmp_path / "state.db")
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_169, Runtime.open(persistence=persistence_169, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_169, Runtime.attach(persistence=persistence_169, features=model_features(_models(), _features())) as runtime:
         session = await runtime.agents.get().create_session("s")
         execution = await session.start("original input")
         await execution.wait(timeout_seconds=5)
@@ -213,7 +213,7 @@ async def test_completed_receipt_old_handoff_after_later_turn(tmp_path, monkeypa
             raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
         return await old_complete(self, checkpoint)
 
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_229, Runtime.open(persistence=persistence_229, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_229, Runtime.attach(persistence=persistence_229, features=model_features(_models(), _features())) as runtime:
         session = await runtime.agents.get().create_session("s")
         monkeypatch.setattr(LocalExecutionBackend, "_complete_handoff", fail_first)
         await session.run("first", timeout_seconds=5)
@@ -223,7 +223,7 @@ async def test_completed_receipt_old_handoff_after_later_turn(tmp_path, monkeypa
         expected_session = await runtime._state.conversation.sessions.get("s", tenant_id=principal.tenant_id)
     monkeypatch.setattr(LocalExecutionBackend, "_complete_handoff", old_complete)
     reopened = PersistenceStorage.from_plan(plan)
-    async with Persistence.open(_NAMESPACE, storage=reopened) as persistence_241, Runtime.open(persistence=persistence_241, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=reopened) as persistence_241, Runtime.attach(persistence=persistence_241, features=model_features(_models(), _features())) as runtime:
         page = await runtime.sessions.timeline("s", principal=principal)
         assert len(page.items) == 2
         assert page.items == expected_page.items

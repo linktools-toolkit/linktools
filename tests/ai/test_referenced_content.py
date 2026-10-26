@@ -314,7 +314,7 @@ async def test_runtime_retains_refs_and_safe_failure_structure_never_original_by
     group.capability(source, id="files", revision=1, scope="agent")
     group.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     group.agent("default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Persistence.open('references', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_304, Runtime.open(persistence=persistence_304, features=model_features(Binding(), group)) as runtime:
+    async with Persistence.open('references', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_304, Runtime.attach(persistence=persistence_304, features=model_features(Binding(), group)) as runtime:
         execution = await runtime.agents.get().start(["inspect", _content()])
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is (ExecutionStatus.SUCCEEDED if boundary in {"success", "wrapped"}

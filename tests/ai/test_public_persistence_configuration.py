@@ -69,7 +69,7 @@ async def test_module_filesystem_routes_reopen_history_without_models_or_hooks(
         return PersistenceStorage(replace(PersistenceStorage.filesystem(root).plan, conversation=routes[PersistenceDomain.CONVERSATION], trace=routes[PersistenceDomain.TRACE], checkpoint=routes[PersistenceDomain.CHECKPOINT]))
 
     state = root_storage()
-    async with Persistence.open('module-routes', storage=state) as persistence_67, Runtime.open(persistence=persistence_67, metrics=Metrics.in_memory(), features=features) as runtime:
+    async with Persistence.open('module-routes', storage=state) as persistence_67, Runtime.attach(persistence=persistence_67, metrics=Metrics.in_memory(), features=features) as runtime:
         session = await runtime.agents.get().create_session("session")
         execution = await session.start("question")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
@@ -138,7 +138,7 @@ async def test_module_resource_cache_inherits_or_explicitly_overrides_root(
         state = PersistenceStorage(replace(state.plan, trace=state.plan.route(PersistenceDomain.TRACE).with_cache(trace_cache)))
     trace = TraceCapability()
     features = _features(ExecutionCapability(retain_history=True), trace)
-    async with Persistence.open('module-cache', storage=state) as persistence_135, Runtime.open(persistence=persistence_135, features=model_features(_FeatureModels(), features)) as runtime:
+    async with Persistence.open('module-cache', storage=state) as persistence_135, Runtime.attach(persistence=persistence_135, features=model_features(_FeatureModels(), features)) as runtime:
         before_root = (root_cache.reads, root_cache.writes)
         before_module = (module_cache.reads, module_cache.writes)
         assert await runtime._state.conversation.sessions.get("missing", tenant_id="default") is None
@@ -180,7 +180,7 @@ async def test_atomic_module_route_rejects_a_different_transaction_group(
     storage = PersistenceStorage(replace(PersistenceStorage.filesystem(root).plan,
                                          **{domain: StorageRoute.filesystem(tmp_path / "separate")}))
     with pytest.raises(AIError) as invalid:
-        async with Persistence.open('different-group', storage=storage) as persistence_174, Runtime.open(persistence=persistence_174, features=model_features(_FeatureModels(), _features(feature))):
+        async with Persistence.open('different-group', storage=storage) as persistence_174, Runtime.attach(persistence=persistence_174, features=model_features(_FeatureModels(), _features(feature))):
             pytest.fail("an atomic module cannot silently split its transactions")
     assert invalid.value.code in {ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, ErrorCode.STORAGE_DEPENDENCY_NOT_READY}
 
@@ -199,7 +199,7 @@ async def test_split_conversation_route_uses_durable_admission_with_shared_cache
     state = PersistenceStorage(replace(state.plan, conversation=route), coordination=cache)
     features = _features()
     features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
-    async with Persistence.open('split-conversation', storage=state) as persistence_196, Runtime.open(persistence=persistence_196, features=model_features(_FeatureModels(FunctionModel(stream_function=model)), features)) as runtime:
+    async with Persistence.open('split-conversation', storage=state) as persistence_196, Runtime.attach(persistence=persistence_196, features=model_features(_FeatureModels(FunctionModel(stream_function=model)), features)) as runtime:
         session = await runtime.agents.get().create_session("session")
         execution = await session.start("question", idempotency_key="turn")
         try:

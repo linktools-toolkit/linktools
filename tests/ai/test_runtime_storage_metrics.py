@@ -47,7 +47,7 @@ async def test_runtime_projects_storage_operation_metrics(tmp_path: Path) -> Non
     metrics = Metrics.from_store(store, namespace="runtime-storage-metrics")
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
 
-    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_47, Runtime.open(persistence=persistence_47, metrics=metrics, features=model_features(_Models(), _agent_group())) as runtime:
+    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_47, Runtime.attach(persistence=persistence_47, metrics=metrics, features=model_features(_Models(), _agent_group())) as runtime:
         result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
 

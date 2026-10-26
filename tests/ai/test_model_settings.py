@@ -46,7 +46,7 @@ def _binding(monkeypatch: pytest.MonkeyPatch, protocol: str, model: str,
     limit = {"openai": "max_completion_tokens", "openai-responses": "max_output_tokens", "anthropic": "max_tokens"}[protocol]
     if limit not in settings.get("extra_body", {}):
         settings.setdefault("max_tokens", 12000)
-    return create_model(protocol=protocol, model=model, api_key="mock-only",
+    return create_model(api=protocol, model=model, api_key="mock-only",
                         base_url="https://model.invalid/v1", max_retries=0, model_settings=settings)
 
 
@@ -95,14 +95,14 @@ async def test_native_manual_budget_overrides_unified_false(monkeypatch):
 @pytest.mark.parametrize("value", [[1], "body", {"value": object()}, {"value": float("nan")}])
 def test_model_settings_requires_json_object(value):
     with pytest.raises((TypeError, ValueError)):
-        create_model(protocol="openai", model="alias", model_settings=value)
+        create_model(api="openai", model="alias", model_settings=value)
 
 
 @pytest.mark.parametrize("protocol", ["openai", "openai-responses", "anthropic"])
 @pytest.mark.parametrize("field", ["max_tokens", "timeout"])
 def test_request_settings_have_no_duplicate_factory_argument(protocol, field):
     with pytest.raises(TypeError):
-        create_model(protocol=protocol, model="fixture", **{field: 1000})
+        create_model(api=protocol, model="fixture", **{field: 1000})
 
 
 @pytest.mark.asyncio
@@ -130,7 +130,7 @@ async def test_runtime_uses_sdk_thinking_mapping_without_local_model_rejection(m
     features.model("default", binding)
     features.agent("default", model="default")
     features.capability(Thinking(effort="high"))
-    async with Persistence.open('native-thinking', storage=PersistenceStorage.in_memory()) as persistence_103, Runtime.open(persistence=persistence_103, features=features) as runtime:
+    async with Persistence.open('native-thinking', storage=PersistenceStorage.in_memory()) as persistence_103, Runtime.attach(persistence=persistence_103, features=features) as runtime:
         result = await runtime.agents.get().run("hello", thinking=thinking, timeout_seconds=10)
     assert result.result.status is ExecutionStatus.SUCCEEDED
     assert sent[-1]["reasoning"]["effort"] == expected
@@ -144,7 +144,7 @@ async def test_runtime_unknown_model_keeps_native_extension_without_profile(monk
     features = RuntimeFeatures()
     features.model("default", binding)
     features.agent("default", model="default")
-    async with Persistence.open('unknown-model', storage=PersistenceStorage.in_memory()) as persistence_117, Runtime.open(persistence=persistence_117, features=features) as runtime:
+    async with Persistence.open('unknown-model', storage=PersistenceStorage.in_memory()) as persistence_117, Runtime.attach(persistence=persistence_117, features=features) as runtime:
         result = await runtime.agents.get().run("hello", thinking=True, timeout_seconds=10)
     assert result.result.status is ExecutionStatus.SUCCEEDED
     assert sent[-1]["vendor_thinking"] == {"budget": 2048}
@@ -223,7 +223,7 @@ async def test_sdk_zero_does_not_disable_binding_retry_owner(monkeypatch, stream
     settings = {"max_tokens": 1000}
     if location == "binding":
         settings["max_retries"] = 0
-    binding = create_model(protocol=protocol, model="fixture", api_key="mock-only",
+    binding = create_model(api=protocol, model="fixture", api_key="mock-only",
                            base_url="https://model.invalid", max_retries=2, retry_delay=0,
                            model_settings=settings)
     request_settings = {"max_retries": 0} if location == "request" else None
@@ -248,7 +248,7 @@ async def test_sdk_zero_does_not_disable_binding_retry_owner(monkeypatch, stream
 @pytest.mark.parametrize("value", [None, 1, 2, False])
 def test_sdk_retry_override_rejected_at_binding(protocol, value):
     with pytest.raises(AIError) as raised:
-        create_model(protocol=protocol, model="fixture", model_settings={"max_retries": value})
+        create_model(api=protocol, model="fixture", model_settings={"max_retries": value})
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
     assert raised.value.retryable is False
 
@@ -288,7 +288,7 @@ async def test_yaml_thinking_is_inherited_until_spec_or_run_explicitly_overrides
     features.model("default", binding)
     features.agent("default", model="default",
                    **({} if spec_thinking is None else {"thinking": spec_thinking}))
-    async with Persistence.open('inherited-thinking', storage=PersistenceStorage.in_memory()) as persistence_233, Runtime.open(persistence=persistence_233, features=features) as runtime:
+    async with Persistence.open('inherited-thinking', storage=PersistenceStorage.in_memory()) as persistence_233, Runtime.attach(persistence=persistence_233, features=features) as runtime:
         result = await runtime.agents.get().run(
             "hello", timeout_seconds=10,
             **({} if run_thinking is None else {"thinking": run_thinking}),
@@ -304,7 +304,7 @@ async def test_omitted_thinking_preserves_sdk_model_default(monkeypatch):
     features = RuntimeFeatures()
     features.model("default", binding)
     features.agent("default", model="default")
-    async with Persistence.open('default-thinking', storage=PersistenceStorage.in_memory()) as persistence_249, Runtime.open(persistence=persistence_249, features=features) as runtime:
+    async with Persistence.open('default-thinking', storage=PersistenceStorage.in_memory()) as persistence_249, Runtime.attach(persistence=persistence_249, features=features) as runtime:
         result = await runtime.agents.get().run("hello", timeout_seconds=10)
     assert result.result.status is ExecutionStatus.SUCCEEDED
     assert "reasoning" not in sent[-1]

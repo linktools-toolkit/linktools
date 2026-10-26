@@ -81,7 +81,7 @@ def _compiler(
     candidates: tuple[CapabilityContribution[object], ...] = (),
 ) -> AgentCompiler:
     return AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=candidates,
         agents={"durable-contract": _spec()},
     )

@@ -189,7 +189,7 @@ async def test_runtime_token_estimator_reads_native_metadata_and_observes_respon
     model = FunctionModel(stream_function=chunks) if streaming else _UsageFunctionModel(answer)
     group.model("default", _Models(model))
     app = {"quota": "project-a"}
-    async with Persistence.open('quota-metadata', storage=PersistenceStorage.in_memory()) as persistence_189, Runtime.open(persistence=persistence_189, context=ExecutionContext(app), features=await group.capture()) as runtime:
+    async with Persistence.open('quota-metadata', storage=PersistenceStorage.in_memory()) as persistence_189, Runtime.attach(persistence=persistence_189, context=ExecutionContext(app), features=await group.capture()) as runtime:
         execution = await runtime.agents.get().start("question", correlation={"request": "one"})
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         deps, request = requests[0]

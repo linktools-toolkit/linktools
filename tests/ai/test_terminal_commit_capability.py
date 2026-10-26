@@ -59,7 +59,7 @@ async def test_conversation_rejects_agent_scope(combined: bool) -> None:
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
     group.capability(_conversation_feature(combined), id="conversation-feature" if combined else None, scope="agent")
     with pytest.raises(AIError) as invalid:
-        async with Persistence.open('conversation-feature', storage=PersistenceStorage.in_memory()) as persistence_58, Runtime.open(persistence=persistence_58, features=model_features(RuntimeUsageModels(), group)):
+        async with Persistence.open('conversation-feature', storage=PersistenceStorage.in_memory()) as persistence_58, Runtime.attach(persistence=persistence_58, features=model_features(RuntimeUsageModels(), group)):
             raise AssertionError("Agent-scoped Conversation was accepted")
     assert invalid.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
@@ -73,7 +73,7 @@ async def test_conversation_rejects_duplicate_native_id_across_contributions() -
             id=policy_id, scope="runtime",
         )
     with pytest.raises(AIError) as invalid:
-        async with Persistence.open('conversation-feature', storage=PersistenceStorage.in_memory()) as persistence_75, Runtime.open(persistence=persistence_75, features=model_features(RuntimeUsageModels(), group)):
+        async with Persistence.open('conversation-feature', storage=PersistenceStorage.in_memory()) as persistence_75, Runtime.attach(persistence=persistence_75, features=model_features(RuntimeUsageModels(), group)):
             raise AssertionError("Duplicate Conversation capabilities were accepted")
     assert invalid.value.code is ErrorCode.CAPABILITY_CONFLICT
 
@@ -154,7 +154,7 @@ async def test_admitted_policy_preserves_stronger_durability(
         for capability in policies:
             group.capability(capability, scope="runtime")
     storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
-    async with Persistence.open('conversation-feature', storage=storage) as persistence_159, Runtime.open(persistence=persistence_159, features=model_features(RuntimeUsageModels(), group)) as runtime:
+    async with Persistence.open('conversation-feature', storage=storage) as persistence_159, Runtime.attach(persistence=persistence_159, features=model_features(RuntimeUsageModels(), group)) as runtime:
         execution = await runtime.agents.get().start("answer", idempotency_key="answer")
         assert (await execution.wait(timeout_seconds=10)).result.output == {"text": "done"}
         record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
@@ -173,7 +173,7 @@ async def test_task_admission_keeps_conversation_disabled() -> None:
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     storage = PersistenceStorage.in_memory()
-    async with Persistence.open('conversation-feature', storage=storage) as persistence_180, Runtime.open(persistence=persistence_180, features=model_features(RuntimeUsageModels(), group)) as runtime, TaskEngine.open(persistence=persistence_180) as engine:
+    async with Persistence.open('conversation-feature', storage=storage) as persistence_180, Runtime.attach(persistence=persistence_180, features=model_features(RuntimeUsageModels(), group)) as runtime, TaskEngine.open(persistence=persistence_180) as engine:
         graph = await engine.with_definitions(task).start(
             TaskGraph("task-policy", (TaskNode("answer", task=task),)), idempotency_key="task-policy",
         )
@@ -198,7 +198,7 @@ async def test_reopening_cannot_reinterpret_admitted_conversation(
         if enabled:
             group.capability(ExecutionCapability(retain_history=True), scope="runtime")
         storage = PersistenceStorage.sqlite(database)
-        async with Persistence.open('conversation-feature', storage=storage) as persistence_207, Runtime.open(persistence=persistence_207, features=model_features(RuntimeUsageModels(), group)) as runtime:
+        async with Persistence.open('conversation-feature', storage=storage) as persistence_207, Runtime.attach(persistence=persistence_207, features=model_features(RuntimeUsageModels(), group)) as runtime:
             execution = await runtime.agents.get().start("answer", idempotency_key="answer")
             assert (await execution.wait(timeout_seconds=10)).result.output == {"text": "done"}
             if execution_id is None:
@@ -236,7 +236,7 @@ async def test_current_execution_record_retains_conversation_through_recovery(
     ) -> None:
         del request, execution, kwargs
 
-    async with Persistence.open('conversation-feature', storage=storage) as persistence_247, Runtime.open(persistence=persistence_247, features=model_features(RuntimeUsageModels(), group)) as runtime:
+    async with Persistence.open('conversation-feature', storage=storage) as persistence_247, Runtime.attach(persistence=persistence_247, features=model_features(RuntimeUsageModels(), group)) as runtime:
         with monkeypatch.context() as fault:
             fault.setattr(_repository_common, "_encode_persisted_domain", capture_current_record)
             fault.setattr(runtime._execution_service.runtime_backend(), "launch", interrupted_launch)
@@ -247,7 +247,7 @@ async def test_current_execution_record_retains_conversation_through_recovery(
         assert before.restart_checkpoints and before.conversation
 
     reopened = PersistenceStorage.filesystem(storage_path)
-    async with Persistence.open('conversation-feature', storage=reopened) as persistence_260, Runtime.open(persistence=persistence_260, features=model_features(RuntimeUsageModels(), group)) as runtime:
+    async with Persistence.open('conversation-feature', storage=reopened) as persistence_260, Runtime.attach(persistence=persistence_260, features=model_features(RuntimeUsageModels(), group)) as runtime:
         recovered = await runtime.executions.get(execution.execution_id)
         assert (await recovered.wait(timeout_seconds=10)).result.output == {"text": "done"}
         after = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)

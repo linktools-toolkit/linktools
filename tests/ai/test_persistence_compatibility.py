@@ -289,7 +289,7 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
         allow_skills=(),
         allow_subagents=(),
     )
-    models = {"default": create_model(protocol='openai', model="gpt-test")}
+    models = {"default": create_model(api='openai', model="gpt-test")}
     compiler = AgentCompiler(
         models=models,
         candidates=candidates,

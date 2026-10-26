@@ -62,7 +62,7 @@ async def test_trace_rejects_partial_write_buffer():
     features = _definitions()
     with pytest.raises(TypeError, match='buffer'):
         features.capability(TraceCapability(commit=CommitPolicy.batch(buffer=Partial(), batch_size=128, flush_interval=3)), scope='runtime')
-        async with Persistence.open('partial-trace-cache', storage=PersistenceStorage.in_memory()) as persistence_62, Runtime.open(persistence=persistence_62, features=model_features(_FeatureModels(), features)):
+        async with Persistence.open('partial-trace-cache', storage=PersistenceStorage.in_memory()) as persistence_62, Runtime.attach(persistence=persistence_62, features=model_features(_FeatureModels(), features)):
             pytest.fail('partial write buffers must be rejected before runtime admission')
 
 

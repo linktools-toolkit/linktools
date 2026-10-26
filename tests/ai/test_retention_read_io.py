@@ -223,10 +223,10 @@ async def test_runtime_releases_only_producer_staging_after_durable_handoff(
     monkeypatch: pytest.MonkeyPatch, condition: str,
 ) -> None:
     from linktools.ai.persistence import PersistenceStorage
-    from linktools.ai.runtime import Runtime
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
 
     async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.in_memory(), tenant_id="tenant") as state:
-        async with Runtime.open(persistence=state, auto_recover=False) as runtime, Runtime.open(
+        async with Runtime.attach(features=RuntimeFeatures(), persistence=state, auto_recover=False) as runtime, Runtime.attach(features=RuntimeFeatures(),
             persistence=state, auto_recover=False,
         ) as peer:
             repository = state.execution.executions

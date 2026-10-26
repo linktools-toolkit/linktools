@@ -55,7 +55,7 @@ async def test_default_global_runs_with_empty_agent_selection_and_rejecting_filt
     capture = await features.capture()
     assert next(item for item in capture.contributions if item.id == 'policy.agent').scope == 'agent'
     assert next(item for item in capture.contributions if item.id == global_policy.id).scope == 'runtime'
-    async with Persistence.open('global-default', storage=PersistenceStorage.in_memory()) as persistence_55, Runtime.open(persistence=persistence_55, features=capture) as runtime:
+    async with Persistence.open('global-default', storage=PersistenceStorage.in_memory()) as persistence_55, Runtime.attach(persistence=persistence_55, features=capture) as runtime:
         for name in ('default', 'worker'):
             execution = await runtime.agents.get(name).start('question')
             await execution.wait(timeout_seconds=5)

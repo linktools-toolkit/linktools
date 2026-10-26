@@ -67,7 +67,7 @@ async def test_provider_stream_failure_is_not_wrapper_cancellation(boundary: str
     group = RuntimeFeatures("provider-stream-failure")
     group.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     group.agent("default", model="default", allow_tools=())
-    async with Persistence.open('provider-stream-failure', storage=PersistenceStorage.in_memory()) as persistence_67, Runtime.open(persistence=persistence_67, features=model_features(_Models(ExitModel(stream_function=stream)), group)) as runtime:
+    async with Persistence.open('provider-stream-failure', storage=PersistenceStorage.in_memory()) as persistence_67, Runtime.attach(persistence=persistence_67, features=model_features(_Models(ExitModel(stream_function=stream)), group)) as runtime:
         execution = await runtime.agents.get("default").start("respond")
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is ExecutionStatus.FAILED

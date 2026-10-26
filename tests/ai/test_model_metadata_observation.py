@@ -304,7 +304,7 @@ async def test_model_metadata_live_and_archived_backend_contract(backend: str, t
     group = RuntimeFeatures[None]("metadata")
     group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
-    async with Persistence.open('metadata-live', storage=storage()) as persistence_304, Runtime.open(persistence=persistence_304, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('metadata-live', storage=storage()) as persistence_304, Runtime.attach(persistence=persistence_304, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get("default").start("private prompt")
         principal = runtime.default_principal
         await asyncio.wait_for(entered.wait(), 5)
@@ -389,7 +389,7 @@ async def test_live_request_progress_precedes_scheduled_canonical_publication(
         buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=0.1,
     )), scope="runtime")
     group.agent("default", model="default", allow_tools=())
-    async with Persistence.open('scheduled-history', storage=storage) as persistence_392, Runtime.open(persistence=persistence_392, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('scheduled-history', storage=storage) as persistence_392, Runtime.attach(persistence=persistence_392, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get("default").start("scheduled prompt")
         principal = runtime.default_principal
         stream = execution.watch()

@@ -57,7 +57,7 @@ async def test_nested_node_recovery_usage_does_not_enter_failed_request_observat
     features.capability(TraceCapability(), scope="runtime")
     features.capability(_NestedRecoveryCapability(), id="nested-node-recovery", scope="runtime")
 
-    async with Persistence.open('fallback-node-boundary', storage=PersistenceStorage.in_memory()) as persistence_57, Runtime.open(persistence=persistence_57, features=features) as runtime:
+    async with Persistence.open('fallback-node-boundary', storage=PersistenceStorage.in_memory()) as persistence_57, Runtime.attach(persistence=persistence_57, features=features) as runtime:
         execution = await runtime.agents.get().start("respond")
         result = (await execution.wait(timeout_seconds=10)).result
         interactions = (await execution.model_interactions(include_content=True)).items

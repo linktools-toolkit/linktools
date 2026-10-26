@@ -127,12 +127,12 @@ async def test_runtime_policy_survives_checkpoint_and_cold_trace_read(
     features.capability(WrapperCapability(TraceCapability(record_http_bodies=enabled), id='wrapped-trace'))
     features.capability(CheckpointCapability())
     root = tmp_path / 'state'
-    async with Persistence.open('body-policy', storage=PersistenceStorage.filesystem(root)) as persistence_126, Runtime.open(persistence=persistence_126, features=model_features(models, features)) as runtime:
+    async with Persistence.open('body-policy', storage=PersistenceStorage.filesystem(root)) as persistence_126, Runtime.attach(persistence=persistence_126, features=model_features(models, features)) as runtime:
         execution = await runtime.agents.get().start('question')
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
         execution_id = execution.execution_id
         principal = runtime.default_principal
-    async with Persistence.open('body-policy', storage=PersistenceStorage.filesystem(root), tenant_id="default", read_only=True) as history_persistence_134, History.open(persistence=history_persistence_134, authorization=features.authorization) as history:
+    async with Persistence.open('body-policy', storage=PersistenceStorage.filesystem(root), tenant_id="default", read_only=True) as history_persistence_134, History.open(persistence=history_persistence_134, authorization=None) as history:
         items = await history.model_interactions(execution_id, principal=principal, include_client_requests=True)
         attempt = items.items[0].client_requests[0]
         assert attempt.record_http_bodies is enabled

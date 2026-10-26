@@ -76,7 +76,7 @@ async def test_runtime_states_share_metrics_without_lifecycle_coupling(
 
     try:
         for state, label in cases:
-            async with Persistence.open('default', storage=state) as persistence_76, Runtime.open(persistence=persistence_76, metrics=metrics, features=model_features(_Models(), _agent_group())) as runtime:
+            async with Persistence.open('default', storage=state) as persistence_76, Runtime.attach(persistence=persistence_76, metrics=metrics, features=model_features(_Models(), _agent_group())) as runtime:
                 result = (await runtime.agents.get("default").run(
                     f"hello-{label}",
                     timeout_seconds=10,

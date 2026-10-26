@@ -420,7 +420,7 @@ async def test_volatile_task_and_descendant_keep_strong_model_boundaries(
     storage = PersistenceStorage.from_plan(
         PersistencePlan(execution=StorageRoute.transient(cache=InMemoryCacheBackend(max_bytes=1000000))),
     )
-    async with Persistence.open('transient-task-control', storage=storage) as persistence_417, Runtime.open(persistence=persistence_417, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_417) as engine:
+    async with Persistence.open('transient-task-control', storage=storage) as persistence_417, Runtime.attach(persistence=persistence_417, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_417) as engine:
         task = Task.from_agent("answer", runtime.agents.get())
         definition = TaskGraph("graph", (TaskNode("answer", task=task, input=AgentTaskInput("question")),))
         graph = await engine.with_definitions(task).start(definition, idempotency_key="once")
@@ -466,7 +466,7 @@ async def test_remote_cancel_stops_model_retry_and_strong_tool_admission(
     group.agent("default", model="default", allow_tools=("work",))
     database = tmp_path / "cancel.db"
     models = _Models(_UsageFunctionModel(model))
-    async with Persistence.open('model-pair-cancel', storage=PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))) as persistence_466, Runtime.open(persistence=persistence_466, features=model_features(models, group)) as owner, Persistence.open('model-pair-cancel', storage=PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))) as persistence_469, Runtime.open(persistence=persistence_469, features=model_features(models, group)) as other:
+    async with Persistence.open('model-pair-cancel', storage=PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))) as persistence_466, Runtime.attach(persistence=persistence_466, features=model_features(models, group)) as owner, Persistence.open('model-pair-cancel', storage=PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))) as persistence_469, Runtime.attach(persistence=persistence_469, features=model_features(models, group)) as other:
         execution = await owner.agents.get().start("question", output=Answer, idempotency_key="once")
         try:
             await asyncio.wait_for(entered.wait(), 5)

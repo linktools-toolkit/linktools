@@ -211,7 +211,7 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
     monkeypatch.setattr(ContentArchive, "publish", publish)
     monkeypatch.setattr(CheckpointPersistence, "materialize_recovery_checkpoint", materialize_recovery)
     monkeypatch.setattr(StateCommands, "commit_terminal_checkpoint", commit)
-    async with Persistence.open('terminal-archive-tool', storage=storage) as persistence_211, Runtime.open(persistence=persistence_211, features=model_features(_ToolModels(), application)) as runtime:
+    async with Persistence.open('terminal-archive-tool', storage=storage) as persistence_211, Runtime.attach(persistence=persistence_211, features=model_features(_ToolModels(), application)) as runtime:
         await runtime.agents.get("default").create_session("session")
         session = runtime.agents.get("default").session("session")
         group = runtime._state.execution.executions.state_store.storage_group

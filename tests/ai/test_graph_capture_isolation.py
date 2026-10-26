@@ -44,7 +44,7 @@ async def test_graph_capture_replays_each_accepted_attachment_once(
     attachment.write_text("accepted file bytes", encoding="utf-8")
     features = _agents(workspace=Workspace.load(work))
     models = FixtureModels()
-    async with Persistence.open('capture-files', storage=PersistenceStorage.filesystem(tmp_path / 'state'), tenant_id='evaluation-consumers') as persistence_42, Runtime.open(persistence=persistence_42, context=CONTEXT, features=model_features(models, features)) as runtime, TaskEngine.open(persistence=persistence_42, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('capture-files', storage=PersistenceStorage.filesystem(tmp_path / 'state'), tenant_id='evaluation-consumers') as persistence_42, Runtime.attach(persistence=persistence_42, context=CONTEXT, features=model_features(models, features)) as runtime, TaskEngine.open(persistence=persistence_42, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         task = Task.from_agent("capture.agent", runtime.agents.get())
         run = await runtime_engine.with_definitions(task).start(TaskGraph("source", (
             TaskNode("agent", task=task, input=AgentTaskInput("question", files=("input.txt",))),
@@ -56,7 +56,7 @@ async def test_graph_capture_replays_each_accepted_attachment_once(
         attachment.write_text("changed live file", encoding="utf-8")
     elif file_change == "deleted":
         attachment.unlink()
-    async with Persistence.open('capture-files', storage=PersistenceStorage.filesystem(tmp_path / 'state'), tenant_id='evaluation-consumers') as persistence_56, Runtime.open(persistence=persistence_56, context=CONTEXT, features=model_features(models, features)) as runtime, TaskEngine.open(persistence=persistence_56, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('capture-files', storage=PersistenceStorage.filesystem(tmp_path / 'state'), tenant_id='evaluation-consumers') as persistence_56, Runtime.attach(persistence=persistence_56, context=CONTEXT, features=model_features(models, features)) as runtime, TaskEngine.open(persistence=persistence_56, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         task = Task.from_agent("capture.agent", runtime.agents.get())
         template = await runtime_engine.inputs.read_graph(capture, principal=PRINCIPAL)
         replay = await runtime_engine.with_definitions(task).start(TaskGraph("replay", template.nodes),
@@ -75,7 +75,7 @@ async def test_graph_capture_applies_context_policy_to_all_agent_input_forms(
         ModelRequest(parts=[UserPromptPart("OLD HISTORICAL QUESTION")]),
         ModelResponse(parts=[TextPart("OLD HISTORICAL ANSWER")]),
     ), session_metadata={"secret": "historical value"})
-    async with Persistence.open('capture-context', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_77, Runtime.open(persistence=persistence_77, context=CONTEXT, features=model_features(FixtureModels(), _agents())) as runtime, TaskEngine.open(persistence=persistence_77, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('capture-context', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_77, Runtime.attach(persistence=persistence_77, context=CONTEXT, features=model_features(FixtureModels(), _agents())) as runtime, TaskEngine.open(persistence=persistence_77, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         task = Task.from_agent("capture.agent", runtime.agents.get())
         engine = runtime_engine.with_definitions(task)
         run = await engine.start(TaskGraph("source", (
@@ -136,7 +136,7 @@ async def test_capture_context_policy_remains_authoritative_when_reprojecting(
         ModelRequest(parts=[SystemPromptPart("PRIOR INSTRUCTIONS"), UserPromptPart("HISTORICAL INPUT TO REMOVE")]),
         ModelResponse(parts=[TextPart("prior answer")]),
     ), session_metadata={"secret": "prior metadata"})
-    async with Persistence.open('capture-reproject', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_139, Runtime.open(persistence=persistence_139, context=CONTEXT, features=model_features(FixtureModels(), _agents())) as runtime, TaskEngine.open(persistence=persistence_139, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('capture-reproject', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_139, Runtime.attach(persistence=persistence_139, context=CONTEXT, features=model_features(FixtureModels(), _agents())) as runtime, TaskEngine.open(persistence=persistence_139, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         task = Task.from_agent("capture.agent", runtime.agents.get())
         scorer = Task("capture.scorer", exact, effect_policy="none")
         engine = runtime_engine.with_definitions(task, scorer)

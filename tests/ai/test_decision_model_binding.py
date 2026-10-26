@@ -110,7 +110,7 @@ async def test_runtime_decision_stream_and_reopen_preserve_probabilities(tmp_pat
     database = tmp_path / "decisions.db"
     ids: list[str] = []
     principal = Principal("decision-reader", "default")
-    async with Persistence.open('decisions', storage=PersistenceStorage.sqlite(database)) as persistence_110, Runtime.open(persistence=persistence_110, features=features) as runtime:
+    async with Persistence.open('decisions', storage=PersistenceStorage.sqlite(database)) as persistence_110, Runtime.attach(persistence=persistence_110, features=features) as runtime:
         for probability in (0.85, 0.15):
             execution = await runtime.agents.get().start("Classify evidence", output=_Decision, principal=principal)
             result = (await execution.wait(timeout_seconds=10)).result
@@ -128,7 +128,7 @@ async def test_runtime_decision_stream_and_reopen_preserve_probabilities(tmp_pat
         assert len(models) == 2
         assert [len(model.requests) for model in models] == [1, 1]
 
-    async with Persistence.open('decisions', storage=PersistenceStorage.sqlite(database)) as persistence_130, Runtime.open(persistence=persistence_130, features=features) as runtime:
+    async with Persistence.open('decisions', storage=PersistenceStorage.sqlite(database)) as persistence_130, Runtime.attach(persistence=persistence_130, features=features) as runtime:
         for execution_id in ids:
             page = await runtime.executions.model_interactions(execution_id, principal=principal, include_content=True)
             item = page.items[0]
@@ -155,7 +155,7 @@ async def test_runtime_does_not_retry_unhandled_decision_handoff() -> None:
     features = RuntimeFeatures("unhandled")
     features.model("default", _Binding(model))
     features.agent("default", allow_tools=())
-    async with Persistence.open('unhandled', storage=PersistenceStorage.in_memory()) as persistence_159, Runtime.open(persistence=persistence_159, features=features) as runtime:
+    async with Persistence.open('unhandled', storage=PersistenceStorage.in_memory()) as persistence_159, Runtime.attach(persistence=persistence_159, features=features) as runtime:
         result = (await runtime.agents.get().run("Classify evidence", output=_Decision, timeout_seconds=10)).result
         assert result.status is ExecutionStatus.FAILED
         assert result.error_diagnostics.exception_type.endswith("UnfillableRoute")

@@ -35,7 +35,7 @@ async def test_session_execution_fork_preserves_committed_cursor_and_rejects_cha
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     if mode == "trace":
         group.capability(TraceCapability(), scope="runtime")
-    async with Persistence.open('session-execution-fork', storage=PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if mode == 'pending' else None)) as persistence_35, Runtime.open(persistence=persistence_35, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('session-execution-fork', storage=PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if mode == 'pending' else None)) as persistence_35, Runtime.attach(persistence=persistence_35, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session("session")
         first = await session.start("first")
         await first.wait(timeout_seconds=5)

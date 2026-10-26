@@ -332,7 +332,7 @@ async def test_runtime_composition_records_failed_tool_trace() -> None:
     features.tool(explode, effect_policy="none")
     features.agent("default", model="default", allow_tools=("explode",))
     features.capability(TraceCapability(), scope="runtime")
-    async with Persistence.open('failed-tool-trace', storage=PersistenceStorage.in_memory()) as persistence_332, Runtime.open(persistence=persistence_332, features=model_features(_FeatureModels(TestModel(call_tools=['explode'], custom_output_text='done')), features)) as runtime:
+    async with Persistence.open('failed-tool-trace', storage=PersistenceStorage.in_memory()) as persistence_332, Runtime.attach(persistence=persistence_332, features=model_features(_FeatureModels(TestModel(call_tools=['explode'], custom_output_text='done')), features)) as runtime:
         execution = await runtime.agents.get().start("invoke tool")
         await execution.wait(timeout_seconds=5)
         trace = await execution.trace()

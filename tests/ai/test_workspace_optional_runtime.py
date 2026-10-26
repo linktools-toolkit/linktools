@@ -57,7 +57,7 @@ class _RecordingLocalSandbox:
 async def test_workspace_less_runtime_runs_session_and_history() -> None:
     features = RuntimeFeatures("conversation")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('web-chat', storage=PersistenceStorage.in_memory()) as persistence_57, Runtime.open(persistence=persistence_57, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('web-chat', storage=PersistenceStorage.in_memory()) as persistence_57, Runtime.attach(persistence=persistence_57, features=model_features(RuntimeUsageModels(), features)) as runtime:
         assert runtime.namespace == "web-chat"
         session = await runtime.agents.get("default").create_session("chat")
         result = (await session.run("hello", timeout_seconds=10)).result
@@ -71,7 +71,7 @@ async def test_workspace_less_runtime_runs_session_and_history() -> None:
 async def test_workspace_less_runtime_rejects_files_and_explicit_cwd() -> None:
     features = RuntimeFeatures("conversation")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('web-chat', storage=PersistenceStorage.in_memory()) as persistence_75, Runtime.open(persistence=persistence_75, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('web-chat', storage=PersistenceStorage.in_memory()) as persistence_75, Runtime.attach(persistence=persistence_75, features=model_features(RuntimeUsageModels(), features)) as runtime:
         with pytest.raises(AIError) as files_error:
             await runtime.agents.get("default").run(
                 "inspect",
@@ -106,7 +106,7 @@ async def test_workspace_group_sandbox_controls_input_reads(tmp_path: Path) -> N
         sandbox=DisabledSandbox(),
     )
 
-    async with Persistence.open('workspace-sandbox', storage=PersistenceStorage.in_memory()) as persistence_114, Runtime.open(persistence=persistence_114, features=model_features(RuntimeUsageModels(), group)) as runtime:
+    async with Persistence.open('workspace-sandbox', storage=PersistenceStorage.in_memory()) as persistence_114, Runtime.attach(persistence=persistence_114, features=model_features(RuntimeUsageModels(), group)) as runtime:
         with pytest.raises(AIError) as error:
             await runtime.agents.get("default").run(
                 "inspect",
@@ -124,7 +124,7 @@ async def test_sandbox_group_can_be_composed_without_workspace() -> None:
     assert snapshot.workspace is None
     assert snapshot.sandbox is sandbox
 
-    async with Persistence.open('sandbox-only', storage=PersistenceStorage.in_memory()) as persistence_136, Runtime.open(persistence=persistence_136, features=model_features(RuntimeUsageModels(), group)) as runtime:
+    async with Persistence.open('sandbox-only', storage=PersistenceStorage.in_memory()) as persistence_136, Runtime.attach(persistence=persistence_136, features=model_features(RuntimeUsageModels(), group)) as runtime:
         result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
     assert result.status is ExecutionStatus.SUCCEEDED
 
@@ -158,7 +158,7 @@ async def test_sandbox_without_workspace_exposes_local_skill_resources(
     try:
         asset_features = RuntimeFeatures("assets", sandbox=sandbox)
         asset_features.capability(AssetCapability(store), scope="runtime")
-        async with Persistence.open('sandbox-skill', storage=PersistenceStorage.in_memory()) as persistence_174, Runtime.open(persistence=persistence_174, features=model_features(RuntimeUsageModels(), asset_features)) as runtime:
+        async with Persistence.open('sandbox-skill', storage=PersistenceStorage.in_memory()) as persistence_174, Runtime.attach(persistence=persistence_174, features=model_features(RuntimeUsageModels(), asset_features)) as runtime:
             result = (await runtime.agents.get("default").run(
                 "review",
                 timeout_seconds=10,
@@ -182,7 +182,7 @@ async def test_explicit_sandbox_controls_workspace_input_reads(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "evidence.txt").write_text("evidence", encoding="utf-8")
-    async with Persistence.open('separate-sandbox', storage=PersistenceStorage.in_memory()) as persistence_202, Runtime.open(persistence=persistence_202, features=model_features(RuntimeUsageModels(), workspace_features('workspace', workspace=Workspace.load(tmp_path), sandbox=DisabledSandbox()))) as runtime:
+    async with Persistence.open('separate-sandbox', storage=PersistenceStorage.in_memory()) as persistence_202, Runtime.attach(persistence=persistence_202, features=model_features(RuntimeUsageModels(), workspace_features('workspace', workspace=Workspace.load(tmp_path), sandbox=DisabledSandbox()))) as runtime:
         with pytest.raises(AIError) as error:
             await runtime.agents.get("default").run(
                 "inspect",
@@ -195,7 +195,7 @@ async def test_explicit_sandbox_controls_workspace_input_reads(
 async def test_runtime_features_rejects_multiple_sources() -> None:
     # A single RuntimeFeatures owns sandbox selection; arrays are no longer an API.
     with pytest.raises(TypeError, match="features"):
-        async with Persistence.open('sandbox-conflict', storage=PersistenceStorage.in_memory()) as persistence_219, Runtime.open(persistence=persistence_219, features=(RuntimeFeatures('first', sandbox=DisabledSandbox()), RuntimeFeatures('second', sandbox=DisabledSandbox()))):
+        async with Persistence.open('sandbox-conflict', storage=PersistenceStorage.in_memory()) as persistence_219, Runtime.attach(persistence=persistence_219, features=(RuntimeFeatures('first', sandbox=DisabledSandbox()), RuntimeFeatures('second', sandbox=DisabledSandbox()))):
             pytest.fail("multiple feature sources were accepted")
 
 
@@ -210,7 +210,7 @@ async def test_existing_workspace_cwd_requires_workspace_for_new_turn(
 
     features = workspace_features("workspace", workspace=workspace)
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('workspace', storage=PersistenceStorage.from_root(storage_root)) as persistence_238, Runtime.open(persistence=persistence_238, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('workspace', storage=PersistenceStorage.from_root(storage_root)) as persistence_238, Runtime.attach(persistence=persistence_238, features=model_features(RuntimeUsageModels(), features)) as runtime:
         await runtime.agents.get("default").create_session(
             "cwd-session",
             cwd=".",
@@ -218,7 +218,7 @@ async def test_existing_workspace_cwd_requires_workspace_for_new_turn(
 
     features = RuntimeFeatures("conversation")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('workspace', storage=PersistenceStorage.from_root(storage_root)) as persistence_250, Runtime.open(persistence=persistence_250, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('workspace', storage=PersistenceStorage.from_root(storage_root)) as persistence_250, Runtime.attach(persistence=persistence_250, features=model_features(RuntimeUsageModels(), features)) as runtime:
         with pytest.raises(AIError) as error:
             await runtime.agents.get("default").run(
                 "continue",

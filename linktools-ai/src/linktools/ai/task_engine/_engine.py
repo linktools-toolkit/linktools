@@ -14,7 +14,7 @@ from ..execution.handle import ExecutionBinding
 from ..core import (AuthorizationPolicy, CorrelationData, ExecutionContext, PrincipalKind, PromptLimits,
     TenantAuthorizationPolicy, canonical_sha256, overlay_correlation, principal_identity_payload, validate_idempotency_key)
 from ..persistence import Persistence, PersistenceDomain
-from ..observe import Metrics
+from ..observe import Metrics, MetricsControl, MetricFlushResult, MetricRecorderStatus
 from ..storage import PayloadPolicy, StorageRetentionMode
 from ..task import (
     DefaultTaskGraphService,
@@ -29,7 +29,7 @@ from ..execution.events import DefaultEventService
 from ..execution.tree import ExecutionTreeBroker, ExecutionTreeStreamer
 from ..execution.coordinator import ExecutionStreamCoordinator
 from ..inputs import ExecutionInputMaterializer
-from ..observe.service import MetricsService
+from ..observe.service import MetricsService, disabled_metric_status
 from ..persistence.objects import ObjectKeyFactory
 from ._runner import TaskNodeExecutor
 from ..inputs import TaskGraphBindingCaptureStore
@@ -124,6 +124,7 @@ class TaskEngine(Generic[AppT]):
         self._metrics = None if metrics is None else MetricsService(metrics)
         if self._metrics is not None:
             self._metrics.configure_runtime_dimensions(self._context.metric_dimensions)
+        self._metrics_control = MetricsControl(self._metric_status, self._flush_metrics)
         key_factory = ObjectKeyFactory(self.namespace)
         payload_policy = PayloadPolicy()
         self._execution_service = TaskExecutionService(
@@ -191,6 +192,18 @@ class TaskEngine(Generic[AppT]):
             release_observation=self._release_observation,
             capture_tree=self._capture_execution_tree, replay_tree=self._replay_execution_tree,
         )
+
+    @property
+    def metrics(self) -> MetricsControl:
+        return self._metrics_control
+
+    def _metric_status(self) -> MetricRecorderStatus:
+        return disabled_metric_status() if self._metrics is None else self._metrics.status()
+
+    async def _flush_metrics(self, *, timeout_seconds: float = 5.0) -> MetricFlushResult:
+        if self._metrics is None:
+            return MetricFlushResult(True, self._metric_status())
+        return await self._metrics.flush(timeout_seconds=timeout_seconds)
 
     def _bind_agent_task(self, task: Task[AppT]) -> Task[AppT]:
         port = task.agent_execution

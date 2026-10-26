@@ -33,7 +33,7 @@ async def test_execution_retries_and_default_forks_share_scope_but_explicit_fork
     capabilities.capability(TraceCapability(), scope="runtime")
     features = capabilities
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('budget-lineage', storage=PersistenceStorage.in_memory()) as persistence_31, Runtime.open(persistence=persistence_31, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('budget-lineage', storage=PersistenceStorage.in_memory()) as persistence_31, Runtime.attach(persistence=persistence_31, features=model_features(RuntimeUsageModels(), features)) as runtime:
         agent = runtime.agents.get()
         root = await agent.start("root", budget=RunBudget(model_requests=10), idempotency_key="budget-root")
         assert (await root.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -67,7 +67,7 @@ async def test_execution_retries_and_default_forks_share_scope_but_explicit_fork
 async def test_session_new_turns_have_independent_budgets() -> None:
     features = _capabilities()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('budget-session', storage=PersistenceStorage.in_memory()) as persistence_66, Runtime.open(persistence=persistence_66, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('budget-session', storage=PersistenceStorage.in_memory()) as persistence_66, Runtime.attach(persistence=persistence_66, features=model_features(RuntimeUsageModels(), features)) as runtime:
         session = runtime.agents.get().session("conversation")
         first = await session.start("first", budget=RunBudget(model_requests=1))
         assert (await first.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -88,7 +88,7 @@ async def test_graph_budget_is_read_only_during_description_and_shared_by_mixed_
         return context.node_id
 
     storage = PersistenceStorage.filesystem(tmp_path)
-    async with Persistence.open('budget-graph', storage=storage) as persistence_88, Runtime.open(persistence=persistence_88, features=model_features(RuntimeUsageModels(), _capabilities())) as runtime, TaskEngine.open(persistence=persistence_88, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('budget-graph', storage=storage) as persistence_88, Runtime.attach(persistence=persistence_88, features=model_features(RuntimeUsageModels(), _capabilities())) as runtime, TaskEngine.open(persistence=persistence_88, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         agent_task = Task.from_agent("budget.agent", runtime.agents.get())
         callable_task = Task("budget.callable", ordinary, effect_policy="none")
         engine = runtime_engine.with_definitions(agent_task, callable_task)
@@ -124,7 +124,7 @@ async def test_zero_budget_stops_model_before_output_and_subagent_inherits_spent
 
     group = _capabilities()
     group.agent("child", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Persistence.open('budget-child', storage=PersistenceStorage.in_memory()) as persistence_125, Runtime.open(persistence=persistence_125, features=model_features(RuntimeUsageModels(), group)) as runtime:
+    async with Persistence.open('budget-child', storage=PersistenceStorage.in_memory()) as persistence_125, Runtime.attach(persistence=persistence_125, features=model_features(RuntimeUsageModels(), group)) as runtime:
         denied = await runtime.agents.get().start("blocked", budget=RunBudget(model_requests=0))
         result = (await denied.wait()).result
         assert result.status is ExecutionStatus.FAILED
@@ -156,7 +156,7 @@ async def test_zero_budget_stops_model_before_output_and_subagent_inherits_spent
 async def test_graph_siblings_and_expanded_nodes_share_actual_model_admission(expanded: bool) -> None:
     from linktools.ai.task import TaskExpander, TaskExpansionContext
 
-    async with Persistence.open('budget-concurrency', storage=PersistenceStorage.in_memory()) as persistence_158, Runtime.open(persistence=persistence_158, features=model_features(RuntimeUsageModels(), _capabilities())) as runtime, TaskEngine.open(persistence=persistence_158, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('budget-concurrency', storage=PersistenceStorage.in_memory()) as persistence_158, Runtime.attach(persistence=persistence_158, features=model_features(RuntimeUsageModels(), _capabilities())) as runtime, TaskEngine.open(persistence=persistence_158, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         task = Task.from_agent("budget.concurrent", runtime.agents.get())
 
         def expand(context: TaskExpansionContext) -> tuple[TaskNode, ...]:
@@ -190,14 +190,14 @@ async def test_budget_scope_survives_restart_and_missing_inherited_scope_fails_c
 
     features = _capabilities()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('budget-reopen', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_193, Runtime.open(persistence=persistence_193, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('budget-reopen', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_193, Runtime.attach(persistence=persistence_193, features=model_features(RuntimeUsageModels(), features)) as runtime:
         root = await runtime.agents.get().start("first", budget=RunBudget(model_requests=2))
         assert (await root.wait()).result.status is ExecutionStatus.SUCCEEDED
         execution_id = root.execution_id
         before = await root.budget_usage()
 
     storage = PersistenceStorage.filesystem(tmp_path)
-    async with Persistence.open('budget-reopen', storage=storage) as persistence_201, Runtime.open(persistence=persistence_201, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('budget-reopen', storage=storage) as persistence_201, Runtime.attach(persistence=persistence_201, features=model_features(RuntimeUsageModels(), features)) as runtime:
         restored = await runtime.executions.get(execution_id)
         assert await restored.budget_usage() == before
         retried = await restored.retry("second")

@@ -24,6 +24,7 @@ from ..capability import (
     CapabilityContribution,
     SkillSourceRegistry,
 )
+from ._lifecycle import _RuntimeCloseCoordinator
 from ._features import (
     RuntimeFeatures,
     RuntimeFeaturesCapture,
@@ -118,6 +119,54 @@ class _RuntimeComponents:
     input_captures: InputCaptures
 
 
+class _AgentLifecycle:
+    """Keep partial Agent resources reachable before composition can fail."""
+
+    def __init__(self) -> None:
+        self.run_store: RuntimeAgentRunStore | None = None
+        self.workspace_access: WorkspaceAccess | None = None
+        self.input_materializer: ExecutionInputMaterializer | None = None
+        self.metric_buffer: MetricsService | None = None
+        self.execution: DefaultExecutionService | None = None
+        self.backend: LocalExecutionBackend | None = None
+        self.session: RuntimeSessionService | None = None
+        self._coordinator: _RuntimeCloseCoordinator | None = None
+
+    def configure(
+        self,
+        actions: Sequence[tuple[str, Callable[[], Awaitable[None]]]],
+        handoff_actions: Sequence[tuple[str, Callable[[], Awaitable[None]]]],
+    ) -> None:
+        self._coordinator = _RuntimeCloseCoordinator(
+            tuple(action for _, action in actions),
+            tuple(action for _, action in handoff_actions),
+        )
+
+    async def close(self) -> None:
+        if self._coordinator is None:
+            actions = _runtime_close_actions(
+                execution=self.execution, backend=self.backend,
+                input_materializer=None, metric_buffer=None, run_store=None,
+                session=self.session,
+            )
+            if self.input_materializer is not None:
+                actions = (*actions, ("runtime.input", self.input_materializer.close))
+            elif self.workspace_access is not None:
+                actions = (*actions, ("runtime.workspace", self.workspace_access.close))
+            if self.run_store is not None:
+                actions = (*actions, ("runtime.runs.preflight", self.run_store.preflight_close),
+                           ("runtime.runs", self.run_store.close))
+            if self.metric_buffer is not None:
+                actions = (*actions, ("runtime.metrics", self.metric_buffer.close))
+            self.configure(actions, ())
+        await self._coordinator.close()
+
+    async def handoff(self) -> None:
+        if self._coordinator is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        await self._coordinator.handoff()
+
+
 async def compose_runtime_components(
     *,
     persistence: Persistence,
@@ -125,6 +174,8 @@ async def compose_runtime_components(
     metrics: Metrics | None = None,
     features: "RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None" = None,
     auto_recover: bool = True,
+    authorization: AuthorizationPolicy | None = None,
+    lifecycle: "_AgentLifecycle | None" = None,
 ) -> _RuntimeComponents:
     """Capture declarations and build Runtime-private services."""
     if not isinstance(persistence, Persistence) or not persistence.ready:
@@ -139,7 +190,6 @@ async def compose_runtime_components(
     if captured is not None:
         await captured.verify_source_revision()
     selected_limits = PromptLimits() if captured is None else captured.limits
-    authorization = None if captured is None else captured.authorization
     execution_capability = ExecutionCapability()
     execution_declared = False
     session_capability = SessionCapability()
@@ -154,7 +204,8 @@ async def compose_runtime_components(
     run_store: RuntimeAgentRunStore | None = None
     workspace_access: WorkspaceAccess | None = None
     input_materializer: ExecutionInputMaterializer | None = None
-    ownership_transferred = False
+    owns_lifecycle = lifecycle is None
+    lifecycle = _AgentLifecycle() if lifecycle is None else lifecycle
     try:
         candidates: list[CapabilityContribution[object]] = []
         asset_sources: dict[str, AssetStoreReader] = {}
@@ -306,6 +357,7 @@ async def compose_runtime_components(
             await persistence.capability_store(identity)
 
         run_store = await persistence.create_agent_run_store()
+        lifecycle.run_store = run_store
         if selected_state.capability_stores:
             run_store.capability_writes = RuntimeCapabilityWrites(
                 selected_state.capability_stores, namespace=resolved_namespace, tenant_id=effective_tenant_id,
@@ -335,6 +387,7 @@ async def compose_runtime_components(
                 workspace,
                 sandbox=sandbox,
             )
+            lifecycle.workspace_access = workspace_access
             execution_cwd = str(workspace.root)
         object_key_factory = ObjectKeyFactory(resolved_namespace)
         payload_policy = PayloadPolicy()
@@ -345,6 +398,7 @@ async def compose_runtime_components(
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
         )
+        lifecycle.input_materializer = input_materializer
         runtime_token_seed = token_seed(resolved_namespace)
         history_reader = _execution_history_reader(
             resolved_namespace,
@@ -365,9 +419,9 @@ async def compose_runtime_components(
             TenantAuthorizationPolicy(effective_tenant_id)
             if authorization is None else authorization
         )
-        ownership_transferred = True
         components = await _build_local_components(
             state=selected_state,
+            lifecycle=lifecycle,
             run_store=run_store,
             metrics=metrics,
             commit=execution_capability.commit,
@@ -397,80 +451,44 @@ async def compose_runtime_components(
             auto_recover=auto_recover,
             tool_responses=tool_responses,
         )
-        try:
-            if captured is not None:
-                await captured.verify_source_revision()
-        except BaseException as primary_error:
-            try:
-                await components.close_callback()
-            except BaseException as cleanup_error:
-                raise primary_error from cleanup_error
-            raise
+        if captured is not None:
+            await captured.verify_source_revision()
         _logger.info("runtime capability capture admitted: group=%s", None if captured is None else captured.group_id)
         return components
-    except BaseException:
-        if not ownership_transferred:
-            await _cleanup_compose_resources(
-                input_materializer=input_materializer,
-                workspace_access=workspace_access,
-                run_store=run_store,
-            )
+    except BaseException as primary_error:
+        if owns_lifecycle:
+            try:
+                await lifecycle.close()
+            except BaseException as cleanup_error:
+                raise primary_error from cleanup_error
         raise
 
 
 def _runtime_close_actions(
     *,
-    execution: DefaultExecutionService,
+    execution: DefaultExecutionService | None,
     backend: LocalExecutionBackend | None,
-    input_materializer: ExecutionInputMaterializer,
+    input_materializer: ExecutionInputMaterializer | None,
     metric_buffer: MetricsService | None,
-    run_store: RuntimeAgentRunStore,
+    run_store: RuntimeAgentRunStore | None,
     session: RuntimeSessionService | None = None,
     handoff: bool = False,
 ) -> tuple[tuple[str, Callable[[], Awaitable[None]]], ...]:
     actions: list[tuple[str, Callable[[], Awaitable[None]]]] = []
     if session is not None:
         actions.append(("runtime.session.display", session.drain_display_reads))
-    actions.append(("runtime.execution.preflight", execution.preflight_close))
+    if execution is not None:
+        actions.append(("runtime.execution.preflight", execution.preflight_close))
     if backend is not None:
         actions.append(("runtime.backend", backend.handoff if handoff else backend.close))
-    actions.append(("runtime.runs.preflight", run_store.preflight_close))
-    actions.append(("runtime.runs", run_store.close))
-    actions.append(("runtime.input", input_materializer.close))
+    if run_store is not None:
+        actions.append(("runtime.runs.preflight", run_store.preflight_close))
+        actions.append(("runtime.runs", run_store.close))
+    if input_materializer is not None:
+        actions.append(("runtime.input", input_materializer.close))
     if metric_buffer is not None:
         actions.append(("runtime.metrics", metric_buffer.close))
     return tuple(actions)
-
-
-async def _run_cleanup_actions(
-    actions: Sequence[tuple[str, Callable[[], Awaitable[None]]]],
-    *,
-    stop_on_error: bool = True,
-) -> None:
-    for phase, action in actions:
-        try:
-            await action()
-        except BaseException as error:
-            _log_secondary_cleanup(phase, error)
-            if stop_on_error:
-                return
-
-
-async def _cleanup_compose_resources(
-    *,
-    input_materializer: ExecutionInputMaterializer | None,
-    workspace_access: WorkspaceAccess | None,
-    run_store: RuntimeAgentRunStore | None,
-) -> None:
-    actions: list[tuple[str, Callable[[], Awaitable[None]]]] = []
-    if input_materializer is not None:
-        actions.append(("runtime.compose.input", input_materializer.close))
-    elif workspace_access is not None:
-        actions.append(("runtime.compose.workspace_access", workspace_access.close))
-    if run_store is not None:
-        actions.extend((("runtime.compose.runs.preflight", run_store.preflight_close),
-                        ("runtime.compose.runs", run_store.close)))
-    await _run_cleanup_actions(actions, stop_on_error=False)
 
 
 def _log_secondary_cleanup(phase: str, error: BaseException) -> None:
@@ -562,6 +580,7 @@ def _require_storage_identity(
 async def _build_local_components(
     *,
     state: Persistence,
+    lifecycle: "_AgentLifecycle",
     run_store: RuntimeAgentRunStore,
     metrics: Metrics | None,
     commit: CommitPolicy,
@@ -637,6 +656,7 @@ async def _build_local_components(
         batch_scopes = BatchWriteScope.scoped_factory()
         run_store.trace_persistence.bind_batch_scopes(batch_scopes)
         metric_buffer = None if metrics is None else MetricsService(metrics, batch_scopes=batch_scopes)
+        lifecycle.metric_buffer = metric_buffer
         metric_source_namespace = None if metric_buffer is None else namespace
         if coordination is not None:
             runtime_bridge.pending_turns.bind_coordination(PendingTurnCoordination.select(
@@ -697,6 +717,7 @@ async def _build_local_components(
                 object_reader=lambda reference: state.read_archive_object(PersistenceDomain.EXECUTION, reference),
             ),
         )
+        lifecycle.execution = execution
         execution_tree_broker = ExecutionTreeBroker()
         dispatcher = SubagentDispatcher(
             catalog,
@@ -713,14 +734,6 @@ async def _build_local_components(
             tool_responses=tool_responses,
         )
     except BaseException:
-        actions: list[tuple[str, Callable[[], Awaitable[None]]]] = [
-            ("runtime.build.input", input_materializer.close),
-            ("runtime.build.runs.preflight", run_store.preflight_close),
-            ("runtime.build.runs", run_store.close),
-        ]
-        if metric_buffer is not None:
-            actions.append(("runtime.build.metrics", metric_buffer.close))
-        await _run_cleanup_actions(actions, stop_on_error=False)
         raise
 
     def build_memory_store(
@@ -810,6 +823,7 @@ async def _build_local_components(
         runtime_bridge.bind(backend)
         runtime_bridge.pending_start = backend.start_pending
         runtime_bridge.pending_promote = backend.promote_pending_execution
+        lifecycle.backend = backend
         runtime_bridge.pending_cancel_promote = lambda execution_id: backend.promote_pending_execution(
             execution_id, allow_cancelled=True,
         )
@@ -831,6 +845,8 @@ async def _build_local_components(
             pending_session_execution=runtime_bridge.pending_turns.read_session_execution,
             workspace_access=input_materializer.access,
         )
+        lifecycle.session = session
+
         async def prepare_pending_capture(execution_id: str, principal) -> None:
             await execution.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_CAPTURE_INPUT)
             await execution.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
@@ -912,29 +928,13 @@ async def _build_local_components(
             execution=execution, backend=backend, input_materializer=input_materializer,
             metric_buffer=metric_buffer, run_store=run_store, session=session, handoff=True,
         )
-        coordinator = _RuntimeCloseCoordinator(
-            tuple(action for _, action in close_actions),
-            tuple(action for _, action in handoff_actions),
-        )
+        lifecycle.configure(close_actions, handoff_actions)
         await run_store.prepare_archives()
         if auto_recover and PersistenceDomain.RECOVERY in state.plan.durable_domains:
             await backend.reconcile(
                 allow_active_recovery=exclusive_execution_writer,
             )
     except BaseException:
-        abort_actions = (
-            close_actions
-            if close_actions is not None
-            else _runtime_close_actions(
-                        execution=execution,
-                backend=backend,
-                input_materializer=input_materializer,
-                metric_buffer=metric_buffer,
-                run_store=run_store,
-                session=session,
-            )
-        )
-        await _run_cleanup_actions(abort_actions)
         raise
     return _RuntimeComponents(
         state=state,
@@ -948,8 +948,8 @@ async def _build_local_components(
         event=event,
         artifact=artifact,
         tenant_id=tenant_id,
-        close_callback=coordinator.close,
-        handoff_callback=(coordinator.handoff if restart_checkpoints and commit.mode == "sync"
+        close_callback=lifecycle.close,
+        handoff_callback=(lifecycle.handoff if restart_checkpoints and commit.mode == "sync"
             and all(state.plan.route(domain).retention is StorageRetentionMode.DURABLE
                     for domain in (PersistenceDomain.EXECUTION, PersistenceDomain.RECOVERY,
                                    PersistenceDomain.CHECKPOINT)) else None),
@@ -1000,36 +1000,6 @@ def _borrowed_runtime_history(
     )
 
 
-class _RuntimeCloseCoordinator:
-    def __init__(
-        self, actions: tuple[Callable[[], Awaitable[None]], ...],
-        handoff_actions: tuple[Callable[[], Awaitable[None]], ...] = (),
-    ) -> None:
-        self._actions = actions
-        self._handoff_actions = handoff_actions
-        self._cursor = 0
-        self._task: asyncio.Task[None] | None = None
-        self._lock = asyncio.Lock()
-
-    async def handoff(self) -> None:
-        if self._task is None and self._cursor == 0:
-            self._actions = self._handoff_actions
-        await self.close()
-
-    async def close(self) -> None:
-        async with self._lock:
-            if self._cursor >= len(self._actions):
-                return
-            task = self._task
-            if task is None or task.done():
-                task = asyncio.create_task(self._run(), name="linktools-runtime-close")
-                self._task = task
-        await asyncio.shield(task)
-
-    async def _run(self) -> None:
-        while self._cursor < len(self._actions):
-            await self._actions[self._cursor]()
-            self._cursor += 1
 
 
 __all__ = []

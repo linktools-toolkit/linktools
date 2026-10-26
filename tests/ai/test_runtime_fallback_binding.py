@@ -47,7 +47,7 @@ async def test_typed_handoff_reaches_one_candidate_and_reopen_preserves_usage(tm
     first, second = _HandoffModel(), _OfflineDecisionModel()
     features, loads = _features(first, second)
     storage = PersistenceStorage.sqlite(tmp_path / "fallback.sqlite")
-    async with Persistence.open('fallback-runtime', storage=storage) as persistence_47, Runtime.open(persistence=persistence_47, features=features) as runtime:
+    async with Persistence.open('fallback-runtime', storage=storage) as persistence_47, Runtime.attach(persistence=persistence_47, features=features) as runtime:
         execution = await runtime.agents.get().start("classify", output=_Decision)
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
@@ -57,7 +57,7 @@ async def test_typed_handoff_reaches_one_candidate_and_reopen_preserves_usage(tm
         assert len(loads) == 1
         principal = runtime.default_principal
         execution_id = execution.execution_id
-    async with Persistence.open('fallback-runtime', storage=storage) as persistence_57, Runtime.open(persistence=persistence_57, features=features) as runtime:
+    async with Persistence.open('fallback-runtime', storage=storage) as persistence_57, Runtime.attach(persistence=persistence_57, features=features) as runtime:
         result = await runtime.executions.result(execution_id, principal=principal)
         assert result.status is ExecutionStatus.SUCCEEDED
         assert result.usage.input_tokens == 12
@@ -68,7 +68,7 @@ async def test_typed_handoff_reaches_one_candidate_and_reopen_preserves_usage(tm
 async def test_unused_incompatible_candidate_is_not_checked():
     first, second = _OfflineDecisionModel(), _AlwaysThinkingModel()
     features, _ = _features(first, second)
-    async with Persistence.open('fallback-runtime', storage=PersistenceStorage.in_memory()) as persistence_68, Runtime.open(persistence=persistence_68, features=features) as runtime:
+    async with Persistence.open('fallback-runtime', storage=PersistenceStorage.in_memory()) as persistence_68, Runtime.attach(persistence=persistence_68, features=features) as runtime:
         execution = await runtime.agents.get().start("classify", output=_Decision, thinking=False)
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
@@ -80,7 +80,7 @@ async def test_unused_incompatible_candidate_is_not_checked():
 async def test_selected_always_on_candidate_preserves_native_false_semantics():
     first, second = _HandoffModel(), _AlwaysThinkingModel()
     features, _ = _features(first, second)
-    async with Persistence.open('fallback-runtime', storage=PersistenceStorage.in_memory()) as persistence_80, Runtime.open(persistence=persistence_80, features=features) as runtime:
+    async with Persistence.open('fallback-runtime', storage=PersistenceStorage.in_memory()) as persistence_80, Runtime.attach(persistence=persistence_80, features=features) as runtime:
         execution = await runtime.agents.get().start("classify", output=_Decision, thinking=False)
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED

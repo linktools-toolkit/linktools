@@ -188,7 +188,7 @@ def test_task_graph_exposes_deterministic_topological_order() -> None:
 
 
 def test_model_resolver_is_instance_owned() -> None:
-    binding = create_model(protocol="openai", model="model")
+    binding = create_model(api="openai", model="model")
     sources = {"route": binding}
     snapshot = _ModelResolver(sources)
     sources.clear()

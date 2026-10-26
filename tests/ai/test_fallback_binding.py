@@ -85,7 +85,7 @@ def test_fallback_requires_a_candidate_and_preserves_ordered_semantics() -> None
     with pytest.raises(ValueError, match="at least one candidate"):
         FallbackBinding()
     primary = create_model(
-        protocol='openai',
+        api='openai',
         model='primary',
         api_key='secret-primary',
         base_url='https://primary.example.test',
@@ -93,7 +93,7 @@ def test_fallback_requires_a_candidate_and_preserves_ordered_semantics() -> None
         model_settings={'max_tokens': 25},
     )
     secondary = create_model(
-        protocol="anthropic", model="secondary", api_key="secret-secondary",
+        api="anthropic", model="secondary", api_key="secret-secondary",
         input_types=["mime:application/pdf"],
     )
     binding = FallbackBinding(primary, secondary)
@@ -149,9 +149,9 @@ def test_handler_implementation_and_connections_do_not_define_model_semantics() 
         def __repr__(self) -> str:
             raise AssertionError("handler implementation must not be exposed")
 
-    primary = create_model(protocol="openai", model="primary", api_key="first-secret")
+    primary = create_model(api="openai", model="primary", api_key="first-secret")
     other_connection = create_model(
-        protocol='openai',
+        api='openai',
         model='primary',
         api_key='second-secret',
         base_url='https://secondary.example.test',

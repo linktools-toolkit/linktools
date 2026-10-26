@@ -66,9 +66,9 @@ async def _runtimes(tmp_path, cache, *, finish_provider: asyncio.Event | None = 
     group.capability(ExecutionCapability(), scope="runtime")
     models = _Models(FunctionModel(stream_function=model))
     path = tmp_path / "state.db"
-    async with Persistence.open('stream-lifecycle', storage=PersistenceStorage.sqlite(path, coordination=cache)) as persistence_66, Runtime.open(persistence=persistence_66, features=model_features(models, group)) as owner:
+    async with Persistence.open('stream-lifecycle', storage=PersistenceStorage.sqlite(path, coordination=cache)) as persistence_66, Runtime.attach(persistence=persistence_66, features=model_features(models, group)) as owner:
         storage = PersistenceStorage.sqlite(path, coordination=cache)
-        async with Persistence.open('stream-lifecycle', storage=storage) as persistence_69, Runtime.open(persistence=persistence_69, features=model_features(models, group)) as reader:
+        async with Persistence.open('stream-lifecycle', storage=storage) as persistence_69, Runtime.attach(persistence=persistence_69, features=model_features(models, group)) as reader:
             execution = await owner.agents.get().start("question")
             try:
                 await asyncio.wait_for(entered.wait(), 5)
@@ -255,9 +255,9 @@ async def test_remote_watch_before_first_admission_receives_later_preview(tmp_pa
     group.capability(ExecutionCapability(), scope="runtime")
     models = _Models(FunctionModel(stream_function=model))
     path = tmp_path / "early.db"
-    async with Persistence.open('early-preview', storage=PersistenceStorage.sqlite(path, coordination=cache)) as persistence_256, Runtime.open(persistence=persistence_256, features=model_features(models, group)) as owner:
+    async with Persistence.open('early-preview', storage=PersistenceStorage.sqlite(path, coordination=cache)) as persistence_256, Runtime.attach(persistence=persistence_256, features=model_features(models, group)) as owner:
         reader_storage = PersistenceStorage.sqlite(path, coordination=cache)
-        async with Persistence.open('early-preview', storage=reader_storage) as persistence_259, Runtime.open(persistence=persistence_259, features=model_features(models, group)) as reader:
+        async with Persistence.open('early-preview', storage=reader_storage) as persistence_259, Runtime.attach(persistence=persistence_259, features=model_features(models, group)) as reader:
             execution = await owner.agents.get().start("question")
             repository = reader._state.execution.executions
             read_head = repository.get_history_head

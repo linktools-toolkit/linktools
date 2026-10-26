@@ -239,7 +239,7 @@ async def _runtime_deferred_session(root: str, resumed: bool, backend: str) -> N
     features.capability(_ChangingInstructions(state), scope="agent")
     features.agent("default", instructions="Fixed instructions.", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = PersistenceStorage.sqlite(Path(root) / "runtime.db") if backend == "sqlite" else PersistenceStorage.filesystem(Path(root))
-    async with Persistence.open('deferred-instructions', storage=storage) as persistence_239, Runtime.open(persistence=persistence_239, features=features) as runtime:
+    async with Persistence.open('deferred-instructions', storage=storage) as persistence_239, Runtime.attach(persistence=persistence_239, features=features) as runtime:
         agent = runtime.agents.get()
         session = agent.session("session") if resumed else await agent.create_session("session")
         if resumed:

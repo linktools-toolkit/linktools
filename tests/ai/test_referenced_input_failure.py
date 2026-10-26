@@ -67,7 +67,7 @@ async def test_wrong_input_bytes_commit_failed_result_and_reopen_without_loading
     features.capability(ReferencedInputsCapability(load), id=_SOURCE.id,
                         revision=_SOURCE.revision, scope="agent")
     content = ReferencedContent(_REF, media_type="application/pdf", source=_SOURCE)
-    async with Persistence.open('reference-failure', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_67, Runtime.open(persistence=persistence_67, features=features) as runtime:
+    async with Persistence.open('reference-failure', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_67, Runtime.attach(persistence=persistence_67, features=features) as runtime:
         principal = runtime.default_principal
         execution = await runtime.agents.get().start(["inspect", content], principal=principal)
         result = (await execution.wait(timeout_seconds=10)).result
@@ -84,7 +84,7 @@ async def test_wrong_input_bytes_commit_failed_result_and_reopen_without_loading
         assert interactions[0].error_code == result.error_code
         execution_id = execution.execution_id
     assert not dispatches and len(loads) == 1
-    async with Persistence.open('reference-failure', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_85, Runtime.open(persistence=persistence_85, features=features) as reopened:
+    async with Persistence.open('reference-failure', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_85, Runtime.attach(persistence=persistence_85, features=features) as reopened:
         restored = await reopened.executions.result(execution_id, principal=principal)
         assert restored.status is ExecutionStatus.FAILED
         assert restored.error_code == ErrorCode.ASSET_CONTENT_MISMATCH.value

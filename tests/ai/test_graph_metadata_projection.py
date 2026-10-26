@@ -43,7 +43,7 @@ async def _runtime(tmp_path: Path, *, backend: str = "filesystem", models=None) 
         storage = PersistenceStorage.filesystem(tmp_path)
     group = RuntimeFeatures("metadata")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Persistence.open('metadata-projection', storage=storage) as persistence_43, Runtime.open(persistence=persistence_43, features=model_features(FixtureModels() if models is None else models, group)) as runtime, TaskEngine.open(persistence=persistence_43, context=runtime.context) as runtime_engine:
+    async with Persistence.open('metadata-projection', storage=storage) as persistence_43, Runtime.attach(persistence=persistence_43, features=model_features(FixtureModels() if models is None else models, group)) as runtime, TaskEngine.open(persistence=persistence_43, context=runtime.context) as runtime_engine:
         yield runtime, runtime_engine
 
 

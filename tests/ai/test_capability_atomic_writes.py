@@ -295,7 +295,7 @@ async def _opened(
             capability.id = None
         features.capability(capability, id=id, revision=1, scope=scope)
     try:
-        async with Persistence.open('atomic-capabilities', storage=storage) as persistence_288, Runtime.open(persistence=persistence_288, features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=metrics) as runtime:
+        async with Persistence.open('atomic-capabilities', storage=storage) as persistence_288, Runtime.attach(persistence=persistence_288, features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=metrics) as runtime:
             opened = _Opened(runtime, probe, templates, release, ready)
             try:
                 yield opened

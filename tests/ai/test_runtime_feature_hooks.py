@@ -47,7 +47,7 @@ async def test_wrapped_features_keep_native_order_and_isolate_concurrent_runs(ne
                              id="wrapped.features", label="outer", events=events) if nested else inner)
     features = _features(tree)
     state = PersistenceStorage.in_memory()
-    async with Persistence.open('wrapped-features', storage=state) as persistence_47, Runtime.open(persistence=persistence_47, features=model_features(_FeatureModels(), features)) as runtime:
+    async with Persistence.open('wrapped-features', storage=state) as persistence_47, Runtime.attach(persistence=persistence_47, features=model_features(_FeatureModels(), features)) as runtime:
         executions = await asyncio.gather(*(runtime.agents.get().start(f"input {index}") for index in range(3)))
         results = await asyncio.gather(*(execution.wait(timeout_seconds=5) for execution in executions))
         assert all(result.result.status is ExecutionStatus.SUCCEEDED for result in results)
@@ -97,7 +97,7 @@ async def test_bound_features_preserve_public_types_and_subclass_hooks_for_nativ
     checkpoint = CheckpointCapability()
     conversation = ExecutionCapability(retain_history=True)
     features = _features(trace, checkpoint, conversation, _RequiresFeatureTypes(events=events))
-    async with Persistence.open('type-ordering', storage=PersistenceStorage.in_memory()) as persistence_98, Runtime.open(persistence=persistence_98, features=model_features(_FeatureModels(), features)) as runtime:
+    async with Persistence.open('type-ordering', storage=PersistenceStorage.in_memory()) as persistence_98, Runtime.attach(persistence=persistence_98, features=model_features(_FeatureModels(), features)) as runtime:
         executions = await asyncio.gather(*(runtime.agents.get().start(str(index)) for index in range(2)))
         results = await asyncio.gather(*(execution.wait(timeout_seconds=5) for execution in executions))
         assert all(result.result.status is ExecutionStatus.SUCCEEDED for result in results)

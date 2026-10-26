@@ -161,7 +161,7 @@ async def test_sql_admission_is_atomic_and_token_survives_reopen(tmp_path) -> No
 
 def _binding() -> AgentBinding:
     spec = AgentSpec("agent", model="model")
-    models = {"model": create_model(protocol="openai", model="gpt-test")}
+    models = {"model": create_model(api="openai", model="gpt-test")}
     compiler = AgentCompiler(
         models=models, candidates=(), agents={spec.id: spec},
     )

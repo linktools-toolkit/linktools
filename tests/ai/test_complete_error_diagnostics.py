@@ -154,7 +154,7 @@ async def test_actual_failure_full_diagnostics_survive_close_and_public_reopen(t
 
     group = RuntimeFeatures("complete-diagnostics")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Persistence.open('complete-diagnostics', storage=storage()) as persistence_153, Runtime.open(persistence=persistence_153, features=model_features(_FailingModel(), group)) as runtime:
+    async with Persistence.open('complete-diagnostics', storage=storage()) as persistence_153, Runtime.attach(persistence=persistence_153, features=model_features(_FailingModel(), group)) as runtime:
         result = (await runtime.agents.get().run("test failure", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.FAILED
         assert result.error_code == ErrorCode.MODEL_API_ERROR.value

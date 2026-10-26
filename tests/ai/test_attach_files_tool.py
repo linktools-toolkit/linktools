@@ -225,7 +225,7 @@ async def test_attach_files_rejects_unknown_image_before_read(
 ) -> None:
     workspace = Workspace.load(tmp_path)
     session = _AttachmentSession({"evidence.png": b"png"})
-    boundary, tool = await _boundary(workspace, session, model_binding=create_model(protocol='openai', model="gpt-test"))
+    boundary, tool = await _boundary(workspace, session, model_binding=create_model(api='openai', model="gpt-test"))
 
     with pytest.raises(
         ToolCallRetry,

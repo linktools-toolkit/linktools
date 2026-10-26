@@ -91,7 +91,7 @@ async def test_completed_output_is_canonical_after_actual_prune_and_reopen(
 ) -> None:
     _canonical_output(monkeypatch, output)
     storage = _storage(tmp_path, backend)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_90, Runtime.open(persistence=persistence_90, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_90, Runtime.attach(persistence=persistence_90, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         result = (await session.run("original user input", timeout_seconds=5)).result
@@ -133,7 +133,7 @@ async def test_retained_payload_and_attachment_roots_survive_gc_then_release(
     output = {"canonical": "x" * (80 * 1024)}
     _canonical_output(monkeypatch, output)
     storage = _storage(tmp_path, objects=objects)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_132, Runtime.open(persistence=persistence_132, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_132, Runtime.attach(persistence=persistence_132, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         result = (await session.run(("inspect original", BinaryContent(
@@ -200,7 +200,7 @@ async def test_fork_retains_only_selected_history_and_independent_turn_outputs(
         count += 1
         return replace(result, output={"turn": count})
     monkeypatch.setattr(AgentExecutor, "execute", execute)
-    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path)) as persistence_199, Runtime.open(persistence=persistence_199, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path)) as persistence_199, Runtime.attach(persistence=persistence_199, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         parent = await runtime.agents.get().create_session("parent")
         await parent.run("first", timeout_seconds=5)
@@ -227,7 +227,7 @@ async def test_fork_retains_only_selected_history_and_independent_turn_outputs(
 
 async def test_disabled_conversation_does_not_retain_new_chat_or_break_results(tmp_path: Path) -> None:
     storage = _storage(tmp_path)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_226, Runtime.open(persistence=persistence_226, features=model_features(_models(), _features(conversation=False))) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_226, Runtime.attach(persistence=persistence_226, features=model_features(_models(), _features(conversation=False))) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         result = (await session.run("not retained as chat", timeout_seconds=5)).result
@@ -236,7 +236,7 @@ async def test_disabled_conversation_does_not_retain_new_chat_or_break_results(t
         )
         assert commits == ()
         assert (await runtime.executions.result(result.execution_id, principal=principal)).output == result.output
-    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path)) as persistence_235, Runtime.open(persistence=persistence_235, features=model_features(_models(), _features(conversation=False))) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path)) as persistence_235, Runtime.attach(persistence=persistence_235, features=model_features(_models(), _features(conversation=False))) as runtime:
         assert (await runtime.executions.result(result.execution_id, principal=principal)).output == result.output
 
 
@@ -255,7 +255,7 @@ async def test_zero_message_failure_keeps_input_and_never_reuses_prior_output(
         return replace(result, output={"completed_turn": count})
     monkeypatch.setattr(AgentExecutor, "execute", execute)
     storage = _storage(tmp_path)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_254, Runtime.open(persistence=persistence_254, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_254, Runtime.attach(persistence=persistence_254, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         await session.run("first success", timeout_seconds=5)
@@ -290,7 +290,7 @@ async def test_cancelled_turn_retains_original_input_without_completed_output(tm
     async def respond(messages, info):
         entered.set()
         await asyncio.Event().wait()
-    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path)) as persistence_289, Runtime.open(persistence=persistence_289, features=model_features(_Models(_UsageFunctionModel(respond)), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path)) as persistence_289, Runtime.attach(persistence=persistence_289, features=model_features(_Models(_UsageFunctionModel(respond)), _features())) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         execution = await session.start("cancelled original input")
@@ -328,7 +328,7 @@ async def test_unknown_terminal_commit_retains_exactly_one_canonical_turn(
         tmp_path / "state.db", cache=cache,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
      coordination=cache)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_329, Runtime.open(persistence=persistence_329, features=model_features(_models(), features)) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_329, Runtime.attach(persistence=persistence_329, features=model_features(_models(), features)) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         group = runtime._state.execution.executions.state_store.storage_group
@@ -390,7 +390,7 @@ async def test_completed_display_cache_uses_retained_envelope_after_execution_pr
     storage = PersistenceStorage.sqlite(
         tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024),
     )
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_391, Runtime.open(persistence=persistence_391, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_391, Runtime.attach(persistence=persistence_391, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         await session.run("retained cached input", timeout_seconds=5)
@@ -425,7 +425,7 @@ async def test_split_route_never_publishes_completed_output_before_execution_ter
     )
     storage = PersistenceStorage.from_plan(plan)
     entered, release = asyncio.Event(), asyncio.Event()
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_426, Runtime.open(persistence=persistence_426, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_426, Runtime.attach(persistence=persistence_426, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         executions = runtime._state.execution.executions
@@ -493,7 +493,7 @@ async def test_display_cache_five_refresh_measurement(tmp_path: Path) -> None:
     storage = PersistenceStorage.sqlite(
         tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024),
     )
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_494, Runtime.open(persistence=persistence_494, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_494, Runtime.attach(persistence=persistence_494, features=model_features(_models(), _features())) as runtime:
         session = await runtime.agents.get().create_session("session")
         await session.run("measure retained display", timeout_seconds=5)
         engine = runtime._state.conversation.sessions.state_store.storage_group.context.engine
@@ -528,7 +528,7 @@ async def test_split_object_stores_copy_result_and_binary_input_before_source_de
         conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
     )
     storage = PersistenceStorage.from_plan(plan)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_529, Runtime.open(persistence=persistence_529, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_529, Runtime.attach(persistence=persistence_529, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         assert runtime._state.object_store(PersistenceDomain.EXECUTION) is not runtime._state.object_store(PersistenceDomain.CONVERSATION)
         session = await runtime.agents.get().create_session("session")
@@ -574,7 +574,7 @@ async def test_split_terminal_without_conversation_receipt_requires_recovery(
     )
     storage = PersistenceStorage.from_plan(plan)
     entered, release = asyncio.Event(), asyncio.Event()
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_575, Runtime.open(persistence=persistence_575, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_575, Runtime.attach(persistence=persistence_575, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         sessions = runtime._state.conversation.sessions
@@ -676,7 +676,7 @@ async def test_cancelled_unconfirmed_model_response_does_not_enter_following_con
         execution=StorageRoute.sqlite(tmp_path / "execution.db"),
         conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
     )) if split else _storage(tmp_path)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_677, Runtime.open(persistence=persistence_677, features=model_features(_Models(_UsageFunctionModel(respond)), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_677, Runtime.attach(persistence=persistence_677, features=model_features(_Models(_UsageFunctionModel(respond)), _features())) as runtime:
         session = await runtime.agents.get().create_session("session")
         assert (await session.run("confirmed first input", timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         second = await session.start("unconfirmed cancelled input")

@@ -67,7 +67,7 @@ async def test_runtime_path_retry_rechecks_allowed_target(tmp_path: Path, bad_ta
         sandbox=LocalSandbox(read_policy=ReadOnlySandboxPolicy(("allowed.txt", "missing.txt"))))
     group.capability(TraceCapability(), scope="runtime")
     group.agent("reader", model="default", allow_tools=("read_file",))
-    async with Persistence.open('paths', storage=PersistenceStorage.in_memory()) as persistence_61, Runtime.open(persistence=persistence_61, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('paths', storage=PersistenceStorage.in_memory()) as persistence_61, Runtime.attach(persistence=persistence_61, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get("reader").start("read")
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
@@ -106,7 +106,7 @@ async def test_runtime_instruction_failure_is_not_model_retry(tmp_path: Path, mo
     group.capability(TraceCapability(), scope="runtime")
     group.agent("reader", model="default", allow_tools=("read_file",))
     with nullcontext() if failure == "malformed_document" else pytest.raises(AIError, match=expected.value):
-        async with Persistence.open('paths', storage=PersistenceStorage.in_memory()) as persistence_103, Runtime.open(persistence=persistence_103, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+        async with Persistence.open('paths', storage=PersistenceStorage.in_memory()) as persistence_103, Runtime.attach(persistence=persistence_103, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
             execution = await runtime.agents.get("reader").start("read")
             if failure == "malformed_document":
                 result = (await execution.wait(timeout_seconds=10)).result
@@ -151,7 +151,7 @@ async def test_shared_rule_boundary_allows_literal_paths_for_workspace_tools(tmp
     group = workspace_features("literal-paths", workspace=Workspace.load(tmp_path))
     group.capability(TraceCapability(), scope="runtime")
     group.agent("reader", model="default", allow_tools=(name,))
-    async with Persistence.open('literal-paths', storage=PersistenceStorage.in_memory()) as persistence_151, Runtime.open(persistence=persistence_151, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('literal-paths', storage=PersistenceStorage.in_memory()) as persistence_151, Runtime.attach(persistence=persistence_151, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get("reader").start("use the file")
         assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
         assert requests == 2

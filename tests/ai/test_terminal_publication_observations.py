@@ -39,7 +39,7 @@ async def test_terminal_observations_keep_physical_guards_and_rollback(
     injected = False
     rejected = False
 
-    async with Persistence.open('terminal-observations', storage=_storage('sqlite', tmp_path)) as persistence_40, Runtime.open(persistence=persistence_40, features=model_features(_ToolModels(), application)) as runtime:
+    async with Persistence.open('terminal-observations', storage=_storage('sqlite', tmp_path)) as persistence_40, Runtime.attach(persistence=persistence_40, features=model_features(_ToolModels(), application)) as runtime:
         async def snapshot():
             async def read(tx):
                 return (

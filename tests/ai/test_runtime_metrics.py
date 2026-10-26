@@ -195,7 +195,7 @@ async def test_runtime_projects_model_agent_and_execution_metrics(tmp_path: Path
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
     secret = "TOP_SECRET_PROMPT_VALUE"
 
-    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_194, Runtime.open(persistence=persistence_194, metrics=metrics, features=model_features(_TextModels(), _agent_group())) as runtime:
+    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_194, Runtime.attach(persistence=persistence_194, metrics=metrics, features=model_features(_TextModels(), _agent_group())) as runtime:
         result = (await runtime.agents.get("default").run(secret, timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
 
@@ -237,7 +237,7 @@ async def test_runtime_metrics_backend_failure_does_not_change_execution_result(
 ) -> None:
     metrics = Metrics.from_store(_FailingMetricStore(), namespace="runtime-fail-open")  # type: ignore[arg-type]
 
-    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_241, Runtime.open(persistence=persistence_241, metrics=metrics, features=model_features(_TextModels(), _agent_group())) as runtime:
+    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_241, Runtime.attach(persistence=persistence_241, metrics=metrics, features=model_features(_TextModels(), _agent_group())) as runtime:
         result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
 
@@ -274,7 +274,7 @@ async def test_isolated_task_failure_keeps_results_events_and_metrics_consistent
     observed_events: list[TaskEvent] = []
     features = RuntimeFeatures("task-metrics")
 
-    async with Persistence.open('task-isolation-metrics', storage=PersistenceStorage.in_memory()) as persistence_283, Runtime.open(persistence=persistence_283, metrics=metrics, features=model_features(_TextModels(), features)) as runtime, TaskEngine.open(persistence=persistence_283, metrics=metrics) as engine:
+    async with Persistence.open('task-isolation-metrics', storage=PersistenceStorage.in_memory()) as persistence_283, Runtime.attach(persistence=persistence_283, metrics=metrics, features=model_features(_TextModels(), features)) as runtime, TaskEngine.open(persistence=persistence_283, metrics=metrics) as engine:
         run = await engine.with_definitions(failed_task, successful_task).start(
             graph,
             idempotency_key="isolated-task-failure-0001",
@@ -819,7 +819,7 @@ async def test_terminal_metric_cancellation_preserves_published_success_and_hist
     metrics = Metrics.from_store(store, namespace="terminal-order")
     features = _agent_group()
     features.capability(TraceCapability(), scope="runtime")
-    async with Persistence.open('terminal-order', storage=PersistenceStorage.in_memory()) as persistence_832, Runtime.open(persistence=persistence_832, metrics=metrics, features=model_features(_TextModels(), features)) as runtime:
+    async with Persistence.open('terminal-order', storage=PersistenceStorage.in_memory()) as persistence_832, Runtime.attach(persistence=persistence_832, metrics=metrics, features=model_features(_TextModels(), features)) as runtime:
         execution = await runtime.agents.get("default").start("hello")
         try:
             await asyncio.wait_for(store.entered.wait(), timeout=2)
@@ -891,7 +891,7 @@ async def test_pending_cancel_delivers_terminal_metric_in_caller_after_admission
             await super().put_observations(namespace, observations)
 
     store = Store()
-    async with Persistence.open('pending-cancel-metric', storage=PersistenceStorage.in_memory()) as persistence_907, Runtime.open(persistence=persistence_907, metrics=Metrics.from_store(store), features=model_features(_TextModels(), _agent_group())) as runtime:
+    async with Persistence.open('pending-cancel-metric', storage=PersistenceStorage.in_memory()) as persistence_907, Runtime.attach(persistence=persistence_907, metrics=Metrics.from_store(store), features=model_features(_TextModels(), _agent_group())) as runtime:
         starter = asyncio.create_task(runtime.agents.get("default").start("hello"))
         cancellation: asyncio.Task[object] | None = None
         try:

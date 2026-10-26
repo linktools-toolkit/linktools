@@ -46,7 +46,7 @@ async def test_web_reads_live_process_history_without_taking_ownership(tmp_path:
         yield "unexpected replay"
 
     try:
-        async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.sqlite(database)) as persistence_45, Runtime.open(persistence=persistence_45, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as runtime, Persistence.open(_NAMESPACE, storage=PersistenceStorage.sqlite(database), tenant_id="default", read_only=True) as history_persistence_48, History.open(persistence=history_persistence_48) as history, client(create_app(runtime=runtime)) as writable, client(create_app(history=history)) as readonly:
+        async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.sqlite(database)) as persistence_45, Runtime.attach(persistence=persistence_45, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as runtime, Persistence.open(_NAMESPACE, storage=PersistenceStorage.sqlite(database), tenant_id="default", read_only=True) as history_persistence_48, History.open(persistence=history_persistence_48) as history, client(create_app(runtime=runtime)) as writable, client(create_app(history=history)) as readonly:
             for http in (writable, readonly):
                 page = await _wait_for_committed(
                     lambda: _get(http, f"/api/executions/{identity}/models?include_content=true"),
@@ -95,7 +95,7 @@ async def test_web_recovery_requires_explicit_control_after_process_exit(
         if not cancel_first:
             await asyncio.to_thread(owner.crash)
         storage = PersistenceStorage.sqlite(database)
-        async with Persistence.open(_NAMESPACE, storage=storage) as persistence_99, Runtime.open(persistence=persistence_99, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as runtime, client(create_app(runtime=runtime)) as http:
+        async with Persistence.open(_NAMESPACE, storage=storage) as persistence_99, Runtime.attach(persistence=persistence_99, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as runtime, client(create_app(runtime=runtime)) as http:
             if cancel_first:
                 await _wait_for_committed(
                     lambda: _get(http, f"/api/executions/{identity}/models"),
@@ -150,7 +150,7 @@ async def test_web_recovery_requires_explicit_control_after_process_exit(
                 info = await _get(http, f"/api/executions/{identity}")
                 assert info["status"] in {"CANCELLING", "CANCELLED"}
                 assert not calls
-        async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.sqlite(database)) as persistence_157, Runtime.open(persistence=persistence_157, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as runtime, client(create_app(runtime=runtime)) as http:
+        async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.sqlite(database)) as persistence_157, Runtime.attach(persistence=persistence_157, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as runtime, client(create_app(runtime=runtime)) as http:
             if control == "cancel_after_exit":
                 replay = await http.post(
                     f"/api/executions/{identity}/cancel", json={"request_id": "cancel"}, headers=_HEADERS,

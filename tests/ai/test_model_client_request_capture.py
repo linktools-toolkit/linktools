@@ -69,7 +69,7 @@ def _binding(
         return client
 
     monkeypatch.setattr(_openai, "DefaultAsyncHttpxClient", create_client)
-    registry = create_model(protocol='openai',
+    registry = create_model(api='openai',
         model="gpt-4o", base_url="https://capture.invalid/v1",
         api_key="connection-secret-never-captured", max_retries=retries,
         retry_delay=0, context_window=context_window,
@@ -378,7 +378,7 @@ async def test_model_client_request_capture_runtime_closes_owned_client(
     storage = PersistenceStorage.in_memory()
     features = _agents()
     features.capability(TraceCapability(record_http_bodies=True), scope="runtime")
-    async with Persistence.open('default', storage=storage) as persistence_374, Runtime.open(persistence=persistence_374, features=model_features(registry, features)) as runtime:
+    async with Persistence.open('default', storage=storage) as persistence_374, Runtime.attach(persistence=persistence_374, features=model_features(registry, features)) as runtime:
         with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
             execution = await runtime.agents.get("default").start("hello")
             await asyncio.wait_for(dispatched.wait(), 5)
@@ -450,7 +450,7 @@ async def test_model_client_request_capture_runtime_preserves_custom_model_lifec
 ) -> None:
     model = _LifecycleModel(failure)
     registry = _ModelBinding(model)
-    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_448, Runtime.open(persistence=persistence_448, features=model_features(registry, _agents())) as runtime:
+    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_448, Runtime.attach(persistence=persistence_448, features=model_features(registry, _agents())) as runtime:
         result = (await runtime.agents.get("default").run("hello", timeout_seconds=5)).result
     assert result.status is ExecutionStatus.FAILED
     expected = ErrorCode.INTERNAL_ERROR if failure == "exit" else ErrorCode.MODEL_CONFIG_INVALID
@@ -468,7 +468,7 @@ async def test_model_client_request_capture_runtime_leaves_borrowed_client_open(
             base_url="https://capture.invalid/v1", api_key="test", http_client=client,
         ))
         registry = _ModelBinding(model)
-        async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_468, Runtime.open(persistence=persistence_468, features=model_features(registry, _agents())) as runtime:
+        async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_468, Runtime.attach(persistence=persistence_468, features=model_features(registry, _agents())) as runtime:
             result = (await runtime.agents.get("default").run("hello", timeout_seconds=5)).result
         assert result.status is ExecutionStatus.SUCCEEDED
         assert not client.is_closed and client.close_calls == 0

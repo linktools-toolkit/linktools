@@ -62,7 +62,7 @@ async def test_graph_cancel_quiesces_active_agent_sibling_when_an_effect_is_unkn
         group.agent(name, allow_tools=tools, allow_subagents=(), allow_skills=())
     storage = PersistenceStorage.in_memory()
     try:
-        async with Persistence.open('cancel-unknown-sibling', storage=storage) as persistence_60, Runtime.open(persistence=persistence_60, features=model_features(_TaskTestModels(), group)) as runtime, TaskEngine.open(persistence=persistence_60) as engine:
+        async with Persistence.open('cancel-unknown-sibling', storage=storage) as persistence_60, Runtime.attach(persistence=persistence_60, features=model_features(_TaskTestModels(), group)) as runtime, TaskEngine.open(persistence=persistence_60) as engine:
             unknown_task = Task.from_agent(
                 "review.unknown", runtime.agents.get("unknown")
             )

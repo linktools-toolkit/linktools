@@ -299,7 +299,7 @@ async def test_real_execution_metadata_live_and_final_handoff(backend, durable_t
     if durable_trace:
         group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
-    async with Persistence.open('execution-observation', storage=storage) as persistence_284, Runtime.open(persistence=persistence_284, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('execution-observation', storage=storage) as persistence_284, Runtime.attach(persistence=persistence_284, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get().start("private prompt")
         rows = []
         async def observe(event):
@@ -659,7 +659,7 @@ async def test_transient_task_model_observation_keeps_canonical_success_after_st
     group = RuntimeFeatures[None]("transient-task-observation")
     group.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage(PersistencePlan(execution=StorageRoute.transient()))
-    async with Persistence.open('transient-task-observation', storage=storage) as persistence_644, Runtime.open(persistence=persistence_644, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('transient-task-observation', storage=storage) as persistence_644, Runtime.attach(persistence=persistence_644, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         task = Task.from_agent("answer", runtime.agents.get())
         async with TaskEngine.open(task, persistence=persistence_644) as engine:
             graph = await engine.start(TaskGraph(

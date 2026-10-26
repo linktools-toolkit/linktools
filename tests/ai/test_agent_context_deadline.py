@@ -63,7 +63,7 @@ def test_deadline_is_optional_readonly_and_timezone_aware() -> None:
 async def test_deadline_inherits_across_retry_fork_and_graph_without_worker_reads(monkeypatch) -> None:
     contexts: list[AgentContext[None]] = []
     storage = PersistenceStorage.in_memory()
-    async with Persistence.open('context-deadline', storage=storage) as persistence_59, Runtime.open(persistence=persistence_59, features=model_features(RuntimeUsageModels(), _group(contexts))) as runtime, TaskEngine.open(persistence=persistence_59, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('context-deadline', storage=storage) as persistence_59, Runtime.attach(persistence=persistence_59, features=model_features(RuntimeUsageModels(), _group(contexts))) as runtime, TaskEngine.open(persistence=persistence_59, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         reads: list[str] = []
         read = runtime._state.execution.budgets.read
 
@@ -117,7 +117,7 @@ async def test_cold_recovery_restores_absolute_deadline_once(tmp_path: Path, mon
     contexts: list[AgentContext[None]] = []
     features = _group(contexts)
     features.capability(CheckpointCapability(), scope="runtime")
-    async with Persistence.open('deadline-recovery', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_114, Runtime.open(persistence=persistence_114, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('deadline-recovery', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_114, Runtime.attach(persistence=persistence_114, features=model_features(RuntimeUsageModels(), features)) as runtime:
         async def interrupted_launch(*args, **kwargs):
             pass
         with monkeypatch.context() as fault:
@@ -126,7 +126,7 @@ async def test_cold_recovery_restores_absolute_deadline_once(tmp_path: Path, mon
         execution_id = run.execution_id
     assert not contexts
     storage = PersistenceStorage.filesystem(tmp_path)
-    async with Persistence.open('deadline-recovery', storage=storage) as persistence_125, Runtime.open(persistence=persistence_125, features=model_features(RuntimeUsageModels(), features), auto_recover=False) as runtime:
+    async with Persistence.open('deadline-recovery', storage=storage) as persistence_125, Runtime.attach(persistence=persistence_125, features=model_features(RuntimeUsageModels(), features), auto_recover=False) as runtime:
         reads: list[str] = []
         read = runtime._state.execution.budgets.read
 

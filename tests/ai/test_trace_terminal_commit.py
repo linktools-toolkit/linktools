@@ -81,7 +81,7 @@ async def _run_observed(path: Path, backend: str, policy: CommitPolicy, monkeypa
     event.listen(Engine, "before_cursor_execute", observe_statement)
     original_sql_mutation = SqlStorageContext.run_mutation
     try:
-        async with Persistence.open('terminal-trace', storage=storage) as persistence_77, Runtime.open(persistence=persistence_77, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), features)) as runtime:
+        async with Persistence.open('terminal-trace', storage=storage) as persistence_77, Runtime.attach(persistence=persistence_77, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), features)) as runtime:
             session = await runtime.agents.get().create_session("session")
             during["sql_mutations"] = []
 

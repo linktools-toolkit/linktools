@@ -44,7 +44,7 @@ async def test_tool_failure_trace_is_durable_and_does_not_fabricate_a_return(fai
     group.capability(TraceCapability(), scope="runtime")
     group.tool(broken, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("broken",))
-    async with Persistence.open('tool-failure-trace', storage=PersistenceStorage.in_memory()) as persistence_44, Runtime.open(persistence=persistence_44, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('tool-failure-trace', storage=PersistenceStorage.in_memory()) as persistence_44, Runtime.attach(persistence=persistence_44, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get("default").start("Call the tool")
         if failure == "fatal":
             with pytest.raises(AIError) as caught:
@@ -94,7 +94,7 @@ async def test_terminal_seal_and_retention_release_outlast_pending_observation_f
     group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.in_memory()
-    async with Persistence.open('observation-terminal-drain', storage=storage) as persistence_97, Runtime.open(persistence=persistence_97, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('observation-terminal-drain', storage=storage) as persistence_97, Runtime.attach(persistence=persistence_97, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get("default").start("finish")
         try:
             await asyncio.wait_for(entered.wait(), 5)
@@ -168,7 +168,7 @@ async def test_pause_handoff_drains_only_its_execution_while_another_run_is_live
     group.tool(broken, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("read_file", "broken"))
     storage = PersistenceStorage.in_memory()
-    async with Persistence.open('parallel-handoff', storage=storage) as persistence_174, Runtime.open(persistence=persistence_174, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('parallel-handoff', storage=storage) as persistence_174, Runtime.attach(persistence=persistence_174, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         held = await runtime.agents.get("default").start("hold this run")
         try:
             await asyncio.wait_for(entered.wait(), 5)

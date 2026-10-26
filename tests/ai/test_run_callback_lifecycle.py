@@ -142,7 +142,7 @@ async def test_two_concurrent_runs_use_their_initialized_instance_through_close(
     features.capability(container(project), id="project", scope="agent")
     features.capability(container(source), id="source", scope="agent")
     features.agent("reader", allow_tools=("inspect",), allow_skills=(), allow_subagents=())
-    async with Persistence.open('run-lifecycle', storage=PersistenceStorage.in_memory()) as persistence_142, Runtime.open(persistence=persistence_142, features=features) as runtime:
+    async with Persistence.open('run-lifecycle', storage=PersistenceStorage.in_memory()) as persistence_142, Runtime.attach(persistence=persistence_142, features=features) as runtime:
         executions = await asyncio.gather(*(runtime.agents.get("reader").start("Inspect.") for _ in range(2)))
         outcomes = await asyncio.gather(*(execution.wait(timeout_seconds=10) for execution in executions))
         assert all(outcome.result.status is ExecutionStatus.SUCCEEDED for outcome in outcomes)

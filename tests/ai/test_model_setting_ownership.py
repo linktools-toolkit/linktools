@@ -63,7 +63,7 @@ async def test_explicit_token_limit_and_raw_limit_cannot_compete(
     sent = []
     _capture(monkeypatch, protocol, sent)
     raw = {"extra_body": {limit: 4096}}
-    binding = create_model(protocol=protocol, model="unregistered-model-alias", api_key="mock-only",
+    binding = create_model(api=protocol, model="unregistered-model-alias", api_key="mock-only",
                            max_retries=0, model_settings={"max_tokens": 8192, **({} if per_request else raw)})
     async with binding.materialize() as model:
         with pytest.raises(AIError) as raised:
@@ -89,7 +89,7 @@ async def test_provider_native_objects_are_not_silently_replaced(
 ) -> None:
     sent = []
     _capture(monkeypatch, protocol, sent)
-    binding = create_model(protocol=protocol, model="unregistered-model-alias", api_key="mock-only",
+    binding = create_model(api=protocol, model="unregistered-model-alias", api_key="mock-only",
                            max_retries=0, model_settings={"max_tokens": 8192, **settings})
     async with binding.materialize() as model:
         with pytest.raises(AIError):
@@ -110,7 +110,7 @@ async def test_raw_only_limits_and_unknown_objects_remain_open(
     sent = []
     _capture(monkeypatch, protocol, sent)
     raw = {limit: 8192, "vendor_feature": {"enabled": False, "values": [None, 1, {"nested": "value"}]}}
-    binding = create_model(protocol=protocol, model="unregistered-model-alias", api_key="mock-only",
+    binding = create_model(api=protocol, model="unregistered-model-alias", api_key="mock-only",
                            max_retries=0, model_settings={"extra_body": raw})
     async with binding.materialize() as model:
         await _request(model, None, streaming)
@@ -131,14 +131,14 @@ async def test_runtime_thinking_is_fallback_not_a_second_native_owner(
     _capture(monkeypatch, "anthropic", sent)
     features = RuntimeFeatures()
     features.model("default", create_model(
-        protocol="anthropic", model="unregistered-model-alias", api_key="mock-only", max_retries=0,
+        api="anthropic", model="unregistered-model-alias", api_key="mock-only", max_retries=0,
         model_settings={"max_tokens": 32768, "extra_body": raw},
     ))
     features.agent("default", model="default")
     features.capability(Thinking(effort="high"))
     async with (
         Persistence.open("native-owner", storage=PersistenceStorage.in_memory()) as persistence,
-        Runtime.open(persistence=persistence, features=features) as runtime,
+        Runtime.attach(persistence=persistence, features=features) as runtime,
     ):
         result = await runtime.agents.get().run("hello", timeout_seconds=10)
     assert result.result.status is ExecutionStatus.SUCCEEDED
@@ -161,7 +161,7 @@ async def test_raw_cannot_replace_model_request_owned_fields(
     sent = []
     _capture(monkeypatch, protocol, sent)
     field = input_field if field == "input_field" else field
-    binding = create_model(protocol=protocol, model="unregistered-model-alias", api_key="mock-only",
+    binding = create_model(api=protocol, model="unregistered-model-alias", api_key="mock-only",
                            max_retries=0, model_settings={"extra_body": {field: value}})
     async with binding.materialize() as model:
         with pytest.raises(AIError):
@@ -181,7 +181,7 @@ async def test_raw_cannot_replace_native_output_contract(
 ) -> None:
     sent = []
     _capture(monkeypatch, protocol, sent)
-    binding = create_model(protocol=protocol, model=model_name, api_key="mock-only", max_retries=0,
+    binding = create_model(api=protocol, model=model_name, api_key="mock-only", max_retries=0,
                            model_settings={"extra_body": {wire_field: {}}})
     parameters = ModelRequestParameters(
         output_mode="native",
@@ -262,7 +262,7 @@ async def test_raw_cannot_replace_native_output_contract(
 async def test_each_native_setting_rejects_a_second_raw_object_owner(
     protocol: str, setting: str, wire_field: str,
 ) -> None:
-    binding = create_model(protocol=protocol, model="unregistered-model-alias", api_key="mock-only",
+    binding = create_model(api=protocol, model="unregistered-model-alias", api_key="mock-only",
                            model_settings={setting: None, "extra_body": {wire_field: {}}})
     async with binding.materialize() as model:
         with pytest.raises(AIError, match="same request object"):
@@ -317,7 +317,7 @@ async def test_token_counting_keeps_request_and_retry_owners(
 ) -> None:
     sent = []
     _capture(monkeypatch, protocol, sent)
-    binding = create_model(protocol=protocol, model="fixture", api_key="mock-only")
+    binding = create_model(api=protocol, model="fixture", api_key="mock-only")
     async with binding.materialize() as model:
         with pytest.raises(AIError) as raised:
             await model.count_tokens([ModelRequest(parts=[UserPromptPart("hello")])],
@@ -334,13 +334,13 @@ async def test_runtime_reports_owner_conflict_as_nonretryable_configuration_erro
     _capture(monkeypatch, "anthropic", sent)
     features = RuntimeFeatures()
     features.model("default", create_model(
-        protocol="anthropic", model="fixture", api_key="mock-only", max_retries=3,
+        api="anthropic", model="fixture", api_key="mock-only", max_retries=3,
         model_settings={"anthropic_effort": "low", "extra_body": {"output_config": {"custom": "private-value"}}},
     ))
     features.agent("default", model="default")
     async with (
         Persistence.open("owner-conflict", storage=PersistenceStorage.in_memory()) as persistence,
-        Runtime.open(persistence=persistence, features=features) as runtime,
+        Runtime.attach(persistence=persistence, features=features) as runtime,
     ):
         result = await runtime.agents.get().run("hello", timeout_seconds=10)
     assert result.result.status is ExecutionStatus.FAILED
@@ -363,7 +363,7 @@ async def test_prompted_output_owns_wire_format_only_when_profile_generates_it(
 ) -> None:
     sent = []
     _capture(monkeypatch, protocol, sent)
-    binding = create_model(protocol=protocol, model="gpt-4o", api_key="mock-only", max_retries=0,
+    binding = create_model(api=protocol, model="gpt-4o", api_key="mock-only", max_retries=0,
                            model_settings={"extra_body": {wire_field: raw, "vendor_flag": False}})
     monkeypatch.setattr(type(binding), "_sdk_profile", lambda self: {
         "supports_json_object_output": supports_json_object,
@@ -396,7 +396,7 @@ async def test_chat_native_search_owns_options_only_when_selected(
     sent = []
     _capture(monkeypatch, "openai", sent)
     raw = {"search_context_size": "low", "vendor_option": False}
-    binding = create_model(protocol="openai", model="gpt-4o-search-preview", api_key="mock-only",
+    binding = create_model(api="openai", model="gpt-4o-search-preview", api_key="mock-only",
                            max_retries=0, model_settings={"extra_body": {"web_search_options": raw}})
     parameters = ModelRequestParameters(native_tools=[WebSearchTool()] if has_native_tool else [])
     async with binding.materialize() as model:
@@ -423,7 +423,7 @@ async def test_raw_cannot_replace_sdk_session_state(
 ) -> None:
     sent = []
     _capture(monkeypatch, protocol, sent)
-    binding = create_model(protocol=protocol, model="fixture", api_key="mock-only", max_retries=0,
+    binding = create_model(api=protocol, model="fixture", api_key="mock-only", max_retries=0,
                            model_settings={"extra_body": {field: "raw-session"}})
     messages = [ModelRequest(parts=[UserPromptPart("next")])]
     if with_history:
@@ -457,7 +457,7 @@ async def test_anthropic_native_container_selection_retains_sdk_history_semantic
     settings = {"extra_body": {"vendor_flag": False}}
     if selection is not None:
         settings["anthropic_container"] = selection
-    binding = create_model(protocol="anthropic", model="fixture", api_key="mock-only", max_retries=0,
+    binding = create_model(api="anthropic", model="fixture", api_key="mock-only", max_retries=0,
                            model_settings=settings)
     messages = [ModelRequest(parts=[UserPromptPart("next")])]
     if with_history:
@@ -480,7 +480,7 @@ async def test_responses_native_session_selection_and_auto_history_remain_suppor
 ) -> None:
     sent = []
     _capture(monkeypatch, "openai-responses", sent)
-    binding = create_model(protocol="openai-responses", model="gpt-4o", api_key="mock-only", max_retries=0,
+    binding = create_model(api="openai-responses", model="gpt-4o", api_key="mock-only", max_retries=0,
                            model_settings={setting: "selected-session", "extra_body": {"vendor_flag": False}})
     first_request = ModelRequest(parts=[UserPromptPart("first")])
     async with binding.materialize() as model:
@@ -509,7 +509,7 @@ async def test_anthropic_compaction_history_keeps_native_context_management_owne
         settings["extra_body"]["context_management"] = context_management
     elif configuration == "native":
         settings["anthropic_context_management"] = context_management
-    binding = create_model(protocol="anthropic", model="claude-sonnet-4-6", api_key="mock-only", max_retries=0,
+    binding = create_model(api="anthropic", model="claude-sonnet-4-6", api_key="mock-only", max_retries=0,
                            model_settings=settings)
     messages = [ModelRequest(parts=[UserPromptPart("next")])]
     if with_history:
@@ -554,7 +554,7 @@ async def test_responses_include_keeps_explicit_and_profile_derived_owners(
     settings = {"extra_body": {"include": ["vendor.extension"], "vendor_flag": False}}
     if logprobs:
         settings["openai_logprobs"] = True
-    binding = create_model(protocol="openai-responses", model=model_name, api_key="mock-only", max_retries=0,
+    binding = create_model(api="openai-responses", model=model_name, api_key="mock-only", max_retries=0,
                            model_settings=settings)
     async with binding.materialize() as model:
         if conflict:
@@ -576,7 +576,7 @@ async def test_responses_native_logprobs_preserves_encrypted_reasoning_include(
 ) -> None:
     sent = []
     _capture(monkeypatch, "openai-responses", sent)
-    binding = create_model(protocol="openai-responses", model="gpt-5", api_key="mock-only", max_retries=0,
+    binding = create_model(api="openai-responses", model="gpt-5", api_key="mock-only", max_retries=0,
                            model_settings={"openai_logprobs": True, "extra_body": {"vendor_flag": False}})
     async with binding.materialize() as model:
         await _request(model, None, streaming)
@@ -593,7 +593,7 @@ async def test_chat_stream_options_are_owned_only_during_streaming(
     sent = []
     _capture(monkeypatch, "openai", sent)
     raw = {"extra_body": {"stream_options": {"include_usage": False, "vendor_flag": True}}}
-    binding = create_model(protocol="openai", model="fixture", api_key="mock-only", max_retries=0,
+    binding = create_model(api="openai", model="fixture", api_key="mock-only", max_retries=0,
                            model_settings={} if per_request else raw)
     async with binding.materialize() as model:
         if streaming:
@@ -614,7 +614,7 @@ async def test_chat_native_stream_usage_options_remain_supported(
 ) -> None:
     sent = []
     _capture(monkeypatch, "openai", sent)
-    binding = create_model(protocol="openai", model="fixture", api_key="mock-only", max_retries=0,
+    binding = create_model(api="openai", model="fixture", api_key="mock-only", max_retries=0,
                            model_settings={"openai_continuous_usage_stats": continuous})
     async with binding.materialize() as model:
         await _request(model, None, True)
@@ -630,7 +630,7 @@ async def test_raw_parallel_calls_may_override_output_only_default(
 
     sent = []
     _capture(monkeypatch, "openai", sent)
-    binding = create_model(protocol="openai", model="fixture", api_key="mock-only", max_retries=0,
+    binding = create_model(api="openai", model="fixture", api_key="mock-only", max_retries=0,
                            model_settings={"extra_body": {"parallel_tool_calls": True}})
     parameters = ModelRequestParameters(output_mode="tool", allow_text_output=False,
                                         output_tools=[ToolDefinition(name="finish", parameters_json_schema={"type": "object", "properties": {}})])

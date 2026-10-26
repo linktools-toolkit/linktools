@@ -52,7 +52,7 @@ async def test_runtime_status_reports_bound_storage_without_io(
         raise AssertionError("status must not query, provision, or start background work")
 
     try:
-        async with Persistence.open('actual-namespace', storage=storage, tenant_id='actual-tenant') as persistence_50, Runtime.open(persistence=persistence_50, context=ExecutionContext(None), features=model_features(RuntimeUsageModels(), features)) as runtime:
+        async with Persistence.open('actual-namespace', storage=storage, tenant_id='actual-tenant') as persistence_50, Runtime.attach(persistence=persistence_50, context=ExecutionContext(None), features=model_features(RuntimeUsageModels(), features)) as runtime:
             if engine is not None:
                 event.listen(engine.sync_engine, "before_cursor_execute", forbidden)
             try:
@@ -94,7 +94,7 @@ async def test_web_config_reads_live_runtime_metrics() -> None:
     from linktools.ai.web import create_app
     from .test_web_console import client
 
-    async with Persistence.open('live-status', storage=PersistenceStorage.in_memory()) as persistence_95, Runtime.open(persistence=persistence_95, features=model_features(RuntimeUsageModels()), metrics=Metrics.in_memory()) as runtime, client(create_app(runtime=runtime)) as http:
+    async with Persistence.open('live-status', storage=PersistenceStorage.in_memory()) as persistence_95, Runtime.attach(persistence=persistence_95, features=model_features(RuntimeUsageModels()), metrics=Metrics.in_memory()) as runtime, client(create_app(runtime=runtime)) as http:
         before = (await http.get("/api/config")).json()["runtime"]
         assert before["namespace"] == "live-status"
         assert before["metrics"]["enabled"] is True
@@ -105,3 +105,13 @@ async def test_web_config_reads_live_runtime_metrics() -> None:
         assert after["metrics"]["accepted"] > before["metrics"]["accepted"]
         assert after["metrics"]["pending"] == 0
         assert after["storage"] == before["storage"]
+        status = runtime.metrics.status()
+        assert after["metrics"]["accepted"] == status.accepted
+        assert after["metrics"]["persisted"] == status.persisted
+        assert after["metrics"]["queue_capacity"] == status.queue_capacity
+        assert len(after["metrics"]["recorders"]) == len(status.recorders)
+        for encoded, recorder in zip(after["metrics"]["recorders"], status.recorders):
+            assert encoded["accepted"] == recorder.accepted
+            assert encoded["persisted"] == recorder.persisted
+            assert encoded["pending"] == recorder.pending
+        assert after["metrics"]["failure_codes"] == list(status.failure_codes)

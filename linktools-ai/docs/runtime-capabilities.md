@@ -20,8 +20,8 @@ group.model("default", binding)
 group.agent("default", allow_capabilities=())
 
 capture = await group.capture()
-async with Persistence.open("application", storage=storage) as persistence, Runtime.open(
-    persistence=persistence, features=capture,
+async with Runtime.open("application", storage=storage,
+    features=capture,
 ) as runtime:
     ...
 ```
@@ -103,30 +103,30 @@ Admission freezes the execution's conversation, checkpoint and trace guarantees.
 Reopening with a different capability set does not upgrade, downgrade or
 reinterpret that execution, including idempotent start replay. Runtime-wide
 request policies, such as rate limits, still use current host configuration.
-TaskEngine and Evaluations are independent composition contexts, not capability
-wrappers. TaskEngine recovery is explicit; opening it does not launch pending
-graphs. Shared storage provisioning is independent of producer activation.
+TaskEngine and Evaluations are Runtime-bound domains, not capability wrappers;
+independent advanced composition contexts remain available. TaskEngine recovery
+is explicit; binding or opening it does not launch pending graphs. Shared storage provisioning is independent of producer activation.
 
 ### Automatic Runtime metrics
 
 `Metrics` remains the shared dataset for Agent, Task, Evaluation and application
-recording. Supply it independently to each producer that should record:
+recording. Supply it once to Runtime for its bound producers:
 
 ```python
-from linktools.ai.task_engine import TaskEngine
-
-async with Persistence.open("app", storage=storage) as persistence, Runtime.open(
-    persistence=persistence, features=group, metrics=metrics,
-) as runtime, TaskEngine.open(*tasks, persistence=persistence, metrics=metrics) as engine:
+async with Runtime.open("app", storage=storage,
+    features=group, metrics=metrics,
+) as runtime:
+    engine = await runtime.tasks.bind(*tasks)
     ...
 ```
 
-`Runtime.open(metrics=...)` records Agent observations, while
-`TaskEngine.open(metrics=...)` records Task observations, including evaluation
-execution. Each producer owns its own recorder and drain lifecycle. Closing one
-does not close the peer, shared dataset, engine or cache. `metrics=None` disables
-that producer's automatic recording; application calls on the dataset remain
-available. Read-only history and snapshots never activate recording. Metrics
+`Runtime.open(metrics=...)` records Agent observations and configures bound
+Task engines to record Task observations, including evaluation execution.
+Each producer owns its recorder and drain lifecycle; Runtime closes its bound
+domains in dependency order without closing the caller-owned dataset, database
+engine or cache. Independently opened Task engines accept `metrics=...` too.
+`metrics=None` disables automatic recording; application calls on the dataset
+remain available. Read-only history and snapshots never activate recording. Metrics
 retain their own batching; a conversation turn does not force a metrics flush.
 
 `TraceCapability()` retains structured execution evidence and model-request

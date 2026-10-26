@@ -79,11 +79,11 @@ async def test_run_only_actor_recovers_native_captured_agent_graph(
             await self.default.authorize(principal, action, resource)
 
     authorization = Authorization()
-    group = RuntimeFeatures("native-graph-recovery", authorization=authorization)
+    group = RuntimeFeatures("native-graph-recovery")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = PersistenceStorage.filesystem(tmp_path / "state")
     try:
-        async with Persistence.open('native-graph-recovery', storage=storage) as persistence_85, Runtime.open(persistence=persistence_85, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as runtime, TaskEngine.open(persistence=persistence_85, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        async with Persistence.open('native-graph-recovery', storage=storage) as persistence_85, Runtime.attach(persistence=persistence_85, authorization=authorization, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as runtime, TaskEngine.open(persistence=persistence_85, authorization=authorization, context=runtime.context) as runtime_engine:
             task = Task.from_agent("test.native-captured-agent", runtime.agents.get("default"))
             engine = runtime_engine.with_definitions(task)
             source = await engine.start(
@@ -144,7 +144,7 @@ async def test_run_only_actor_recovers_native_captured_agent_graph(
             assert not backend.worker_installed(execution_id)
 
         storage = PersistenceStorage.filesystem(tmp_path / "state")
-        async with Persistence.open('native-graph-recovery', storage=storage) as persistence_149, Runtime.open(persistence=persistence_149, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as runtime, TaskEngine.open(persistence=persistence_149, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        async with Persistence.open('native-graph-recovery', storage=storage) as persistence_149, Runtime.attach(persistence=persistence_149, authorization=authorization, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as runtime, TaskEngine.open(persistence=persistence_149, context=runtime.context, authorization=authorization) as runtime_engine:
             task = Task.from_agent("test.native-captured-agent", runtime.agents.get("default"))
             engine = runtime_engine.with_definitions(task)
             run = await engine.get("native-recovery", principal=origin)
@@ -206,7 +206,7 @@ async def test_graph_takeover_rejects_active_local_worker_without_child_claim(tm
     group = RuntimeFeatures("local-graph-recovery")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = PersistenceStorage.filesystem(tmp_path / "state")
-    async with Persistence.open('local-graph-recovery', storage=storage) as persistence_214, Runtime.open(persistence=persistence_214, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as runtime, TaskEngine.open(persistence=persistence_214, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('local-graph-recovery', storage=storage) as persistence_214, Runtime.attach(persistence=persistence_214, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as runtime, TaskEngine.open(persistence=persistence_214, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         try:
             task = Task.from_agent("test.local-agent", runtime.agents.get("default"))
             run = await runtime_engine.with_definitions(task).start(

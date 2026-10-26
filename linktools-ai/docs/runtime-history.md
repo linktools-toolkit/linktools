@@ -721,7 +721,7 @@ this heuristic nor adds a token-counting network request on every model call.
 
 `PersistenceStorage` is a reusable resource declaration. `Persistence.open(...)`
 binds repositories, physical routes, retained-content readers, and maintenance
-operations once. `Runtime.open(persistence=p)` and
+operations once. `Runtime.attach(persistence=p)` and
 `History.open(persistence=p)` borrow that owner; closing either view does not
 close `p` or borrowed backends. Custom routes and shared coordination are
 configured on Persistence, not supplied again as Runtime features to a reader.

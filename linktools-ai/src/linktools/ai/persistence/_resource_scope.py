@@ -12,10 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from linktools.core import environ
-
 from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
+from ..observe.stream import await_stream_cleanup
 from ..storage import (
     FilesystemMutationLock,
     SqlStorageContext,
@@ -29,8 +28,6 @@ from ._sql import SqlStateStorageGroup
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
-
-_logger = environ.get_logger("ai.runtime.state.resources")
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,21 +74,22 @@ class StorageResourceScope:
     ) -> "StorageResourceScope":
         scope = cls()
         try:
-            await scope._open(requests, namespace, tenant_id, read_only)
-        except BaseException:
+            await scope.initialize(requests, namespace=namespace, tenant_id=tenant_id, read_only=read_only)
+        except BaseException as primary_error:
             try:
-                await scope.close()
-            except BaseException:
-                _logger.exception("storage resource initialization cleanup failed")
+                await await_stream_cleanup(scope.close(), None)
+            except BaseException as cleanup_error:
+                raise primary_error from cleanup_error
             raise
         return scope
 
-    async def _open(
+    async def initialize(
         self,
         requests: tuple[StorageResourceRequest, ...],
+        *,
         namespace: str,
         tenant_id: str,
-        read_only: bool,
+        read_only: bool = False,
     ) -> None:
         if len({request.name for request in requests}) != len(requests):
             raise ValueError("storage resource request names must be unique")
@@ -159,7 +157,9 @@ class StorageResourceScope:
                     await asyncio.to_thread(route.path.parent.mkdir, parents=True, exist_ok=True)
                     async with FilesystemMutationLock(route.path.with_name(route.path.name + ".init.lock")):
                         if not route.path.exists():
-                            await _provision_sqlite_database(route.path, metadata)
+                            await _provision_sqlite_database(
+                                route.path, metadata, register_cleanup=self._close_actions.append,
+                            )
                 from sqlalchemy import URL
                 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -182,23 +182,17 @@ class StorageResourceScope:
 
     async def close(self) -> None:
         async with self._close_lock:
-            pending: list[Callable[[], Awaitable[None]]] = []
-            failure: BaseException | None = None
-            for action in reversed(self._close_actions):
-                try:
-                    await action()
-                except BaseException as error:
-                    pending.append(action)
-                    if failure is None:
-                        failure = error
-            self._close_actions = list(reversed(pending))
-            if failure is not None:
-                raise failure
+            while self._close_actions:
+                await self._close_actions[-1]()
+                self._close_actions.pop()
 
 
-async def _provision_sqlite_database(path: Path, metadata: "MetaData") -> None:
+async def _provision_sqlite_database(
+    path: Path, metadata: "MetaData", *,
+    register_cleanup: Callable[[Callable[[], Awaitable[None]]], None],
+) -> None:
     from sqlalchemy import URL
-    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
     descriptor, name = tempfile.mkstemp(
         prefix=f".{path.name}.init-",
@@ -207,15 +201,22 @@ async def _provision_sqlite_database(path: Path, metadata: "MetaData") -> None:
     )
     os.close(descriptor)
     temporary = Path(name)
-    engine = create_async_engine(
-        URL.create(
-            "sqlite+aiosqlite",
-            database=str(temporary),
-        )
-    )
-    context = create_sql_storage_context(engine, owns_engine=True)
+    engine: AsyncEngine | None = None
+    context: SqlStorageContext | None = None
     published = False
+
+    async def cleanup() -> None:
+        if context is not None:
+            await context.close()
+        elif engine is not None:
+            await engine.dispose()
+        if not published:
+            await asyncio.to_thread(_cleanup_sqlite_temporary, temporary)
+
+    register_cleanup(cleanup)
     try:
+        engine = create_async_engine(URL.create("sqlite+aiosqlite", database=str(temporary)))
+        context = create_sql_storage_context(engine, owns_engine=True)
         await context.initialize()
         async with context.engine.begin() as connection:
             await connection.run_sync(metadata.create_all)
@@ -230,17 +231,14 @@ async def _provision_sqlite_database(path: Path, metadata: "MetaData") -> None:
             if published:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
             raise
-    finally:
-        if not context.closed:
-            await context.close()
-        if not published:
-            try:
-                await asyncio.to_thread(_cleanup_sqlite_temporary, temporary)
-            except BaseException:  # noqa: BLE001
-                _logger.exception(
-                    "temporary SQLite cleanup failed: path=%s",
-                    temporary,
-                )
+    except BaseException as primary_error:
+        try:
+            await await_stream_cleanup(cleanup(), None)
+        except BaseException as cleanup_error:
+            raise primary_error from cleanup_error
+        raise
+    else:
+        await await_stream_cleanup(cleanup(), None)
 
 
 def _ensure_sqlite_database_is_self_contained(path: Path) -> None:

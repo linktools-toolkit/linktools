@@ -130,7 +130,7 @@ async def test_business_tool_reference_is_consumed_once_after_live_or_durable_re
     group.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     group.agent("default", allow_tools=("get_file", "finish"),
                 allow_skills=(), allow_subagents=())
-    async with Persistence.open('referenced-tool-replay', storage=PersistenceStorage.in_memory()) as persistence_130, Runtime.open(persistence=persistence_130, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('referenced-tool-replay', storage=PersistenceStorage.in_memory()) as persistence_130, Runtime.attach(persistence=persistence_130, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get().start("Inspect the referenced document.")
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED, result.error_diagnostics
@@ -168,7 +168,7 @@ def _recovery_features(
     loader: Callable[[AgentContext[None], ReferencedContent], Awaitable[bytes]],
     text_loader: Callable[[AgentContext[None], ReferencedContent], Awaitable[bytes]] | None = None,
 ) -> RuntimeFeatures:
-    group = RuntimeFeatures(_RECOVERY_NAMESPACE, authorization=_RecoveryAuthorization())
+    group = RuntimeFeatures(_RECOVERY_NAMESPACE)
     group.capability(ReferencedInputsCapability(loader), id=_SOURCE.id,
                      revision=_SOURCE.revision, scope="agent")
     if text_loader is not None:
@@ -209,7 +209,7 @@ def _pending_reference_process(connection: Connection, path: str, multiple_sourc
             assert context.principal == _ADMITTED and content == _text_content()
             return _TEXT_BODY
 
-        async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.filesystem(Path(path))) as persistence_212, Runtime.open(persistence=persistence_212, features=_recovery_features(pending_load, load_text if multiple_sources else None)) as runtime:
+        async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.filesystem(Path(path))) as persistence_212, Runtime.attach(persistence=persistence_212, authorization=_RecoveryAuthorization(), features=_recovery_features(pending_load, load_text if multiple_sources else None)) as runtime:
             prompt = ["Inspect text and file", _text_content(), _content()] if multiple_sources else ["Inspect", _content()]
             await runtime.agents.get().start(prompt, principal=_ADMITTED)
             await asyncio.Event().wait()
@@ -254,7 +254,7 @@ async def test_pending_reference_reopens_from_checkpoint_with_original_principal
         loaded.append((agent_context.principal, content))
         return _TEXT_BODY
 
-    async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.filesystem(path)) as persistence_260, Runtime.open(persistence=persistence_260, features=_recovery_features(authorized_load, authorized_text if multiple_sources else None), auto_recover=False) as runtime:
+    async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.filesystem(path)) as persistence_260, Runtime.attach(persistence=persistence_260, authorization=_RecoveryAuthorization(), features=_recovery_features(authorized_load, authorized_text if multiple_sources else None), auto_recover=False) as runtime:
         checkpoint = await runtime._state.recovery.checkpoints.get(
             execution_id, tenant_id=_ADMITTED.tenant_id,
         )
@@ -268,7 +268,7 @@ async def test_pending_reference_reopens_from_checkpoint_with_original_principal
         )).result
         assert result.status is ExecutionStatus.SUCCEEDED, result.error_diagnostics
         assert result.output == {"text": "recovered reference"}
-    async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.filesystem(path)) as persistence_277, Runtime.open(persistence=persistence_277, features=_recovery_features(authorized_load, authorized_text if multiple_sources else None), auto_recover=False) as reopened:
+    async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.filesystem(path)) as persistence_277, Runtime.attach(persistence=persistence_277, authorization=_RecoveryAuthorization(), features=_recovery_features(authorized_load, authorized_text if multiple_sources else None), auto_recover=False) as reopened:
         history = await reopened.executions.history(
             execution_id, principal=_ADMITTED, include_content=True,
         )

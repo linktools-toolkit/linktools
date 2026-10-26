@@ -123,7 +123,7 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(ToolResponsesCapability(ToolResponseFixture(first, assets)), scope="runtime")
     storage = PersistenceStorage.filesystem(tmp_path)
-    async with Persistence.open('fixture-input', storage=storage) as persistence_112, Runtime.open(persistence=persistence_112, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('fixture-input', storage=storage) as persistence_112, Runtime.attach(persistence=persistence_112, features=model_features(RuntimeUsageModels(), features)) as runtime:
         execution = await runtime.agents.get().start("first", idempotency_key="first", principal=principal)
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
         record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
@@ -156,7 +156,7 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(ToolResponsesCapability(ToolResponseFixture(second, assets)), scope="runtime")
     storage = PersistenceStorage.filesystem(tmp_path)
-    async with Persistence.open('fixture-input', storage=storage) as persistence_145, Runtime.open(persistence=persistence_145, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('fixture-input', storage=storage) as persistence_145, Runtime.attach(persistence=persistence_145, features=model_features(RuntimeUsageModels(), features)) as runtime:
         original = await runtime.executions.get(execution.execution_id, principal=principal)
         for derived in (await original.retry("retry"), await original.fork("fork")):
             assert (await derived.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -189,7 +189,7 @@ async def test_fixture_session_rejection_leaves_no_admitted_turn(tmp_path: Path)
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(ToolResponsesCapability(ToolResponseFixture(first, assets)), scope="runtime")
     storage = PersistenceStorage.filesystem(tmp_path)
-    async with Persistence.open('fixture-session', storage=storage) as persistence_178, Runtime.open(persistence=persistence_178, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('fixture-session', storage=storage) as persistence_178, Runtime.attach(persistence=persistence_178, features=model_features(RuntimeUsageModels(), features)) as runtime:
         with pytest.raises(AIError) as rejected:
             await runtime.agents.get().start("question", session_id="session")
         assert rejected.value.code is ErrorCode.BINDING_CONFLICT
@@ -204,12 +204,12 @@ async def test_fixture_session_rejection_leaves_no_admitted_turn(tmp_path: Path)
 @pytest.mark.asyncio
 async def test_derived_fixture_mode_mismatch_fails_before_execution_reservation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assets, first, _second = await _fixtures()
-    async with Persistence.open('fixture-modes', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_193, Runtime.open(persistence=persistence_193, features=model_features(RuntimeUsageModels())) as runtime:
+    async with Persistence.open('fixture-modes', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_193, Runtime.attach(persistence=persistence_193, features=model_features(RuntimeUsageModels())) as runtime:
         live = await runtime.agents.get().start("live")
         assert (await live.wait()).result.status is ExecutionStatus.SUCCEEDED
     features = RuntimeFeatures("fixture-modes")
     features.capability(ToolResponsesCapability(ToolResponseFixture(first, assets)), scope="runtime")
-    async with Persistence.open('fixture-modes', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_198, Runtime.open(persistence=persistence_198, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('fixture-modes', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_198, Runtime.attach(persistence=persistence_198, features=model_features(RuntimeUsageModels(), features)) as runtime:
         fixture = await runtime.agents.get().start("fixture")
         assert (await fixture.wait()).result.status is ExecutionStatus.SUCCEEDED
         original = await runtime.executions.get(live.execution_id)
@@ -217,7 +217,7 @@ async def test_derived_fixture_mode_mismatch_fails_before_execution_reservation(
             await original.retry("retain live mode")
         assert mismatch.value.code is ErrorCode.BINDING_CONFLICT
     storage = PersistenceStorage.filesystem(tmp_path)
-    async with Persistence.open('fixture-modes', storage=storage) as persistence_207, Runtime.open(persistence=persistence_207, features=model_features(RuntimeUsageModels())) as runtime:
+    async with Persistence.open('fixture-modes', storage=storage) as persistence_207, Runtime.attach(persistence=persistence_207, features=model_features(RuntimeUsageModels())) as runtime:
         async def unexpected_reservation(value: ExecutionStartReservation) -> None:
             raise AssertionError("fixture mismatch must fail before execution admission")
 
@@ -249,9 +249,9 @@ async def test_fixture_asset_preflight_is_authorized_and_precedes_admission(auth
 
     monkeypatch.setattr(assets, "read_versions", missing_version)
     storage = PersistenceStorage.in_memory()
-    features = RuntimeFeatures("fixture-preflight", authorization=Authorization())
+    features = RuntimeFeatures("fixture-preflight")
     features.capability(ToolResponsesCapability(ToolResponseFixture(first, assets)), scope="runtime")
-    async with Persistence.open('fixture-preflight', storage=storage) as persistence_241, Runtime.open(persistence=persistence_241, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('fixture-preflight', storage=storage) as persistence_241, Runtime.attach(persistence=persistence_241, authorization=Authorization(), features=model_features(RuntimeUsageModels(), features)) as runtime:
         monkeypatch.setattr(runtime._state.execution.executions, "reserve_start", unexpected_reservation)
         with pytest.raises(AIError) as rejected:
             await runtime.agents.get().start("question")
@@ -397,7 +397,7 @@ async def test_fixture_disappearing_after_admission_preserves_execution_for_repa
     monkeypatch.setattr(assets, "read_versions", read_fixture)
     features = _persistence_capabilities(restart=True)
     features.capability(ToolResponsesCapability(ToolResponseFixture(first, assets)), scope="runtime")
-    async with Persistence.open('fixture-repair', storage=storage) as persistence_387, Runtime.open(persistence=persistence_387, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('fixture-repair', storage=storage) as persistence_387, Runtime.attach(persistence=persistence_387, features=model_features(RuntimeUsageModels(), features)) as runtime:
         reserve = runtime._state.execution.executions.reserve_start
 
         async def remove_after_admission(value: ExecutionStartReservation) -> object:

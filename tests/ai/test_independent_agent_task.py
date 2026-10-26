@@ -22,7 +22,7 @@ async def test_agent_task_binds_to_shared_persistence_without_runtime_task_owner
     features = RuntimeFeatures("agent-task")
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("agent-task", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+        async with Runtime.attach(persistence=persistence, authorization=agent_policy, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             task = Task.from_agent("answer", runtime.agents.get())
             async with TaskEngine.open(task, persistence=persistence) as engine:
                 graph = await engine.start(TaskGraph("answer", (
@@ -49,7 +49,7 @@ async def test_agent_task_rejects_an_unrelated_persistence_owner() -> None:
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("first", storage=PersistenceStorage.in_memory()) as first:
         async with Persistence.open("second", storage=PersistenceStorage.in_memory()) as second:
-            async with Runtime.open(persistence=first, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+            async with Runtime.attach(persistence=first, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
                 task = Task.from_agent("answer", runtime.agents.get())
                 with pytest.raises(AIError) as mismatch:
                     async with TaskEngine.open(task, persistence=second):
@@ -65,7 +65,7 @@ async def test_restored_agent_task_retains_the_captured_binding() -> None:
     features = RuntimeFeatures("agent-task-restore")
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("restore", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+        async with Runtime.attach(persistence=persistence, authorization=agent_policy, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             binding = runtime.agents.get().execution_port.binding_contract
             restored = runtime.agents.restore(binding)
             task = Task.from_agent("restore", restored)
@@ -94,7 +94,7 @@ async def test_mixed_task_cancellation_reaches_its_agent_producer() -> None:
     features = RuntimeFeatures("agent-task-cancel")
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("cancel", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+        async with Runtime.attach(persistence=persistence, authorization=agent_policy, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             task = Task.from_agent("answer", runtime.agents.get())
             async with TaskEngine.open(task, persistence=persistence) as engine:
                 graph = await engine.start(TaskGraph("cancel", (
@@ -124,7 +124,7 @@ async def test_task_hold_release_cleans_only_the_original_agent_staging(monkeypa
     features = RuntimeFeatures("agent-task-hold")
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("hold", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+        async with Runtime.attach(persistence=persistence, authorization=agent_policy, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             released = []
             original_release = runtime._run_store.release_execution_staging
 
@@ -178,10 +178,10 @@ async def test_task_admission_does_not_bypass_agent_execution_authorization() ->
 
     agent_policy = Policy(AuthorizationAction.EXECUTION_RUN)
     task_policy = Policy()
-    features = RuntimeFeatures("agent-task-authorization", authorization=agent_policy)
+    features = RuntimeFeatures("agent-task-authorization")
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("authorization", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+        async with Runtime.attach(persistence=persistence, authorization=agent_policy, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             task = Task.from_agent("answer", runtime.agents.get())
             async with TaskEngine.open(task, persistence=persistence, authorization=task_policy) as engine:
                 graph = await engine.start(TaskGraph("denied", (
@@ -208,8 +208,8 @@ async def test_two_agent_producers_share_task_persistence_without_sharing_lifecy
     first_features.agent("default", model="default", allow_tools=())
     second_features.agent("default", model="default", allow_tools=())
     async with Persistence.open("two-agents", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(first_model)), first_features)) as first:
-            async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(second_model)), second_features)) as second:
+        async with Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(first_model)), first_features)) as first:
+            async with Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(second_model)), second_features)) as second:
                 first_task = Task.from_agent("first", first.agents.get())
                 second_task = Task.from_agent("second", second.agents.get())
                 async with TaskEngine.open(first_task, second_task, persistence=persistence) as engine:

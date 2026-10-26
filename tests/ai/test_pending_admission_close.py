@@ -62,7 +62,7 @@ async def test_runtime_close_joins_pending_publication_after_start_cancellation(
         storage_closed.set()
 
     monkeypatch.setattr(Persistence, "close", close_storage)
-    async with Persistence.open('pending-admission-close', storage=storage) as persistence_62, Runtime.open(persistence=persistence_62, features=model_features(_Models(_UsageFunctionModel(model)), _group())) as runtime:
+    async with Persistence.open('pending-admission-close', storage=storage) as persistence_62, Runtime.attach(persistence=persistence_62, features=model_features(_Models(_UsageFunctionModel(model)), _group())) as runtime:
         session = await runtime.agents.get().create_session("session")
         starting = asyncio.create_task(session.start("question", idempotency_key="request"))
         closing = None

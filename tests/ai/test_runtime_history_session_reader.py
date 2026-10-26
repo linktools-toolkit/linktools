@@ -235,7 +235,7 @@ async def test_runtime_history_session_reader_pending_overlay_and_canonical_boun
             persistence=await readers.enter_async_context(Persistence.open(
                 "pending-session-display", read_only=True,
                 storage=PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache),
-            )), authorization=features.authorization,
+            )), authorization=None,
         ))
         async with reader_context as reader:
             principal = owner.default_principal
@@ -368,7 +368,7 @@ async def test_runtime_history_session_reader_independent_terminal_commit_is_aut
     await observer.publish(pending, lease)
     features = RuntimeFeatures("independent-history")
     try:
-        async with Persistence.open('independent', storage=PersistenceStorage.sqlite(path, cache=InMemoryCacheBackend(max_bytes=2 ** 20), coordination=coordination), tenant_id='tenant', read_only=True) as history_persistence_372, History.open(persistence=history_persistence_372, authorization=features.authorization) as reader:
+        async with Persistence.open('independent', storage=PersistenceStorage.sqlite(path, cache=InMemoryCacheBackend(max_bytes=2 ** 20), coordination=coordination), tenant_id='tenant', read_only=True) as history_persistence_372, History.open(persistence=history_persistence_372, authorization=None) as reader:
             assert (await reader.inspect_execution(
                 pending.execution_id, principal=_OWNER, include_usage=False,
             )).status is ExecutionStatus.STARTED

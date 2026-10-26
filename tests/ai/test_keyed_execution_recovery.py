@@ -54,7 +54,7 @@ async def _recoverable(
     state = PersistenceStorage.sqlite(database)
     other_state = PersistenceStorage.sqlite(database)
     try:
-        async with Persistence.open(_NAMESPACE, storage=state) as persistence_54, Runtime.open(persistence=persistence_54, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as runtime, Persistence.open(_NAMESPACE, storage=other_state) as persistence_57, Runtime.open(persistence=persistence_57, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as other:
+        async with Persistence.open(_NAMESPACE, storage=state) as persistence_54, Runtime.attach(persistence=persistence_54, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as runtime, Persistence.open(_NAMESPACE, storage=other_state) as persistence_57, Runtime.attach(persistence=persistence_57, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as other:
             try:
                 yield runtime, other, runtime._state, execution_id, calls, release
             finally:

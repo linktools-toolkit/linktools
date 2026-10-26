@@ -27,7 +27,7 @@ _PNG = base64.b64decode(
 
 
 def _binding():
-    return create_model(protocol='openai',
+    return create_model(api='openai',
         model="explicit-test",
         input_types=(
             "mime:image/png",
@@ -129,7 +129,7 @@ async def test_unified_read_later_failure_returns_no_partial_batch(tmp_path: Pat
     (tmp_path / "image.png").write_bytes(_PNG)
     session = await LocalSandbox().open(root=tmp_path)
     try:
-        denied = create_model(protocol='openai', model="no-inputs", input_types=())
+        denied = create_model(api='openai', model="no-inputs", input_types=())
         with pytest.raises(ToolCallRetry) as rejected:
             await _tools(tmp_path, session, binding=denied)["read_file"].function(["notes.txt", "image.png"])
         facts = json.loads(str(rejected.value).split(" File: ", 1)[1])
@@ -204,7 +204,7 @@ def test_workspace_tools_use_initial_behavior_revision(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_legacy_attach_obeys_explicit_model_route_before_publication(tmp_path: Path) -> None:
     (tmp_path / "report.pdf").write_bytes(b"%PDF-1.7\n")
-    binding = create_model(protocol='openai', model="no-files", input_types=())
+    binding = create_model(api='openai', model="no-files", input_types=())
     session = await LocalSandbox().open(root=tmp_path)
     try:
         with pytest.raises(ToolCallRetry):
@@ -314,7 +314,7 @@ async def test_generic_text_detection_keeps_structured_text_attachment_hint(tmp_
     import mimetypes
     mimetypes.add_type(mime, Path(name).suffix)
     (tmp_path / name).write_text("key,value\none,two\n", encoding="utf-8")
-    binding = create_model(protocol='openai', model="known-text", input_types=(f"mime:{mime}",))
+    binding = create_model(api='openai', model="known-text", input_types=(f"mime:{mime}",))
     session = await LocalSandbox().open(root=tmp_path)
     try:
         value = (await _tools(tmp_path, session, binding=binding)["read_file"].function(name, as_file=True)).return_value[0]
@@ -341,7 +341,7 @@ async def test_unsupported_attachment_reports_facts_without_content_or_native_de
     (tmp_path / name).write_bytes(body)
     session = await LocalSandbox().open(root=tmp_path)
     try:
-        denied = create_model(protocol='openai', model="no-inputs")
+        denied = create_model(api='openai', model="no-inputs")
         with pytest.raises(ToolCallRetry) as rejected:
             await _tools(tmp_path, session, binding=denied)["read_file"].function(name, as_file=as_file)
         facts = json.loads(str(rejected.value).split(" File: ", 1)[1])
@@ -357,7 +357,7 @@ async def test_default_attachment_deny_keeps_bounded_text_preview_available(tmp_
     (tmp_path / "large.txt").write_text("line\n" * 10000, encoding="utf-8")
     session = await LocalSandbox().open(root=tmp_path)
     try:
-        denied = create_model(protocol='openai', model="no-inputs")
+        denied = create_model(api='openai', model="no-inputs")
         result = await _tools(tmp_path, session, binding=denied)["read_file"].function("large.txt", offset=1, limit=2)
         assert result.return_value["texts"][0]["content"] == "line\nline\n"
         assert result.return_value["files"] == []

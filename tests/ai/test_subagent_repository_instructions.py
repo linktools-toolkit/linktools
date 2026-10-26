@@ -38,7 +38,7 @@ from ._runtime_test_helpers import execution_owner_fields
 
 def _binding() -> AgentBinding:
     spec = AgentSpec("agent", model="model")
-    models = {"model": create_model(protocol="openai", model="gpt-test")}
+    models = {"model": create_model(api="openai", model="gpt-test")}
     compiler = AgentCompiler(
         models=models, candidates=(), agents={spec.id: spec},
     )

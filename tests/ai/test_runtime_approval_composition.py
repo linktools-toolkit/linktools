@@ -65,7 +65,7 @@ async def test_composed_runtime_ask_enters_approval_wait(
         allow_tools=("read_file",),
     )
 
-    async with Persistence.open('default', storage=state) as persistence_65, Runtime.open(persistence=persistence_65, features=model_features(_ToolModels(), application)) as runtime:
+    async with Persistence.open('default', storage=state) as persistence_65, Runtime.attach(persistence=persistence_65, features=model_features(_ToolModels(), application)) as runtime:
         execution = await runtime.agents.get("default").start("read a file")
         record = None
         for _ in range(200):

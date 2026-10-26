@@ -196,7 +196,7 @@ def _local_model(
                     configured = value_type(configured)
                 numeric_options[name] = workspace.config.get(name) if configured is None else configured
         return create_model(
-            protocol=api,
+            api=api,
             model=selected_model,
             input_types=input_types,
             model_settings={name: value for name, value in numeric_options.items()
@@ -237,7 +237,6 @@ async def _open_local_runtime(
     from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
     from linktools.ai.runtime import Runtime
-    from linktools.ai.persistence import Persistence
 
     assets = _local_runtime_assets(workspace)
     await assets.initialize()
@@ -249,8 +248,8 @@ async def _open_local_runtime(
         features.capability(ExecutionCapability(retain_history=True))
         features.capability(CheckpointCapability())
         features.capability(TraceCapability())
-        async with Persistence.open("default", storage=_local_runtime_storage(workspace)) as persistence, Runtime.open(
-            persistence=persistence,
+        async with Runtime.open(
+            "default", storage=_local_runtime_storage(workspace),
             features=features,
             metrics=await _local_metrics(workspace),
         ) as runtime:

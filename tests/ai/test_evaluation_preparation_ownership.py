@@ -99,7 +99,7 @@ async def test_cancelled_preparation_releases_payload_and_survives_reopen(
         reopened = PersistenceStorage.filesystem(tmp_path)
         async with (
             Persistence.open('preparation', storage=reopened, tenant_id='tenant') as persistence_93,
-            Runtime.open(persistence=persistence_93, context=ExecutionContext(None)) as reader,
+            Runtime.attach(persistence=persistence_93, context=ExecutionContext(None)) as reader,
         ):
             assert await reader._state.task.admissions.submission_status(saved[0].ref) == "cancelled"
 
@@ -121,7 +121,7 @@ async def test_purge_discovers_capture_written_before_offline_quiescence(tmp_pat
     storage = PersistenceStorage.filesystem(tmp_path)
     async with (
         Persistence.open('preparation', storage=storage, tenant_id='tenant') as persistence_112,
-        Runtime.open(persistence=persistence_112, context=ExecutionContext(None)) as runtime,
+        Runtime.attach(persistence=persistence_112, context=ExecutionContext(None)) as runtime,
     ):
         async with (
             TaskEngine.open(*tasks, persistence=persistence_112, context=ExecutionContext(None)) as engine,

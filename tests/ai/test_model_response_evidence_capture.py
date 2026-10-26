@@ -137,7 +137,7 @@ async def test_model_response_evidence_capture_blocks_duplicate_tool_effects() -
     features.agent("default", model="default", allow_tools=("work",))
     rejected_error = None
     try:
-        async with Persistence.open('invalid-response', storage=PersistenceStorage.in_memory()) as persistence_137, Runtime.open(persistence=persistence_137, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+        async with Persistence.open('invalid-response', storage=PersistenceStorage.in_memory()) as persistence_137, Runtime.attach(persistence=persistence_137, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             execution = await runtime.agents.get().start("run work")
             with pytest.raises(AIError) as rejected:
                 await execution.wait(timeout_seconds=10)

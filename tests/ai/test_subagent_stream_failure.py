@@ -89,7 +89,7 @@ async def test_child_stream_failure_details_survive_parent_history_and_reopen(
             return PersistenceStorage.filesystem(tmp_path / "state")
         return PersistenceStorage.sqlite(tmp_path / "state.db")
 
-    async with Persistence.open('child-stream-failure', storage=storage()) as persistence_89, Runtime.open(persistence=persistence_89, features=features) as runtime:
+    async with Persistence.open('child-stream-failure', storage=storage()) as persistence_89, Runtime.attach(persistence=persistence_89, features=features) as runtime:
         execution = await runtime.agents.get().start("delegate once and report any failure")
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
@@ -127,7 +127,7 @@ async def test_child_stream_failure_details_survive_parent_history_and_reopen(
 
     assert len(streams) == 2 and all(stream.closed for stream in streams)
     assert all(client.is_closed for client in clients)
-    async with Persistence.open('child-stream-failure', storage=storage()) as persistence_127, Runtime.open(persistence=persistence_127, features=features) as reopened:
+    async with Persistence.open('child-stream-failure', storage=storage()) as persistence_127, Runtime.attach(persistence=persistence_127, features=features) as reopened:
         execution = await reopened.executions.get(parent_id)
         child = await reopened.executions.get(child_id)
         assert (await execution.history(include_content=True)).items == parent_history

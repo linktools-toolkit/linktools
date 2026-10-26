@@ -51,7 +51,7 @@ async def test_group_agent_skill_requirements_survive_capture(
         assert isinstance(captured, AgentSpec)
         assert captured.allow_skills == declared.allow_skills == ("guide",)
         compiler = AgentCompiler(
-            models={"default": create_model(protocol='openai', model="unused-offline-model")},
+            models={"default": create_model(api='openai', model="unused-offline-model")},
             candidates=capture.contributions,
             agents={captured.id: captured},
         )

@@ -129,7 +129,7 @@ from linktools.ai.runtime import RuntimeFeatures
 from dataclasses import replace
 from linktools.ai.runtime import Runtime
 from linktools.ai.core import PersistenceDomain
-from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.persistence import PersistenceStorage
 
 storage = PersistenceStorage.from_root("state", cache=hot_cache)
 execution_route = storage.plan.route(PersistenceDomain.EXECUTION)
@@ -137,8 +137,8 @@ features = RuntimeFeatures("app")
 features.capability(CheckpointCapability())
 features.capability(TraceCapability())
 storage = PersistenceStorage(replace(storage.plan, trace=execution_route.with_cache(None)))
-async with Persistence.open("app", storage=storage) as persistence, Runtime.open(
-    persistence=persistence, features=features,
+async with Runtime.open("app", storage=storage,
+    features=features,
 ) as runtime:
     ...
 ```
@@ -207,8 +207,8 @@ finally:
     await recorder.close()
 ```
 
-Automatic Agent observations use `Runtime.open(..., metrics=dataset)`; Task
-and evaluation work uses the TaskEngine recorder. Each producer owns an isolated
+`Runtime.open(..., metrics=dataset)` configures Agent observations and its
+bound TaskEngine recorders, including evaluation work. Each producer owns an isolated
 recorder over the borrowed Metrics dataset;
 explicit application recording uses the dataset independently.
 

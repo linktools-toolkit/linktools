@@ -3,31 +3,23 @@
 `linktools-ai` requires Python >= 3.11 and provides the Agent runtime layer for LinkTools. The public composition model is intentionally small:
 
 ```text
-namespace
-    + PersistenceStorage
-        -> Persistence.open(...)
-    + one RuntimeFeatures or RuntimeFeaturesCapture
-        -> optional, independent Workspace and Sandbox via RuntimeFeatures(...)
-        -> Runtime.open(...)
-        -> captured capability/declaration candidates
-        -> AgentCompiler
-        -> CompiledAgent
-        -> runtime.agents.get(id)
-        -> per-execution AgentBinding
-        -> Agent / Session / Execution / Recovery
-    + TaskEngine.open(..., persistence=...)
-        -> Task graphs / Evaluations.open(engine)
+Runtime.open(namespace, storage=..., features=...)
+    -> owned Persistence: namespace, tenant and storage
+    -> optional Agent features: Agent / Session / Execution / Recovery
+    -> await runtime.tasks.bind(*definitions): TaskEngine
+    -> await runtime.evaluations.bind(engine): Evaluations
+    -> runtime.history: retained readback
 ```
 
 The main ownership rules are:
 
-- `Persistence` owns the namespace, tenant and shared storage; Runtime and TaskEngine borrow it without closing each other. Neither requires a filesystem Workspace.
+- `Runtime.open` owns application composition and closes its bound domains before its Persistence. Advanced callers can use `Runtime.attach(persistence=...)` to borrow an independently opened Persistence without closing it. Neither requires a filesystem Workspace.
 - `Workspace` owns paths and policy; it is not a persistence identity.
 - `AssetStore` stores raw asset bytes. It does not interpret declarations.
 - `RuntimeFeatures` is the only public registration/discovery composition unit. It can provide a Workspace or Sandbox independently and captures direct registrations and, when store-backed, one declaration view pinned to Asset version references.
 - `AgentSpec` is a runtime-independent Agent declaration.
 - `AgentCompiler` is the sole Agent-level selector. It resolves model, tool, Skill, MCP, capability, and Subagent candidates from the captured Runtime candidate set.
-- `Runtime` composes Agent execution. TaskEngine, History, Snapshot and Evaluations have independent public entry points.
+- `Runtime` composes Agent, Task and Evaluation execution through one application lifecycle. `features=None` leaves Agent execution disabled; Task-only applications need no model declarations. TaskEngine, History, Snapshot and Evaluations retain independent advanced entry points.
 - `runtime.agents.get(id)` returns a Runtime-bound `Agent`; it does not compile or register new definitions.
 - `AgentBinding` is created per execution and pins the exact durable semantics, including the output contract.
 - `Session` is bound to `AgentSpec.id`; retry/recovery remain pinned to the exact historical execution binding.
@@ -43,7 +35,6 @@ The callback may inspect public declaration metadata; the SDK does not reserve
 business metadata keys, prescribe a type/tag system or serialize the callback.
 
 ```python
-from linktools.ai.persistence import Persistence
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 
 
@@ -54,8 +45,8 @@ def available(agent, contribution):
     return required is None or bool(set(required) & set(agent.metadata.get("tags", [])))
 
 group = RuntimeFeatures("application", filter=available)
-async with Persistence.open("application", storage=storage) as persistence, Runtime.open(
-    persistence=persistence, features=group,
+async with Runtime.open("application", storage=storage,
+    features=group,
 ) as runtime:
     ...
 ```
@@ -73,12 +64,13 @@ to `Runtime.open(features=...)`. This keeps the same source revision and
 reader without loading the assets again. `Runtime.open` has no separate filter
 parameter.
 
-`RuntimeFeatures` also owns the current host authorization policy and prompt
-limits: `RuntimeFeatures("application", authorization=policy, limits=PromptLimits(...))`.
-Capture it once for `Runtime.open(features=...)`. Independently opened History and
-TaskEngine accept the same policy through `authorization=policy`; storage routes
-and tenant identity come from Persistence. The policy instance remains in process;
-it is not serialized as an execution identity.
+`RuntimeFeatures` owns Agent prompt limits:
+`RuntimeFeatures("application", limits=PromptLimits(...))`. Capture it once for
+`Runtime.open(features=...)`. The application authorization policy belongs to
+`Runtime.open(..., authorization=policy)` and is shared by its bound domains.
+Independently opened History and TaskEngine accept `authorization=policy` too.
+Storage routes and tenant identity come from Persistence. The policy instance
+remains in process; it is not serialized as an execution identity.
 Omitting authorization uses the Runtime tenant policy. Prompt limits constrain
 model context and are separate from TaskGraph and snapshot limits.
 
@@ -86,7 +78,7 @@ For a fixed MCP response fixture, register
 `ToolResponsesCapability(ToolResponseFixture(ref, reader))` from
 `linktools.ai.capability` before capture. The fixture
 keeps its immutable Asset reference and borrowed reader. `Runtime.open` has no
-separate authorization, prompt-limit, or tool-response arguments.
+separate prompt-limit or tool-response arguments.
 
 With no callback, existing selection behavior is unchanged. Wildcard selectors
 expand the remaining candidates; explicit unavailable selections fail.
@@ -121,8 +113,8 @@ independently of `allow_capabilities` and `RuntimeFeatures.filter`. Use explicit
 
 ```python
 group.capability(global_rate_limit, id="host.rate-limit")
-async with Persistence.open("application", storage=storage) as persistence, Runtime.open(
-    persistence=persistence, features=group,
+async with Runtime.open("application", storage=storage,
+    features=group,
 ) as runtime:
     ...
 ```
@@ -136,8 +128,8 @@ Context retention, interrupted-run recovery and detailed trace are independent
 Runtime-scoped opt-ins: `ExecutionCapability(retain_history=True)`,
 `CheckpointCapability()`, and `TraceCapability()`. Durable storage alone enables
 none of these optional guarantees. `Runtime.open(..., metrics=dataset)` independently enables automatic
-Agent observations. Pass the same dataset to `TaskEngine.open(metrics=dataset)`
-for Task and evaluation execution observations. Each producer owns its recorder
+Agent observations and supplies the dataset to Runtime-bound Task engines for
+Task and evaluation execution observations. Each producer owns its recorder
 and drain lifecycle; the shared dataset remains caller-owned. Task and Evaluation
 need no capability wrappers. Session metadata and display history
 are enabled by the default `SessionCapability`; use `SessionCapability(enabled=False)`
@@ -151,7 +143,7 @@ boundaries](docs/runtime-capabilities.md#optional-execution-persistence).
 
 See [Task graph authoring](docs/task-graphs.md) for typed JSON results, conditional branches, batch expansion, collection, and submission-time diagnostics.
 
-Use `Evaluations.open(engine)` from `linktools.ai.evaluation_engine` to evaluate Tasks, Agent-backed Tasks, and native TaskGraphs with retained evidence, rule/model/human scorers, rescoring, and paired reports. See the [evaluation guide](docs/evaluation.md) for an offline end-to-end example and the capture, comparison, authorization, and retention contracts.
+Use `await runtime.evaluations.bind(engine)` to evaluate Tasks, Agent-backed Tasks, and native TaskGraphs with retained evidence, rule/model/human scorers, rescoring, and paired reports. See the [evaluation guide](docs/evaluation.md) for an offline end-to-end example and the capture, comparison, authorization, and retention contracts.
 
 ## 1. Run a workspace
 
@@ -247,17 +239,16 @@ security, persisted history and explicit recovery of stopped executors.
 from linktools.ai import RuntimeFeatures, Runtime, Workspace
 from linktools.ai.capability import WorkspaceCapability
 from linktools.ai.model import create_model
-from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.persistence import PersistenceStorage
 
 workspace = Workspace.initialize("/workspace/project")
-binding = create_model(protocol="openai", model="gpt-4o-mini")
+binding = create_model(api="openai", model="gpt-4o-mini")
 storage = PersistenceStorage.in_memory()
 features = RuntimeFeatures("workspace")
 features.model("default", binding)
 features.capability(WorkspaceCapability(workspace))
 
-async with Persistence.open("default", storage=storage) as persistence, Runtime.open(
-    persistence=persistence,
+async with Runtime.open("default", storage=storage,
     features=features,
 ) as runtime:
     result = (await runtime.agents.get("default").run(
@@ -281,7 +272,7 @@ To give multiple routes the same static binding, register that object under each
 
 ```python
 binding = create_model(
-    protocol="openai", model="gpt-4o-mini",
+    api="openai", model="gpt-4o-mini",
     api_key=get_api_key(),
 )
 features.model("production", binding)
@@ -294,7 +285,7 @@ Install `linktools-ai[openai]` for Chat Completions and Responses, or
 `linktools-ai[anthropic]` for Messages; combine extras when using both.
 The base package does not install either provider SDK.
 
-`create_model(protocol="anthropic", model="claude-sonnet-4-5")` returns a
+`create_model(api="anthropic", model="claude-sonnet-4-5")` returns a
 model binding without a route name. Protocols are `openai` (Chat Completions),
 `openai-responses`, and `anthropic`. Register bindings in the same feature
 container as tools and capabilities:
@@ -304,9 +295,9 @@ from linktools.ai.model import create_model
 from linktools.ai.runtime import RuntimeFeatures
 
 features = RuntimeFeatures()
-features.model("assistant", create_model(protocol="anthropic", model="claude-sonnet-4-5"))
+features.model("assistant", create_model(api="anthropic", model="claude-sonnet-4-5"))
 # Or load one fresh binding for each agent run. The function is synchronous.
-features.model("deferred", lambda: create_model(protocol="openai", model="gpt-4o"))
+features.model("deferred", lambda: create_model(api="openai", model="gpt-4o"))
 ```
 
 Runtime captures the route mapping at opening without evaluating every loader.
@@ -360,8 +351,7 @@ application.agent(
     allow_subagents=(),
 )
 
-async with Persistence.open("default", storage=storage) as persistence, Runtime.open(
-    persistence=persistence,
+async with Runtime.open("default", storage=storage,
     features=application,
 ) as runtime:
     result = (await runtime.agents.get("audit").run("inspect ticket SEC-123")).result
@@ -1137,7 +1127,7 @@ family. Attachments that do not match the resulting MIME allowlist are rejected:
 ```python
 from linktools.ai.model import create_model
 
-binding = create_model(protocol="openai",
+binding = create_model(api="openai",
     model="your-model",
     input_types=["audio", "document", "mime:audio/*", "mime:application/pdf"],
 )
@@ -1216,23 +1206,22 @@ Attachment delivery evidence is available through `runtime.history.attachment_fa
 
 ### Agent-backed Task graphs
 
-Bind Agent-backed Task definitions through `Task.from_agent` and an independent TaskEngine and put prompt,
+Bind Agent-backed Task definitions through `Task.from_agent` and `runtime.tasks.bind`, and put prompt,
 parameters, and Workspace paths in `AgentTaskInput`:
 
 ```python
 from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.task import Task, TaskGraph, TaskNode
-from linktools.ai.task_engine import TaskEngine
 
 task = Task.from_agent("writer-task", runtime.agents.get("writer"))
 graph = TaskGraph(
     "draft-1",
     (TaskNode("draft", task=task, input=AgentTaskInput("Say hello.")),),
 )
-async with TaskEngine.open(task, persistence=persistence) as engine:
-    run = await engine.start(graph, idempotency_key="draft-1")
-    await run.wait()
-    result = await run.result("draft")
+engine = await runtime.tasks.bind(task)
+run = await engine.start(graph, idempotency_key="draft-1")
+await run.wait()
+result = await run.result("draft")
 ```
 
 Agent task prompt content supports native user content such as `BinaryContent`
@@ -1271,10 +1260,8 @@ low-cardinality metric dimensions. Tenant identity belongs to Persistence:
 from linktools.ai.core import ExecutionContext
 
 context = ExecutionContext(app)
-async with Persistence.open(
+async with Runtime.open(
     "web-chat", storage=storage, tenant_id="tenant-a",
-) as persistence, Runtime.open(
-    persistence=persistence,
     features=features,
     context=context,
 ) as runtime:
@@ -1293,8 +1280,10 @@ Retry `handoff()` or `close()` to join that same cleanup after a failure.
 
 Handoff requires `CheckpointCapability`, synchronous execution admission, and
 durable execution, recovery and checkpoint storage. Unsupported composition
-raises `CAPABILITY_REQUIRED_MISSING` before closing the Runtime. Evaluation coordination belongs to its own context; close or hand off dependent
-Task engines before handing off the Agent Runtime they borrow. A handoff cannot
+raises `CAPABILITY_REQUIRED_MISSING` before closing the Runtime. Runtime coordinates
+its bound Evaluation and Task domains before releasing Agent execution and owned
+Persistence. For independently opened domains, close or hand off dependent Task
+engines before handing off the Agent Runtime they borrow. A handoff cannot
 replace an already-started default close and reports an error instead of claiming
 that cancelled executions were preserved.
 
@@ -1490,25 +1479,24 @@ compatibility commitment exists.
 
 ## 7. Runtime storage
 
-`Persistence.open()` binds explicit storage, namespace and tenant. Runtime borrows that scope; storage selection belongs to the application:
+`Runtime.open()` owns a Persistence scope with explicit storage, namespace and tenant; storage selection belongs to the application:
 
 ```python
 from pathlib import Path
 
 from linktools.ai import Runtime
-from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.persistence import PersistenceStorage
 
 runtime_root = Path("/var/lib/linktools/runtime")
 storage = PersistenceStorage.sqlite(runtime_root / "runtime.db")
 
-async with Persistence.open("service-runtime", storage=storage) as persistence, Runtime.open(
-    persistence=persistence,
+async with Runtime.open("service-runtime", storage=storage,
     features=features,
 ) as runtime:
     ...
 ```
 
-`PersistenceStorage` supports in-memory, filesystem, SQLite, and SQL backends. Repository domains keep their ownership, transaction, recovery, and retention rules; `Persistence.open()` owns the storage composition. Pass the same Persistence to Runtime, TaskEngine, `History.open(persistence=...)` and `Snapshot.create(persistence=...)`; readers do not need Agent features or activate executors. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only `PersistenceStorage` handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only `PersistenceStorage`, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. Snapshots include Persistence-owned objects only. Skill and MCP resource bytes remain Asset-owned and are persisted as Asset version references in
+`PersistenceStorage` supports in-memory, filesystem, SQLite, and SQL backends. Repository domains keep their ownership, transaction, recovery, and retention rules; `Persistence.open()` owns the storage composition. Advanced callers can open Persistence independently, use `Runtime.attach(persistence=...)`, and pass the same Persistence to TaskEngine, `History.open(persistence=...)` and `Snapshot.create(persistence=...)`; readers do not need Agent features or activate executors. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only `PersistenceStorage` handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only `PersistenceStorage`, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. Snapshots include Persistence-owned objects only. Skill and MCP resource bytes remain Asset-owned and are persisted as Asset version references in
 binding metadata; portable PersistenceStorage restore therefore requires the
 corresponding Asset history to remain available through the AssetStore supplied
 when the Runtime is reopened.
