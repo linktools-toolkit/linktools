@@ -22,7 +22,7 @@ async def test_agent_task_binds_to_shared_persistence_without_runtime_task_owner
     features = RuntimeFeatures("agent-task")
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("agent-task", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, authorization=agent_policy, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+        async with Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             task = Task.from_agent("answer", runtime.agents.get())
             async with TaskEngine.open(task, persistence=persistence) as engine:
                 graph = await engine.start(TaskGraph("answer", (
@@ -65,7 +65,7 @@ async def test_restored_agent_task_retains_the_captured_binding() -> None:
     features = RuntimeFeatures("agent-task-restore")
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("restore", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, authorization=agent_policy, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+        async with Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             binding = runtime.agents.get().execution_port.binding_contract
             restored = runtime.agents.restore(binding)
             task = Task.from_agent("restore", restored)
@@ -94,7 +94,7 @@ async def test_mixed_task_cancellation_reaches_its_agent_producer() -> None:
     features = RuntimeFeatures("agent-task-cancel")
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("cancel", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, authorization=agent_policy, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+        async with Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             task = Task.from_agent("answer", runtime.agents.get())
             async with TaskEngine.open(task, persistence=persistence) as engine:
                 graph = await engine.start(TaskGraph("cancel", (
@@ -124,7 +124,7 @@ async def test_task_hold_release_cleans_only_the_original_agent_staging(monkeypa
     features = RuntimeFeatures("agent-task-hold")
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("hold", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, authorization=agent_policy, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+        async with Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             released = []
             original_release = runtime._run_store.release_execution_staging
 

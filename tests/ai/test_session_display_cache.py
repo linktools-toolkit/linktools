@@ -1104,7 +1104,7 @@ async def test_display_rebuild_does_not_stack_body_cache_expiry(tmp_path, monkey
 
 @pytest.mark.asyncio
 async def test_persistence_owns_record_cache_publication_beyond_runtime_close(tmp_path):
-    from linktools.ai.runtime import Runtime
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
 
     entered, exited = asyncio.Event(), asyncio.Event()
 

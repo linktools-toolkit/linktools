@@ -14,7 +14,8 @@ def test_runtime_exports_only_composition_and_domain_entry_points() -> None:
     expected = {
         "Agent", "Session", "Runtime", "RuntimeStatus", "RuntimeFeatures",
         "RuntimeFeaturesCapture", "RuntimeAgents", "RuntimeExecutions",
-        "RuntimeMetrics", "RuntimeSessions",
+        "RuntimeMetrics", "RuntimeSessions", "RuntimeTasks", "RuntimeEvaluations",
+        "RuntimeMetricsStatus", "RuntimeMetricsFlushResult",
     }
     assert set(runtime.__all__) == expected
     namespace: dict[str, object] = {}

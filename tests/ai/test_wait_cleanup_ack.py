@@ -79,7 +79,7 @@ async def test_live_wait_acknowledges_callback_cleanup_without_waiting_for_model
 @pytest.mark.parametrize("owner", ["execution", "graph", "evaluation"])
 @pytest.mark.parametrize("exit_kind", ["deadline", "caller_cancel"])
 async def test_wait_callback_can_finish_during_cleanup_without_reopening_observation(owner, exit_kind) -> None:
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     bundle.execution.release.clear()
     bundle.graph.release.clear()
     entered = asyncio.Event()
@@ -146,7 +146,7 @@ async def test_wait_callback_can_finish_during_cleanup_without_reopening_observa
 @pytest.mark.asyncio
 @pytest.mark.parametrize("observe", [False, True])
 async def test_authoritative_wait_timeout_keeps_its_own_details(observe) -> None:
-    bundle = _Bundle()
+    bundle = await _Bundle.create()
     cause = AIError(ErrorCode.WAIT_TIMEOUT, safe_details={"cursor": "service-owned", "scope": "authority"})
     bundle.execution.error = cause
     bundle.tree.emit = True
