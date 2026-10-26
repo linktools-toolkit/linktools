@@ -9,7 +9,7 @@ from typing import TypeVar
 
 from linktools.core import environ
 
-from linktools.ai.core import (
+from ..core import (
     OperationKind,
     OperationLedgerInput,
     OperationLedgerRecord,
@@ -19,8 +19,8 @@ from linktools.ai.core import (
     TaskStatus,
     canonical_sha256,
 )
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.task import (
+from ..errors import AIError, ErrorCode
+from ..task import (
     TaskGraph,
     TaskGraphAdmission,
     TaskGraphSubmission,
@@ -30,9 +30,9 @@ from linktools.ai.task import (
     TaskNode,
     TaskNodeView,
 )
-from linktools.ai.persistence.durability import CommitObservation, DurableCommitState, run_durable_commit
-from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence.repositories import (
+from .durability import CommitObservation, DurableCommitState, run_durable_commit
+from ._plan import PersistenceDomain
+from .repositories import (
     RepositoryBase,
     append_operation,
     decode_operation,
@@ -41,7 +41,7 @@ from linktools.ai.persistence.repositories import (
     record_cursor,
     replace_checked,
 )
-from linktools.ai.persistence.state import (
+from .state import (
     RecordQuery,
     StateStore,
     StateTransaction,
@@ -50,14 +50,14 @@ from linktools.ai.persistence.state import (
     operation_key,
     sortable_identity,
 )
-from linktools.ai.persistence._task_events import (
+from ._task_events import (
     _TaskEventState,
     _append_task_events,
     _append_task_state_events,
     _guard_task_event_owner,
     _task_graph_event_drafts,
 )
-from linktools.ai.persistence._task_state import (
+from ._task_state import (
     _effective_graph_status,
     _is_sha256,
     _isolated_graph_status,

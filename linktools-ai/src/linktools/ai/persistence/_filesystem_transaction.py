@@ -10,9 +10,9 @@ from pathlib import Path
 
 from linktools.core import environ
 
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence.codec import encode_alias, encode_fact, encode_operation, encode_record
-from linktools.ai.persistence._filesystem_layout import (
+from ..errors import AIError, ErrorCode
+from .codec import encode_alias, encode_fact, encode_operation, encode_record
+from ._filesystem_layout import (
     _CowMap, _FactStreamInfo, _FilesystemIndex, _RECORD_INDEX_MARKER, _RecordIndexNode,
     _alias_path, _decode_record_index_node_bytes, _fact_item_path, _fact_meta_path,
     _fact_subject_path, _json_bytes, _matches_record, _operation_path, _operation_ref_path,
@@ -20,7 +20,7 @@ from linktools.ai.persistence._filesystem_layout import (
     _record_index_identity, _record_index_node_path, _record_index_node_payload,
     _record_index_replace_child, _record_path, _relative_path, _require_scan_limit, _sequence_path,
 )
-from linktools.ai.persistence.state import (
+from .state import (
     FactQuery, FactScanCursor, OperationQuery, OperationScanCursor, RecordQuery,
     RecordReplacement, RecordScanCursor, StoredAlias, StoredFact, StoredOperation, StoredRecord,
     validate_operation_replacement, validate_record_identity, validate_record_replacement,

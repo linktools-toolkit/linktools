@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import re
 
-from linktools.ai.core import JsonValue, canonical_sha256
-from linktools.ai.errors import AIError, ErrorCode
+from ..core import JsonValue, canonical_sha256
+from ..errors import AIError, ErrorCode
 from ._graph import TaskNode
 
 

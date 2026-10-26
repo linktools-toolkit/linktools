@@ -10,7 +10,7 @@ from typing import cast
 from pydantic import BaseModel, TypeAdapter
 from pydantic_core import PydanticSerializationError, to_jsonable_python
 
-from linktools.ai.core import JsonValue, canonical_json_bytes
+from ..core import JsonValue, canonical_json_bytes
 
 
 def stable_json_snapshot(value: object) -> JsonValue:

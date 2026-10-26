@@ -9,7 +9,7 @@ from pydantic_ai.messages import ModelMessage
 
 from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
-from linktools.ai.model.messages import decode_model_messages, encode_model_messages
+from ..model.messages import decode_model_messages, encode_model_messages
 
 
 @dataclass(frozen=True, slots=True)

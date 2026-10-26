@@ -10,9 +10,9 @@ from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 from linktools.core import environ
-from linktools.ai.model import StoredUserInput
+from ..model import StoredUserInput
 
-from linktools.ai.core import (
+from ..core import (
     ApprovalStatus,
     PersistenceDomain,
     ExecutionEventType,
@@ -26,10 +26,10 @@ from linktools.ai.core import (
     canonical_sha256,
     agent_run_id,
 )
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.storage import StoredPayload
-from linktools.ai.persistence._archive import ContentArchive, PreparedArchive
-from linktools.ai.persistence.contracts import (
+from ..errors import AIError, ErrorCode
+from ..storage import StoredPayload
+from ._archive import ContentArchive, PreparedArchive
+from .contracts import (
     deferred_resource_id,
     AgentAttemptClaim,
     ApprovalRecord,
@@ -63,36 +63,36 @@ from linktools.ai.persistence.contracts import (
     ToolOperationRecord,
     decode_tool_operation_failure,
 )
-from linktools.ai.persistence.durability import (
+from .durability import (
     CommitObservation,
     DurableCommitResult,
     DurableCommitState,
     run_durable_commit,
 )
-from linktools.ai.persistence._execution_commands import _execution_history_seal
-from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
-from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
-from linktools.ai.persistence._conversation_repositories import (
+from ._execution_commands import _execution_history_seal
+from ._execution_repositories import ExecutionRepositoryImpl
+from ._model_interaction_store import ModelInteractionStateStepArchive
+from ._conversation_repositories import (
     ConversationHistoryRepositoryImpl,
     SessionRepositoryImpl,
 )
-from linktools.ai.persistence._recovery_repositories import (
+from ._recovery_repositories import (
     RecoveryCheckpointRepositoryImpl,
     tool_admission_matches as _tool_admission_matches,
 )
-from linktools.ai.persistence._step_contracts import (
+from ._step_contracts import (
     AgentRunCheckpoint,
     AgentRunRecord,
     StepEvent,
 )
-from linktools.ai.persistence._step_archive import (
+from ._step_archive import (
     PreparedExecutionProjection,
     PreparedAgentRunCheckpoint,
     PreparedAgentRunCheckpointBatch,
     StateStepArchive,
 )
-from linktools.ai.persistence._repository_common import operation_identity_matches, validate_recovery_operation
-from linktools.ai.persistence.state import GroupRecordReader, StateGroupTransaction, StateStore, StateTransaction
+from ._repository_common import operation_identity_matches, validate_recovery_operation
+from .state import GroupRecordReader, StateGroupTransaction, StateStore, StateTransaction
 
 _logger = environ.get_logger("ai.runtime.state.commands")
 
@@ -149,7 +149,7 @@ def _timeline_turn_message_range(
 
 
 if TYPE_CHECKING:
-    from linktools.ai.persistence.capabilities import RuntimeCapabilityWrites, PreparedCapabilityWrites
+    from .capabilities import RuntimeCapabilityWrites, PreparedCapabilityWrites
 
 
 class StateCommands:

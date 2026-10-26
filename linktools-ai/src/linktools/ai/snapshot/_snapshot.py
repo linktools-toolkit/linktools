@@ -36,14 +36,14 @@ from ..storage import (
     read_object,
 )
 from ..history import History
-from linktools.ai.persistence.snapshots import (
+from ..persistence.snapshots import (
     SnapshotExclusiveGuard,
     SnapshotLimits,
     reject_filesystem_capability_partitions,
     snapshot_object_ref_payload as _object_ref_payload,
     snapshot_object_ref_from_payload as _object_ref_from_payload,
 )
-from linktools.ai.persistence import PersistenceStorage, Persistence, PersistenceDomain
+from ..persistence import PersistenceStorage, Persistence, PersistenceDomain
 
 if TYPE_CHECKING:
     from ..workspace import Workspace

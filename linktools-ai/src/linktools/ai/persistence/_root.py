@@ -5,8 +5,8 @@
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from linktools.ai.storage import CacheBackend, TurnCoordinationBackend, StreamBackend, StorageRoute, FilesystemObjectStore, ObjectStore
-from linktools.ai.persistence._plan import PersistencePlan
+from ..storage import CacheBackend, TurnCoordinationBackend, StreamBackend, StorageRoute, FilesystemObjectStore, ObjectStore
+from ._plan import PersistencePlan
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine

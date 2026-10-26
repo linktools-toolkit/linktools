@@ -5,11 +5,11 @@
 from collections.abc import Iterator, Mapping
 from datetime import datetime
 
-from linktools.ai.agent import AgentInputCaptureRef
-from linktools.ai.core import JsonValue, canonical_sha256
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.task import TaskDependencyCapture, TaskGraphCaptureRef, TaskGraphTemplateRef, TaskInvocationInputRef
-from linktools.ai.persistence.codec import decode_domain
+from ..agent import AgentInputCaptureRef
+from ..core import JsonValue, canonical_sha256
+from ..errors import AIError, ErrorCode
+from ..task import TaskDependencyCapture, TaskGraphCaptureRef, TaskGraphTemplateRef, TaskInvocationInputRef
+from .codec import decode_domain
 
 _CAPTURE_TYPES = {
     "agent_input_capture_ref": (AgentInputCaptureRef, "agent"),

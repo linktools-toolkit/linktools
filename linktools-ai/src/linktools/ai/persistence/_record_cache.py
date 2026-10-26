@@ -8,11 +8,11 @@ from collections.abc import Mapping, Sequence
 import hashlib
 import json
 
-from linktools.ai.core import canonical_json_bytes
-from linktools.ai.errors import AIError
-from linktools.ai.storage import CacheBackend, StorageReadCache
-from linktools.ai.persistence.codec import decode_record, encode_record
-from linktools.ai.persistence.state import StateStore, StoredRecord, active_state_transaction
+from ..core import canonical_json_bytes
+from ..errors import AIError
+from ..storage import CacheBackend, StorageReadCache
+from .codec import decode_record, encode_record
+from .state import StateStore, StoredRecord, active_state_transaction
 
 
 class StateRecordCache:

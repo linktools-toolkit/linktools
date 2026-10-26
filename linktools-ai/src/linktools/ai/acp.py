@@ -19,7 +19,7 @@ except ModuleNotFoundError:
 
 from .capability import ExecutionCapability, WorkspaceCapability
 from .runtime import RuntimeFeatures
-from linktools.ai.persistence import Persistence, PersistenceStorage
+from .persistence import Persistence, PersistenceStorage
 from .core import (
     ExecutionDeltaType,
     ExecutionEventType,

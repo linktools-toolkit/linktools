@@ -6,20 +6,20 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal, cast
 
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelClientRequest, ModelClientResponse
-from linktools.ai.storage import StoredPayload
-from linktools.ai.persistence.contracts import (
+from ..errors import AIError, ErrorCode
+from ..model import ModelClientRequest, ModelClientResponse
+from ..storage import StoredPayload
+from .contracts import (
     ModelClientBodyRef,
     ModelClientRequestRef,
     ModelClientResponseRef,
     RuntimePayloadRef,
 )
-from linktools.ai.persistence._payload import decode_payload_bytes, encode_payload_bytes
-from linktools.ai.persistence._plan import PersistenceDomain
+from ._payload import decode_payload_bytes, encode_payload_bytes
+from ._plan import PersistenceDomain
 
 if TYPE_CHECKING:
-    from linktools.ai.persistence._history import TranscriptRepository
+    from ._history import TranscriptRepository
 
 
 async def prepare_client_requests(

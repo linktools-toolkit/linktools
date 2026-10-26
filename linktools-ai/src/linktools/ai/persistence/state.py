@@ -15,8 +15,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Generic, Protocol, TypeVar, runtime_checkable
 
-from linktools.ai.core import ImmutableJsonMapping, JsonValue, canonical_json_bytes
-from linktools.ai.persistence._archive_read import ArchiveFrontierReader, ArchiveNodeRead
+from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes
+from ._archive_read import ArchiveFrontierReader, ArchiveNodeRead
 
 ValueT = TypeVar("ValueT")
 

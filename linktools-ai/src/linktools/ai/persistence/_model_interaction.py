@@ -15,17 +15,17 @@ from pydantic_ai.messages import BinaryContent, ModelMessage, ModelResponse
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
 
-from linktools.ai.core import (
+from ..core import (
     JsonValue,
     UsageMetrics,
     canonical_json_bytes,
     normalize_json_value,
 )
-from linktools.ai.model import ModelClientRequest
-from linktools.ai.storage import StoredPayload
-from linktools.ai.model.messages import encode_model_messages
-from linktools.ai.model.messages import stable_json_snapshot
-from linktools.ai.persistence.contracts import (
+from ..model import ModelClientRequest
+from ..storage import StoredPayload
+from ..model.messages import encode_model_messages
+from ..model.messages import stable_json_snapshot
+from .contracts import (
     ContextProjection,
     InlineContextBlock,
     RuntimePayloadRef,
@@ -33,7 +33,7 @@ from linktools.ai.persistence.contracts import (
     TranscriptMessageRef,
     TranscriptSpanRef,
 )
-from linktools.ai.persistence._plan import PersistenceDomain
+from ._plan import PersistenceDomain
 
 _ENVELOPE_VERSION = 1
 

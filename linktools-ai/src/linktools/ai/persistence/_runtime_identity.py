@@ -4,7 +4,7 @@
 
 import hashlib
 
-from linktools.ai.core import canonical_sha256
+from ..core import canonical_sha256
 
 
 

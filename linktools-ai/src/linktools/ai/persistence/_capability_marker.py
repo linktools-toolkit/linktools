@@ -4,8 +4,8 @@
 
 import hashlib
 
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence.state import StateTransaction, StoredOperation
+from ..errors import AIError, ErrorCode
+from .state import StateTransaction, StoredOperation
 
 _KEY = hashlib.sha256(b"linktools.runtime.capability-partitions").digest()
 

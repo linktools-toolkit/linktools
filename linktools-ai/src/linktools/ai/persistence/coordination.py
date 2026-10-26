@@ -16,8 +16,8 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..storage import CacheBackend, StreamBackend, Lease, TurnCoordination, TurnCoordinationBackend
-from linktools.ai.persistence.codec import decode_domain, encode_domain
-from linktools.ai.execution import ExecutionRecord
+from .codec import decode_domain, encode_domain
+from ..execution import ExecutionRecord
 
 
 _PROMOTION_INTENT = b"promote"

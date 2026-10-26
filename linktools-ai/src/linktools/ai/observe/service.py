@@ -23,9 +23,9 @@ from ..observe import (
     Metrics,
     Observation,
 )
-from linktools.ai.observe.identity import stable_observation_id
+from .identity import stable_observation_id
 if TYPE_CHECKING:
-    from linktools.ai.execution import ExecutionTerminalCommitResult
+    from ..execution import ExecutionTerminalCommitResult
 
 _logger = environ.get_logger("ai.observe.metrics")
 _WARNING_INTERVAL_SECONDS = 30.0

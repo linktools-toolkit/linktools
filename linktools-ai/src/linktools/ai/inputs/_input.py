@@ -23,8 +23,8 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
 from ..workspace import normalize_workspace_input_path
-from linktools.ai.model.messages import binary_attachment_text, input_attachment_views, is_binary_attachment_text
-from linktools.ai.persistence import PersistenceDomain
+from ..model.messages import binary_attachment_text, input_attachment_views, is_binary_attachment_text
+from ..persistence import PersistenceDomain
 from ..model import (
     ReferencedContent,
     CanonicalUserInput,
@@ -34,11 +34,11 @@ from ..model import (
     validate_user_content,
     validate_user_input,
 )
-from linktools.ai.model.messages import UnsupportedUserContentKind, decode_user_content_item, encode_user_content_item
+from ..model.messages import UnsupportedUserContentKind, decode_user_content_item, encode_user_content_item
 
 if TYPE_CHECKING:
-    from linktools.ai.persistence.objects import ObjectKeyFactory
-    from linktools.ai.execution import StoredUserInput
+    from ..persistence.objects import ObjectKeyFactory
+    from ..execution import StoredUserInput
 
 _TEXT_CODEC = "text"
 _USER_CONTENT_CODEC = "user-content-v1"
@@ -447,7 +447,7 @@ class ExecutionInputMaterializer:
         *,
         tenant_id: str,
     ) -> "StoredUserInput":
-        from linktools.ai.execution import StoredUserInput
+        from ..execution import StoredUserInput
 
         canonical = validate_user_input(value)
         if isinstance(canonical, str):
@@ -465,7 +465,7 @@ class ExecutionInputMaterializer:
             if self._object_store is None or self._object_key_factory is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             body = canonical_json_bytes(cast(JsonValue, payload.value))
-            from linktools.ai.persistence.objects import ObjectKeyFactory, put_runtime_object
+            from ..persistence.objects import ObjectKeyFactory, put_runtime_object
 
             if not isinstance(self._object_key_factory, ObjectKeyFactory):
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -480,7 +480,7 @@ class ExecutionInputMaterializer:
         return StoredUserInput(_USER_CONTENT_CODEC, payload, view)
 
     async def restore(self, value: "StoredUserInput") -> CanonicalUserInput:
-        from linktools.ai.execution import StoredUserInput
+        from ..execution import StoredUserInput
 
         if not isinstance(value, StoredUserInput):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -488,7 +488,7 @@ class ExecutionInputMaterializer:
         if payload.kind == "object":
             if self._object_store is None or payload.ref is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            from linktools.ai.persistence.objects import read_runtime_object
+            from ..persistence.objects import read_runtime_object
 
             raw = await read_runtime_object(self._object_store, payload.ref)
             try:
@@ -749,7 +749,7 @@ def merge_captured_input_files(
 def stored_input_attachment_views(
     value: "StoredUserInput",
 ) -> tuple[Mapping[str, JsonValue], ...]:
-    from linktools.ai.execution import StoredUserInput
+    from ..execution import StoredUserInput
 
     if not isinstance(value, StoredUserInput):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -770,7 +770,7 @@ def stored_input_attachment_views(
 
 
 def stored_user_input_view(value: "StoredUserInput") -> dict[str, JsonValue]:
-    from linktools.ai.execution import StoredUserInput
+    from ..execution import StoredUserInput
 
     if not isinstance(value, StoredUserInput):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

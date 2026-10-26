@@ -19,10 +19,10 @@ from ..capability import TraceCapability
 from ..core import JsonValue, UsageMetrics
 from ..errors import AIError, ErrorCode
 from ..model import ModelClientRequest, ModelStreamAttempt, model_binding_error
-from linktools.ai.model.messages import request_attachment_facts
-from linktools.ai.observe.journal import ModelRequestFact
-from linktools.ai.model.messages import freeze_model_messages
-from linktools.ai.persistence.runs import (
+from ..model.messages import request_attachment_facts
+from ..observe.journal import ModelRequestFact
+from ..model.messages import freeze_model_messages
+from ..persistence.runs import (
     StagedContextProjection,
     StagedContextSpan,
     StagedModelInteraction,

@@ -14,26 +14,26 @@ from pydantic_ai.tools import RunContext as PydanticRunContext
 
 from ..core import PromptLimits, DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
 from ..errors import AIError, ErrorCode
-from linktools.ai.persistence.capabilities import CapabilityPersistence
+from ..persistence.capabilities import CapabilityPersistence
 from ._agent_run_recorder import AgentRunRecorder
 from ._budget import RunBudgetContext
 from ._compaction import ExternalModelRequestRecorder, CompactionCapability, CompactionPolicy
-from linktools.ai.capability import ExecutionCapability
+from ..capability import ExecutionCapability
 from ._harness import HarnessPlanStoreAdapter
 from ._harness_memory import build_harness_memory, select_harness_memory_tools
 from ._harness_planning import build_harness_planning
 from ._memory import MemoryStore
-from linktools.ai.capability import CheckpointCapability, TraceCapability
+from ..capability import CheckpointCapability, TraceCapability
 from ._plan import RuntimePlanStore
 from ._run_hooks import AgentRunCapture
 from ._conversation_service import ConversationService
 from ._persistence_services import CheckpointService, TraceService
 from ._persistence_configuration import execution_configuration
-from linktools.ai.persistence.runs import AgentRunStore
-from linktools.ai.persistence.runs import RuntimeAgentRunStore
+from ..persistence.runs import AgentRunStore
+from ..persistence.runs import RuntimeAgentRunStore
 
 if TYPE_CHECKING:
-    from linktools.ai.observe.journal import ModelRequestJournal
+    from ..observe.journal import ModelRequestJournal
 
 _MEMORY_CAPABILITY_ID = "linktools.ai.memory"
 _logger = environ.get_logger("ai.runtime.capabilities")

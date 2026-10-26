@@ -53,7 +53,7 @@ from ._retention import EvaluationRetention, require_evaluation_content
 from ._scope import EvaluationTrialScope, EvaluationTrialScopeCallback, _EnteredTrialScope
 from ..inputs import input_intent
 from ..inputs import CaptureInputRequest
-from linktools.ai.persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
+from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
 from ..execution import UsageSummary, TaskGraphRunEvent
 from ..observe import WaitResult
 from ..observe.stream import (
@@ -63,11 +63,11 @@ from ..observe.stream import (
 from ..observe.cursors import (
     decode_evaluation_watch_cursor, encode_evaluation_watch_cursor, decode_graph_watch_cursor,
 )
-from linktools.ai.core import token_seed
-from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.snapshots import SnapshotExclusiveGuard
-from linktools.ai.execution import IdempotencyRecord
-from linktools.ai.persistence.contracts import (
+from ..core import token_seed
+from ..persistence import PersistenceDomain
+from ..persistence.snapshots import SnapshotExclusiveGuard
+from ..execution import IdempotencyRecord
+from ..persistence.contracts import (
     EvaluationLaunchIntent,
     EvaluationRecord,
     EvaluationSlotDisposition,

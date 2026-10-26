@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
 from linktools.core import environ
-from linktools.ai.core import (
+from ..core import (
     ApprovalDecision,
     ApprovalStatus,
     ExternalCallStatus,
@@ -19,10 +19,10 @@ from linktools.ai.core import (
     validate_lease_owner,
     validate_lease_seconds,
 )
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.storage import StoredPayload
-from linktools.ai.persistence.contracts import ToolOperationRecord
-from linktools.ai.persistence.contracts import (
+from ..errors import AIError, ErrorCode
+from ..storage import StoredPayload
+from .contracts import ToolOperationRecord
+from .contracts import (
     ApprovalRecord,
     ExternalCallRecord,
     RecoveryCheckpoint,
@@ -30,8 +30,8 @@ from linktools.ai.persistence.contracts import (
     ToolOperationAdmission,
     decode_tool_operation_failure,
 )
-from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence.state import (
+from ._plan import PersistenceDomain
+from .state import (
     RecordReplacement,
     StateStore,
     StateTransaction,
@@ -39,7 +39,7 @@ from linktools.ai.persistence.state import (
     StoredRecord,
     alias_digest,
 )
-from linktools.ai.persistence._repository_common import (
+from ._repository_common import (
     OperationLedgerRepositoryImpl,
     RepositoryBase as _RepositoryBase,
     ResourceRepository as _ResourceRepository,

@@ -20,7 +20,7 @@ from ..evaluation import (
 from ..spec import canonicalize_pydantic_model_schema
 from ..task import TaskGraph, TaskNode, TaskNodeResultRef, TaskRef, TaskInvocationInputRef
 from ..inputs import AgentTaskInput
-from linktools.ai.execution import ExecutionInputContext
+from ..execution import ExecutionInputContext
 
 if TYPE_CHECKING:
     from ..inputs import InputCaptures

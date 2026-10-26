@@ -32,7 +32,7 @@ from ._records import (ExecutionRecord, ExecutionStartClaim, ExecutionStartReser
     ExecutionTerminalCommit, IdempotencyRecord, IdempotencyTerminalUpdate, ResultRecord, StoredUserInput)
 
 if TYPE_CHECKING:
-    from linktools.ai.persistence.contracts import ExecutionRepositories, SessionRepository, TaskAdmissionRepository
+    from ..persistence.contracts import ExecutionRepositories, SessionRepository, TaskAdmissionRepository
 
 _logger = environ.get_logger("ai.execution")
 

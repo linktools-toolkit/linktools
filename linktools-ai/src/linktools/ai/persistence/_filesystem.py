@@ -16,13 +16,13 @@ from uuid import uuid4
 
 from linktools.core import environ
 
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.storage import (
+from ..errors import AIError, ErrorCode
+from ..storage import (
     CacheBackend,
     FilesystemJournal, FilesystemMutationLock, FilesystemWriterLock, sync_directory,
 )
-from linktools.ai.persistence.codec import decode_alias, decode_fact, decode_operation, decode_record
-from linktools.ai.persistence._filesystem_layout import (
+from .codec import decode_alias, decode_fact, decode_operation, decode_record
+from ._filesystem_layout import (
     _FactStreamInfo, _FilesystemCache, _FilesystemIndex, _RECORD_INDEX_MARKER,
     _RECORD_INDEX_VERSION, _build_record_index_nodes, _digest, _fact_item_path,
     _fact_meta_path, _fact_subject_path, _layout_digest, _layout_sequence_name,
@@ -31,9 +31,9 @@ from linktools.ai.persistence._filesystem_layout import (
     _record_index_marker_valid, _record_index_node_payload, _record_path,
     _require_layout_path, _sync_record_index_tree, _track_physical_task, _write_json, _write_text,
 )
-from linktools.ai.persistence._filesystem_transaction import _FilesystemTransaction
-from linktools.ai.persistence._record_cache import StateRecordCache
-from linktools.ai.persistence.state import (
+from ._filesystem_transaction import _FilesystemTransaction
+from ._record_cache import StateRecordCache
+from .state import (
     StateCallback, StateGroupCallback, StateStorageGroup, StateTransaction, StateTransactionNestingError, StoredOperation,
     StoredRecord, active_state_group_transaction, active_state_scope, active_state_transaction, bind_state_scope,
     reset_state_transaction, state_store_digest,

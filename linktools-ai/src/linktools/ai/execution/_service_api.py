@@ -74,7 +74,7 @@ from ._recovery import (
 
 
 if TYPE_CHECKING:
-    from linktools.ai.execution import ResultRecord
+    from . import ResultRecord
 
 
 

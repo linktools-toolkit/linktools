@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from ._execution import DefaultExecutionService
     from ..execution import ExecutionRecord, SessionService
     from ..inputs import InputCaptures
-    from linktools.ai.persistence import Persistence
+    from ..persistence import Persistence
 
 AppT = TypeVar("AppT")
 _logger = environ.get_logger("ai.agent")

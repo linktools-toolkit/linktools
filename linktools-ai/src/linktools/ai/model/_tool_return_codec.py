@@ -9,11 +9,11 @@ from typing import cast
 from pydantic_ai.messages import TextContent, ToolReturn, ToolReturnContent, is_multi_modal_content
 from pydantic_ai.tools import DeferredToolResults
 
-from linktools.ai.core import JsonValue, canonical_sha256, normalize_json_value
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ReferencedContent
-from linktools.ai.model._user_content_codec import RetiredReferencedContent, decode_user_content_item, encode_user_content_item
-from linktools.ai.model._json_snapshot import stable_json_snapshot
+from ..core import JsonValue, canonical_sha256, normalize_json_value
+from ..errors import AIError, ErrorCode
+from . import ReferencedContent
+from ._user_content_codec import RetiredReferencedContent, decode_user_content_item, encode_user_content_item
+from ._json_snapshot import stable_json_snapshot
 
 _JSON_SCALARS = (str, int, float, bool, type(None))
 _TOOL_RETURN_CONTRACT = "linktools.tool-return"

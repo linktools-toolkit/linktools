@@ -2,21 +2,21 @@
 # -*- coding: utf-8 -*-
 """Runtime-owned transient object and AgentRun retention."""
 
-from linktools.ai.storage import StorageRetentionMode
+from ..storage import StorageRetentionMode
 
 from typing import TYPE_CHECKING, Protocol
 
 from linktools.core import environ
 
-from linktools.ai.core import ExecutionStatus
-from linktools.ai.storage import ObjectStore
-from linktools.ai.persistence.contracts import ConversationCursor, ConversationRepositories, ExecutionRepositories
-from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
-from linktools.ai.persistence._plan import PersistenceDomain, PersistencePlan
+from ..core import ExecutionStatus
+from ..storage import ObjectStore
+from .contracts import ConversationCursor, ConversationRepositories, ExecutionRepositories
+from ._execution_repositories import ExecutionRepositoryImpl
+from ._plan import PersistenceDomain, PersistencePlan
 
 if TYPE_CHECKING:
-    from linktools.ai.persistence.contracts import ExecutionRecord
-    from linktools.ai.persistence.state import StateTransaction
+    from .contracts import ExecutionRecord
+    from .state import StateTransaction
 
 _logger = environ.get_logger("ai.runtime.state.retention")
 

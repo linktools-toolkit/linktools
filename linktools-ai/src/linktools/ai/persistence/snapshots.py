@@ -9,32 +9,32 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from linktools.ai.core import (
+from ..core import (
     canonical_json_bytes,
     validate_persistence_namespace,
     validate_tenant_id,
 )
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.storage import ObjectRef, ObjectStore, ObjectStoreInspection, StoredPayload, read_object
-from linktools.ai.task import TaskGraphAdmission, TaskGraphSubmission
-from linktools.ai.persistence._runtime_identity import task_graph_binding_capture_key
-from linktools.ai.persistence._archive import ContentRecord
-from linktools.ai.persistence._archive_closure import (
+from ..errors import AIError, ErrorCode
+from ..storage import ObjectRef, ObjectStore, ObjectStoreInspection, StoredPayload, read_object
+from ..task import TaskGraphAdmission, TaskGraphSubmission
+from ._runtime_identity import task_graph_binding_capture_key
+from ._archive import ContentRecord
+from ._archive_closure import (
     ArchiveClosure,
     iter_archive_content_refs,
     iter_archive_roots,
     rekey_archive_roots,
 )
-from linktools.ai.persistence._payload import decode_payload_bytes
-from linktools.ai.persistence.captures import (
+from ._payload import decode_payload_bytes
+from .captures import (
     input_capture_expiry_key,
     input_capture_key,
     iter_input_capture_dependencies,
     validate_input_capture_payload,
 )
-from linktools.ai.persistence._capability_marker import has_capability_partition_marker
-from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence.state import (
+from ._capability_marker import has_capability_partition_marker
+from ._plan import PersistenceDomain
+from .state import (
     FactScanCursor,
     OperationScanCursor,
     RecordScanCursor,
@@ -46,22 +46,22 @@ from linktools.ai.persistence.state import (
     StoredOperation,
     StoredRecord,
 )
-from linktools.ai.persistence._snapshot import (
+from ._snapshot import (
     SnapshotLimits,
     SnapshotExclusiveGuard,
     snapshot_object_ref_payload as _object_ref_payload,
     snapshot_object_ref_from_payload as _object_ref_from_payload,
 )
-from linktools.ai.persistence._object_cleanup import (
+from ._object_cleanup import (
     ObjectCleanupResult,
     purge_unreferenced_objects as _purge_unreferenced_objects,
 )
-from linktools.ai.persistence._snapshot_validation import (
+from ._snapshot_validation import (
     canonical_snapshot_indexes,
     validate_snapshot_domain,
     validate_snapshot_references,
 )
-from linktools.ai.persistence.codec import (
+from .codec import (
     _decode_enveloped_domain,
     iter_runtime_object_dependencies,
     decode_fact,
@@ -318,7 +318,7 @@ class RuntimeSnapshotOperations:
                         await copy_references(encoded, domain)
                     if value.kind in {"execution", "task_admission"}:
                         if value.kind == "execution":
-                            from linktools.ai.persistence.contracts import ExecutionRecord
+                            from .contracts import ExecutionRecord
                             identity = _decode_enveloped_domain(value.data, ExecutionRecord).execution_id
                             capture_kind = "invocation"
                         else:
@@ -638,7 +638,7 @@ async def restore_snapshot(
                 )
         for record in records:
             if record.kind == "execution":
-                from linktools.ai.persistence.contracts import ExecutionRecord
+                from .contracts import ExecutionRecord
                 identity = _decode_enveloped_domain(record.data, ExecutionRecord).execution_id
                 optional_capture_keys.add(input_capture_key(namespace, tenant_id, "invocation", identity))
             elif record.kind == "task_admission":

@@ -82,33 +82,33 @@ from ..storage import (
     TurnCoordination,
     payload_fits_inline,
 )
-from linktools.ai.execution.events import ExecutionDelta, LiveExecutionEventBroker
+from ..execution.events import ExecutionDelta, LiveExecutionEventBroker
 from ._execution import CancelEffectOutcome, ExecutionStartIdentity, _TerminalMetricDelivery
-from linktools.ai.observe.service import (
+from ..observe.service import (
     capture_execution_terminal,
     record_metric_observation,
     record_storage_operation,
     release_metric_execution_context,
 )
-from linktools.ai.model.messages import encode_model_messages
-from linktools.ai.execution import ExecutionInputContext
+from ..model.messages import encode_model_messages
+from ..execution import ExecutionInputContext
 from ._memory import MemoryStore, RuntimeMemoryStore
-from linktools.ai.persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
+from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
 from ._tool import (
     RuntimeToolOperationBridge,
     _ToolOperationRuntimeRepository,
 )
-from linktools.ai.execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
+from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
 from ._budget import RunBudgetContext
-from linktools.ai.execution import ExecutionRequest
+from ..execution import ExecutionRequest
 from ._conversation_service import ConversationService
-from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.commands import StateCommands
-from linktools.ai.persistence.repositories import ExecutionRepositoryImpl
-from linktools.ai.persistence.repositories import SessionRepositoryImpl
-from linktools.ai.persistence.repositories import RecoveryCheckpointRepositoryImpl
-from linktools.ai.persistence.objects import runtime_object_source_reads
-from linktools.ai.persistence.contracts import (
+from ..persistence import PersistenceDomain
+from ..persistence.commands import StateCommands
+from ..persistence.repositories import ExecutionRepositoryImpl
+from ..persistence.repositories import SessionRepositoryImpl
+from ..persistence.repositories import RecoveryCheckpointRepositoryImpl
+from ..persistence.objects import runtime_object_source_reads
+from ..persistence.contracts import (
     ApprovalRecord,
     AgentAttemptClaim,
     ConversationRepositories,
@@ -132,8 +132,8 @@ from linktools.ai.persistence.contracts import (
     SessionRepository,
     ToolOperationRecord,
 )
-from linktools.ai.session import ConversationCursor, SessionRecord
-from linktools.ai.execution import (
+from ..session import ConversationCursor, SessionRecord
+from ..execution import (
     ExecutionCancelRequestCommit,
     ExecutionRecord,
     ExecutionStartClaim,
@@ -144,11 +144,11 @@ from linktools.ai.execution import (
     RuntimePayloadRef,
     ResultRecord,
 )
-from linktools.ai.persistence.runs import AgentRunCheckpoint, AgentRunRecord, StepEvent, AgentRunStore
-from linktools.ai.persistence.commands import RuntimeRecoveryCommands
-from linktools.ai.persistence.repositories import operation_identity_matches
-from linktools.ai.persistence.runs import ExecutionTerminalSealPlan, RuntimeAgentRunStore, StateStepArchive
-from linktools.ai.persistence.state import StateGroupTransaction
+from ..persistence.runs import AgentRunCheckpoint, AgentRunRecord, StepEvent, AgentRunStore
+from ..persistence.commands import RuntimeRecoveryCommands
+from ..persistence.repositories import operation_identity_matches
+from ..persistence.runs import ExecutionTerminalSealPlan, RuntimeAgentRunStore, StateStepArchive
+from ..persistence.state import StateGroupTransaction
 
 
 class _SubagentDispatcher(Protocol):

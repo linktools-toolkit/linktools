@@ -34,9 +34,9 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
-from linktools.ai.persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
-from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.contracts import MemoryRecord, MemoryRepositories
+from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
+from ..persistence import PersistenceDomain
+from ..persistence.contracts import MemoryRecord, MemoryRepositories
 
 _logger = environ.get_logger("ai.runtime.memory")
 _MAX_CONTENT_CHARS = 65_536

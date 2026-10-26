@@ -16,26 +16,26 @@ from typing import Protocol, TypeVar, runtime_checkable
 from linktools.core import environ
 from pydantic_ai.messages import ModelMessage
 
-from linktools.ai.core import ExecutionStatus
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelClientRequest
-from linktools.ai.storage import ObjectRef, ObjectStore, StoredPayload
-from linktools.ai.model.messages import decode_model_messages, encode_model_messages
-from linktools.ai.persistence._transcript_staging import MessageArchive, StagedTranscript
-from linktools.ai.persistence._model_interaction import (
+from ..core import ExecutionStatus
+from ..errors import AIError, ErrorCode
+from ..model import ModelClientRequest
+from ..storage import ObjectRef, ObjectStore, StoredPayload
+from ..model.messages import decode_model_messages, encode_model_messages
+from ._transcript_staging import MessageArchive, StagedTranscript
+from ._model_interaction import (
     StagedContextSpan,
     StagedContextInline,
     StagedContextProjection,
     StagedModelInteraction,
     context_projection_to_durable,
 )
-from linktools.ai.persistence._archive import PreparedArchive
-from linktools.ai.persistence.codec import (
+from ._archive import PreparedArchive
+from .codec import (
     _decode_enveloped_domain,
     _decode_step_envelope,
     _encode_step_envelope,
 )
-from linktools.ai.persistence.contracts import (
+from .contracts import (
     ArchivedContextBlock,
     ContextProjection,
     ConversationHistoryRepository,
@@ -57,17 +57,17 @@ from linktools.ai.persistence.contracts import (
     TranscriptOrigin,
     TranscriptSpanRef,
 )
-from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
-from linktools.ai.persistence._history import (
+from ._execution_repositories import ExecutionRepositoryImpl
+from ._history import (
     PreparedTranscriptObservation,
     TranscriptCapture,
     TranscriptRepository,
     _exact_message_signature,
 )
-from linktools.ai.persistence._model_client import prepare_client_requests, resolve_client_requests
-from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence._object_router import runtime_object_source_reads
-from linktools.ai.persistence._step_contracts import (
+from ._model_client import prepare_client_requests, resolve_client_requests
+from ._plan import PersistenceDomain
+from ._object_router import runtime_object_source_reads
+from ._step_contracts import (
     TOOL_ERROR_CODE_METADATA_KEY,
     AgentRunCheckpoint,
     AgentRunHistoryCapture,
@@ -75,7 +75,7 @@ from linktools.ai.persistence._step_contracts import (
     StepEvent,
     AgentRunStore,
 )
-from linktools.ai.persistence.state import (
+from .state import (
     FactQuery,
     GroupRecordReader,
     StateGroupTransaction,

@@ -17,8 +17,8 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, read_object
 from ..task import Task, TaskExpander, TaskGraph, TaskGraphAdmission, TaskNode, TaskRef
-from linktools.ai.persistence.captures import task_graph_binding_capture_key
-from linktools.ai.persistence.captures import (
+from ..persistence.captures import task_graph_binding_capture_key
+from ..persistence.captures import (
     TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
     TASK_GRAPH_BINDING_CAPTURE_MANIFEST_KEYS,
     read_task_graph_binding_capture_declarations,

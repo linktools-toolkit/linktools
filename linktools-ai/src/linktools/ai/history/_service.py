@@ -38,8 +38,8 @@ from ..execution import (
     UsageSummary,
     project_execution_view,
 )
-from linktools.ai.execution import ExecutionRecord
-from linktools.ai.persistence.contracts import ExecutionRepository
+from ..execution import ExecutionRecord
+from ..persistence.contracts import ExecutionRepository
 
 _CURSOR_RESOURCE_KIND = "EXECUTION"
 

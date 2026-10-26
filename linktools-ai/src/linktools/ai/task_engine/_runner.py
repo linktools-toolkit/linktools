@@ -70,7 +70,7 @@ from ..task import (
 from ..inputs import InputCaptures
 from ._agent import AgentTaskRunner
 from ..inputs import AgentTaskInput
-from linktools.ai.task import AgentTaskNode
+from ..task import AgentTaskNode
 from ..inputs import (
     CanonicalUserInput,
     ExecutionInputMaterializer,
@@ -78,21 +78,21 @@ from ..inputs import (
     task_prompt_draft,
     validate_user_input,
 )
-from linktools.ai.persistence.codec import encode_domain
-from linktools.ai.execution import ExecutionRecord, StoredUserInput
-from linktools.ai.persistence.contracts import ExecutionRepository, TaskAdmissionRepository, TaskPreparedInputRecord
-from linktools.ai.persistence.objects import ObjectKeyFactory
+from ..persistence.codec import encode_domain
+from ..execution import ExecutionRecord, StoredUserInput
+from ..persistence.contracts import ExecutionRepository, TaskAdmissionRepository, TaskPreparedInputRecord
+from ..persistence.objects import ObjectKeyFactory
 from ..inputs import (
     TaskGraphBindingCapture,
     TaskGraphBindingCaptureStore,
     builtin_task_declaration,
     task_declaration_semantics,
 )
-from linktools.ai.execution import ExecutionService, ExecutionView
-from linktools.ai.execution import ExecutionResult
-from linktools.ai.persistence.contracts import ArtifactRecord, ArtifactRepositories
-from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.contracts import BudgetRepository
+from ..execution import ExecutionService, ExecutionView
+from ..execution import ExecutionResult
+from ..persistence.contracts import ArtifactRecord, ArtifactRepositories
+from ..persistence import PersistenceDomain
+from ..persistence.contracts import BudgetRepository
 
 if TYPE_CHECKING:
     from ._reads import TaskExecutionReads

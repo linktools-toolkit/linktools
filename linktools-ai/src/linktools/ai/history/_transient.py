@@ -7,8 +7,8 @@ from datetime import datetime
 from typing import Protocol
 
 from ..errors import AIError, ErrorCode
-from linktools.ai.persistence.runs import StagingAgentRunStore
-from linktools.ai.persistence.runs import AgentRunHistoryCapture, AgentRunRecord, StepEvent
+from ..persistence.runs import StagingAgentRunStore
+from ..persistence.runs import AgentRunHistoryCapture, AgentRunRecord, StepEvent
 
 
 class _InteractionResolver(Protocol):

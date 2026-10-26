@@ -8,12 +8,12 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Generic, TypeVar
 
 from pydantic import BaseModel
 from ..core import RunBudget, JsonValue, Page, Principal, ThinkingValue
-from linktools.ai.observe import WaitResult
+from ..observe import WaitResult
 from ..execution import Execution
-from linktools.ai.observe.stream import validate_wait
-from linktools.ai.execution import ExecutionInputContext
+from ..observe.stream import validate_wait
+from ..execution import ExecutionInputContext
 from ..model import ModelBinding, UserPromptInput, validate_user_input
-from linktools.ai.execution import ExecutionResult, ExecutionTreeEvent, SessionHistoryItem, SessionTurn, SessionView
+from ..execution import ExecutionResult, ExecutionTreeEvent, SessionHistoryItem, SessionTurn, SessionView
 
 if TYPE_CHECKING:
     from .agent_execution import AgentExecutionPort

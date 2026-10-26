@@ -6,8 +6,8 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from uuid import uuid4
 
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence.contracts import (
+from ..errors import AIError, ErrorCode
+from .contracts import (
     ConversationHistoryIndexNodeRecord,
     ConversationHistorySegmentRef,
 )

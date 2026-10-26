@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Generic, TypeVar, cast
 
-from linktools.ai.errors import AIError, ErrorCode
+from ..errors import AIError, ErrorCode
 
 ValueT = TypeVar("ValueT")
 

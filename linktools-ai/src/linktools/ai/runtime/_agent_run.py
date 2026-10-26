@@ -8,10 +8,10 @@ from typing import Protocol
 
 from ..core import JsonValue
 from ..errors import ErrorCode, ErrorDiagnostics
-from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.runs import CheckpointPersistence
-from linktools.ai.execution import ExecutionRecord
-from linktools.ai.persistence.runs import ExecutionTerminalSealPlan
+from ..persistence import PersistenceDomain
+from ..persistence.runs import CheckpointPersistence
+from ..execution import ExecutionRecord
+from ..persistence.runs import ExecutionTerminalSealPlan
 
 
 @dataclass(frozen=True, slots=True)

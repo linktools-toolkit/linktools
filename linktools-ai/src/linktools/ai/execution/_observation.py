@@ -11,11 +11,11 @@ from typing import TYPE_CHECKING
 from ..core import Principal
 from ..errors import AIError, ErrorCode, ObservationError
 from .projection import ModelProjection
-from linktools.ai.observe.stream import await_stream_cleanup, drain_stream_tasks, is_observation_cleanup, report_observation_error
+from ..observe.stream import await_stream_cleanup, drain_stream_tasks, is_observation_cleanup, report_observation_error
 from .stream import SharedStreamEvent
-from linktools.ai.observe.cursors import get_preview_positions, ExecutionWatchPositions, decode_execution_observation_cursor, encode_execution_observation_cursor, encode_execution_watch_cursor
+from ..observe.cursors import get_preview_positions, ExecutionWatchPositions, decode_execution_observation_cursor, encode_execution_observation_cursor, encode_execution_watch_cursor
 from ._service_api import ExecutionObservationEvent, ExecutionTreeEvent, ExecutionView, TaskModelProjection
-from linktools.ai.observe.stream import ExecutionStreamFailure
+from ..observe.stream import ExecutionStreamFailure
 
 if TYPE_CHECKING:
     from .handle import ExecutionTreeWatcher, ExecutionBinding

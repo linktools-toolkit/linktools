@@ -20,10 +20,10 @@ from ..errors import AIError, ErrorCode
 from ..task import TaskDependencyState, TaskNodeInvocation, TaskResultRef
 from ._input import decode_task_prompt_draft, task_prompt_draft, validate_user_input
 from ..model import CanonicalUserInput, MaterializedUserContent, UserPromptInput
-from linktools.ai.execution import ExecutionInputContext
+from ..execution import ExecutionInputContext
 
 if TYPE_CHECKING:
-    from linktools.ai.execution import StoredUserInput
+    from ..execution import StoredUserInput
 
 
 _AGENT_TASK_INPUT_FIELDS = (
@@ -150,8 +150,8 @@ class AgentTaskInput(Mapping[str, JsonValue]):
                     )
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                from linktools.ai.persistence.codec import decode_domain
-                from linktools.ai.execution import StoredUserInput
+                from ..persistence.codec import decode_domain
+                from ..execution import StoredUserInput
 
                 stored_prompt = decode_domain(prompt.get("value"), StoredUserInput)
                 decoded_prompt = "Stored user input"

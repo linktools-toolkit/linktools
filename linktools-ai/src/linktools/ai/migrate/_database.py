@@ -9,9 +9,9 @@ from linktools.core import environ
 
 from ..asset import build_asset_sql_metadata
 from ..observe import build_metrics_sql_metadata
-from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.objects import runtime_domain_uses_object_store
-from linktools.ai.persistence.schema import build_runtime_sql_metadata
+from ..persistence import PersistenceDomain
+from ..persistence.objects import runtime_domain_uses_object_store
+from ..persistence.schema import build_runtime_sql_metadata
 from ..storage import build_object_sql_metadata, provision_sql
 
 _logger = environ.get_logger("ai.migrate.database")

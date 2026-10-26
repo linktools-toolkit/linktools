@@ -8,31 +8,31 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TypeVar, cast
 
-from linktools.ai.core import IdempotencyStatus, ImmutableJsonMapping, ResourceKind, canonical_json_bytes
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.evaluation import (
+from ..core import IdempotencyStatus, ImmutableJsonMapping, ResourceKind, canonical_json_bytes
+from ..errors import AIError, ErrorCode
+from ..evaluation import (
     CaseContract, CaseRef, ComparisonReport, DatasetContract, DatasetRef,
     EvaluationReport, EvaluationReadCutoff, EvidenceBundle, EvidenceRef, ScoreBundle,
     SlotDispositionView, ScoreNotApplicable,
 )
-from linktools.ai.persistence.contracts import IdempotencyRecord
-from linktools.ai.persistence.durability import CommitObservation, DurableCommitState, run_durable_commit
-from linktools.ai.persistence._evaluation_records import (
+from .contracts import IdempotencyRecord
+from .durability import CommitObservation, DurableCommitState, run_durable_commit
+from ._evaluation_records import (
     EvaluationLaunchIntent, EvaluationRecord, EvaluationTrialEvidence,
     EvaluationDatasetRecord, EvaluationCaseRecord, EvaluationSlotDisposition,
     EvaluationTombstone, EvaluationContentTombstone, EvaluationCleanupRecord,
 )
-from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence._repository_common import (
+from ._plan import PersistenceDomain
+from ._repository_common import (
     RepositoryBase,
     projected_record,
     replace_checked,
     record_cursor,
     record_state,
 )
-from linktools.ai.storage import ObjectRef
-from linktools.ai.persistence.codec import encode_domain, iter_runtime_object_refs
-from linktools.ai.persistence.state import StateStore, StateTransaction, StoredRecord, RecordQuery
+from ..storage import ObjectRef
+from .codec import encode_domain, iter_runtime_object_refs
+from .state import StateStore, StateTransaction, StoredRecord, RecordQuery
 
 ValueT = TypeVar("ValueT")
 

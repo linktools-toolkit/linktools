@@ -33,12 +33,12 @@ from ..storage import (
     StoredPayload,
     payload_fits_inline,
 )
-from linktools.ai.model.messages import decode_model_messages, encode_model_messages
-from linktools.ai.persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
-from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.contracts import ToolOperationAdmission
-from linktools.ai.persistence.durability import CommitObservation, DurableCommitState, run_durable_commit
-from linktools.ai.persistence.contracts import ToolOperationRecord, decode_tool_operation_failure
+from ..model.messages import decode_model_messages, encode_model_messages
+from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
+from ..persistence import PersistenceDomain
+from ..persistence.contracts import ToolOperationAdmission
+from ..persistence.durability import CommitObservation, DurableCommitState, run_durable_commit
+from ..persistence.contracts import ToolOperationRecord, decode_tool_operation_failure
 
 _logger = environ.get_logger("ai.runtime.tool")
 TOOL_OPERATION_LEASE_SECONDS = 60
@@ -94,7 +94,7 @@ class ToolOperationBridge(Protocol):
     async def list_operations(self) -> tuple[ToolOperationRecord, ...]: ...
 
 
-from linktools.ai.persistence.contracts import ToolStateRepository
+from ..persistence.contracts import ToolStateRepository
 
 
 class _ToolOperationRuntimeRepository(Protocol):

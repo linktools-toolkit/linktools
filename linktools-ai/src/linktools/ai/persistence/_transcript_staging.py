@@ -8,7 +8,7 @@ from weakref import WeakValueDictionary
 
 from pydantic_ai.messages import ModelMessage
 
-from linktools.ai.model.messages import decode_model_messages, encode_model_messages
+from ..model.messages import decode_model_messages, encode_model_messages
 
 
 @dataclass(frozen=True, slots=True)

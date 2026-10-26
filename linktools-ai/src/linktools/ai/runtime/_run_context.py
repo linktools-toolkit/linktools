@@ -12,10 +12,10 @@ from pydantic_ai.messages import ModelMessage
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
 from ..errors import AIError, ErrorCode
-from linktools.ai.model.messages import encode_model_messages, freeze_model_messages, project_transient_binary_content
-from linktools.ai.persistence.contracts import LoadedModelContext, TranscriptMessageRef
-from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.runs import AgentRunCheckpoint, CheckpointState
+from ..model.messages import encode_model_messages, freeze_model_messages, project_transient_binary_content
+from ..persistence.contracts import LoadedModelContext, TranscriptMessageRef
+from ..persistence import PersistenceDomain
+from ..persistence.runs import AgentRunCheckpoint, CheckpointState
 
 if TYPE_CHECKING:
     from ._agent_run_recorder import AgentRunRecorder

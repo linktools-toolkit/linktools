@@ -8,8 +8,8 @@ is the single semantic boundary shared by the local and SQL implementations.
 
 from __future__ import annotations
 
-from linktools.ai.persistence._archive import ArchiveRoot
-from linktools.ai.execution import (
+from ._archive import ArchiveRoot
+from ..execution import (
     RuntimePayloadRef,
     StoredUserInput,
     ExecutionRecord,
@@ -28,8 +28,8 @@ from linktools.ai.execution import (
 
 import binascii
 import json
-from linktools.ai.session import SessionRepository as SessionRepositoryContract
-from linktools.ai.session import (ConversationCursor, SessionRecord, SessionTurnRef, SessionTurnCommit)
+from ..session import SessionRepository as SessionRepositoryContract
+from ..session import (ConversationCursor, SessionRecord, SessionTurnRef, SessionTurnCommit)
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -39,16 +39,16 @@ from typing import TYPE_CHECKING, Protocol
 
 from pydantic_ai.messages import ModelMessage
 
-from linktools.ai.agent import AgentBindingContract
-from linktools.ai.asset import AssetVersionRef
-from linktools.ai.evaluation import (
+from ..agent import AgentBindingContract
+from ..asset import AssetVersionRef
+from ..evaluation import (
     CaseContract, CaseRef, ComparisonReport, DatasetContract, DatasetRef,
     EvaluationReport, EvaluationReadCutoff, EvidenceBundle, EvidenceRef,
 )
-from linktools.ai.persistence._evaluation_records import (
+from ._evaluation_records import (
     EvaluationLaunchIntent, EvaluationRecord, EvaluationTrialEvidence, EvaluationSlotDisposition, EvaluationCleanupRecord,
 )
-from linktools.ai.core import (
+from ..core import (
     BudgetUsage,
     RunBudget,
     ApprovalDecision,
@@ -81,9 +81,9 @@ from linktools.ai.core import (
     validate_resource_id,
     validate_tenant_id,
 )
-from linktools.ai.errors import AIError, ErrorCode, ErrorDiagnostics
-from linktools.ai.storage import ObjectRef, StoredPayload
-from linktools.ai.task import (
+from ..errors import AIError, ErrorCode, ErrorDiagnostics
+from ..storage import ObjectRef, StoredPayload
+from ..task import (
     TaskBindingContract,
     TaskEvent,
     TaskGraph,
@@ -101,12 +101,12 @@ from linktools.ai.task import (
     TaskRef,
     TaskTerminalRecord,
 )
-from linktools.ai.workspace import validate_workspace_path
-from linktools.ai.persistence._plan import PersistenceDomain
+from ..workspace import validate_workspace_path
+from ._plan import PersistenceDomain
 
 if TYPE_CHECKING:
-    from linktools.ai.persistence._archive import ContentArchive, PreparedArchive
-    from linktools.ai.persistence.state import StateStore, StateTransaction, StoredRecord
+    from ._archive import ContentArchive, PreparedArchive
+    from .state import StateStore, StateTransaction, StoredRecord
 
 
 def _is_sha256(value: object) -> bool:

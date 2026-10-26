@@ -11,16 +11,16 @@ from datetime import datetime
 from ..core import ExecutionStatus, IdempotencyStatus, SessionStatus
 from ..errors import AIError, ErrorCode
 from ..storage import TurnCoordination
-from linktools.ai.persistence.coordination import PendingTurnCoordination
-from linktools.ai.persistence.runs import ArchiveRoot
-from linktools.ai.execution import (
+from ..persistence.coordination import PendingTurnCoordination
+from ..persistence.runs import ArchiveRoot
+from ..execution import (
     ExecutionRecord,
     ExecutionStartReservation,
     ExecutionTerminalCommitResult,
     RuntimePayloadRef,
 )
-from linktools.ai.persistence.contracts import RecoveryCheckpoint, RecoveryCheckpointState
-from linktools.ai.session import SessionRecord
+from ..persistence.contracts import RecoveryCheckpoint, RecoveryCheckpointState
+from ..session import SessionRecord
 
 
 @dataclass(slots=True)

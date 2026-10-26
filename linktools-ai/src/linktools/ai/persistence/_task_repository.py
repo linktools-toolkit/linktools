@@ -11,7 +11,7 @@ from typing import TypeVar
 
 from linktools.core import environ
 
-from linktools.ai.core import (
+from ..core import (
     JsonValue,
     OperationKind,
     OperationLedgerInput,
@@ -25,8 +25,8 @@ from linktools.ai.core import (
     validate_lease_owner,
     validate_lease_seconds,
 )
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.task import (
+from ..errors import AIError, ErrorCode
+from ..task import (
     TaskEvent,
     TaskGraph,
     TaskGraphAdmission,
@@ -39,16 +39,16 @@ from linktools.ai.task import (
     TaskResultRecord,
     TaskTerminalRecord,
 )
-from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence.contracts import TaskPreparedInputRecord
-from linktools.ai.persistence.repositories import (
+from ._plan import PersistenceDomain
+from .contracts import TaskPreparedInputRecord
+from .repositories import (
     RepositoryBase,
     append_operation as _append_operation,
     projected_record,
     replace_checked,
     require_repository_tenant,
 )
-from linktools.ai.persistence.state import (
+from .state import (
     FactQuery,
     OperationQuery,
     RecordQuery,
@@ -60,9 +60,9 @@ from linktools.ai.persistence.state import (
     sortable_identity,
     stream_digest,
 )
-from linktools.ai.persistence._repository_common import decode_operation as _decode_operation
+from ._repository_common import decode_operation as _decode_operation
 
-from linktools.ai.persistence._task_events import (
+from ._task_events import (
     _TaskEventAppendConflict,
     _TaskEventDraft,
     _TaskEventState,
@@ -74,7 +74,7 @@ from linktools.ai.persistence._task_events import (
     _task_graph_event_drafts,
     _task_node_event_drafts,
 )
-from linktools.ai.persistence._task_state import (
+from ._task_state import (
     _effective_graph_status,
     _is_sha256,
     _isolated_graph_status,

@@ -5,10 +5,10 @@
 from dataclasses import dataclass
 from datetime import datetime
 
-from linktools.ai.core import TaskStatus
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.task import TaskEvent, TaskEventType, TaskGraphView, TaskNodeView
-from linktools.ai.persistence.state import (
+from ..core import TaskStatus
+from ..errors import AIError, ErrorCode
+from ..task import TaskEvent, TaskEventType, TaskGraphView, TaskNodeView
+from .state import (
     StateTransaction,
     StoredFact,
     StoredRecord,

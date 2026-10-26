@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Literal, Protocol
 from pydantic_ai.messages import ModelMessage, ModelRequest
 
 if TYPE_CHECKING:
-    from linktools.ai.persistence.contracts import RuntimePayloadRef, TranscriptChunk
+    from .contracts import RuntimePayloadRef, TranscriptChunk
 
 
 StepEventType = Literal[

@@ -12,19 +12,19 @@ from uuid import uuid4
 from linktools.core import environ
 from pydantic_ai.messages import ModelMessage
 
-from linktools.ai.core import ExecutionStatus
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model.messages import decode_model_messages, encode_model_messages
-from linktools.ai.persistence._transcript_staging import StagedTranscript
-from linktools.ai.persistence._model_interaction import (
+from ..core import ExecutionStatus
+from ..errors import AIError, ErrorCode
+from ..model.messages import decode_model_messages, encode_model_messages
+from ._transcript_staging import StagedTranscript
+from ._model_interaction import (
     StagedContextInline,
     StagedContextSpan,
     StagedModelInteraction,
 )
-from linktools.ai.persistence._conversation_persistence import ConversationPersistence
-from linktools.ai.persistence._checkpoint_persistence import CheckpointPersistence
-from linktools.ai.persistence._trace_persistence import TracePersistence
-from linktools.ai.persistence.contracts import (
+from ._conversation_persistence import ConversationPersistence
+from ._checkpoint_persistence import CheckpointPersistence
+from ._trace_persistence import TracePersistence
+from .contracts import (
     ExecutionHistoryHeadRecord,
     ExecutionHistoryState,
     ExecutionRecord,
@@ -36,17 +36,17 @@ from linktools.ai.persistence.contracts import (
     TranscriptMessageRef,
     TranscriptSpanRef,
 )
-from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
-from linktools.ai.persistence.durability import (
+from ._execution_repositories import ExecutionRepositoryImpl
+from .durability import (
     CommitObservation,
     DurableCommitState,
     await_owned_task,
     run_durable_commit,
 )
-from linktools.ai.persistence._model_client import resolve_client_requests
-from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence._archive import PreparedArchive
-from linktools.ai.persistence._step_archive import (
+from ._model_client import resolve_client_requests
+from ._plan import PersistenceDomain
+from ._archive import PreparedArchive
+from ._step_archive import (
     CapturedExecutionProjection,
     ExecutionProjectionBatch,
     ExecutionTerminalSealPlan,
@@ -68,12 +68,12 @@ from linktools.ai.persistence._step_archive import (
     _materialize_checkpoint,
     _sync_projection,
 )
-from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent, AgentRunStore
-from linktools.ai.persistence.state import StateGroupTransaction, StateTransaction
+from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent, AgentRunStore
+from .state import StateGroupTransaction, StateTransaction
 
 if TYPE_CHECKING:
-    from linktools.ai.persistence.capabilities import RuntimeCapabilityWrites
-    from linktools.ai.execution import ModelInteractionSubscription
+    from .capabilities import RuntimeCapabilityWrites
+    from ..execution import ModelInteractionSubscription
 
 _logger = environ.get_logger("ai.runtime.state.run_store")
 _BoundaryResult = TypeVar("_BoundaryResult")

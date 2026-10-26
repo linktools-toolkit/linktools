@@ -8,15 +8,15 @@ from pydantic_ai.messages import ModelMessage
 
 from collections.abc import Callable, Sequence
 from dataclasses import replace
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.storage import StoredPayload
-from linktools.ai.persistence._model_interaction import (
+from ..errors import AIError, ErrorCode
+from ..storage import StoredPayload
+from ._model_interaction import (
     StagedContextProjection,
     StagedContextSpan,
     StagedModelInteraction,
     context_projection_to_durable,
 )
-from linktools.ai.persistence.contracts import (
+from .contracts import (
     ContextProjection,
     ExecutionHistoryHeadRecord,
     InlineContextBlock,
@@ -24,11 +24,11 @@ from linktools.ai.persistence.contracts import (
     RuntimePayloadRef,
     TranscriptSpanRef,
 )
-from linktools.ai.persistence._history import PreparedTranscriptObservation
-from linktools.ai.persistence._model_client import prepare_client_requests
-from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent
-from linktools.ai.persistence._step_archive import (
+from ._history import PreparedTranscriptObservation
+from ._model_client import prepare_client_requests
+from ._plan import PersistenceDomain
+from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent
+from ._step_archive import (
     InMemoryStepArchive,
     PreparedAgentRunCheckpoint,
     StateStepArchive,
@@ -36,8 +36,8 @@ from linktools.ai.persistence._step_archive import (
     _encode_step,
     _validate_interaction_page,
 )
-from linktools.ai.persistence._archive import PreparedArchive
-from linktools.ai.persistence.state import (
+from ._archive import PreparedArchive
+from .state import (
     RecordQuery,
     RecordReplacement,
     StateTransaction,

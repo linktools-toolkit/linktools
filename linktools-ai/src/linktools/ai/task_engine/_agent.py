@@ -31,8 +31,8 @@ from ..task import (
     TaskResultRef,
 )
 from ..inputs import decode_task_prompt_draft, merge_captured_input_files, task_prompt_draft
-from linktools.ai.execution import StoredUserInput
-from linktools.ai.persistence.contracts import TaskPreparedInputRecord
+from ..execution import StoredUserInput
+from ..persistence.contracts import TaskPreparedInputRecord
 from ..inputs import (
     AgentTaskInput,
     AgentTaskInputBuilder,
@@ -44,7 +44,7 @@ from ..model import CanonicalUserInput, validate_user_input
 if TYPE_CHECKING:
     from ..runtime.agent_execution import AgentExecutionPort
     from ..core import RunBudget
-    from linktools.ai.execution import ExecutionView
+    from ..execution import ExecutionView
 
 
 AppT = TypeVar("AppT")

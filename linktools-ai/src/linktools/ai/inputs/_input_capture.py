@@ -26,25 +26,25 @@ from ..task import (
     TaskInvocationInputContract, TaskInvocationInputRef, TaskNode,
     TaskNodeInvocation, TaskNodeResultRef, TaskRef, TaskResultRef,
 )
-from linktools.ai.task import AgentTaskNode
+from ..task import AgentTaskNode
 from ._input import (
     CanonicalUserInput, ExecutionInputMaterializer, UserPromptInput,
     captured_input_files, captured_input_prompt, decode_task_prompt_draft, task_prompt_draft,
 )
-from linktools.ai.execution import ExecutionInputContext
+from ..execution import ExecutionInputContext
 from ._context_archive import ExecutionContextArchive
 from ..model import MaterializedUserContent
-from linktools.ai.persistence.objects import read_runtime_object
+from ..persistence.objects import read_runtime_object
 from ._task_graph_binding_capture import TaskGraphBindingCaptureStore
 from ..execution import ExecutionResult, ExecutionView
-from linktools.ai.persistence import Persistence
-from linktools.ai.persistence.objects import ObjectKeyFactory
+from ..persistence import Persistence
+from ..persistence.objects import ObjectKeyFactory
 from ..core import PromptLimits
-from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.contracts import ExecutionRepositories, TaskRepositories
-from linktools.ai.persistence.captures import input_capture_key, input_capture_expiry_key
-from linktools.ai.persistence.codec import decode_domain, encode_domain
-from linktools.ai.execution import StoredUserInput
+from ..persistence import PersistenceDomain
+from ..persistence.contracts import ExecutionRepositories, TaskRepositories
+from ..persistence.captures import input_capture_key, input_capture_expiry_key
+from ..persistence.codec import decode_domain, encode_domain
+from ..execution import StoredUserInput
 
 ExecutionInputCaptureRef: TypeAlias = AgentInputCaptureRef | TaskInvocationInputRef
 

@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
-from linktools.ai.core import CommitPolicy, ImmutableJsonMapping, JsonValue, canonical_json_bytes
-from linktools.ai.errors import AIError, ErrorCode
+from ..core import CommitPolicy, ImmutableJsonMapping, JsonValue, canonical_json_bytes
+from ..errors import AIError, ErrorCode
 from ._capability_contracts import CapabilityPersistence, CapabilityWriter
 from .state import StateStore, StateTransaction, StateStorageGroup, StateGroupTransaction, StoredOperation
 from .durability import CommitObservation, DurableCommitState, run_durable_commit, await_owned_task

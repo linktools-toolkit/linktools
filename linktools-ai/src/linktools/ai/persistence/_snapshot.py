@@ -7,9 +7,9 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Protocol
 
-from linktools.ai.core import RUNTIME_OBJECT_STORE_ID, JsonValue
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.storage import ObjectRef
+from ..core import RUNTIME_OBJECT_STORE_ID, JsonValue
+from ..errors import AIError, ErrorCode
+from ..storage import ObjectRef
 
 
 class SnapshotExclusiveGuard(Protocol):

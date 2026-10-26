@@ -32,7 +32,7 @@ from ..errors import AIError, ErrorCode
 from ..core import decode_cursor as decode_runtime_cursor
 from ..core import encode_cursor as encode_runtime_cursor
 from ..execution import ArtifactDownload, ArtifactView
-from linktools.ai.persistence.contracts import ArtifactRepositories
+from ..persistence.contracts import ArtifactRepositories
 
 _logger = environ.get_logger("ai.runtime.artifact")
 _CURSOR_RESOURCE_KIND = "ARTIFACT"

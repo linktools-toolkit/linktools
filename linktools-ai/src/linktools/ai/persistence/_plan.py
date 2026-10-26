@@ -7,10 +7,10 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from pathlib import Path
 
-from linktools.ai.storage import CacheBackend, ObjectStore, StorageRoute, StorageRetentionMode
+from ..storage import CacheBackend, ObjectStore, StorageRoute, StorageRetentionMode
 
 
-from linktools.ai.core import PersistenceDomain
+from ..core import PersistenceDomain
 
 
 _OBJECT_STORE_DOMAINS = frozenset(

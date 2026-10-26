@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING, cast
 
 from linktools.core import environ
 
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.storage import (
+from ..errors import AIError, ErrorCode
+from ..storage import (
     CacheBackend,
     StorageRoute,
     StorageRetentionMode,
@@ -21,7 +21,7 @@ from linktools.ai.storage import (
     build_object_sql_metadata,
     namespace_digest,
 )
-from linktools.ai.persistence.contracts import (
+from .contracts import (
     ArtifactRepositories,
     ConversationRepositories,
     EvaluationRepositories,
@@ -30,32 +30,32 @@ from linktools.ai.persistence.contracts import (
     RecoveryRepositories,
     TaskRepositories,
 )
-from linktools.ai.persistence._filesystem import FilesystemStateStore
-from linktools.ai.persistence._memory import InMemoryStateStore
-from linktools.ai.persistence._object_router import _RuntimeObjectRouter, build_runtime_object_router
-from linktools.ai.persistence._plan import PersistenceDomain, PersistencePlan, runtime_domain_uses_object_store
-from linktools.ai.persistence._recovery_repositories import build_recovery_repository_bundle
-from linktools.ai.persistence.repositories import (
+from ._filesystem import FilesystemStateStore
+from ._memory import InMemoryStateStore
+from ._object_router import _RuntimeObjectRouter, build_runtime_object_router
+from ._plan import PersistenceDomain, PersistencePlan, runtime_domain_uses_object_store
+from ._recovery_repositories import build_recovery_repository_bundle
+from .repositories import (
     OperationLedgerRepositoryImpl,
     RepositoryBase,
     build_repository_bundle,
 )
-from linktools.ai.persistence._resource_scope import (
+from ._resource_scope import (
     FilesystemResource, MemoryResource, StorageResourceRequest, StorageResourceScope,
 )
-from linktools.ai.persistence._retention import RuntimeRetentionController
-from linktools.ai.persistence._sql import SqlStateStore
-from linktools.ai.persistence._step_materializer import build_runtime_agent_run_store
-from linktools.ai.persistence.runs import RuntimeAgentRunStore
-from linktools.ai.persistence.state import StateStore, state_store_digest
-from linktools.ai.persistence._task_admission_repository import TaskAdmissionRepositoryImpl
-from linktools.ai.persistence._task_repository import TaskRepositoryImpl
+from ._retention import RuntimeRetentionController
+from ._sql import SqlStateStore
+from ._step_materializer import build_runtime_agent_run_store
+from .runs import RuntimeAgentRunStore
+from .state import StateStore, state_store_digest
+from ._task_admission_repository import TaskAdmissionRepositoryImpl
+from ._task_repository import TaskRepositoryImpl
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
 
     from .contracts import ToolStateRepository
-    from linktools.ai.persistence.contracts import (
+    from .contracts import (
         ApprovalRepository,
         ArtifactRepository,
         BudgetRepository,
@@ -114,7 +114,7 @@ async def materialize_runtime_storage(
     read_only: bool = False,
     capability_routes: Mapping[str, StorageRoute] | None = None,
 ) -> _MaterializedRuntimeStorage:
-    from linktools.ai.persistence._schema import build_runtime_sql_metadata
+    from ._schema import build_runtime_sql_metadata
 
     def configure_schema(domain: PersistenceDomain, metadata: "MetaData") -> None:
         build_runtime_sql_metadata(frozenset({domain}), metadata=metadata)

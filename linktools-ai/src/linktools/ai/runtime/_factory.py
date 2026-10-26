@@ -57,13 +57,13 @@ from ._agent_executor import AgentExecutor
 from ._approval import DefaultApprovalService
 from ._agent_binding_resolver import _AgentBindingResolver
 from ..history import DefaultArtifactService
-from linktools.ai.execution.coordinator import ExecutionStreamCoordinator
-from linktools.ai.execution.events import DefaultEventService, LiveExecutionEventBroker
+from ..execution.coordinator import ExecutionStreamCoordinator
+from ..execution.events import DefaultEventService, LiveExecutionEventBroker
 from ._external import DefaultExternalService
 from ._execution import DefaultExecutionService, _ExecutionRuntimeBridge
-from linktools.ai.execution import ExecutionRecord
+from ..execution import ExecutionRecord
 from ..execution.stream import SharedStreamPublisher
-from linktools.ai.execution.tree import ExecutionTreeBroker, ExecutionTreeStreamer
+from ..execution.tree import ExecutionTreeBroker, ExecutionTreeStreamer
 from ..history import StepExecutionHistoryReader, StepSessionHistoryReader
 from ..history import DefaultExecutionHistoryService
 from ..inputs import ExecutionInputMaterializer
@@ -71,26 +71,26 @@ from ..inputs import InputCaptures
 from ..inputs.recovery import TaskRecoveryGuard
 from ..inputs import ExecutionContextArchive
 from ._local import LocalExecutionBackend
-from linktools.ai.persistence.coordination import PendingTurnCoordination
+from ..persistence.coordination import PendingTurnCoordination
 from ._memory import MemoryStore, RuntimeMemoryStore
-from linktools.ai.persistence.objects import ObjectKeyFactory
+from ..persistence.objects import ObjectKeyFactory
 from ._capabilities import runtime_feature_leaves
-from linktools.ai.persistence.capabilities import CapabilityPersistence
-from linktools.ai.persistence.capabilities import RuntimeCapabilityWrites
-from linktools.ai.observe.service import MetricsService
+from ..persistence.capabilities import CapabilityPersistence
+from ..persistence.capabilities import RuntimeCapabilityWrites
+from ..observe.service import MetricsService
 from ._persistence_configuration import validate_persistence_capabilities, capability_persistence_ids
-from linktools.ai.capability import TraceCapability, CheckpointCapability
+from ..capability import TraceCapability, CheckpointCapability
 from ..history import History
-from linktools.ai.core import token_seed
+from ..core import token_seed
 from ._session import RuntimeSessionService
 from ._subagent import SubagentDispatcher
 from ..history import TransientExecutionHistoryStore
 from ..capability import ToolResponseFixture
-from linktools.ai.execution import CancelExecutionRequest, ExecutionHistoryReader, SessionHistoryReader
+from ..execution import CancelExecutionRequest, ExecutionHistoryReader, SessionHistoryReader
 from ..storage import StorageRetentionMode
-from linktools.ai.persistence import PersistenceDomain, Persistence
-from linktools.ai.persistence.runs import RuntimeAgentRunStore
-from linktools.ai.persistence.runs import StagingAgentRunStore
+from ..persistence import PersistenceDomain, Persistence
+from ..persistence.runs import RuntimeAgentRunStore
+from ..persistence.runs import StagingAgentRunStore
 
 AppT = TypeVar("AppT")
 _logger = environ.get_logger("ai.runtime.factory")

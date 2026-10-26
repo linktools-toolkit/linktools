@@ -18,9 +18,9 @@ from pydantic_ai.messages import (
     VideoUrl,
 )
 
-from linktools.ai.core import JsonValue, normalize_json_value
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ReferencedContent
+from ..core import JsonValue, normalize_json_value
+from ..errors import AIError, ErrorCode
+from . import ReferencedContent
 
 
 class RetiredReferencedContent(TextContent):
@@ -95,8 +95,8 @@ def decode_user_content_item(value: object) -> UserContent:
         raise ValueError("user content item is invalid")
     kind = value["kind"]
     if kind == "referenced-content":
-        from linktools.ai.asset import AssetVersionRef
-        from linktools.ai.spec import CapabilityRef
+        from ..asset import AssetVersionRef
+        from ..spec import CapabilityRef
         source = value.get("source")
         required = {"kind", "ref", "media_type", "source"}
         if (not required.issubset(value) or set(value) - required - {"representation", "source_parameters", "identifier"}

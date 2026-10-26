@@ -47,13 +47,13 @@ try:
 except ImportError:
     RetryFeedbackPart = RetryInfo = None
 
-from linktools.ai.core import JsonValue, canonical_json_bytes
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import model_input_content, ReferencedContent, project_model_attempts, project_model_response_attempts
-from linktools.ai.model._attachment import binary_attachment_text, has_binary_attachment_metadata
-from linktools.ai.model._user_content_codec import RetiredReferencedContent, decode_user_content_item, encode_user_content_item
-from linktools.ai.model._json_snapshot import stable_json_snapshot
-from linktools.ai.model._tool_return_codec import decode_tool_return_content, encode_tool_return_content
+from ..core import JsonValue, canonical_json_bytes
+from ..errors import AIError, ErrorCode
+from . import model_input_content, ReferencedContent, project_model_attempts, project_model_response_attempts
+from ._attachment import binary_attachment_text, has_binary_attachment_metadata
+from ._user_content_codec import RetiredReferencedContent, decode_user_content_item, encode_user_content_item
+from ._json_snapshot import stable_json_snapshot
+from ._tool_return_codec import decode_tool_return_content, encode_tool_return_content
 
 _MESSAGE_VERSION = 1
 _TOOL_KINDS = frozenset({"tool-search", "capability-load"})

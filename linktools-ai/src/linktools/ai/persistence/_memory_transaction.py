@@ -7,8 +7,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Generic, TypeVar
 
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence.state import (
+from ..errors import AIError, ErrorCode
+from .state import (
     FactQuery,
     FactScanCursor,
     OperationQuery,

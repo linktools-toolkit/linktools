@@ -4,18 +4,18 @@
 
 from collections.abc import Iterator, Mapping, Sequence
 
-from linktools.ai.core import JsonValue
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.storage import ObjectRef, StoredPayload
-from linktools.ai.persistence._archive import ArchiveRoot, ContentRecord, ImmutableSequenceNode
-from linktools.ai.persistence.codec import (
+from ..core import JsonValue
+from ..errors import AIError, ErrorCode
+from ..storage import ObjectRef, StoredPayload
+from ._archive import ArchiveRoot, ContentRecord, ImmutableSequenceNode
+from .codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
     decode_domain,
     encode_domain,
     encode_envelope,
 )
-from linktools.ai.persistence.state import StoredRecord, record_key_digest
+from .state import StoredRecord, record_key_digest
 
 
 def _context_payload(value: Mapping[str, object]) -> tuple[Mapping[str, object], StoredPayload] | None:

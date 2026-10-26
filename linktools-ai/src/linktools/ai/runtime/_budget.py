@@ -12,7 +12,7 @@ from pydantic_ai.tools import RunContext, ToolDefinition
 
 from ..capability import AgentContext
 from ..core import canonical_sha256
-from linktools.ai.persistence.contracts import BudgetRepository
+from ..persistence.contracts import BudgetRepository
 from ._tool_metrics import TOOL_METRICS_MANAGED_METADATA_KEY
 
 

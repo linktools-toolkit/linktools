@@ -13,10 +13,10 @@ from typing import TypeVar
 
 from linktools.core import environ
 
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.storage import sync_directory
-from linktools.ai.persistence.codec import decode_alias, decode_fact, decode_operation, decode_record
-from linktools.ai.persistence.state import (
+from ..errors import AIError, ErrorCode
+from ..storage import sync_directory
+from .codec import decode_alias, decode_fact, decode_operation, decode_record
+from .state import (
     FactScanCursor,
     OperationScanCursor,
     RecordQuery,

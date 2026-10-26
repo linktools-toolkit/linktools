@@ -15,20 +15,20 @@ from pydantic import BaseModel
 from ..core import BudgetUsage, RunBudget, JsonValue, Page, Principal, ThinkingValue
 from ..errors import AIError, ErrorCode, ObservationError
 from .stream import SharedStreamEvent
-from linktools.ai.observe import WaitResult
+from ..observe import WaitResult
 from ._observation import _ExecutionModelObservation
-from linktools.ai.observe.stream import wait_for_result, validate_wait, await_stream_cleanup, is_observation_cleanup, owned_watch
+from ..observe.stream import wait_for_result, validate_wait, await_stream_cleanup, is_observation_cleanup, owned_watch
 from ._input_context import ExecutionInputContext
 from ..model import ModelBinding, UserPromptInput, validate_user_input
-from linktools.ai.observe.cursors import decode_execution_watch_cursor, get_preview_positions, ExecutionWatchPositions, encode_execution_watch_cursor
+from ..observe.cursors import decode_execution_watch_cursor, get_preview_positions, ExecutionWatchPositions, encode_execution_watch_cursor
 from ._recovery import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolution, ToolEffectResolutionResult
 from ._service_api import CancelExecutionRequest, CancelExecutionResult, ExecutionEvent, ExecutionHistoryItem, ExecutionResult, ExecutionTraceItem, ExecutionTreeEvent, ExecutionObservationEvent, ModelInteractionItem, SessionHistoryItem, SessionTurn, SessionView, TranscriptItem, UsageReadCutoff
-from linktools.ai.observe.stream import ExecutionStreamFailure
+from ..observe.stream import ExecutionStreamFailure
 
 if TYPE_CHECKING:
     from ..agent import CompiledAgent
     from ._service_api import ExecutionService, ExecutionView, ExecutionHistoryService
-    from linktools.ai.observe.stream import ObservationSession
+    from ..observe.stream import ObservationSession
 
 AppT = TypeVar("AppT")
 

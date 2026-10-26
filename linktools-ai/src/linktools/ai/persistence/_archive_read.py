@@ -8,7 +8,7 @@ from enum import IntFlag
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from linktools.ai.persistence.state import StoredRecord
+    from .state import StoredRecord
 
 
 class ArchiveNodeSlot(IntFlag):

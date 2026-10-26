@@ -4,7 +4,7 @@
 
 from typing import TYPE_CHECKING
 
-from linktools.ai.storage import (
+from ..storage import (
     sql_audit_columns,
     sql_audit_indexes,
     sql_id_column,
@@ -15,7 +15,7 @@ from linktools.ai.storage import (
     sql_table_options,
     sql_unique,
 )
-from linktools.ai.persistence._plan import PersistenceDomain, PersistencePlan
+from ._plan import PersistenceDomain, PersistencePlan
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData

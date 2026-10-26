@@ -38,7 +38,7 @@ from ..observe import Observation
 from ..workspace import SandboxSession, ToolPermissionPolicy
 from ._handoff import ToolEntryStopped, execution_handoff_scope
 from ._budget import RunBudgetContext
-from linktools.ai.model.messages import bind_tool_return_attachments
+from ..model.messages import bind_tool_return_attachments
 from ._tool import TOOL_OPERATION_LEASE_SECONDS, ToolOperationBridge
 from ._tool_metrics import (
     TOOL_METRICS_MANAGED_METADATA_KEY,

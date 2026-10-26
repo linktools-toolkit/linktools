@@ -29,10 +29,10 @@ from pydantic_ai.messages import (
     VideoUrl,
 )
 
-from linktools.ai.core import JsonValue, normalize_json_value
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ReferencedContent
-from linktools.ai.session import SessionHistoryItem
+from ..core import JsonValue, normalize_json_value
+from ..errors import AIError, ErrorCode
+from ..model import ReferencedContent
+from ..session import SessionHistoryItem
 
 SESSION_HISTORY_VIEW_V1 = 2
 EXECUTION_TRANSCRIPT_VIEW_V1 = 1

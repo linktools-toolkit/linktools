@@ -22,9 +22,9 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
-from linktools.ai.persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
-from linktools.ai.model.messages import encode_tool_return_content
-from linktools.ai.execution import (
+from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
+from ..model.messages import encode_tool_return_content
+from ..execution import (
     ExternalCallFailed,
     ExternalCallRetry,
     ExternalCallSucceeded,
@@ -32,7 +32,7 @@ from linktools.ai.execution import (
     ExternalSupplyRequest,
     ExternalSupplyResult,
 )
-from linktools.ai.persistence.contracts import (
+from ..persistence.contracts import (
     deferred_resource_id,
     ExternalCallRecord,
     ExternalCallRepository,
@@ -42,7 +42,7 @@ from linktools.ai.persistence.contracts import (
     RecoveryCheckpointRepository,
     RecoveryCheckpointState,
 )
-from linktools.ai.persistence import PersistenceDomain
+from ..persistence import PersistenceDomain
 
 
 _logger = environ.get_logger("ai.runtime.external")

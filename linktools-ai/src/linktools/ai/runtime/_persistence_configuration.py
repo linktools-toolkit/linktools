@@ -9,8 +9,8 @@ from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, Wra
 from ..errors import AIError, ErrorCode
 from ..core import CommitPolicy
 from ..capability import CheckpointCapability, ExecutionCapability, TraceCapability
-from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.capabilities import CapabilityPersistence
+from ..persistence import PersistenceDomain
+from ..persistence.capabilities import CapabilityPersistence
 
 
 def validate_persistence_capabilities(

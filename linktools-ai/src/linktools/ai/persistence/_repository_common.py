@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import datetime
 from typing import Generic, TypeVar
 from linktools.core import environ
-from linktools.ai.core import (
+from ..core import (
     OperationKind,
     OperationLedgerInput,
     OperationLedgerRecord,
@@ -21,17 +21,17 @@ from linktools.ai.core import (
     operation_cas_immutable_matches,
     operation_replay_matches,
 )
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.evaluation import EvidenceBundle, EvaluationReport, ComparisonReport
-from linktools.ai.task import TaskGraphView, TaskNodeView
-from linktools.ai.persistence.contracts import ToolOperationRecord
-from linktools.ai.persistence.codec import (
+from ..errors import AIError, ErrorCode
+from ..evaluation import EvidenceBundle, EvaluationReport, ComparisonReport
+from ..task import TaskGraphView, TaskNodeView
+from .contracts import ToolOperationRecord
+from .codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
     encode_envelope,
     wire_type_id,
 )
-from linktools.ai.persistence.contracts import (
+from .contracts import (
     ApprovalRecord,
     ArtifactRecord,
     ConversationHistoryRecord,
@@ -43,15 +43,15 @@ from linktools.ai.persistence.contracts import (
     RecoveryCheckpoint,
     SessionRecord,
 )
-from linktools.ai.persistence._evaluation_records import (
+from ._evaluation_records import (
     EvaluationCaseRecord,
     EvaluationDatasetRecord,
     EvaluationTombstone,
     EvaluationContentTombstone,
     EvaluationCleanupRecord,
 )
-from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence.state import (
+from ._plan import PersistenceDomain
+from .state import (
     OperationQuery,
     RecordQuery,
     StateStore,
@@ -243,9 +243,9 @@ class _RepositoryBase:
     async def _refresh_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
         # Native stores can repair their ordinary cache after a source fallback.
         # Custom stores retain the existing mandatory StateStore contract.
-        from linktools.ai.persistence._filesystem import FilesystemStateStore
-        from linktools.ai.persistence._memory import InMemoryStateStore
-        from linktools.ai.persistence._sql import SqlStateStore
+        from ._filesystem import FilesystemStateStore
+        from ._memory import InMemoryStateStore
+        from ._sql import SqlStateStore
 
         if isinstance(self._store, (FilesystemStateStore, InMemoryStateStore, SqlStateStore)):
             return await self._store.refresh_records(keys)

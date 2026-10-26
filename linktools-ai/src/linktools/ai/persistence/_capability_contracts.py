@@ -5,8 +5,8 @@
 from collections.abc import Mapping
 from typing import Protocol, runtime_checkable
 
-from linktools.ai.core import CommitPolicy, JsonValue
-from linktools.ai.persistence.state import StateTransaction
+from ..core import CommitPolicy, JsonValue
+from .state import StateTransaction
 
 
 class CapabilityWriter(Protocol):

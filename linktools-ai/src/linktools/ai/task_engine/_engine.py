@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator, Sequence
 from ..execution.handle import ExecutionBinding
 from ..core import (AuthorizationPolicy, CorrelationData, ExecutionContext, PrincipalKind, PromptLimits,
     TenantAuthorizationPolicy, canonical_sha256, overlay_correlation, principal_identity_payload, validate_idempotency_key)
-from linktools.ai.persistence import Persistence, PersistenceDomain
+from ..persistence import Persistence, PersistenceDomain
 from ..observe import Metrics
 from ..storage import PayloadPolicy, StorageRetentionMode
 from ..task import (
@@ -24,20 +24,20 @@ from ..task import (
     RecoverGraphRequest,
 )
 from ..execution import TaskExecutionService
-from linktools.ai.persistence.commands import StoredExecutionManagementAdapter
-from linktools.ai.execution.events import DefaultEventService
-from linktools.ai.execution.tree import ExecutionTreeBroker, ExecutionTreeStreamer
-from linktools.ai.execution.coordinator import ExecutionStreamCoordinator
+from ..persistence.commands import StoredExecutionManagementAdapter
+from ..execution.events import DefaultEventService
+from ..execution.tree import ExecutionTreeBroker, ExecutionTreeStreamer
+from ..execution.coordinator import ExecutionStreamCoordinator
 from ..inputs import ExecutionInputMaterializer
-from linktools.ai.observe.service import MetricsService
-from linktools.ai.persistence.objects import ObjectKeyFactory
+from ..observe.service import MetricsService
+from ..persistence.objects import ObjectKeyFactory
 from ._runner import TaskNodeExecutor
 from ..inputs import TaskGraphBindingCaptureStore
 from ..inputs import InputCaptures
-from linktools.ai.observe.stream import ObservationSession, await_stream_cleanup
+from ..observe.stream import ObservationSession, await_stream_cleanup
 from ._run import _CancelSettlement
 from ..execution import Execution
-from linktools.ai.execution import ExecutionView, ExecutionTreeEvent, CancelExecutionResult, CancelExecutionRequest
+from ..execution import ExecutionView, ExecutionTreeEvent, CancelExecutionResult, CancelExecutionRequest
 from linktools.core import environ
 
 _logger = environ.get_logger("ai.task.engine")

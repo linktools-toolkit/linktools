@@ -27,15 +27,15 @@ from pydantic_ai.messages import (
     VideoUrl,
 )
 
-from linktools.ai.core import (
+from ..core import (
     JsonValue,
     WorkspaceFileInput,
     canonical_sha256,
     normalize_json_value,
 )
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ReferencedContent
-from linktools.ai.workspace import validate_workspace_path
+from ..errors import AIError, ErrorCode
+from . import ReferencedContent
+from ..workspace import validate_workspace_path
 
 _URL_TYPES = (ImageUrl, AudioUrl, DocumentUrl, VideoUrl)
 _FILE_TOOLS = frozenset({"attach_files", "read_file"})

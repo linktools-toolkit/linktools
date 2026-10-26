@@ -20,7 +20,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..spec import SubagentRef
 from ._execution import DefaultExecutionService
-from linktools.ai.execution import CancelExecutionRequest, ExecutionRequest, ExecutionResult
+from ..execution import CancelExecutionRequest, ExecutionRequest, ExecutionResult
 
 _logger = environ.get_logger("ai.runtime.subagent")
 

@@ -11,11 +11,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, TypeVar
 
 from linktools.core import environ
-from linktools.ai.observe.stream import await_stream_cleanup
+from ..observe.stream import await_stream_cleanup
 
-from linktools.ai.core import validate_persistence_namespace, validate_tenant_id, canonical_json_bytes
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.storage import (
+from ..core import validate_persistence_namespace, validate_tenant_id, canonical_json_bytes
+from ..errors import AIError, ErrorCode
+from ..storage import (
     CacheBackend,
     TurnCoordinationBackend,
     StreamBackend,
@@ -23,20 +23,20 @@ from linktools.ai.storage import (
     ObjectStore,
     StorageRetentionMode,
 )
-from linktools.ai.persistence._root import PersistenceStorage, _validate_storage_configuration
-from linktools.ai.persistence._plan import PersistenceDomain, PersistencePlan, runtime_domain_uses_object_store
-from linktools.ai.persistence.contracts import (ArtifactRepositories, ConversationRepositories, EvaluationRepositories,
+from ._root import PersistenceStorage, _validate_storage_configuration
+from ._plan import PersistenceDomain, PersistencePlan, runtime_domain_uses_object_store
+from .contracts import (ArtifactRepositories, ConversationRepositories, EvaluationRepositories,
                          ExecutionRepositories, MemoryRepositories, RecoveryRepositories, TaskRepositories)
-from linktools.ai.persistence.state import StateStore
-from linktools.ai.persistence._snapshot import SnapshotLimits, SnapshotExclusiveGuard
-from linktools.ai.persistence.snapshots import SnapshotResources, RuntimeSnapshotOperations, restore_snapshot
-from linktools.ai.persistence._object_cleanup import ObjectCleanupResult
+from .state import StateStore
+from ._snapshot import SnapshotLimits, SnapshotExclusiveGuard
+from .snapshots import SnapshotResources, RuntimeSnapshotOperations, restore_snapshot
+from ._object_cleanup import ObjectCleanupResult
 
 if TYPE_CHECKING:
-    from linktools.ai.persistence._materializer import _MaterializedRuntimeStorage
-    from linktools.ai.persistence._object_router import _RuntimeObjectRouter
-    from linktools.ai.persistence._retention import RuntimeRetentionController
-    from linktools.ai.persistence.runs import RuntimeAgentRunStore
+    from ._materializer import _MaterializedRuntimeStorage
+    from ._object_router import _RuntimeObjectRouter
+    from ._retention import RuntimeRetentionController
+    from .runs import RuntimeAgentRunStore
 
 
 _ValueT = TypeVar("_ValueT")
@@ -277,7 +277,7 @@ class Persistence:
             _validate_storage_configuration(self._plan, self._external_object_store)
             self._lifecycle = _RuntimeStateLifecycle.INITIALIZING
             try:
-                from linktools.ai.persistence._materializer import materialize_runtime_storage
+                from ._materializer import materialize_runtime_storage
 
                 materialized = await materialize_runtime_storage(
                     self._plan,

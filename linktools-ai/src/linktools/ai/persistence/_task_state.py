@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 """Pure Task durable-state status helpers."""
 
-from linktools.ai.core import TaskStatus
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.task import TaskGraphView, TaskNode, TaskNodeView
+from ..core import TaskStatus
+from ..errors import AIError, ErrorCode
+from ..task import TaskGraphView, TaskNode, TaskNodeView
 
 
 def _is_sha256(value: object) -> bool:

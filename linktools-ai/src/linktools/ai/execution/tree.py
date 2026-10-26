@@ -11,12 +11,12 @@ from typing import Protocol
 
 from ..core import ExecutionLineageKind, Page, Principal
 from ..errors import AIError, ErrorCode
-from linktools.ai.execution.events import project_event_payload
+from .events import project_event_payload
 from ..execution.stream import shared_stream_positions
-from linktools.ai.observe.cursors import ExecutionWatchPositions, get_preview_positions
-from linktools.ai.observe.stream import is_observation_cleanup, drain_stream_tasks, await_stream_cleanup, report_observation_error
-from linktools.ai.execution import ExecutionStreamEvent, ExecutionEvent, ExecutionTreeEvent, ExecutionView
-from linktools.ai.observe.stream import ExecutionStreamFailure
+from ..observe.cursors import ExecutionWatchPositions, get_preview_positions
+from ..observe.stream import is_observation_cleanup, drain_stream_tasks, await_stream_cleanup, report_observation_error
+from . import ExecutionStreamEvent, ExecutionEvent, ExecutionTreeEvent, ExecutionView
+from ..observe.stream import ExecutionStreamFailure
 
 _DISCOVERY_BACKOFF_INITIAL = 1.0
 _DISCOVERY_BACKOFF_MAX = 30.0

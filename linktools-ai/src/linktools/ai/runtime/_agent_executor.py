@@ -113,10 +113,10 @@ from ._budget import RunBudgetContext, RunBudgetCapability
 from ._tool_metrics import ToolMetricContext
 from ._capabilities import compose_platform_capabilities, runtime_feature_leaves
 from ._agent_run_recorder import AgentRunRecorder
-from linktools.ai.persistence.runs import RuntimeAgentRunStore
+from ..persistence.runs import RuntimeAgentRunStore
 from ._compaction import CompactionPolicy
 from ..inputs import CanonicalUserInput
-from linktools.ai.observe.journal import ModelRequestJournal
+from ..observe.journal import ModelRequestJournal
 from ._memory import MemoryStore
 from ._metric_capability import ModelObservationCapability
 from ._plan import RuntimePlanStore
@@ -124,7 +124,7 @@ from ._harness import (
     ReinjectRuntimeSystemPrompt, SummaryProviderModel,
     FallbackProviderModel,
 )
-from linktools.ai.model.messages import without_history_system_prompts
+from ..model.messages import without_history_system_prompts
 from ._repository_instructions import _RepositoryInstructionCapability
 from ._tool import ToolOperationBridge
 from ..capability import ToolResponseFixture
@@ -138,9 +138,9 @@ from ._tool_boundary import (
 from ._tool_metrics import (
     ToolMetricsCapability,
 )
-from linktools.ai.model.messages import rehydrate_deferred_tool_results, tool_return_content_digest
-from linktools.ai.persistence.contracts import LoadedModelContext
-from linktools.ai.persistence.runs import AgentRunCheckpoint, AgentRunStore
+from ..model.messages import rehydrate_deferred_tool_results, tool_return_content_digest
+from ..persistence.contracts import LoadedModelContext
+from ..persistence.runs import AgentRunCheckpoint, AgentRunStore
 
 if TYPE_CHECKING:
     from ._mcp import _MCPBinding, _MCPProjection

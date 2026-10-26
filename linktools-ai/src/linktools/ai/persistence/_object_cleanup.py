@@ -7,9 +7,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
 
-from linktools.ai.core import JsonValue, validate_page_limit
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.storage import (
+from ..core import JsonValue, validate_page_limit
+from ..errors import AIError, ErrorCode
+from ..storage import (
     ObjectRef,
     ObjectStat,
     ObjectStore,
@@ -17,16 +17,16 @@ from linktools.ai.storage import (
     ObjectStoreMaintenance,
     read_object,
 )
-from linktools.ai.persistence._archive_closure import ArchiveClosure, iter_archive_content_refs, iter_archive_roots
-from linktools.ai.persistence.codec import iter_runtime_object_dependencies, iter_runtime_object_refs
-from linktools.ai.persistence.captures import (
+from ._archive_closure import ArchiveClosure, iter_archive_content_refs, iter_archive_roots
+from .codec import iter_runtime_object_dependencies, iter_runtime_object_refs
+from .captures import (
     input_capture_expiry_key,
     iter_input_capture_dependencies,
     validate_input_capture_payload,
 )
-from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence._snapshot import SnapshotExclusiveGuard
-from linktools.ai.persistence.state import (
+from ._plan import PersistenceDomain
+from ._snapshot import SnapshotExclusiveGuard
+from .state import (
     FactScanCursor,
     OperationScanCursor,
     RecordScanCursor,

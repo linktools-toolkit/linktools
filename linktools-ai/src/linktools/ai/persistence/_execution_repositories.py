@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
 from linktools.core import environ
-from linktools.ai.core import (
+from ..core import (
     ExecutionEventType,
     ExecutionStatus,
     IdempotencyStatus,
@@ -15,11 +15,11 @@ from linktools.ai.core import (
     Page,
     ResourceKind,
 )
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.task import TaskBindingContract
-from linktools.ai.persistence._archive import ContentArchive, PreparedArchive
-from linktools.ai.persistence._budget import BudgetRepositoryImpl
-from linktools.ai.persistence.contracts import (
+from ..errors import AIError, ErrorCode
+from ..task import TaskBindingContract
+from ._archive import ContentArchive, PreparedArchive
+from ._budget import BudgetRepositoryImpl
+from .contracts import (
     ExecutionCandidate,
     ExecutionCandidatePage,
     ExecutionCancelRequestCommit,
@@ -39,9 +39,9 @@ from linktools.ai.persistence.contracts import (
     IdempotencyTerminalUpdate,
     ResultRecord,
 )
-from linktools.ai.persistence.contracts import RuntimePayloadRef
-from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence.state import (
+from .contracts import RuntimePayloadRef
+from ._plan import PersistenceDomain
+from .state import (
     FactQuery,
     RecordQuery,
     RecordReplacement,
@@ -52,7 +52,7 @@ from linktools.ai.persistence.state import (
     operation_key,
     stream_digest,
 )
-from linktools.ai.persistence._repository_common import (
+from ._repository_common import (
     RepositoryBase as _RepositoryBase,
     ResourceRepository as _ResourceRepository,
     decode_operation as _decode_operation,

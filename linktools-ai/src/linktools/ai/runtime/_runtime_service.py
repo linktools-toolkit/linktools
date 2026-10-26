@@ -45,15 +45,15 @@ from .agent_execution import AgentExecutionPort
 from ._agent import Agent, Session
 from ..execution import Execution
 from ._agent_binding_resolver import _AgentBindingResolver
-from linktools.ai.observe.stream import ObservationSession, await_stream_cleanup
+from ..observe.stream import ObservationSession, await_stream_cleanup
 from ._domains import RuntimeAgents, RuntimeExecutions, RuntimeMetrics, RuntimeSessions
-from linktools.ai.execution import ExecutionInputContext
+from ..execution import ExecutionInputContext
 from ..core import ExecutionContext
 from ..model import normalize_input_files
 from ..inputs import CanonicalUserInput
 from ..observe import Metrics, MetricRecorderStatus, MetricFlushResult
-from linktools.ai.observe.service import disabled_metric_status
-from linktools.ai.execution import (
+from ..observe.service import disabled_metric_status
+from ..execution import (
     ExecutionView,
     ApprovalService,
     ArtifactService,
@@ -70,8 +70,8 @@ from linktools.ai.execution import (
     UpdateSessionRequest,
     ExecutionTreeEvent,
 )
-from linktools.ai.persistence import Persistence, PersistenceStatus
-from linktools.ai.persistence.runs import RuntimeAgentRunStore
+from ..persistence import Persistence, PersistenceStatus
+from ..persistence.runs import RuntimeAgentRunStore
 
 _logger = environ.get_logger("ai.runtime")
 AppT = TypeVar("AppT")

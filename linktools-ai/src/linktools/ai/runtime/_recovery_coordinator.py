@@ -49,7 +49,7 @@ from ._repository_instructions import (
     _repository_instructions_contain,
     _validate_repository_instruction_frontier,
 )
-from linktools.ai.execution import (
+from ..execution import (
     ExecutionRecoveryEffect,
     ResolveToolEffectRequest,
     ToolEffectApplied,
@@ -57,8 +57,8 @@ from linktools.ai.execution import (
     ToolEffectNotApplied,
     ToolEffectResolutionResult,
 )
-from linktools.ai.execution import ExecutionRequest
-from linktools.ai.persistence.contracts import (
+from ..execution import ExecutionRequest
+from ..persistence.contracts import (
     deferred_resource_id,
     ApprovalRecord,
     ExternalCallRecord,
@@ -70,9 +70,9 @@ from linktools.ai.persistence.contracts import (
     RepositoryInstructionBarrier,
     ToolOperationRecord,
 )
-from linktools.ai.session import ConversationCursor
-from linktools.ai.execution import ExecutionRecord, IdempotencyRecord, RuntimePayloadRef
-from linktools.ai.persistence.runs import AgentRunCheckpoint, AgentRunRecord
+from ..session import ConversationCursor
+from ..execution import ExecutionRecord, IdempotencyRecord, RuntimePayloadRef
+from ..persistence.runs import AgentRunCheckpoint, AgentRunRecord
 
 _logger = environ.get_logger("ai.runtime.local")
 

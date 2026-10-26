@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from linktools.ai.core import Principal, JsonValue
-from linktools.ai.evaluation import (
+from ..core import Principal, JsonValue
+from ..evaluation import (
     ScoreBundle, CaseContract, DatasetContract,
     EvaluationManifest,
     EvidenceRef,
@@ -15,9 +15,9 @@ from linktools.ai.evaluation import (
     SlotDispositionView,
     TargetTrialRef,
 )
-from linktools.ai.task import TaskGraphSubmission, TaskInvocationInputRef
-from linktools.ai.storage import ObjectRef
-from linktools.ai.persistence._plan import PersistenceDomain
+from ..task import TaskGraphSubmission, TaskInvocationInputRef
+from ..storage import ObjectRef
+from ._plan import PersistenceDomain
 
 
 @dataclass(frozen=True, slots=True)

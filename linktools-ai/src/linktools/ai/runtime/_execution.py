@@ -18,7 +18,7 @@ from linktools.core import environ
 from ..execution import (TaskExecutionService, ExecutionReleaseCallback as _ExecutionReleaseCallback,
     LocalExecutionWaiter as _LocalExecutionWaiter, overlay_execution_correlation as _overlay_execution_correlation,
     consumed_terminal_query, observed_query as _observed_query)
-from linktools.ai.persistence.commands import StoredExecutionManagementAdapter
+from ..persistence.commands import StoredExecutionManagementAdapter
 
 
 from ..execution import (ExecutionManager, ExecutionDriver, CancelEffectOutcome,
@@ -97,9 +97,9 @@ from ..inputs import (
     input_intent,
     validate_user_input,
 )
-from linktools.ai.persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
-from linktools.ai.execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
-from linktools.ai.execution import (
+from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
+from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
+from ..execution import (
     CancelExecutionRequest,
     CancelExecutionResult,
     ExecutionHandle,
@@ -117,13 +117,13 @@ from linktools.ai.execution import (
     TranscriptItem,
     UsageReadCutoff,
 )
-from linktools.ai.execution import project_execution_view as _project_execution_view
-from linktools.ai.persistence import PersistenceDomain
+from ..execution import project_execution_view as _project_execution_view
+from ..persistence import PersistenceDomain
 from ._pending_turn import _PendingExecutionTurns
-from linktools.ai.persistence.coordination import PendingTurnCoordination
-from linktools.ai.persistence.repositories import ExecutionRepositoryImpl
-from linktools.ai.persistence.objects import runtime_object_source_reads
-from linktools.ai.execution import (
+from ..persistence.coordination import PendingTurnCoordination
+from ..persistence.repositories import ExecutionRepositoryImpl
+from ..persistence.objects import runtime_object_source_reads
+from ..execution import (
     ExecutionCancelRequestCommit,
     ExecutionRecord,
     ExecutionStartClaim,
@@ -137,13 +137,13 @@ from linktools.ai.execution import (
     ResultRecord,
     StoredUserInput,
 )
-from linktools.ai.persistence.contracts import ExecutionRepositories, SessionRepository, TaskAdmissionRepository
+from ..persistence.contracts import ExecutionRepositories, SessionRepository, TaskAdmissionRepository
 
 if TYPE_CHECKING:
-    from linktools.ai.persistence.state import StateTransaction
-    from linktools.ai.execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
-    from linktools.ai.execution import RuntimePayloadRef
-    from linktools.ai.session import SessionRecord
+    from ..persistence.state import StateTransaction
+    from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
+    from ..execution import RuntimePayloadRef
+    from ..session import SessionRecord
 
 _logger = environ.get_logger("ai.runtime.execution")
 

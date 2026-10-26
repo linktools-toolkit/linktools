@@ -5,9 +5,9 @@
 import re
 from collections.abc import Callable, Mapping
 
-from linktools.ai.core import ImmutableJsonMapping, JsonValue
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.spec import canonicalize_json_schema
+from ..core import ImmutableJsonMapping, JsonValue
+from ..errors import AIError, ErrorCode
+from ..spec import canonicalize_json_schema
 
 TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION = 1
 TASK_GRAPH_BINDING_CAPTURE_MANIFEST_KEYS = frozenset(
@@ -126,7 +126,7 @@ def task_declaration_identity(value: object) -> tuple[str, int]:
             or not isinstance(config.get("binding_contract"), Mapping)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        from linktools.ai.agent import AgentBindingContract
+        from ..agent import AgentBindingContract
 
         AgentBindingContract.from_payload(config["binding_contract"])
     return identity

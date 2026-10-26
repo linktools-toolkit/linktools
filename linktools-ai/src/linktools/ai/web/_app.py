@@ -23,7 +23,7 @@ from ..core import Principal, PrincipalKind
 from ..errors import AIError, ErrorCode, ErrorDiagnostics, ObservationError
 from ..model import ModelClientRequest, ModelClientResponse
 from ..observe import MetricAggregation, MetricQuery, Metrics, MetricWindow
-from linktools.ai.history import History
+from ..history import History
 from ..execution import CreateSessionRequest, ExecutionStreamEvent, ListExecutionRequest, ListSessionRequest, TaskModelProjection, ToolEffectApplied, ToolEffectFailed, ToolEffectNotApplied
 from ..runtime import Runtime
 

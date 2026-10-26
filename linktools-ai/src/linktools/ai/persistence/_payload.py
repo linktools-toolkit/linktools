@@ -5,7 +5,7 @@
 import hashlib
 import zlib
 
-from linktools.ai.errors import AIError, ErrorCode
+from ..errors import AIError, ErrorCode
 
 PAYLOAD_COMPRESS_MINIMUM = 16 * 1024
 

@@ -29,7 +29,7 @@ from pydantic_ai.tools import ToolDefinition
 from ..capability import AgentContext, ToolCallFailed, ToolCallRetry
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Observation
-from linktools.ai.observe.identity import tool_observation_id
+from ..observe.identity import tool_observation_id
 
 _logger = environ.get_logger("ai.runtime.tool_metrics")
 TOOL_METRICS_MANAGED_METADATA_KEY = "linktools.tool_metrics_managed"

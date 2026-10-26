@@ -13,7 +13,7 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from linktools.ai.persistence.state import StateStore, StateTransaction, StoredRecord, record_key_digest
+from ..persistence.state import StateStore, StateTransaction, StoredRecord, record_key_digest
 
 _logger = environ.get_logger("ai.runtime.plan")
 _OWNER_KINDS = frozenset({"session", "execution"})

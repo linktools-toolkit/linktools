@@ -34,7 +34,7 @@ from ..history import (
     project_session_timeline,
 )
 from ..inputs import InputFileSource, stored_user_input_view
-from linktools.ai.execution import (
+from ..execution import (
     CancelExecutionRequest,
     ExecutionHandle,
     ExecutionRequest,
@@ -46,13 +46,13 @@ from linktools.ai.execution import (
     SessionTurn,
     SessionView,
 )
-from linktools.ai.persistence.objects import runtime_object_source_reads
-from linktools.ai.session import ConversationCursor, SessionRecord
-from linktools.ai.persistence.contracts import ConversationRepositories, ExecutionRepository
-from linktools.ai.execution import ExecutionRecord
-from linktools.ai.persistence.repositories import SessionRepositoryImpl
-from linktools.ai.persistence.repositories import ExecutionRepositoryImpl
-from linktools.ai.persistence.state import active_state_scope
+from ..persistence.objects import runtime_object_source_reads
+from ..session import ConversationCursor, SessionRecord
+from ..persistence.contracts import ConversationRepositories, ExecutionRepository
+from ..execution import ExecutionRecord
+from ..persistence.repositories import SessionRepositoryImpl
+from ..persistence.repositories import ExecutionRepositoryImpl
+from ..persistence.state import active_state_scope
 
 
 

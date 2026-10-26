@@ -51,17 +51,17 @@ from ..task import (
     TaskResultRef,
 )
 from ._artifact import DefaultArtifactService
-from linktools.ai.persistence.coordination import PendingTurnCoordination
-from linktools.ai.persistence.objects import runtime_object_source_reads
-from linktools.ai.execution.events import project_event_payload
+from ..persistence.coordination import PendingTurnCoordination
+from ..persistence.objects import runtime_object_source_reads
+from ..execution.events import project_event_payload
 from ..core import decode_cursor as decode_runtime_cursor
 from ..core import encode_cursor as encode_runtime_cursor
 from ._projection import StepExecutionHistoryReader
 from ._service import DefaultExecutionHistoryService, _read_model_interaction_updates
-from linktools.ai.core import token_seed
+from ..core import token_seed
 from ._transient import TransientExecutionHistoryStore
 from ._session_display_cache import SessionDisplayCache
-from linktools.ai.persistence.state import active_state_scope
+from ..persistence.state import active_state_scope
 from ._session_timeline import (
     SessionTimelineTranscriptStore,
     capture_session_timeline,
@@ -87,19 +87,19 @@ from ..execution import (
     UsageReadCutoff,
     UsageSummary,
 )
-from linktools.ai.persistence import Persistence, PersistenceDomain
-from linktools.ai.persistence.repositories import ExecutionRepositoryImpl
-from linktools.ai.persistence.repositories import SessionRepositoryImpl
-from linktools.ai.persistence.runs import StagingAgentRunStore
-from linktools.ai.persistence.contracts import (
+from ..persistence import Persistence, PersistenceDomain
+from ..persistence.repositories import ExecutionRepositoryImpl
+from ..persistence.repositories import SessionRepositoryImpl
+from ..persistence.runs import StagingAgentRunStore
+from ..persistence.contracts import (
     ConversationRepositories,
     EventRepository,
     ExecutionRepository,
     SessionRepository,
     TaskRepository,
 )
-from linktools.ai.execution import ExecutionRecord
-from linktools.ai.session import SessionRecord
+from ..execution import ExecutionRecord
+from ..session import SessionRecord
 
 @dataclass(frozen=True, slots=True)
 class ExecutionInfo:

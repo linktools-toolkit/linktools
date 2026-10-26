@@ -4,7 +4,7 @@
 
 import json
 from dataclasses import replace
-from linktools.ai.core import (
+from ..core import (
     OperationKind,
     OperationLedgerInput,
     OperationLedgerRecord,
@@ -12,11 +12,11 @@ from linktools.ai.core import (
     Page,
     ResourceKind,
 )
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence.contracts import ArtifactRecord, MemoryRecord
-from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence.state import RecordQuery, StateStore, StateTransaction, StoredRecord
-from linktools.ai.persistence._repository_common import (
+from ..errors import AIError, ErrorCode
+from .contracts import ArtifactRecord, MemoryRecord
+from ._plan import PersistenceDomain
+from .state import RecordQuery, StateStore, StateTransaction, StoredRecord
+from ._repository_common import (
     ResourceRepository as _ResourceRepository,
     insert_operation as _insert_operation,
     projected_record as _projected_record,

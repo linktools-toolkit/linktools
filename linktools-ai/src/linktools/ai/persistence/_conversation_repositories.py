@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime
 from linktools.core import environ
-from linktools.ai.core import (
+from ..core import (
     ExecutionStatus,
     JsonValue,
     OperationKind,
@@ -17,15 +17,15 @@ from linktools.ai.core import (
     canonical_sha256,
     validate_agent_id,
 )
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import StoredUserInput
-from linktools.ai.storage import StoredPayload
-from linktools.ai.persistence.codec import (
+from ..errors import AIError, ErrorCode
+from ..model import StoredUserInput
+from ..storage import StoredPayload
+from .codec import (
     _decode_enveloped_domain,
     encode_session_turn_commit,
     decode_session_turn_commit,
 )
-from linktools.ai.persistence.contracts import (
+from .contracts import (
     ConversationCursor,
     ConversationHistoryIndexNodeRecord,
     ConversationHistoryRecord,
@@ -36,9 +36,9 @@ from linktools.ai.persistence.contracts import (
     TranscriptHeadRecord,
     TranscriptOwnerDomain,
 )
-from linktools.ai.persistence._history_index import build_fork_index_node_from_roots
-from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence.state import (
+from ._history_index import build_fork_index_node_from_roots
+from ._plan import PersistenceDomain
+from .state import (
     FactQuery,
     RecordQuery,
     StateStore,
@@ -50,7 +50,7 @@ from linktools.ai.persistence.state import (
     stream_digest,
     subject_digest,
 )
-from linktools.ai.persistence._repository_common import (
+from ._repository_common import (
     RepositoryBase as _RepositoryBase,
     ResourceRepository as _ResourceRepository,
     append_operation as _append_operation,

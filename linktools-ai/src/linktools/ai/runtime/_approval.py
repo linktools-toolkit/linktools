@@ -22,9 +22,9 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, StoredPayload
-from linktools.ai.persistence.objects import read_runtime_object
-from linktools.ai.execution import ApprovalDecisionRequest, ApprovalDecisionResult, ApprovalView
-from linktools.ai.persistence.contracts import (
+from ..persistence.objects import read_runtime_object
+from ..execution import ApprovalDecisionRequest, ApprovalDecisionResult, ApprovalView
+from ..persistence.contracts import (
     deferred_resource_id,
     ApprovalRecord,
     ApprovalRepository,
