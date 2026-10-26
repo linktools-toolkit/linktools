@@ -15,6 +15,7 @@ from openai.types.chat import ChatCompletion
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.models import Model, ModelRequestParameters, ModelSettings
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
+from pydantic_ai.native_tools import WebSearchTool
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import merge_model_settings
 
@@ -45,8 +46,7 @@ _RESPONSES_REQUEST_SETTING_FIELDS = {
     "max_tokens": "max_output_tokens", "openai_reasoning_effort": "reasoning",
     "openai_reasoning_mode": "reasoning", "openai_reasoning_context": "reasoning",
     "openai_reasoning_summary": "reasoning", "openai_text_verbosity": "text",
-    "openai_truncation": "truncation", "openai_previous_response_id": "previous_response_id",
-    "openai_conversation_id": "conversation", "openai_context_management": "context_management",
+    "openai_truncation": "truncation", "openai_context_management": "context_management",
     "openai_background": "background", "openai_include_code_execution_outputs": "include",
     "openai_include_web_search_sources": "include", "openai_include_file_search_results": "include",
     "openai_prompt_cache_diagnostics": "prompt_cache_options",
@@ -71,9 +71,15 @@ class _OutputOnlyOpenAIChatModel(OpenAIChatModel):
             request_fields=("model", "messages", "tools", "tool_choice", "stream"),
         )
         settings, parameters = super().prepare_request(model_settings, model_request_parameters)
-        if parameters.output_mode == "native":
+        if parameters.output_mode == "native" or (
+            parameters.output_mode == "prompted" and self.profile.get("supports_json_object_output", False)
+        ):
             _ProviderModelBinding.validate_request_owners(
                 settings, wire_fields={}, request_fields=("response_format",),
+            )
+        if any(isinstance(tool, WebSearchTool) for tool in parameters.native_tools):
+            _ProviderModelBinding.validate_request_owners(
+                settings, wire_fields={}, request_fields=("web_search_options",),
             )
         return _ProviderModelBinding.prepare_output_tool_settings(
             settings, parameters,
@@ -91,10 +97,13 @@ class _OutputOnlyOpenAIResponsesModel(OpenAIResponsesModel):
         _ProviderModelBinding.validate_request_owners(
             merge_model_settings(self.settings, model_settings),
             wire_fields=_RESPONSES_REQUEST_SETTING_FIELDS,
-            request_fields=("model", "input", "instructions", "tools", "tool_choice", "stream"),
+            request_fields=("model", "input", "instructions", "tools", "tool_choice", "stream",
+                            "previous_response_id", "conversation"),
         )
         settings, parameters = super().prepare_request(model_settings, model_request_parameters)
-        if parameters.output_mode == "native":
+        if parameters.output_mode == "native" or (
+            parameters.output_mode == "prompted" and self.profile.get("supports_json_object_output", False)
+        ):
             _ProviderModelBinding.validate_request_owners(
                 settings, wire_fields={}, request_fields=("text",),
             )

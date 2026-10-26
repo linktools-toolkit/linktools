@@ -7,7 +7,7 @@ import json
 import httpx2
 import pytest
 from pydantic_ai.capabilities import Thinking
-from pydantic_ai.messages import ModelRequest, UserPromptPart
+from pydantic_ai.messages import CompactionPart, ModelRequest, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.output import OutputObjectDefinition
 
@@ -201,9 +201,7 @@ async def test_raw_cannot_replace_native_output_contract(
     ('anthropic', 'anthropic_thinking', 'thinking'),
     ('anthropic', 'anthropic_effort', 'output_config'),
     ('anthropic', 'anthropic_task_budget', 'output_config'),
-    ('anthropic', 'anthropic_container', 'container'),
     ('anthropic', 'anthropic_speed', 'speed'),
-    ('anthropic', 'anthropic_context_management', 'context_management'),
     ('anthropic', 'anthropic_cache', 'cache_control'),
     ('anthropic', 'anthropic_cache_diagnostics', 'diagnostics'),
     ('openai', 'temperature', 'temperature'),
@@ -248,8 +246,6 @@ async def test_raw_cannot_replace_native_output_contract(
     ('openai-responses', 'openai_reasoning_summary', 'reasoning'),
     ('openai-responses', 'openai_text_verbosity', 'text'),
     ('openai-responses', 'openai_truncation', 'truncation'),
-    ('openai-responses', 'openai_previous_response_id', 'previous_response_id'),
-    ('openai-responses', 'openai_conversation_id', 'conversation'),
     ('openai-responses', 'openai_context_management', 'context_management'),
     ('openai-responses', 'openai_background', 'background'),
     ('openai-responses', 'openai_include_code_execution_outputs', 'include'),
@@ -283,6 +279,7 @@ def test_sdk_setting_owners_have_explicit_protocol_classification() -> None:
             # These native settings change existing input/tool objects, which already have an owner.
             "parallel_tool_calls", "anthropic_cache_tool_definitions", "anthropic_cache_instructions",
             "anthropic_cache_messages", "anthropic_code_execution_tool_version", "anthropic_eager_input_streaming",
+            "anthropic_container", "anthropic_context_management",  # Can also be derived from history.
             "anthropic_betas",  # Native HTTP header, not a JSON body field.
             "frequency_penalty", "logit_bias", "presence_penalty", "seed",  # Unsupported by this adapter.
         }),
@@ -294,6 +291,7 @@ def test_sdk_setting_owners_have_explicit_protocol_classification() -> None:
         }),
         (OpenAIResponsesModelSettings, _RESPONSES_REQUEST_SETTING_FIELDS, {
             "openai_cache_instructions", "openai_native_tools", "openai_send_reasoning_ids",
+            "openai_previous_response_id", "openai_conversation_id",
             "openai_include_raw_annotations",  # Response parsing only.
             # Unsupported inherited Chat settings do not own a Responses wire object.
             "openai_continuous_usage_stats", "openai_logprobs", "openai_prediction",
@@ -342,3 +340,192 @@ async def test_runtime_reports_owner_conflict_as_nonretryable_configuration_erro
     assert "private-value" not in str(result.result.safe_error_details)
     assert "private-value" not in str(result.result.error_diagnostics)
     assert sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("supports_json_object", [False, True])
+@pytest.mark.parametrize("protocol,wire_field,raw", [
+    ("openai", "response_format", {"type": "text"}),
+    ("openai-responses", "text", {"format": {"type": "text"}, "vendor_extension": False}),
+])
+async def test_prompted_output_owns_wire_format_only_when_profile_generates_it(
+    monkeypatch: pytest.MonkeyPatch, protocol: str, wire_field: str, raw: dict,
+    supports_json_object: bool, streaming: bool,
+) -> None:
+    sent = []
+    _capture(monkeypatch, protocol, sent)
+    binding = create_model(protocol=protocol, model="gpt-4o", api_key="mock-only", max_retries=0,
+                           model_settings={"extra_body": {wire_field: raw, "vendor_flag": False}})
+    monkeypatch.setattr(type(binding), "_sdk_profile", lambda self: {
+        "supports_json_object_output": supports_json_object,
+    })
+    parameters = ModelRequestParameters(
+        output_mode="prompted",
+        output_object=OutputObjectDefinition(name="answer", json_schema={"type": "object", "properties": {}}),
+    )
+    async with binding.materialize() as model:
+        if supports_json_object:
+            with pytest.raises(AIError) as raised:
+                await _request(model, None, streaming, parameters)
+            assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
+            assert raised.value.safe_details == {"field": wire_field, "owner": "model_request"}
+            assert sent == []
+        else:
+            await _request(model, None, streaming, parameters)
+            assert sent[-1][wire_field] == raw
+            assert sent[-1]["vendor_flag"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("has_native_tool", [False, True])
+async def test_chat_native_search_owns_options_only_when_selected(
+    monkeypatch: pytest.MonkeyPatch, has_native_tool: bool, streaming: bool,
+) -> None:
+    from pydantic_ai.native_tools import WebSearchTool
+
+    sent = []
+    _capture(monkeypatch, "openai", sent)
+    raw = {"search_context_size": "low", "vendor_option": False}
+    binding = create_model(protocol="openai", model="gpt-4o-search-preview", api_key="mock-only",
+                           max_retries=0, model_settings={"extra_body": {"web_search_options": raw}})
+    parameters = ModelRequestParameters(native_tools=[WebSearchTool()] if has_native_tool else [])
+    async with binding.materialize() as model:
+        if has_native_tool:
+            with pytest.raises(AIError) as raised:
+                await _request(model, None, streaming, parameters)
+            assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
+            assert raised.value.safe_details == {"field": "web_search_options", "owner": "model_request"}
+            assert sent == []
+        else:
+            await _request(model, None, streaming, parameters)
+            assert sent[-1]["web_search_options"] == raw
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("with_history", [False, True])
+@pytest.mark.parametrize("protocol,field", [
+    ("anthropic", "container"), ("openai-responses", "previous_response_id"),
+    ("openai-responses", "conversation"),
+])
+async def test_raw_cannot_replace_sdk_session_state(
+    monkeypatch: pytest.MonkeyPatch, protocol: str, field: str, with_history: bool, streaming: bool,
+) -> None:
+    sent = []
+    _capture(monkeypatch, protocol, sent)
+    binding = create_model(protocol=protocol, model="fixture", api_key="mock-only", max_retries=0,
+                           model_settings={"extra_body": {field: "raw-session"}})
+    messages = [ModelRequest(parts=[UserPromptPart("next")])]
+    if with_history:
+        messages = [ModelRequest(parts=[UserPromptPart("first")]), ModelResponse(
+            parts=[TextPart("answer")], provider_name="anthropic" if protocol == "anthropic" else "openai",
+            provider_response_id="history-response", provider_details={
+                "container_id": "history-container", "conversation_id": "history-conversation",
+            },
+        ), *messages]
+    async with binding.materialize() as model:
+        with pytest.raises(AIError) as raised:
+            if streaming:
+                async with model.request_stream(messages, None, ModelRequestParameters()) as stream:
+                    async for _ in stream:
+                        pass
+            else:
+                await model.request(messages, None, ModelRequestParameters())
+    assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
+    assert raised.value.safe_details == {"field": field, "owner": "model_request"}
+    assert sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_history", [False, True])
+@pytest.mark.parametrize("selection,expected", [(None, None), ("chosen-container", "chosen-container"), (False, None)])
+async def test_anthropic_native_container_selection_retains_sdk_history_semantics(
+    monkeypatch: pytest.MonkeyPatch, with_history: bool, selection: str | bool | None, expected: str | None,
+) -> None:
+    sent = []
+    _capture(monkeypatch, "anthropic", sent)
+    settings = {"extra_body": {"vendor_flag": False}}
+    if selection is not None:
+        settings["anthropic_container"] = selection
+    binding = create_model(protocol="anthropic", model="fixture", api_key="mock-only", max_retries=0,
+                           model_settings=settings)
+    messages = [ModelRequest(parts=[UserPromptPart("next")])]
+    if with_history:
+        messages = [ModelRequest(parts=[UserPromptPart("first")]), ModelResponse(
+            parts=[TextPart("answer")], provider_name="anthropic",
+            provider_details={"container_id": "history-container"},
+        ), *messages]
+    async with binding.materialize() as model:
+        await model.request(messages, None, ModelRequestParameters())
+    assert sent[-1].get("container") == ("history-container" if with_history and selection is None else expected)
+    assert sent[-1]["vendor_flag"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("setting,field", [
+    ("openai_previous_response_id", "previous_response_id"), ("openai_conversation_id", "conversation"),
+])
+async def test_responses_native_session_selection_and_auto_history_remain_supported(
+    monkeypatch: pytest.MonkeyPatch, setting: str, field: str,
+) -> None:
+    sent = []
+    _capture(monkeypatch, "openai-responses", sent)
+    binding = create_model(protocol="openai-responses", model="gpt-4o", api_key="mock-only", max_retries=0,
+                           model_settings={setting: "selected-session", "extra_body": {"vendor_flag": False}})
+    first_request = ModelRequest(parts=[UserPromptPart("first")])
+    async with binding.materialize() as model:
+        first_response = await model.request([first_request], None, ModelRequestParameters())
+        assert sent[-1][field] == "selected-session"
+        if field == "conversation":
+            first_response.provider_details = {**(first_response.provider_details or {}), "conversation_id": "history-conversation"}
+        await model.request([first_request, first_response, ModelRequest(parts=[UserPromptPart("next")])],
+                            {setting: "auto"}, ModelRequestParameters())
+    assert sent[-1][field] == (first_response.provider_response_id if field == "previous_response_id" else "history-conversation")
+    assert sent[-1]["vendor_flag"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("with_history", [False, True])
+@pytest.mark.parametrize("configuration", ["raw", "native", "default"])
+async def test_anthropic_compaction_history_keeps_native_context_management_owner(
+    monkeypatch: pytest.MonkeyPatch, streaming: bool, with_history: bool, configuration: str,
+) -> None:
+    sent = []
+    _capture(monkeypatch, "anthropic", sent)
+    context_management = {"edits": [{"type": "compact_20260112", "trigger": {"type": "input_tokens", "value": 100000}}]}
+    settings = {"extra_body": {"vendor_flag": False}}
+    if configuration == "raw":
+        settings["extra_body"]["context_management"] = context_management
+    elif configuration == "native":
+        settings["anthropic_context_management"] = context_management
+    binding = create_model(protocol="anthropic", model="claude-sonnet-4-6", api_key="mock-only", max_retries=0,
+                           model_settings=settings)
+    messages = [ModelRequest(parts=[UserPromptPart("next")])]
+    if with_history:
+        messages = [ModelRequest(parts=[UserPromptPart("first")]), ModelResponse(
+            parts=[CompactionPart(content="summary", provider_name="anthropic")], provider_name="anthropic",
+        ), *messages]
+    async with binding.materialize() as model:
+        async def send() -> None:
+            if streaming:
+                async with model.request_stream(messages, None, ModelRequestParameters()) as stream:
+                    async for _ in stream:
+                        pass
+            else:
+                await model.request(messages, None, ModelRequestParameters())
+        if configuration == "raw":
+            with pytest.raises(AIError) as raised:
+                await send()
+            assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
+            assert raised.value.safe_details == {"field": "context_management", "owner": "model_request"}
+            assert sent == []
+        else:
+            await send()
+            expected = context_management if configuration == "native" else (
+                {"edits": [{"type": "compact_20260112"}]} if with_history else None
+            )
+            assert sent[-1].get("context_management") == expected
+            assert sent[-1]["vendor_flag"] is False

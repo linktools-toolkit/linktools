@@ -28,11 +28,13 @@ _REQUEST_SETTING_FIELDS = {
     "service_tier": "service_tier", "anthropic_service_tier": "service_tier",
     "anthropic_metadata": "metadata", "anthropic_thinking": "thinking",
     "anthropic_effort": "output_config", "anthropic_task_budget": "output_config",
-    "anthropic_container": "container", "anthropic_speed": "speed",
-    "anthropic_context_management": "context_management",
+    "anthropic_speed": "speed",
     "anthropic_cache": "cache_control", "anthropic_cache_diagnostics": "diagnostics",
 }
-_REQUEST_FIELDS = ("model", "messages", "system", "tools", "tool_choice", "mcp_servers", "stream")
+_REQUEST_FIELDS = (
+    "model", "messages", "system", "tools", "tool_choice", "mcp_servers", "stream",
+    "container", "context_management",
+)
 
 
 class _OutputOnlyAnthropicModel(AnthropicModel):

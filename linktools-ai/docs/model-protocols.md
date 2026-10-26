@@ -357,7 +357,17 @@ raw object, such as `extra_body={"output_config": {"effort": "low", ...}}`, not 
 There is no guessed deep merge. Unknown raw fields and nested values pass through.
 The model identity, input messages, registered tools, instructions and streaming
 mode belong to the request, and cannot be replaced through `extra_body`.
-Native structured-output schemas likewise own their provider output object.
+Native structured-output schemas and profile-generated prompted JSON output own
+their provider output object. A selected Chat native web-search tool owns
+`web_search_options`; without that tool, the raw object remains available.
+SDK session controls are not raw extension fields: configure Anthropic `container`
+through `anthropic_container` and context management through `anthropic_context_management`,
+and Responses `previous_response_id` / `conversation`
+through `openai_previous_response_id` / `openai_conversation_id`. This preserves the
+SDK's history selection, input trimming and continuation rules; raw replacements
+are rejected even on the initial request. Native explicit values, automatic history
+reuse, compaction-history defaults and Anthropic's explicit `False` to start
+without a container remain available.
 
 Protocol adapters track the wire-object owners of supported SDK fields, not an
 allowlist of extensions. When updating an SDK adapter, update this ownership mapping
