@@ -5,6 +5,8 @@
 from dataclasses import replace
 from types import SimpleNamespace
 
+from linktools.ai.persistence import Persistence
+
 import pytest
 from pydantic_ai.messages import (
     BinaryContent, ModelRequest, ModelResponse, SystemPromptPart, TextPart,
@@ -164,7 +166,6 @@ async def test_runtime_history_session_reader_empty_unavailable_and_invalid_limi
 async def test_runtime_history_session_reader_shared_display_cache_preserves_sql_budget(tmp_path):
     from sqlalchemy import event
     from linktools.ai.persistence import PersistenceStorage
-    from linktools.ai.persistence import Persistence
     from linktools.ai.core import TenantAuthorizationPolicy
     from linktools.ai.storage import InMemoryCacheBackend
     from .test_session_display_cache import _prepare, _service
@@ -350,7 +351,6 @@ async def test_runtime_history_session_reader_independent_terminal_commit_is_aut
     from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.core import CommitPolicy, ExecutionStatus
     from linktools.ai.persistence import PersistenceStorage
-    from linktools.ai.persistence import Persistence
     from linktools.ai.persistence.coordination import PendingTurnCoordination
     from linktools.ai.storage import InMemoryCacheBackend
     from .test_pending_coordination import _claim

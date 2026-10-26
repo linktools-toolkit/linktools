@@ -321,7 +321,8 @@ async def test_immediate_terminal_execution_waits_for_task_dependency_hold(execu
             del execution_id, tenant_id
             return None
 
-    service._state = SimpleNamespace(executions=Executions())
+    service._repositories = SimpleNamespace(executions=Executions())
+    service._port = SimpleNamespace(read_source_execution=service._repositories.executions.get)
     release_started = asyncio.Event()
     release_finished = asyncio.Event()
 

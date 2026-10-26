@@ -161,7 +161,7 @@ async def test_updates_preserve_custom_public_read_dispatch(tmp_path: Path, kind
                 assert active_state_scope() is None
                 calls.append("metadata")
                 return await _reader(state).read_model_interaction_metadata(execution_id, **kwargs)
-        class History(History):
+        class CustomHistory(History):
             async def capture_model_interaction_cutoffs(self, execution_id, **kwargs):
                 calls.append("capture")
                 return await super().capture_model_interaction_cutoffs(execution_id, **kwargs)
@@ -177,7 +177,7 @@ async def test_updates_preserve_custom_public_read_dispatch(tmp_path: Path, kind
             selected = _service(state, reader=reader)
         else:
             selected = original
-        history = (History if kind == "history_subclass" else History)(selected, tenant_id="tenant")
+        history = (CustomHistory if kind == "history_subclass" else History)(selected, tenant_id="tenant")
         boundary, rows = await history.read_model_interaction_updates("execution", principal=_PRINCIPAL)
         assert len(boundary.cutoffs) == len(rows) == 1
         assert calls == ["capture", "metadata"]

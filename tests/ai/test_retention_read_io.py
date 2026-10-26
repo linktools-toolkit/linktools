@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import event
 
-from linktools.ai.persistence import Persistence
+from linktools.ai.persistence import Persistence, PersistenceDomain
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
@@ -32,21 +32,21 @@ def _controller(repository, calls):
     controller = object.__new__(RuntimeRetentionController)
     controller._execution = SimpleNamespace(executions=repository)
     controller._namespace = _NAMESPACE
-    controller._transient_domains = frozenset()
+    controller._transient_domains = frozenset({PersistenceDomain.TRACE})
     controller._objects = SimpleNamespace()
     async def session_release(session_id, **kwargs):
         assert active_state_scope() is None
         record = await repository.get(kwargs["execution_id"], tenant_id=kwargs["tenant_id"])
         assert record.retention_closed and record.session_id == session_id
         calls.append(("session", session_id))
-    async def staging_release(**kwargs):
+    async def object_release(domain, *, owner_scope):
         assert active_state_scope() is None
-        record = await repository.get(kwargs["execution_id"], tenant_id="tenant")
-        assert record.retention_closed
-        assert len(kwargs["candidate_agent_run_ids"]) == record.agent_run_seq
-        calls.append(("staging", kwargs["execution_id"]))
+        record = await repository.get(owner_scope.removeprefix("execution:"), tenant_id="tenant")
+        if record is not None:
+            assert record.retention_closed
+        calls.append(("objects", owner_scope.removeprefix("execution:")))
     controller._conversation = SimpleNamespace(sessions=SimpleNamespace(release_execution=session_release))
-    controller._run_store = SimpleNamespace(release_staging_many=staging_release)
+    controller._objects = SimpleNamespace(release_object_scope=object_release)
     return controller
 
 
@@ -69,9 +69,10 @@ async def test_retention_cleanup_observes_committed_closure(
         calls = []
         released = await _controller(repository, calls).release_execution_handoff("execution", tenant_id="tenant")
         assert released == (condition not in ("running", "hold"))
-        assert calls == ([] if condition in ("missing", "running", "hold") else [
-            ("session", "session"), ("staging", "execution"),
-        ])
+        assert calls == ([] if condition in ("running", "hold") else
+            [("objects", "execution")] if condition == "missing" else [
+                ("session", "session"), ("objects", "execution"),
+            ])
     finally:
         await state.close()
 
@@ -128,10 +129,10 @@ async def test_builtin_retention_avoids_owner_reread_and_custom_owner_keeps_fall
                 statements.append(statement.split()[0].upper())
             calls = []
             controller = _controller(owner, calls)
-            async def staging_release(**kwargs):
+            async def object_release(domain, *, owner_scope):
                 assert active_state_scope() is None
-                calls.append(kwargs["execution_id"])
-            controller._run_store = SimpleNamespace(release_staging_many=staging_release)
+                calls.append(owner_scope.removeprefix("execution:"))
+            controller._objects = SimpleNamespace(release_object_scope=object_release)
             event.listen(engine, "before_cursor_execute", capture)
             try:
                 assert await controller.release_execution_handoff("execution", tenant_id="tenant")
@@ -172,7 +173,7 @@ async def test_retention_unknown_commit_does_not_clean_until_retry(
         assert calls == []
         assert (await repository.get("execution", tenant_id="tenant")).retention_closed
         assert await controller.release_execution_handoff("execution", tenant_id="tenant")
-        assert calls == [("staging", "execution")]
+        assert calls == [("objects", "execution")]
     finally:
         await state.close()
 
@@ -209,9 +210,71 @@ async def test_terminal_policy_hint_still_requires_source_closure(
         )
         assert released is not held
         assert bool(mutations) is not (conversation and closed)
-        assert calls == ([] if held else [("staging", "execution")])
+        assert calls == ([] if held else [("objects", "execution")])
         current = await repository.get("execution", tenant_id="tenant")
         assert current is not None
         assert current.retention_closed is not held
     finally:
         await state.close()
+
+
+@pytest.mark.parametrize("condition", ("terminal", "closed", "missing", "running", "hold", "unknown", "cancel_after_commit"))
+async def test_runtime_releases_only_producer_staging_after_durable_handoff(
+    monkeypatch: pytest.MonkeyPatch, condition: str,
+) -> None:
+    from linktools.ai.persistence import PersistenceStorage
+    from linktools.ai.runtime import Runtime
+
+    async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.in_memory(), tenant_id="tenant") as state:
+        async with Runtime.open(persistence=state, auto_recover=False) as runtime, Runtime.open(
+            persistence=state, auto_recover=False,
+        ) as peer:
+            repository = state.execution.executions
+            if condition != "missing":
+                await repository.create_with_history_head(replace(
+                    _execution(),
+                    status=_execution().status if condition == "running" else ExecutionStatus.SUCCEEDED,
+                    retention_closed=condition == "closed",
+                    dependency_hold_ids=("hold",) if condition == "hold" else (),
+                ))
+            own = runtime._run_store
+            own._execution_producers["own-run"] = ("execution", 1)
+            own._execution_producers["unrelated-run"] = ("other-execution", 1)
+            peer._run_store._execution_producers["peer-run"] = ("execution", 2)
+            assert own is not state.run_store and own is not peer._run_store
+            calls = []
+            original_release = own.release_staging_many
+
+            async def release(**kwargs):
+                assert active_state_scope() is None
+                record = await repository.get("execution", tenant_id="tenant")
+                assert record is None if condition == "missing" else record.retention_closed
+                calls.append(kwargs["candidate_agent_run_ids"])
+                await original_release(**kwargs)
+
+            monkeypatch.setattr(own, "release_staging_many", release)
+            original_mutate = repository.state_store.mutate
+
+            async def lose_ack(callback):
+                outer = active_state_scope() is None
+                result = await original_mutate(callback)
+                if outer:
+                    if condition == "cancel_after_commit":
+                        raise asyncio.CancelledError()
+                    raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+                return result
+
+            release_terminal = runtime._execution_service._release_terminal
+            if condition in ("unknown", "cancel_after_commit"):
+                with monkeypatch.context() as patch:
+                    patch.setattr(repository.state_store, "mutate", lose_ack)
+                    with pytest.raises(asyncio.CancelledError if condition == "cancel_after_commit" else AIError):
+                        await release_terminal("execution", tenant_id="tenant")
+                assert calls == []
+                assert "own-run" in own._execution_producers
+            released = await release_terminal("execution", tenant_id="tenant")
+            assert released is (condition not in ("running", "hold"))
+            assert calls == ([("own-run",)] if released else [])
+            assert ("own-run" in own._execution_producers) is not released
+            assert "unrelated-run" in own._execution_producers
+            assert "peer-run" in peer._run_store._execution_producers

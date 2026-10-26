@@ -446,7 +446,7 @@ async def test_cleanup_receipt_survives_failed_physical_delete_and_retry(tmp_pat
     from datetime import timedelta
     from linktools.ai.core import service_principal
     from linktools.ai.evaluation import EvidenceAttachmentRef, EvidenceBundle, EvidenceRef, ExecutionSubjectRef, ExecutionTargetEvidence, TargetTrialRef
-    from linktools.ai.evaluation_engine._service_retention import EvaluationRetention
+    from linktools.ai.evaluation_engine._retention import EvaluationRetention
     from tests.ai.test_evaluation_persistence import experiment
 
     class Authorization:

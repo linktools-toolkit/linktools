@@ -400,6 +400,8 @@ async def test_graph_wait_does_not_wait_for_observer_completion(late_producer: b
         _register_observation=lambda session: None,
         _release_observation=lambda session: None,
     )
+    # These synthetic nodes have no Agent task declarations to bind.
+    runtime._bind_graph_history = lambda state: None
     runtime._inspect_execution = runtime.executions.inspect
     runtime._history = runtime.history
     streamer = ExecutionTreeStreamer(runtime.executions, execution_service, ExecutionTreeBroker())

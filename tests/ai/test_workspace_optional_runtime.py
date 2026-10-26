@@ -238,13 +238,13 @@ async def test_workspace_less_runtime_does_not_require_host_cwd(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(runtime_factory, "_capture_host_cwd", lambda: None)
-    components = await runtime_factory.compose_runtime_components(
-        "web-chat",
-        features=model_features(RuntimeUsageModels()),  # type: ignore[arg-type]
-        storage=PersistenceStorage.in_memory(),
-    )
-    try:
-        backend = components.execution.runtime_backend()
-        assert backend._execution_cwd is None  # type: ignore[attr-defined]
-    finally:
-        await components.close_callback()
+    async with Persistence.open("web-chat", storage=PersistenceStorage.in_memory()) as persistence:
+        components = await runtime_factory.compose_runtime_components(
+            persistence=persistence,
+            features=model_features(RuntimeUsageModels()),
+        )
+        try:
+            backend = components.execution.runtime_backend()
+            assert backend._execution_cwd is None  # type: ignore[attr-defined]
+        finally:
+            await components.close_callback()

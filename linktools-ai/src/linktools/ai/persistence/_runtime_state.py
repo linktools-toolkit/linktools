@@ -10,6 +10,9 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, TypeVar
 
+from linktools.core import environ
+from linktools.ai.observe.stream import await_stream_cleanup
+
 from linktools.ai.core import validate_persistence_namespace, validate_tenant_id, canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import (
@@ -37,6 +40,7 @@ if TYPE_CHECKING:
 
 
 _ValueT = TypeVar("_ValueT")
+_logger = environ.get_logger(__name__)
 
 
 class PersistenceStatus(TypedDict):
@@ -111,8 +115,18 @@ class Persistence:
                 read_only=read_only,
             )
             yield state
-        finally:
-            await state.close()
+        except BaseException:
+            try:
+                await await_stream_cleanup(state.close(), None)
+            except BaseException as error:
+                _logger.error(
+                    "secondary cleanup failed: phase=persistence.close code=%s exception_type=%s",
+                    error.code.value if isinstance(error, AIError) else None,
+                    type(error).__name__,
+                )
+            raise
+        else:
+            await await_stream_cleanup(state.close(), None)
 
     @property
     def coordination_backend(self) -> CacheBackend | TurnCoordinationBackend | StreamBackend | None:

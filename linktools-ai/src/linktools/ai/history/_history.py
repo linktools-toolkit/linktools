@@ -1313,11 +1313,12 @@ class History:
         after_cutoffs: tuple[UsageReadCutoff, ...] = (), limit: int = 200,
     ) -> tuple[ModelInteractionReadBoundary, tuple[ModelInteractionItem, ...]]:
         """Read one fresh boundary and bounded suffix through the explicit reader contract."""
-        if type(self) is not History:
+        read_updates = getattr(self._service, "read_model_interaction_updates", None)
+        if type(self) is not History or not callable(read_updates):
             return await _read_model_interaction_updates(
                 self, execution_id, principal=principal, after_cutoffs=after_cutoffs, limit=limit,
             )
-        return await self._service.read_model_interaction_updates(
+        return await read_updates(
             execution_id, principal=principal, after_cutoffs=after_cutoffs, limit=limit,
         )
 

@@ -73,10 +73,6 @@ async def test_stale_unadmitted_cache_cannot_prove_publication(tmp_path, monkeyp
         async def release_session(*args, **kwargs):
             calls.append("released")
 
-        async def release_staging(**kwargs):
-            calls.append("staging")
-
-        controller._run_store = SimpleNamespace(release_staging_many=release_staging)
         controller._conversation = SimpleNamespace(sessions=SimpleNamespace(
             state_store=repository.state_store,
             pending_turn_commit_in_transaction=missing_receipt,
@@ -180,7 +176,7 @@ async def test_unknown_close_preserves_only_durable_publication_proof(tmp_path, 
         durable = await repository.state_store.read(source)
         assert durable.retention_closed is committed
         assert await controller.release_execution_handoff("execution", tenant_id="tenant")
-        assert calls == [("staging", "execution")]
+        assert calls == [("objects", "execution")]
     finally:
         await state.close()
 

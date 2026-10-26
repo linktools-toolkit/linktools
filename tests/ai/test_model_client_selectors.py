@@ -369,7 +369,7 @@ async def test_model_client_selectors_keep_default_custom_reader_and_service_cal
             "execution", principal=principal, agent_run_seq=None, model_request_seq=None,
             include_content=True, include_client_requests=False,
         )).items == ()
-    execution = Execution(SimpleNamespace(executions=executions), "execution", principal, None)
+    execution = Execution(SimpleNamespace(service=executions), "execution", principal, None)
     assert (await execution.model_interactions()).items == ()
     assert (await execution.model_interactions(
         agent_run_seq=None, model_request_seq=None, include_content=True, include_client_requests=False,
@@ -400,6 +400,6 @@ async def test_model_client_selectors_propagate_through_execution_facades() -> N
             "execution", principal=principal, agent_run_seq=2, model_request_seq=3,
             include_client_requests=True,
         )
-    execution = Execution(SimpleNamespace(executions=executions), "execution", principal, None)
+    execution = Execution(SimpleNamespace(service=executions), "execution", principal, None)
     await execution.model_interactions(agent_run_seq=2, model_request_seq=3, include_client_requests=True)
     assert calls == [("execution", "tenant", 2, 3, False, True)] * 4

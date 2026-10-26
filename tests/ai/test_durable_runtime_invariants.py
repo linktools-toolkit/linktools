@@ -325,7 +325,7 @@ async def test_runtime_object_preflight_ignores_external_filesystem_work(
 
 
 @pytest.mark.asyncio
-async def test_execution_retention_releases_staging_after_execution_lookup() -> None:
+async def test_execution_retention_releases_objects_after_execution_lookup() -> None:
     calls: list[str] = []
 
     async def close_retention(execution_id: str, *, tenant_id: str) -> bool:
@@ -336,12 +336,8 @@ async def test_execution_retention_releases_staging_after_execution_lookup() -> 
         calls.append(f"execution:{execution_id}:{tenant_id}")
         return SimpleNamespace(session_id=None, agent_run_seq=0, retention_closed=True)
 
-    async def release_staging_many(
-        *,
-        candidate_agent_run_ids: tuple[str, ...],
-        execution_id: str,
-    ) -> None:
-        calls.append(f"staging:{execution_id}:{candidate_agent_run_ids}")
+    async def release_object_scope(domain, *, owner_scope: str) -> None:
+        calls.append(f"objects:{owner_scope}")
 
     controller = object.__new__(RuntimeRetentionController)
     controller._execution = SimpleNamespace(
@@ -352,11 +348,8 @@ async def test_execution_retention_releases_staging_after_execution_lookup() -> 
     )
     controller._conversation = SimpleNamespace()
     controller._namespace = "runtime"
-    controller._run_store = SimpleNamespace(
-        release_staging_many=release_staging_many
-    )
-    controller._objects = SimpleNamespace()
-    controller._transient_domains = frozenset()
+    controller._objects = SimpleNamespace(release_object_scope=release_object_scope)
+    controller._transient_domains = frozenset({PersistenceDomain.TRACE})
 
     await controller.release_execution_handoff("execution", tenant_id="tenant")
 
@@ -364,7 +357,7 @@ async def test_execution_retention_releases_staging_after_execution_lookup() -> 
         "execution:execution:tenant",
         "retention:execution:tenant",
         "execution:execution:tenant",
-        "staging:execution:()",
+        "objects:execution:execution",
     ]
 
 

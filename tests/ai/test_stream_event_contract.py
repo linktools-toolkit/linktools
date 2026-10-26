@@ -7,6 +7,8 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from types import SimpleNamespace
 
+from linktools.ai.execution.handle import ExecutionBinding
+
 import pytest
 
 from linktools.ai.acp import ACPAgent, _acp_update
@@ -286,17 +288,17 @@ class _ACPExecution:
         self.release = asyncio.Event()
         self.release.set()
         self.observations = set()
-        runtime = SimpleNamespace(
+        binding = ExecutionBinding(
             namespace="acp-test",
-            _execution_service=SimpleNamespace(wait=self._wait),
-            _register_observation=self.observations.add,
-            _release_observation=self.observations.discard,
-            _ensure_open=lambda: None,
-            _capture_execution_tree=self._capture,
-            _replay_execution_tree=self._replay,
+            service=SimpleNamespace(wait=self._wait),
+            register_observation=self.observations.add,
+            release_observation=self.observations.discard,
+            ensure_open=lambda: None,
+            capture_tree=self._capture,
+            replay_tree=self._replay,
         )
         self.handle = Execution(
-            runtime,  # type: ignore[arg-type]
+            binding,
             self.execution_id,
             Principal("principal", "tenant", "service"),
             self._watch_tree,

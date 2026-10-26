@@ -93,9 +93,10 @@ class ModelProjection:
                         contiguous = False
                         break
                     afters[run] = active[0] - 1
-            if contiguous:
+            read_updates = getattr(self.history, "read_model_interaction_updates", None)
+            if contiguous and callable(read_updates):
                 after_cutoffs = tuple(UsageReadCutoff(execution_id, run, after) for run, after in sorted(afters.items()))
-                boundary, items = await self.history.read_model_interaction_updates(
+                boundary, items = await read_updates(
                     execution_id, principal=self.principal, after_cutoffs=after_cutoffs, limit=200,
                 )
                 ranges = model_interaction_update_ranges(

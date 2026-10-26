@@ -23,7 +23,7 @@ def test_checkpoint_staging_bodies_shared_and_capture_survives_trim(monkeypatch)
     archive = staging._message_archives["run"]
     assert len(archive._leaves) == 128
     assert len(archive._branches) < 128 * 8
-    from linktools.ai.runtime import _transcript_staging
+    from linktools.ai.persistence import _transcript_staging
     decoded = []
     decode = _transcript_staging.decode_model_messages
 
@@ -123,7 +123,7 @@ def test_message_staging_sequential_read_does_not_repeat_index_traversal(monkeyp
 
 @pytest.mark.asyncio
 async def test_memory_archive_counts_and_ranges_do_not_decode_whole_checkpoint(monkeypatch):
-    from linktools.ai.runtime import _transcript_staging
+    from linktools.ai.persistence import _transcript_staging
     from linktools.ai.persistence._plan import PersistenceDomain
     from linktools.ai.persistence._step_archive import InMemoryStepArchive
 

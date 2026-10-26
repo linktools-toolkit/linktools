@@ -18,6 +18,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
 from linktools.ai.execution import Execution, TaskGraphRunEvent
+from linktools.ai.execution.handle import ExecutionBinding
 from linktools.ai.runtime import Runtime
 from linktools.ai.task_engine import TaskGraphRun
 from linktools.ai.core import _signed_cursor as _cursor
@@ -203,7 +204,7 @@ class _EventService:
         return Page(tuple(event for event in events if event.event_seq > after_event_seq)[:limit])
 
 
-def _prepare_observation_runtime(runtime):
+def _prepare_observation_engine(runtime):
     if not hasattr(runtime, "_ensure_open"):
         runtime._ensure_open = lambda: None
     if not hasattr(runtime, "history"):
@@ -211,6 +212,10 @@ def _prepare_observation_runtime(runtime):
     executions = getattr(runtime, "executions", _ExecutionService())
     events = getattr(runtime, "events", _EventService())
     streamer = ExecutionTreeStreamer(executions, events, ExecutionTreeBroker())
+    # These synthetic nodes have no Agent task declarations to bind.
+    runtime._bind_graph_history = lambda state: None
+    runtime._inspect_execution = executions.inspect
+    runtime._history = runtime.history
     runtime._capture_execution_tree = streamer.capture
     runtime._replay_execution_tree = streamer.replay
     return runtime
@@ -225,7 +230,18 @@ class _Runtime:
         self.graph = _TaskGraphService()
         self.history = _HistoryService()
         self.observations = set()
-        _prepare_observation_runtime(self)
+        _prepare_observation_engine(self)
+
+    def execution_binding(self) -> ExecutionBinding:
+        return ExecutionBinding(
+            namespace=self.namespace, service=self.executions,
+            ensure_open=self._ensure_open,
+            register_observation=self._register_observation,
+            release_observation=self._release_observation,
+            capture_tree=self._capture_execution_tree,
+            replay_tree=self._replay_execution_tree,
+            history=self.history, list_events=self.history.list_execution_events,
+        )
 
     def _register_observation(self, session) -> None:
         self.observations.add(session)
@@ -241,7 +257,7 @@ def _task_graph_run(
     watch_tree,
 ) -> TaskGraphRun:
     return TaskGraphRun(
-        _prepare_observation_runtime(runtime),
+        _prepare_observation_engine(runtime),
         runtime.graph,
         graph_id,
         principal,
@@ -268,9 +284,9 @@ def _watch_tree(
 
 
 @pytest.mark.asyncio
-async def test_execution_list_events_uses_runtime_history_query_surface() -> None:
+async def test_execution_list_events_uses_bound_history_query_surface() -> None:
     execution = Execution(
-        _Runtime(),
+        _Runtime().execution_binding(),
         "execution",
         Principal("owner", "tenant"),
         _watch_tree,
@@ -287,7 +303,7 @@ async def test_execution_list_events_uses_runtime_history_query_surface() -> Non
 async def test_execution_watch_projects_complete_execution_tree() -> None:
     runtime = _Runtime()
     execution = Execution(
-        runtime,
+        runtime.execution_binding(),
         "execution",
         Principal("owner", "tenant"),
         _watch_tree,
@@ -1643,7 +1659,7 @@ async def test_graph_live_subagent_root_cursor_binds_selected_execution():
         return ()
     runtime = SimpleNamespace(namespace="selected-subtree", executions=SimpleNamespace(
         inspect=inspect, list_children=list_children))
-    handle = TaskGraphRun(_prepare_observation_runtime(runtime), Graph(), "graph", principal, tree)
+    handle = TaskGraphRun(_prepare_observation_engine(runtime), Graph(), "graph", principal, tree)
     items = [item async for item in handle.watch()]
     nested = next(item.event for item in items if isinstance(item.event, ExecutionTreeEvent))
     assert nested.root_execution_id == "lineage-root" and nested.depth == 0

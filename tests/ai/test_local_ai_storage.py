@@ -42,6 +42,7 @@ def _record(
     binding = TaskBindingContract("local-history", 1, "none", {}, None, 1, 0)
     return SimpleNamespace(
         execution_id=execution_id,
+        event_seq=0,
         binding_kind="task",
         agent_id=None,
         task_id="local-history",

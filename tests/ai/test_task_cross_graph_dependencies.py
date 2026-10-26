@@ -155,6 +155,7 @@ async def test_prepare_node_authorizes_source_header_and_deduplicates_hold() -> 
     runner._authorization = authorization
     runner._task_state = TaskRepositories()
     runner._execution = execution
+    runner._execution_reads = execution
     runner._task_durable = True
     runner._execution_durable = True
     runner._recovery_durable = True
