@@ -9,6 +9,7 @@ import json
 import sys
 import time
 import uuid
+from builtins import BaseExceptionGroup
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
