@@ -74,7 +74,7 @@ _WORKSPACE_TOOL_DECLARATIONS = (
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("paths",),
-    ), revision=2),
+    )),
     WorkspaceToolDeclaration("create_directory", tool_metadata(
         effect_policy="non_replay_safe",
         tool_class="filesystem.write",
@@ -115,7 +115,7 @@ _WORKSPACE_TOOL_DECLARATIONS = (
         tool_class="filesystem.read",
         path_fields=("path",),
         context_dedupe="workspace_file_read_v1",
-    ), revision=2),
+    )),
     WorkspaceToolDeclaration("search_files", tool_metadata(
         effect_policy="none",
         plan_safe=True,

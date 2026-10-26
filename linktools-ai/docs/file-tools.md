@@ -136,7 +136,7 @@ structured input metadata, never from parsing arbitrary user text.
 Workspace `inspect_file` facts and current `read_file`/`attach_files` result
 entries use `mime_type`; extension hints use `extension_mime_type`.
 `read_file` retains `input_index` and `sha256` where applicable. `read_file` and
-`attach_files` use behavior revision 2: when files are returned, the native tool
+`attach_files` use behavior revision 1: when files are returned, the native tool
 result is `[metadata, *files]`. Text-only results retain their metadata object.
 Old stored tool results remain readable without rewriting their fields. SDK content retains its
 `media_type` field at the adapter boundary.

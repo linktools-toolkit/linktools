@@ -232,10 +232,7 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
         "write_file",
     )
     assert all(item.kind == "tool" for item in contributions)
-    assert {item.id: item.revision for item in contributions} == {
-        item.id: 2 if item.id in {"read_file", "attach_files"} else 1
-        for item in contributions
-    }
+    assert all(item.revision == 1 for item in contributions)
     assert tuple(
         tool_class_from_metadata(item.value.tool_def.metadata)
         for item in contributions

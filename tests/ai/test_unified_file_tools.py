@@ -191,13 +191,13 @@ async def test_unified_file_selection_keeps_scenarios_minimal(tmp_path: Path) ->
         await session.close()
 
 
-def test_unified_file_behavior_revisions_do_not_bump_unchanged_tools(tmp_path: Path) -> None:
+def test_workspace_tools_use_initial_behavior_revision(tmp_path: Path) -> None:
     contributions = workspace_features("workspace", workspace=Workspace.load(tmp_path))._contributions
     revisions = {item.id: item.revision for item in contributions}
     assert {name: revisions[name] for name in ("read_file", "write_file", "search_files")} == {
-        "read_file": 2, "write_file": 1, "search_files": 1,
+        "read_file": 1, "write_file": 1, "search_files": 1,
     }
-    assert revisions["attach_files"] == 2
+    assert revisions["attach_files"] == 1
     assert revisions["edit_file"] == revisions["list_files"] == 1
 
 
