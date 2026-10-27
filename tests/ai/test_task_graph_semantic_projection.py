@@ -7,7 +7,7 @@ from dataclasses import replace
 import pytest
 
 from linktools.ai.core import Principal, canonical_sha256, principal_identity_payload
-from linktools.ai.runtime.state._codec import decode_domain, encode_domain
+from linktools.ai.persistence.codec import decode_domain, encode_domain
 from linktools.ai.task import (
     TaskExpanderRef,
     TaskGraph,

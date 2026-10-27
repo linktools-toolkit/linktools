@@ -12,8 +12,8 @@ from aiosqlite import Cursor
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime.state._sql import SqlStateStore
-from linktools.ai.runtime.state._store import StateTransaction
+from linktools.ai.persistence._sql import SqlStateStore
+from linktools.ai.persistence.state import StateTransaction
 
 
 @pytest.mark.asyncio

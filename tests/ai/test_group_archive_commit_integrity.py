@@ -10,11 +10,12 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import GroupRecordReader, RuntimeDomain
-from linktools.ai.runtime.state._archive import ContentArchive, ContentRecord, PreparedArchive
-from linktools.ai.runtime.state._step_archive import PreparedAgentRunCheckpointBatch
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
-from linktools.ai.runtime.state._store import StateGroupTransaction, StateStore, StoredRecord, active_state_scope
+from linktools.ai.persistence.state import GroupRecordReader
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._archive import ContentArchive, ContentRecord, PreparedArchive
+from linktools.ai.persistence._step_archive import PreparedAgentRunCheckpointBatch
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
+from linktools.ai.persistence.state import StateGroupTransaction, StateStore, StoredRecord, active_state_scope
 from linktools.ai.storage import InMemoryObjectStore
 
 from .test_pending_turn_commit import _commit, _pending_turn, _snapshot, _turn_state
@@ -64,7 +65,7 @@ async def test_pending_turn_rejects_content_winner_after_preparation_and_rolls_b
 ) -> None:
     async with _turn_state("sqlite", tmp_path) as state:
         turn = _pending_turn(state)
-        step = state.storage.run_store.read_store(RuntimeDomain.CONVERSATION)
+        step = state.storage.run_store.read_store(PersistenceDomain.CONVERSATION)
         original = step.prepare_conversation_checkpoint
         captured: list[tuple[object, ...]] = []
         rivals: list[StoredRecord] = []

@@ -18,7 +18,7 @@ from linktools.ai.core import service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelClientRequestRecorder, ReferencedContent
 from linktools.ai.runtime._harness import SummaryProviderModel
-from linktools.ai.runtime._message import encode_model_messages
+from linktools.ai.model.messages import encode_model_messages
 from linktools.ai.spec import CapabilityRef
 from linktools.ai.storage import StorageEntryRevision
 

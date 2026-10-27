@@ -3,6 +3,7 @@
 """Named task definitions and exact references."""
 
 import re
+import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Generic, Protocol
@@ -16,6 +17,9 @@ from ..errors import AIError
 from ..spec import canonicalize_json_schema, canonicalize_pydantic_model_schema
 
 if TYPE_CHECKING:
+    from ..runtime import Agent
+    from ..runtime.agent_execution import AgentExecutionPort
+    from ..inputs import AgentTaskInputBuilder
     from ._graph import TaskNode
     from ._handler import TaskEffectResolution, TaskNodeContext
     from ._runner import TaskNodeRunner
@@ -118,6 +122,8 @@ class Task(Generic[AppT, _ResultT]):
         "_reconcile_callback",
         "_output_type",
         "_contract",
+        "_agent_execution",
+        "_build_input",
     )
 
     def __init__(
@@ -168,6 +174,36 @@ class Task(Generic[AppT, _ResultT]):
         )
 
     @classmethod
+    def from_agent(
+        cls, id: str, agent: "Agent[AppT]", *, revision: int = 1,
+        build_input: "AgentTaskInputBuilder | None" = None,
+    ) -> "Task[AppT, JsonValue]":
+        if build_input is not None and not inspect.iscoroutinefunction(build_input):
+            raise TypeError("build_input must be async")
+        port = agent.execution_port
+        contract: dict[str, JsonValue] = {
+            "version": 1, "type": "agent", "effect_policy": "none",
+            "output_contract": {"kind": "json"}, "reconcile": False,
+            "config": {
+                "agent_id": port.compiled.spec.id, "agent_revision": port.compiled.spec.revision,
+                "binding_contract": port.binding_contract.to_payload(),
+                "input_mode": "projected" if build_input is not None else "literal",
+            },
+        }
+        value = cls.__new__(cls)
+        value._initialize(_definition_ref(id, revision), None, None, _normalize_input, None, None,
+                          None, contract, agent_execution=port, build_input=build_input)
+        return value
+
+    @property
+    def agent_execution(self) -> "AgentExecutionPort[AppT] | None":
+        return self._agent_execution
+
+    @property
+    def build_input(self) -> "AgentTaskInputBuilder | None":
+        return self._build_input
+
+    @classmethod
     def from_runner(
         cls: "type[Task[AppT, JsonValue]]",
         id: str,
@@ -207,13 +243,17 @@ class Task(Generic[AppT, _ResultT]):
         ] | None,
         output_type: type[BaseModel] | None,
         contract: Mapping[str, JsonValue],
+        *, agent_execution: "AgentExecutionPort[AppT] | None" = None,
+        build_input: "AgentTaskInputBuilder | None" = None,
     ) -> None:
-        if (function is None) == (runner is None):
-            raise ValueError("task must have exactly one function or runner")
+        if sum(value is not None for value in (function, runner, agent_execution)) != 1:
+            raise ValueError("task must have exactly one function, runner or Agent binding")
         try:
             normalized_contract = ImmutableJsonMapping(contract)
         except (TypeError, ValueError) as error:
             raise ValueError("task declaration is invalid") from error
+        object.__setattr__(self, "_agent_execution", agent_execution)
+        object.__setattr__(self, "_build_input", build_input)
         object.__setattr__(self, "_ref", reference)
         object.__setattr__(self, "_function", function)
         object.__setattr__(self, "_runner", runner)

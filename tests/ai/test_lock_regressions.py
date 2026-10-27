@@ -17,7 +17,7 @@ from linktools.ai.storage import FilesystemLeaseCoordinator, KeyedAsyncLock, Lea
 
 @pytest.mark.asyncio
 async def test_cancelled_run_history_waiter_does_not_clear_holder_state() -> None:
-    from linktools.ai.runtime.state._steps import _AgentRunHistoryLock
+    from linktools.ai.persistence.runs import _AgentRunHistoryLock
 
     history_lock = _AgentRunHistoryLock()
     holder_ready = asyncio.Event()

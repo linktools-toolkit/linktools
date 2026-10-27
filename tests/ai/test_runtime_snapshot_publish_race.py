@@ -8,15 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import (
-    RuntimeSnapshot,
-    SnapshotLimits,
-    SnapshotTargetInfo,
-)
-from linktools.ai.runtime import _snapshot as snapshot_module
+from linktools.ai.snapshot import Snapshot, SnapshotTargetInfo
+from linktools.ai.persistence.snapshots import SnapshotLimits
+from linktools.ai.snapshot import _snapshot as snapshot_module
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef
 
 
@@ -82,24 +79,24 @@ async def test_same_snapshot_concurrent_restore_publishes_one_generation(
         return SnapshotTargetInfo("matching", None, ref.digest)
 
     monkeypatch.setattr(
-        RuntimeSnapshot,
+        Snapshot,
         "_verified_manifest",
         classmethod(verified_manifest),
     )
     monkeypatch.setattr(
-        RuntimeState,
+        Persistence,
         "restore_snapshot",
         classmethod(restore_storage),
     )
     monkeypatch.setattr(
-        RuntimeSnapshot,
+        Snapshot,
         "inspect_target",
         classmethod(inspect_target),
     )
 
     target = tmp_path / "runtime"
     first, second = await asyncio.gather(
-        RuntimeSnapshot.restore(
+        Snapshot.restore(
             snapshot_ref,
             object_store=store,
             target=target,
@@ -107,7 +104,7 @@ async def test_same_snapshot_concurrent_restore_publishes_one_generation(
             tenant_id="tenant",
             limits=SnapshotLimits(max_entries=100, max_bytes=1024 * 1024),
         ),
-        RuntimeSnapshot.restore(
+        Snapshot.restore(
             snapshot_ref,
             object_store=store,
             target=target,
@@ -172,19 +169,19 @@ async def test_collect_temporary_skips_active_restore_generation(
         await release.wait()
 
     monkeypatch.setattr(
-        RuntimeSnapshot,
+        Snapshot,
         "_verified_manifest",
         classmethod(verified_manifest),
     )
     monkeypatch.setattr(
-        RuntimeState,
+        Persistence,
         "restore_snapshot",
         classmethod(restore_storage),
     )
 
     target = tmp_path / "runtime"
     restoring = asyncio.create_task(
-        RuntimeSnapshot.restore(
+        Snapshot.restore(
             snapshot_ref,
             object_store=store,
             target=target,
@@ -195,7 +192,7 @@ async def test_collect_temporary_skips_active_restore_generation(
     )
     await entered.wait()
 
-    assert await RuntimeSnapshot.collect_temporary(target) == 0
+    assert await Snapshot.collect_temporary(target) == 0
 
     release.set()
     restored = await restoring
@@ -247,12 +244,12 @@ async def test_current_pointer_commit_unknown_keeps_published_generation(
         Path(root).mkdir(parents=True, exist_ok=False)
 
     monkeypatch.setattr(
-        RuntimeSnapshot,
+        Snapshot,
         "_verified_manifest",
         classmethod(verified_manifest),
     )
     monkeypatch.setattr(
-        RuntimeState,
+        Persistence,
         "restore_snapshot",
         classmethod(restore_storage),
     )
@@ -272,7 +269,7 @@ async def test_current_pointer_commit_unknown_keeps_published_generation(
     )
 
     with pytest.raises(AIError) as raised:
-        await RuntimeSnapshot.restore(
+        await Snapshot.restore(
             snapshot_ref,
             object_store=store,
             target=target,

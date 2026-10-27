@@ -3,6 +3,7 @@
 """Trusted host stdio shares restricted file sessions without widening policy."""
 
 import asyncio
+from functools import partial
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,10 +11,10 @@ import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.workspace import (
-    LocalSandbox,
-    ReadOnlySandboxPolicy,
-    SandboxOperationRejected,
-    SandboxResource,
+    LocalWorkspaceBackend,
+    WorkspaceReadPolicy,
+    WorkspaceOperationRejected,
+    WorkspaceResource,
 )
 from linktools.ai.workspace import _local_sandbox
 
@@ -43,9 +44,9 @@ def subprocess_double(
 
 
 @pytest.mark.parametrize("option", (None, 0, 1, "true", (), {}))
-def test_host_stdio_permission_requires_boolean(option: object) -> None:
+def test_host_stdio_permission_requires_boolean(option: object, tmp_path: Path) -> None:
     with pytest.raises(TypeError, match="allow_host_stdio_with_read_policy must be bool"):
-        LocalSandbox(allow_host_stdio_with_read_policy=option)  # type: ignore[arg-type]
+        LocalWorkspaceBackend(tmp_path, allow_host_stdio_with_read_policy=option)  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -58,21 +59,18 @@ async def test_host_stdio_advertisement_matches_process_permission(
     option: bool | None,
 ) -> None:
     process, spawn, _stop = subprocess_double
-    sandbox = LocalSandbox(
-        read_policy=ReadOnlySandboxPolicy(("visible.txt",)) if restricted else None,
-        **({} if option is None else {"allow_host_stdio_with_read_policy": option}),
-    )
-    session = await sandbox.open(root=tmp_path)
+    sandbox = partial(LocalWorkspaceBackend, read_policy=WorkspaceReadPolicy(("visible.txt",)) if restricted else None, **{} if option is None else {"allow_host_stdio_with_read_policy": option})
+    session = sandbox(root=tmp_path)
     try:
         if restricted and option is not True:
             with pytest.raises(AIError) as advertised:
-                sandbox.stdio_execution_policy()
+                session.stdio_execution_policy()
             with pytest.raises(AIError) as launched:
                 await session.open_stdio_process("trusted-server")
             assert advertised.value.code is launched.value.code is ErrorCode.SANDBOX_UNAVAILABLE
             spawn.assert_not_awaited()
         else:
-            assert sandbox.stdio_execution_policy() == {"version": 1, "boundary": "host-stdio"}
+            assert session.stdio_execution_policy() == {"version": 1, "boundary": "host-stdio"}
             await session.open_stdio_process("trusted-server")
             assert process.returncode is None
     finally:
@@ -84,15 +82,15 @@ async def test_host_stdio_advertisement_matches_process_permission(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("allow_stdio", (False, True))
 @pytest.mark.parametrize(
-    ("operation", "args"),
+    ("operation", "args", "kwargs"),
     (
-        ("write_file", ("visible.txt", "changed")),
-        ("edit_file", ("visible.txt", "visible", "changed")),
-        ("create_directory", ("new",)),
-        ("run_command", ("echo denied",)),
-        ("start_command", ("echo denied",)),
-        ("check_command", ("command",)),
-        ("stop_command", ("command",)),
+        ("write_file", ("visible.txt", "changed"), {}),
+        ("write_file", ("visible.txt", "changed"), {"old_text": "visible"}),
+        ("make_dir", ("new",), {}),
+        ("run_command", ("echo denied",), {}),
+        ("start_command", ("echo denied",), {}),
+        ("check_command", ("command",), {}),
+        ("stop_command", ("command",), {}),
     ),
 )
 async def test_host_stdio_permission_does_not_allow_commands_or_file_mutation(
@@ -101,17 +99,17 @@ async def test_host_stdio_permission_does_not_allow_commands_or_file_mutation(
     allow_stdio: bool,
     operation: str,
     args: tuple[str, ...],
+    kwargs: dict[str, str],
 ) -> None:
     _process, spawn, _stop = subprocess_double
     (tmp_path / "visible.txt").write_text("visible", encoding="utf-8")
-    session = await LocalSandbox(
-        read_policy=ReadOnlySandboxPolicy(("visible.txt",)),
-        allow_host_stdio_with_read_policy=allow_stdio,
-    ).open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path, read_policy=WorkspaceReadPolicy(("visible.txt",)), allow_host_stdio_with_read_policy=allow_stdio)
+    await session.working_dir()
     try:
-        with pytest.raises(SandboxOperationRejected) as denied:
-            await getattr(session, operation)(*args)
-        assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+        with pytest.raises(PermissionError if operation == "make_dir" else WorkspaceOperationRejected) as denied:
+            await getattr(session, operation)(*args, **kwargs)
+        error = denied.value.__cause__ if operation == "make_dir" else denied.value
+        assert error.code is ErrorCode.AUTHORIZATION_DENIED
         assert await session.read_bytes("visible.txt") == b"visible"
         assert not (tmp_path / "new").exists()
         spawn.assert_not_awaited()
@@ -127,11 +125,9 @@ async def test_host_stdio_preserves_resource_cwd_and_environment(
     _process, spawn, _stop = subprocess_double
     package = tmp_path / "package"
     package.mkdir()
-    resource = SandboxResource("package", package)
-    session = await LocalSandbox(
-        read_policy=ReadOnlySandboxPolicy(("visible.txt",)),
-        allow_host_stdio_with_read_policy=True,
-    ).open(root=tmp_path, resources=(resource,))
+    resource = WorkspaceResource("package", package)
+    session = LocalWorkspaceBackend(tmp_path, read_policy=WorkspaceReadPolicy(("visible.txt",)), allow_host_stdio_with_read_policy=True, resources=(resource,))
+    await session.working_dir()
     try:
         assert session.resource_path("package") is None
         with pytest.raises(AIError) as denied:
@@ -163,10 +159,8 @@ async def test_failed_host_stdio_start_keeps_restricted_session_usable(
     failure = OSError("could not start")
     spawn.side_effect = failure
     (tmp_path / "visible.txt").write_text("visible", encoding="utf-8")
-    session = await LocalSandbox(
-        read_policy=ReadOnlySandboxPolicy(("visible.txt",)),
-        allow_host_stdio_with_read_policy=True,
-    ).open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path, read_policy=WorkspaceReadPolicy(("visible.txt",)), allow_host_stdio_with_read_policy=True)
+    await session.working_dir()
     try:
         with pytest.raises(AIError) as raised:
             await session.open_stdio_process("trusted-server")
@@ -196,10 +190,8 @@ async def test_closing_restricted_session_owns_inflight_host_stdio_start(
         return process
 
     spawn.side_effect = start
-    session = await LocalSandbox(
-        read_policy=ReadOnlySandboxPolicy(("visible.txt",)),
-        allow_host_stdio_with_read_policy=True,
-    ).open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path, read_policy=WorkspaceReadPolicy(("visible.txt",)), allow_host_stdio_with_read_policy=True)
+    await session.working_dir()
     opening = asyncio.create_task(session.open_stdio_process("trusted-server"))
     closing: asyncio.Task[None] | None = None
     try:
@@ -245,10 +237,8 @@ async def test_cancelled_restricted_session_close_finishes_host_stdio_cleanup(
         process.returncode = -15
 
     stop.side_effect = terminate
-    session = await LocalSandbox(
-        read_policy=ReadOnlySandboxPolicy(("visible.txt",)),
-        allow_host_stdio_with_read_policy=True,
-    ).open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path, read_policy=WorkspaceReadPolicy(("visible.txt",)), allow_host_stdio_with_read_policy=True)
+    await session.working_dir()
     handle = await session.open_stdio_process("trusted-server")
     closing = asyncio.create_task(session.close())
     try:
@@ -274,15 +264,15 @@ async def test_host_stdio_permission_does_not_leak_between_sessions(
     tmp_path: Path,
     subprocess_double: tuple[MagicMock, AsyncMock, AsyncMock],
 ) -> None:
-    policy = ReadOnlySandboxPolicy(("visible.txt",))
-    enabled = LocalSandbox(read_policy=policy, allow_host_stdio_with_read_policy=True)
-    restricted = LocalSandbox(read_policy=policy)
-    enabled_session = await enabled.open(root=tmp_path)
-    restricted_session = await restricted.open(root=tmp_path)
+    policy = WorkspaceReadPolicy(("visible.txt",))
+    enabled = partial(LocalWorkspaceBackend, read_policy=policy, allow_host_stdio_with_read_policy=True)
+    restricted = partial(LocalWorkspaceBackend, read_policy=policy)
+    enabled_session = enabled(tmp_path)
+    restricted_session = restricted(tmp_path)
     try:
         await enabled_session.open_stdio_process("trusted-server")
         with pytest.raises(AIError) as advertised:
-            restricted.stdio_execution_policy()
+            restricted_session.stdio_execution_policy()
         with pytest.raises(AIError) as launched:
             await restricted_session.open_stdio_process("trusted-server")
         assert advertised.value.code is launched.value.code is ErrorCode.SANDBOX_UNAVAILABLE
@@ -303,10 +293,8 @@ async def test_failed_host_stdio_process_close_retains_ownership_until_retry(
     original_cleanup = cleanup.side_effect
     failure = RuntimeError("process cleanup failed")
     cleanup.side_effect = failure
-    session = await LocalSandbox(
-        read_policy=ReadOnlySandboxPolicy(("visible.txt",)),
-        allow_host_stdio_with_read_policy=True,
-    ).open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path, read_policy=WorkspaceReadPolicy(("visible.txt",)), allow_host_stdio_with_read_policy=True)
+    await session.working_dir()
     try:
         handle = await session.open_stdio_process("trusted-server")
         with pytest.raises(AIError) as raised:
@@ -343,10 +331,8 @@ async def test_pending_host_stdio_cleanup_failure_retains_ownership_and_cause(
 
     spawn.side_effect = start
     stop.side_effect = failure
-    session = await LocalSandbox(
-        read_policy=ReadOnlySandboxPolicy(("visible.txt",)),
-        allow_host_stdio_with_read_policy=True,
-    ).open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path, read_policy=WorkspaceReadPolicy(("visible.txt",)), allow_host_stdio_with_read_policy=True)
+    await session.working_dir()
     opening = asyncio.create_task(session.open_stdio_process("trusted-server"))
     await asyncio.wait_for(entered.wait(), 2)
     opening.cancel()
@@ -370,4 +356,13 @@ async def test_pending_host_stdio_cleanup_failure_retains_ownership_and_cause(
     assert reading.value.code is ErrorCode.SANDBOX_SESSION_LOST
     with pytest.raises(AIError) as repeated:
         await session.close()
-    assert repeated.value is closing.value
+    assert repeated.value.code is ErrorCode.SANDBOX_CLEANUP_FAILED
+    assert repeated.value.__cause__ is failure
+    assert session.managed_process_ids() == frozenset({process.pid})
+
+    async def recover(*args: object) -> None:
+        process.returncode = -15
+
+    stop.side_effect = recover
+    await session.close()
+    assert session.managed_process_ids() == frozenset()

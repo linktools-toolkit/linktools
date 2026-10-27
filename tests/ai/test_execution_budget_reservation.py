@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Execution reservations publish their budget scope atomically."""
 from ._runtime_test_helpers import model_features
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from dataclasses import replace
 from pathlib import Path
@@ -12,10 +14,11 @@ import pytest
 
 from linktools.ai.core import ExecutionStatus, RunBudget
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime.state import SnapshotLimits
-from linktools.ai.runtime.state._contracts import ExecutionStartReservationResult
-from linktools.ai.runtime.state._store import RecordQuery
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.snapshots import SnapshotLimits
+from linktools.ai.persistence.contracts import ExecutionStartReservationResult
+from linktools.ai.persistence.state import RecordQuery
 from linktools.ai.storage import InMemoryObjectStore
 
 from ._runtime_test_helpers import RuntimeUsageModels
@@ -27,12 +30,12 @@ from ._runtime_test_helpers import RuntimeUsageModels
 async def test_cancelled_reservation_snapshot_restores_and_replays(
     backend: str, budget: RunBudget | None, tmp_path: Path, monkeypatch,
 ) -> None:
-    storage = (RuntimeStorage.filesystem(tmp_path / "source") if backend == "filesystem"
-               else RuntimeStorage.sqlite(tmp_path / "source.db"))
+    storage = (PersistenceStorage.filesystem(tmp_path / "source") if backend == "filesystem"
+               else PersistenceStorage.sqlite(tmp_path / "source.db"))
     namespace = "cancelled-budget-reservation"
     limits = SnapshotLimits(max_entries=1000, max_bytes=1024 * 1024)
     objects = InMemoryObjectStore("snapshot")
-    async with Runtime.open(namespace, features=model_features(RuntimeUsageModels()), storage=storage) as runtime:
+    async with Persistence.open(namespace, storage=storage) as persistence_35, Runtime.attach(persistence=persistence_35, features=model_features(RuntimeUsageModels())) as runtime:
         store = runtime._state.execution.budgets.state_store
         mutate = store.mutate
         committed = asyncio.Event()
@@ -88,9 +91,9 @@ async def test_cancelled_reservation_snapshot_restores_and_replays(
         scopes = await store.read(lambda transaction: transaction.list_records(RecordQuery(kind="budget_scope")))
         assert len(scopes) == (0 if budget is None else 1)
 
-    reader = (RuntimeStorage.filesystem(tmp_path / "source") if backend == "filesystem"
-              else RuntimeStorage.sqlite(tmp_path / "source.db"))
-    reader = RuntimeState(reader)
+    reader = (PersistenceStorage.filesystem(tmp_path / "source") if backend == "filesystem"
+              else PersistenceStorage.sqlite(tmp_path / "source.db"))
+    reader = Persistence(reader)
     await reader.initialize(namespace=namespace, tenant_id="default", read_only=True)
     try:
         reference = await reader.export_snapshot(object_store=objects, limits=limits)
@@ -98,9 +101,8 @@ async def test_cancelled_reservation_snapshot_restores_and_replays(
         await reader.close()
 
     restored = tmp_path / "restored"
-    await RuntimeState.restore_snapshot(reference, object_store=objects, root=restored, limits=limits)
-    async with Runtime.open(namespace, features=model_features(RuntimeUsageModels()),
-                            storage=RuntimeStorage.from_root(restored)) as runtime:
+    await Persistence.restore_snapshot(reference, object_store=objects, root=restored, limits=limits)
+    async with Persistence.open(namespace, storage=PersistenceStorage.from_root(restored)) as persistence_102, Runtime.attach(persistence=persistence_102, features=model_features(RuntimeUsageModels())) as runtime:
         run = await runtime.agents.get().start("hello", budget=budget, idempotency_key="cancelled")
         assert run.execution_id == reservation.execution.execution_id
         assert (await run.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -118,10 +120,10 @@ async def test_cancelled_reservation_snapshot_restores_and_replays(
 async def test_failed_reservation_rolls_back_budget_scope(
     backend: str, tmp_path: Path, monkeypatch,
 ) -> None:
-    storage = (RuntimeStorage.in_memory() if backend == "memory" else
-               RuntimeStorage.filesystem(tmp_path / "source") if backend == "filesystem" else
-               RuntimeStorage.sqlite(tmp_path / "source.db"))
-    async with Runtime.open("failed-budget-reservation", features=model_features(RuntimeUsageModels()), storage=storage) as runtime:
+    storage = (PersistenceStorage.in_memory() if backend == "memory" else
+               PersistenceStorage.filesystem(tmp_path / "source") if backend == "filesystem" else
+               PersistenceStorage.sqlite(tmp_path / "source.db"))
+    async with Persistence.open('failed-budget-reservation', storage=storage) as persistence_124, Runtime.attach(persistence=persistence_124, features=model_features(RuntimeUsageModels())) as runtime:
         store = runtime._state.execution.budgets.state_store
         mutate = store.mutate
 

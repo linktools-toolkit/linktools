@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from linktools.ai.evaluation.engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+
+from linktools.ai.persistence import Persistence
 """Captured input reprojection retains inline workspace attachment occurrences."""
 from ._runtime_test_helpers import model_features
 
@@ -10,16 +14,14 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import BinaryContent, UserContent
 
-from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import TaskStatus, WorkspaceFileInput
 from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationPolicy,
     EvaluationSpec, GraphTargetSpec, StartEvaluationRequest,
 )
-from linktools.ai.runtime import (
-    AgentTaskInput, AgentTaskInputContext, CaptureGraphRequest, CaptureInputRequest,
-    Runtime, RuntimeStorage,
-)
+from linktools.ai.inputs import AgentTaskInput, AgentTaskInputContext, CaptureGraphRequest, CaptureInputRequest
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task import Task, TaskGraph, TaskNode
 from linktools.ai.workspace import Workspace
 from .test_captured_graph_execution_inputs import _score_graph
@@ -55,13 +57,11 @@ async def test_capture_reprojects_inline_and_file_attachments_without_live_reads
         assert not isinstance(context.prompt, str)
         return (f"Prepared in {context.graph_id}: ", *context.prompt)
 
-    async with Runtime.open("inline-capture", context=CONTEXT,
-            storage=RuntimeStorage.in_memory(),
-            features=model_features(models, group)) as runtime:
-        target = runtime.tasks.from_agent("inline.agent", runtime.agents.get(),
+    async with Persistence.open('inline-capture', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_58, Runtime.attach(persistence=persistence_58, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_58, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        target = Task.from_agent("inline.agent", runtime.agents.get(),
                                           build_input=project if projected else None)
         scorer = Task("inline.score", _score_graph, effect_policy="none")
-        engine = runtime.tasks.bind(target, scorer)
+        engine = runtime_engine.with_definitions(target, scorer)
         prompt = ("Before", BinaryContent(b"DIRECT", media_type="text/plain"),
                   WorkspaceFileInput("./inline.txt", identifier="first"), "Between",
                   WorkspaceFileInput("inline.txt", identifier="second"), "After")
@@ -77,16 +77,16 @@ async def test_capture_reprojects_inline_and_file_attachments_without_live_reads
         assert len(models.prompts) == 1
         case_ref = CaseRef(f"data-{capture_kind}", "case", 1)
         if capture_kind.endswith("graph"):
-            capture = await runtime.tasks.capture_graph(source.graph_id,
+            capture = await runtime_engine.inputs.capture_graph(source.graph_id,
                 CaptureGraphRequest(PRINCIPAL, f"capture-{capture_kind}", mode=capture_kind, context_policy="clean"))
             case = CaseSpec.graph(case_ref, inputs={})
             candidate = CandidateSpec("captured", graph_template=GraphTargetSpec(capture=capture, outputs={"answer": "agent"}))
         else:
             execution = await source.execution("agent")
-            capture = await runtime.executions.capture_input(execution.execution_id,
+            capture = await runtime_engine.inputs.capture_input(execution.execution_id,
                 CaptureInputRequest(PRINCIPAL, f"capture-{capture_kind}", context_policy="clean"))
             if capture_kind == "task":
-                capture = await runtime._input_captures.task_input(capture, principal=PRINCIPAL)
+                capture = await runtime_engine.inputs.task_input(capture, principal=PRINCIPAL)
             case = CaseSpec.from_capture(case_ref, capture=capture)
             candidate = CandidateSpec("captured", task=target.ref)
         if file_change == "deleted":
@@ -94,22 +94,23 @@ async def test_capture_reprojects_inline_and_file_attachments_without_live_reads
             suffix.unlink()
         else:
             inline.write_text("MUTATED", encoding="utf-8")
-        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef(f"data-{capture_kind}", 1), (case,)),
-            principal=PRINCIPAL, idempotency_key=f"dataset-{capture_kind}")
-        prompt_offset, attachment_offset = len(models.prompts), len(models.attachments)
-        for input_mode in ("fixed_input", "reproject_input"):
-            run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-                (candidate,), (rule_scorer(scorer),), input_mode=input_mode,
-                policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(models.contract,))),
-                PRINCIPAL, f"{capture_kind}-{input_mode}"), engine=engine)
-            assert (await run.wait(timeout_seconds=20)).result.completion == "complete", (capture_kind, input_mode)
-            assert (await run.create_report()).scores[0].valid == 1, (capture_kind, input_mode)
-            assert models.attachments[-len(expected):] == expected, (capture_kind, input_mode)
-        assert models.attachments[attachment_offset:] == expected * 2, capture_kind
-        assert models.prompts[prompt_offset] == models.prompts[0], capture_kind
-        assert (models.prompts[prompt_offset + 1] != models.prompts[0]) == projected, capture_kind
-        assert len(models.prompts) == prompt_offset + 2, capture_kind
-        assert models.attachments == expected * 3
+        async with Evaluations.open(engine) as evaluations:
+            dataset = await evaluations.publish_dataset(DatasetSpec(DatasetRef(f"data-{capture_kind}", 1), (case,)),
+                principal=PRINCIPAL, idempotency_key=f"dataset-{capture_kind}")
+            prompt_offset, attachment_offset = len(models.prompts), len(models.attachments)
+            for input_mode in ("fixed_input", "reproject_input"):
+                run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
+                    (candidate,), (rule_scorer(scorer),), input_mode=input_mode,
+                    policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(models.contract,))),
+                    PRINCIPAL, f"{capture_kind}-{input_mode}"))
+                assert (await run.wait(timeout_seconds=20)).result.completion == "complete", (capture_kind, input_mode)
+                assert (await run.create_report()).scores[0].valid == 1, (capture_kind, input_mode)
+                assert models.attachments[-len(expected):] == expected, (capture_kind, input_mode)
+            assert models.attachments[attachment_offset:] == expected * 2, capture_kind
+            assert models.prompts[prompt_offset] == models.prompts[0], capture_kind
+            assert (models.prompts[prompt_offset + 1] != models.prompts[0]) == projected, capture_kind
+            assert len(models.prompts) == prompt_offset + 2, capture_kind
+            assert models.attachments == expected * 3
 
 
 @pytest.mark.asyncio
@@ -130,43 +131,42 @@ async def test_irreversible_projection_keeps_fixed_capture_and_rejects_reproject
     async def discard(context: AgentTaskInputContext) -> str:
         return "Projected without the original attachment"
 
-    async with Runtime.open("irreversible-capture", context=CONTEXT,
-            storage=RuntimeStorage.filesystem(tmp_path / "state"),
-            features=model_features(models, group)) as runtime:
-        target = runtime.tasks.from_agent("irreversible.agent", runtime.agents.get(), build_input=discard)
+    async with Persistence.open('irreversible-capture', storage=PersistenceStorage.filesystem(tmp_path / 'state'), tenant_id='evaluation-consumers') as persistence_133, Runtime.attach(persistence=persistence_133, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_133, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        target = Task.from_agent("irreversible.agent", runtime.agents.get(), build_input=discard)
         scorer = Task("irreversible.score", _score_graph, effect_policy="none")
-        engine = runtime.tasks.bind(target, scorer)
+        engine = runtime_engine.with_definitions(target, scorer)
         source = await engine.start(TaskGraph("source", (
             TaskNode("agent", task=target, input=AgentTaskInput((WorkspaceFileInput("unused.txt"),))),
         )), principal=PRINCIPAL, idempotency_key="source")
         assert (await source.wait(timeout_seconds=15)).result.wait_status is TaskStatus.SUCCEEDED
         assert models.attachments == []
         if capture_kind.endswith("graph"):
-            capture = await runtime.tasks.capture_graph(source.graph_id,
+            capture = await runtime_engine.inputs.capture_graph(source.graph_id,
                 CaptureGraphRequest(PRINCIPAL, "capture", mode=capture_kind, context_policy="clean"))
             case = CaseSpec.graph(CaseRef("data", "case", 1), inputs={})
             candidate = CandidateSpec("captured", graph_template=GraphTargetSpec(capture=capture, outputs={"answer": "agent"}))
         else:
             execution = await source.execution("agent")
-            capture = await runtime.executions.capture_input(execution.execution_id,
+            capture = await runtime_engine.inputs.capture_input(execution.execution_id,
                 CaptureInputRequest(PRINCIPAL, "capture", context_policy="clean"))
             if capture_kind == "task":
-                capture = await runtime._input_captures.task_input(capture, principal=PRINCIPAL)
+                capture = await runtime_engine.inputs.task_input(capture, principal=PRINCIPAL)
             case = CaseSpec.from_capture(CaseRef("data", "case", 1), capture=capture)
             candidate = CandidateSpec("captured", task=target.ref)
         attachment.unlink()
-        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("data", 1), (case,)),
-            principal=PRINCIPAL, idempotency_key="dataset")
-        fixed = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-            (candidate,), (rule_scorer(scorer),), policy=EvaluationPolicy(model_fixtures=(models.contract,))),
-            PRINCIPAL, "fixed"), engine=engine)
-        assert (await fixed.wait(timeout_seconds=20)).result.completion == "complete"
-        assert (await fixed.create_report()).scores[0].valid == 1
-        with pytest.raises(AIError) as raised:
-            await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-                (candidate,), (rule_scorer(scorer),), input_mode="reproject_input",
-                policy=EvaluationPolicy(model_fixtures=(models.contract,))),
-                PRINCIPAL, "reproject"), engine=engine)
-        assert raised.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
-        assert raised.value.safe_details["reason"] == "accepted_workspace_input_not_retained"
-        assert models.prompts == ["Projected without the original attachment"] * 2
+        async with Evaluations.open(engine) as evaluations:
+            dataset = await evaluations.publish_dataset(DatasetSpec(DatasetRef("data", 1), (case,)),
+                principal=PRINCIPAL, idempotency_key="dataset")
+            fixed = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
+                (candidate,), (rule_scorer(scorer),), policy=EvaluationPolicy(model_fixtures=(models.contract,))),
+                PRINCIPAL, "fixed"))
+            assert (await fixed.wait(timeout_seconds=20)).result.completion == "complete"
+            assert (await fixed.create_report()).scores[0].valid == 1
+            with pytest.raises(AIError) as raised:
+                await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
+                    (candidate,), (rule_scorer(scorer),), input_mode="reproject_input",
+                    policy=EvaluationPolicy(model_fixtures=(models.contract,))),
+                    PRINCIPAL, "reproject"))
+            assert raised.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
+            assert raised.value.safe_details["reason"] == "accepted_workspace_input_not_retained"
+            assert models.prompts == ["Projected without the original attachment"] * 2

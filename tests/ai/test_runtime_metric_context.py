@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Runtime-scoped bounded metric dimension regressions."""
 from ._runtime_test_helpers import model_features
 from linktools.ai.model import create_model
@@ -10,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from linktools.ai.core import CommitPolicy
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 
@@ -24,19 +26,15 @@ from linktools.ai.observe import (
     Metrics,
     Observation,
 )
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime._context import RuntimeContext
-from linktools.ai.runtime._metrics_service import MetricsService
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.core import ExecutionContext
+from linktools.ai.observe.service import MetricsService
 from linktools.ai.workspace import Workspace
 
 
 def test_runtime_context_normalizes_and_preserves_metric_dimensions() -> None:
-    context = RuntimeContext(
-        None,
-        tenant_id="tenant",
-        correlation={"request": "root"},
-        metric_dimensions={"environment": "prod", "region": "us-west"},
-    )
+    context = ExecutionContext(None, correlation={'request': 'root'}, metric_dimensions={'environment': 'prod', 'region': 'us-west'})
 
     assert dict(context.metric_dimensions) == {
         "environment": "prod",
@@ -60,7 +58,7 @@ def test_runtime_context_rejects_unbounded_or_reserved_metric_dimensions(
     dimensions: dict[str, str],
 ) -> None:
     with pytest.raises(ValueError):
-        RuntimeContext(None, metric_dimensions=dimensions)
+        ExecutionContext(None, metric_dimensions=dimensions)
 
 
 @pytest.mark.asyncio
@@ -69,8 +67,8 @@ async def test_runtime_metric_dimensions_flow_into_automatic_observations_and_qu
 ) -> None:
     workspace = Workspace.load(tmp_path)
     metrics = Metrics.in_memory(namespace="runtime-context")
-    models = create_model(protocol='openai', model="gpt-test")
-    context = RuntimeContext(
+    models = create_model(api='openai', model="gpt-test")
+    context = ExecutionContext(
         None,
         metric_dimensions={"environment": "prod", "region": "us-west"},
     )
@@ -90,17 +88,16 @@ async def test_runtime_metric_dimensions_flow_into_automatic_observations_and_qu
     )
 
     features = workspace_features("workspace", workspace=workspace)
-    async with Runtime.open(
-        "default",
-        metrics=metrics, context=context,
-        storage=RuntimeStorage.in_memory(),
-        features=model_features(models, features),
-    ) as runtime:
+    async with Persistence.open('default', storage=PersistenceStorage.in_memory(), tenant_id='tenant') as persistence_93, Runtime.attach(persistence=persistence_93, metrics=metrics, context=context, features=model_features(models, features)) as runtime:
         control = runtime._metric_control  # type: ignore[attr-defined]
         assert isinstance(control, MetricsService)
         assert await control.try_record(observation) is True
         flushed = await runtime.metrics.flush()
         assert flushed.completed is True
+        assert len(flushed.status.recorders) == 1
+        assert flushed.status.accepted == flushed.status.recorders[0].accepted
+        assert flushed.status.persisted == flushed.status.recorders[0].persisted
+        assert flushed.status.pending == flushed.status.recorders[0].pending
 
     stored = await metrics.get_observation(observation.observation_id)
     assert stored is not None
@@ -184,12 +181,8 @@ async def test_runtimes_sharing_metrics_close_only_their_own_write_scopes() -> N
 
     metrics = Metrics.in_memory(commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)))
     features = await RuntimeFeatures("shared-metrics").capture()
-    async with Runtime.open(
-        "first", metrics=metrics, storage=RuntimeStorage.in_memory(), features=features,
-    ) as first:
-        async with Runtime.open(
-            "second", metrics=metrics, storage=RuntimeStorage.in_memory(), features=features,
-        ) as second:
+    async with Persistence.open('first', storage=PersistenceStorage.in_memory()) as persistence_187, Runtime.attach(persistence=persistence_187, metrics=metrics, features=features) as first:
+        async with Persistence.open('second', storage=PersistenceStorage.in_memory()) as persistence_190, Runtime.attach(persistence=persistence_190, metrics=metrics, features=features) as second:
             observation = Observation(
                 version=1, observation_id="second-pending", kind="test.metric",
                 occurred_at=datetime.now(timezone.utc), source_namespace="second",
@@ -236,19 +229,17 @@ async def test_runtime_cancelled_close_keeps_storage_open_until_metric_sink_sett
             returned.set()
 
     metrics = Metrics.from_store(CancellingStore(), commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)))
-    storage = RuntimeStorage.in_memory()
-    original_close = RuntimeState.close
+    storage = PersistenceStorage.in_memory()
+    original_close = Persistence.close
 
     async def close_storage(owner) -> None:
         assert returned.is_set()
         storage_closed.set()
         await original_close(owner)
 
-    monkeypatch.setattr(RuntimeState, "close", close_storage)
+    monkeypatch.setattr(Persistence, "close", close_storage)
     features = RuntimeFeatures("close-metrics")
-    async with Runtime.open(
-        "close-owner", metrics=metrics, storage=storage, features=features,
-    ) as runtime:
+    async with Persistence.open('close-owner', storage=storage) as persistence_249, Runtime.attach(persistence=persistence_249, metrics=metrics, features=features) as runtime:
         observation = Observation(
             version=1, observation_id="close-inflight", kind="test.metric",
             occurred_at=datetime.now(timezone.utc), source_namespace="close-owner",
@@ -282,15 +273,12 @@ async def test_metrics_resources_do_not_enter_captured_agent_binding_identity() 
 
     features = RuntimeFeatures("metric-resource-identity")
     features.agent("default")
-    models = create_model(protocol="openai", model="unused-offline-model")
+    models = create_model(api="openai", model="unused-offline-model")
     features.model("default", models)
     capture = await features.capture()
     bindings = []
     for metrics in (None, Metrics.in_memory(), Metrics.in_memory()):
-        async with Runtime.open(
-            "metric-resource-identity",
-            storage=RuntimeStorage.in_memory(), features=capture, metrics=metrics,
-        ) as runtime:
+        async with Persistence.open('metric-resource-identity', storage=PersistenceStorage.in_memory()) as persistence_290, Runtime.attach(persistence=persistence_290, features=capture, metrics=metrics) as runtime:
             compiled = runtime.agents.get().derive(instructions=("fixed binding",)).compiled
             assert compiled is not None
             compiler = AgentCompiler(

@@ -6,6 +6,7 @@ from linktools.ai.model import create_model
 
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Annotated
 
@@ -29,9 +30,9 @@ from linktools.ai.capability import (
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state import _codec as runtime_codec
-from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence import codec as runtime_codec
+from linktools.ai.persistence.contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec, SkillSpec
 from linktools.ai.storage import StorageEntryRevision, StoredPayload
 from pydantic_ai import Tool
@@ -154,7 +155,7 @@ def _execution(
 
 def _compiler() -> AgentCompiler:
     return AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=(),
         agents={"agent": AgentSpec("agent")},
     )
@@ -300,7 +301,7 @@ def test_binding_asset_versions_are_not_runtime_object_dependencies() -> None:
     assert tuple(
         runtime_codec.iter_runtime_object_refs(
             runtime_codec._encode_persisted_domain(_execution(binding=binding_contract)),
-            default_domain=RuntimeDomain.EXECUTION,
+            default_domain=PersistenceDomain.EXECUTION,
         )
     ) == ()
 
@@ -322,12 +323,12 @@ def test_agent_declaration_identity_uses_explicit_revision() -> None:
 
 
 def test_model_contract_ignores_openai_prefix_and_connection_config() -> None:
-    plain = create_model(protocol='openai',
+    plain = create_model(api='openai',
         model="gpt-test",
         base_url="https://first.example/v1",
         api_key="first-key",
     )
-    prefixed = create_model(protocol='openai',
+    prefixed = create_model(api='openai',
         model="openai:gpt-test",
         base_url="https://second.example/v1",
         api_key="second-key",
@@ -347,14 +348,14 @@ def test_model_contract_ignores_openai_prefix_and_connection_config() -> None:
 async def test_feature_capture_keeps_replaced_model_connection() -> None:
     features = RuntimeFeatures()
     features.model("default", create_model(
-        protocol="openai", model="gpt-test",
+        api="openai", model="gpt-test",
         base_url="https://first.example/v1", api_key="first-key",
     ))
     first_capture = await features.capture()
     first = first_capture.models["default"]
 
     features.model("default", create_model(
-        protocol="openai", model="gpt-test",
+        api="openai", model="gpt-test",
         base_url="https://second.example/v1", api_key="second-key",
     ))
     second = (await features.capture()).models["default"]
@@ -366,8 +367,8 @@ async def test_feature_capture_keeps_replaced_model_connection() -> None:
 
 def test_agent_identity_ignores_model_but_catalog_uses_current_binding() -> None:
     models = {
-        "first": create_model(protocol="openai", model="gpt-test", base_url="https://first.example/v1"),
-        "second": create_model(protocol="openai", model="gpt-test", base_url="https://second.example/v1"),
+        "first": create_model(api="openai", model="gpt-test", base_url="https://first.example/v1"),
+        "second": create_model(api="openai", model="gpt-test", base_url="https://second.example/v1"),
     }
     compiler = AgentCompiler(
         models=models,
@@ -461,12 +462,12 @@ def test_restore_accepts_tool_configuration_changes_with_same_revision() -> None
     assert first_candidate.revision == second_candidate.revision
 
     first_compiler = AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=(first_candidate,),
         agents={"agent": spec},
     )
     second_compiler = AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=(second_candidate,),
         agents={"agent": spec},
     )
@@ -689,7 +690,7 @@ def _configured_contribution(kind: str, identity: str, revision: int, setting: s
 
 def _contribution_compiler(candidate: CapabilityContribution[object]) -> AgentCompiler:
     return AgentCompiler(
-        models={"default": create_model(protocol="openai", model="gpt-test")},
+        models={"default": create_model(api="openai", model="gpt-test")},
         candidates=(candidate,), agents={"agent": AgentSpec("agent")},
     )
 
@@ -727,16 +728,23 @@ def test_capability_binding_identity_ignores_configuration_but_preserves_named_r
 
 
 @pytest.mark.asyncio
-async def test_mcp_resolution_keeps_historical_contract_when_current_arguments_change() -> None:
+async def test_mcp_resolution_keeps_historical_contract_when_current_arguments_change(tmp_path: Path) -> None:
     from linktools.ai.runtime._agent_binding_resolver import _AgentBindingResolver
+    from linktools.ai.workspace import LocalWorkspaceBackend
+
+    workspace_backend = LocalWorkspaceBackend(tmp_path)
 
     original_compiler = _contribution_compiler(_configured_contribution("mcp", "sample", 1, "original"))
     changed_compiler = _contribution_compiler(_configured_contribution("mcp", "sample", 1, "changed"))
     spec = AgentSpec("agent")
     original_catalog = AgentCatalog({"agent": original_compiler.compile(spec)})
     changed_catalog = AgentCatalog({"agent": changed_compiler.compile(spec)})
-    original = await _AgentBindingResolver(original_catalog, original_compiler).resolve_root("agent")
-    resolved = await _AgentBindingResolver(changed_catalog, changed_compiler).resolve_contract(original)
+    original = await _AgentBindingResolver(
+        original_catalog, original_compiler, workspace_backend=workspace_backend,
+    ).resolve_root("agent")
+    resolved = await _AgentBindingResolver(
+        changed_catalog, changed_compiler, workspace_backend=workspace_backend,
+    ).resolve_contract(original)
     assert resolved == original
     assert resolved.selected[0].contract["args"] == ["original"]
     assert changed_compiler.restore(resolved).compiled_agent.mcp_servers[0].args == ("changed",)

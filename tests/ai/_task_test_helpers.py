@@ -2,14 +2,17 @@
 # -*- coding: utf-8 -*-
 """Shared Task test helpers and test-only legacy fixture adapters."""
 
-from linktools.ai.runtime.state import RuntimeState
-from collections.abc import Callable, Mapping
+from linktools.ai.persistence import Persistence
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import asynccontextmanager
 from typing import TypeVar
 
 from linktools.ai.runtime import RuntimeFeatures as _RuntimeFeatures
 from linktools.ai.core import Principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import AgentTaskInput, Runtime
+from linktools.ai.inputs import AgentTaskInput
+from linktools.ai.runtime import Runtime
+from linktools.ai.task.engine import TaskEngine
 from linktools.ai.task import (
     Task,
     TaskExpander,
@@ -26,6 +29,7 @@ AppT = TypeVar("AppT")
 _TASKS: dict[tuple[str, int], Task[object]] = {}
 _EXPANDERS: dict[tuple[str, int], TaskExpander] = {}
 _RUNS: dict[tuple[int, str], object] = {}
+_ENGINES: dict[int, TaskEngine[object]] = {}
 
 
 class TaskFunction(Task[AppT]):
@@ -119,6 +123,25 @@ def register_task_definition(task: Task[AppT]) -> Task[AppT]:
     return task
 
 
+@asynccontextmanager
+async def task_engine_scope(runtime: Runtime[object], persistence: Persistence) -> AsyncIterator[TaskEngine[object]]:
+    """Borrow both domains explicitly and close task work before the Agent owner."""
+    key = id(runtime)
+    assert key not in _ENGINES
+    async with TaskEngine.open(
+        persistence=persistence, context=runtime.context,
+        authorization=runtime._execution_service._authorization,
+    ) as engine:
+        _ENGINES[key] = engine
+        try:
+            yield engine
+        finally:
+            _ENGINES.pop(key)
+            for identity in tuple(_RUNS):
+                if identity[0] == key:
+                    _RUNS.pop(identity)
+
+
 def task_engine(runtime: Runtime[object]):
     tasks: list[Task[object]] = []
     for task in _TASKS.values():
@@ -127,23 +150,23 @@ def task_engine(runtime: Runtime[object]):
             tasks.append(task)
             continue
         agent_id = config.get("agent_id")
-        runner = task.runner
-        if not isinstance(agent_id, str) or runner is None:
+        if not isinstance(agent_id, str) or task.agent_execution is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        build_input = getattr(runner, "_build_input", None)
+        build_input = task.build_input
         tasks.append(
-            runtime.tasks.from_agent(
+            Task.from_agent(
                 task.id,
                 runtime.agents.get(agent_id),
                 revision=task.revision,
                 build_input=build_input,  # type: ignore[arg-type]
             )
         )
-    return runtime.tasks.bind(*tasks, *_EXPANDERS.values())
+    return _ENGINES[id(runtime)].with_definitions(*tasks, *_EXPANDERS.values())
 
 
 async def start_task_graph(runtime: Runtime[object], graph: TaskGraph, **kwargs: object):
     engine = task_engine(runtime)
+    kwargs.setdefault("principal", runtime.default_principal)
     run = await engine.start(graph, **kwargs)  # type: ignore[arg-type]
     _RUNS[(id(runtime), graph.graph_id)] = run
     return run
@@ -159,14 +182,14 @@ async def get_task_graph_run(runtime: Runtime[object], graph_id: str):
     selected = _RUNS.get((id(runtime), graph_id))
     if selected is not None:
         return selected
-    return await task_engine(runtime).get(graph_id)
+    return await task_engine(runtime).get(graph_id, principal=runtime.default_principal)
 
 
 def agent_task_node(runtime: Runtime[AppT], node_id: str, prompt: object, **kwargs: object) -> TaskNode:
     agent_id = str(kwargs.pop("agent_id", "default"))
     task_id = str(kwargs.pop("task_id", f"test.agent.{agent_id}"))
     revision = int(kwargs.pop("task_revision", 1))
-    task = runtime.tasks.from_agent(
+    task = Task.from_agent(
         task_id,
         runtime.agents.get(agent_id),
         revision=revision,
@@ -197,7 +220,7 @@ def agent_task_node(runtime: Runtime[AppT], node_id: str, prompt: object, **kwar
 
 
 def agent_task_definition(runtime: Runtime[AppT], agent_id: str, task_id: str) -> Task[AppT]:
-    task = runtime.tasks.from_agent(task_id, runtime.agents.get(agent_id))
+    task = Task.from_agent(task_id, runtime.agents.get(agent_id))
     register_task_definition(task)
     return task
 
@@ -241,7 +264,7 @@ async def start_task_request(runtime: Runtime[object], request: TaskGraphRequest
 
 
 async def admit_graph(
-    state: RuntimeState,
+    state: Persistence,
     graph: TaskGraph,
     *,
     tenant_id: str = "tenant",

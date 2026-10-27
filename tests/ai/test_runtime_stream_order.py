@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from typing import TypeVar
 
 import pytest
-import linktools.ai.runtime._event as event_module
+import linktools.ai.execution.events as event_module
 from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
@@ -25,9 +25,11 @@ from linktools.ai.core import (
     UsageMetrics,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime import RuntimeStorage, TaskGraphRun, TaskGraphRunEvent
-from linktools.ai.runtime._event import (
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.execution import TaskGraphRunEvent
+from linktools.ai.task.engine import TaskGraphRun
+from linktools.ai.execution.events import (
     DefaultEventService,
     ExecutionDelta,
     LiveExecutionEventBroker,
@@ -35,17 +37,17 @@ from linktools.ai.runtime._event import (
 )
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._pending_turn import _PendingExecutionTurns
-from linktools.ai.runtime._execution_tree import ExecutionTreeBroker, ExecutionTreeStreamer
-from linktools.ai.runtime._watch_cursor import decode_graph_watch_cursor
-from linktools.ai.runtime.service_api import (
+from linktools.ai.execution.tree import ExecutionTreeBroker, ExecutionTreeStreamer
+from linktools.ai.observe.cursors import decode_graph_watch_cursor
+from linktools.ai.execution import (
     ExecutionEvent,
     ExecutionTreeEvent,
     ExecutionView,
     ModelInteractionReadBoundary,
     TaskGraphProjection,
 )
-from linktools.ai.runtime.state._commands import RuntimeStateCommands
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence.commands import StateCommands
+from linktools.ai.persistence.contracts import (
     ExecutionCancelRequestCommit,
     ExecutionEventAppend,
     ExecutionRecord,
@@ -398,6 +400,10 @@ async def test_graph_wait_does_not_wait_for_observer_completion(late_producer: b
         _register_observation=lambda session: None,
         _release_observation=lambda session: None,
     )
+    # These synthetic nodes have no Agent task declarations to bind.
+    runtime._bind_graph_history = lambda state: None
+    runtime._inspect_execution = runtime.executions.inspect
+    runtime._history = runtime.history
     streamer = ExecutionTreeStreamer(runtime.executions, execution_service, ExecutionTreeBroker())
     runtime._capture_execution_tree = streamer.capture
     runtime._replay_execution_tree = streamer.replay
@@ -751,7 +757,7 @@ async def test_live_overflow_replays_all_durable_events_without_loss() -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_batches_pending_audit_in_one_filesystem_mutation(tmp_path: Path) -> None:
-    state = RuntimeState(RuntimeStorage.filesystem(tmp_path / "runtime"))
+    state = Persistence(PersistenceStorage.filesystem(tmp_path / "runtime"))
     await state.initialize(namespace="stream-order", tenant_id="tenant")
     try:
         now = datetime.now(timezone.utc)
@@ -829,7 +835,7 @@ async def test_cancel_terminal_race_is_conflict_not_integrity() -> None:
             )
             return Page((event,), None)
 
-    commands = RuntimeStateCommands(
+    commands = StateCommands(
         _ExecutionRepo(),
         namespace="stream-order",
         events=_Events(),
@@ -1315,7 +1321,7 @@ async def test_concurrent_cancel_winner_is_conflict_not_integrity() -> None:
                 None,
             )
 
-    commands = RuntimeStateCommands(
+    commands = StateCommands(
         _ExecutionRepo(),
         namespace="stream-order",
         events=_Events(),
@@ -1372,7 +1378,7 @@ async def test_revision_only_cancel_race_is_conflict_not_integrity() -> None:
             del execution_id, tenant_id, after_event_seq, limit
             return Page((), None)
 
-    commands = RuntimeStateCommands(
+    commands = StateCommands(
         _ExecutionRepo(),
         namespace="stream-order",
         events=_Events(),
@@ -1439,7 +1445,7 @@ async def test_cancel_readback_accepts_own_suffix_after_revision_only_advance() 
                 None,
             )
 
-    commands = RuntimeStateCommands(
+    commands = StateCommands(
         _ExecutionRepo(),
         namespace="stream-order",
         events=_Events(),

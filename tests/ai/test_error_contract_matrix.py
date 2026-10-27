@@ -26,12 +26,8 @@ from linktools.ai.agent._model_resolver import _ModelResolver
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionManager
 
-from linktools.ai.runtime import (
-    ExecutionResult,
-    WaitResult,
-    ExecutionStreamEvent,
-    ExecutionTreeEvent,
-)
+from linktools.ai.execution import ExecutionResult, ExecutionStreamEvent, ExecutionTreeEvent
+from linktools.ai.observe import WaitResult
 from linktools.ai.runtime._agent_executor import (
     DurableBoundary,
     _execution_error,
@@ -41,7 +37,7 @@ from linktools.ai.runtime._execution import (
     DefaultExecutionService,
     _ExecutionRuntimeBridge,
 )
-from linktools.ai.runtime._planner import _execution_failure
+from linktools.ai.task.engine._runner import _execution_failure
 from linktools.ai.runtime._subagent import _subagent_result
 from linktools.ai.storage import StoragePath
 from linktools.ai.task import (
@@ -194,7 +190,7 @@ def test_error_codes_have_fixed_retryability(code: ErrorCode, retryable: bool) -
 @pytest.mark.asyncio
 async def test_execution_result_before_terminal_is_not_ready() -> None:
     service = object.__new__(DefaultExecutionService)
-    service._management = ExecutionManager(SimpleNamespace(), _AllowAll())
+    service._manager = ExecutionManager(SimpleNamespace(), _AllowAll())
 
     async def load_authorized(
         execution_id: str,
@@ -204,7 +200,7 @@ async def test_execution_result_before_terminal_is_not_ready() -> None:
         del execution_id, principal, action
         return SimpleNamespace(status=ExecutionStatus.STARTED)
 
-    service._load_authorized = load_authorized  # type: ignore[method-assign]
+    service.load_authorized = load_authorized  # type: ignore[method-assign]
     principal = Principal("principal", "tenant", "service")
     with pytest.raises(AIError) as error:
         await DefaultExecutionService.result.__wrapped__(
@@ -233,7 +229,7 @@ async def test_execution_wait_timeout_has_stable_code() -> None:
             execution_id=execution_id, status=ExecutionStatus.STARTED
         )
 
-    service._load_authorized = load_authorized  # type: ignore[method-assign]
+    service.load_authorized = load_authorized  # type: ignore[method-assign]
     service._runtime_bridge = _ExecutionRuntimeBridge()
     service._live_broker = SimpleNamespace(
         abandon_prepared_local_producer=lambda _execution_id: None

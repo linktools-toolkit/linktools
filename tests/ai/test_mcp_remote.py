@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Real localhost MCP protocol, execution boundary, and recovery contracts."""
 from ._runtime_test_helpers import model_features
 
 import asyncio
+from functools import partial
 import json
 import socket
 from collections.abc import AsyncIterator, Mapping
@@ -42,7 +45,9 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage, ToolEffectApplied
+from linktools.ai.runtime import Runtime
+from linktools.ai.execution import ToolEffectApplied
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._mcp import (
     _MCPBinding,
     _raise_primary_after_cleanup,
@@ -51,10 +56,10 @@ from linktools.ai.runtime._mcp import (
 )
 from linktools.ai.spec import MCPServerSpec, mcp_server_selector, mcp_tool_selector
 from linktools.ai.workspace import (
-    BubblewrapSandbox,
-    LocalSandbox,
-    SandboxResource,
-    SandboxSession,
+    BubblewrapWorkspaceBackend,
+    LocalWorkspaceBackend,
+    WorkspaceResource,
+    SupportsFileTools,
 )
 
 from ._runtime_test_helpers import RuntimeUsageModels, _UsageFunctionModel
@@ -318,8 +323,7 @@ async def _toolsets(
     capabilities = await materialize_mcp_capabilities(
         servers,
         selected,
-        sandbox=None,
-        sandbox_session=None,
+        workspace_backend=None,
         host_cwd=None,
         bindings={
             server.id: _MCPBinding(
@@ -549,8 +553,8 @@ class _RemoteModels(_RemoteModelBinding):
     pass
 
 
-def _group(*servers: MCPServerSpec, sandbox: Any = None) -> RuntimeFeatures[object]:
-    group = RuntimeFeatures[object]("remote", sandbox=sandbox)
+def _group(*servers: MCPServerSpec, workspace_factory: Any = LocalWorkspaceBackend) -> RuntimeFeatures[object]:
+    group = RuntimeFeatures[object]("remote", workspace_factory=workspace_factory)
     for server in servers:
         group.mcp(server)
     group.agent("default", allow_tools=(mcp_tool_selector(servers[0].id, "echo"),))
@@ -565,29 +569,20 @@ async def test_remote_only_runtime_uses_host_network_without_opening_sandbox(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sandbox = (
-        LocalSandbox()
+        LocalWorkspaceBackend
         if sandbox_kind == "local"
-        else BubblewrapSandbox(
+        else partial(BubblewrapWorkspaceBackend,
             runtime_root=tmp_path, bwrap_executable=tmp_path / "bwrap"
         )
     )
 
-    async def forbidden_open(
-        self: object,
-        *,
-        root: Path,
-        resources: tuple[SandboxResource, ...] = (),
-    ) -> SandboxSession:
-        del self, root, resources
-        pytest.fail("remote-only execution must not open a sandbox session")
+    async def forbidden_activate(self):
+        pytest.fail("remote-only execution must not activate a workspace environment")
 
-    monkeypatch.setattr(type(sandbox), "open", forbidden_open)
+    backend_class = LocalWorkspaceBackend if sandbox_kind == "local" else BubblewrapWorkspaceBackend
+    monkeypatch.setattr(backend_class, "working_dir", forbidden_activate)
     async with _serve() as remote:
-        async with Runtime.open(
-            "remote-only",
-            storage=RuntimeStorage.in_memory(),
-            features=model_features(_RemoteModels(), _group(_spec(remote), sandbox=sandbox)),
-        ) as runtime:
+        async with Persistence.open('remote-only', storage=PersistenceStorage.in_memory()) as persistence_586, Runtime.attach(persistence=persistence_586, features=model_features(_RemoteModels(), _group(_spec(remote), workspace_factory=sandbox))) as runtime:
             result = (await runtime.agents.get("default").run("echo", timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED
         assert remote.effects == ["committed"]
@@ -600,11 +595,7 @@ async def test_unselected_offline_remote_does_not_connect() -> None:
         offline = MCPServerSpec(
             "offline", transport="streamable-http", url="http://127.0.0.1:1/mcp"
         )
-        async with Runtime.open(
-            "remote-selection",
-            storage=RuntimeStorage.in_memory(),
-            features=model_features(_RemoteModels(), _group(_spec(remote), offline)),
-        ) as runtime:
+        async with Persistence.open('remote-selection', storage=PersistenceStorage.in_memory()) as persistence_603, Runtime.attach(persistence=persistence_603, features=model_features(_RemoteModels(), _group(_spec(remote), offline))) as runtime:
             result = (await runtime.agents.get("default").run("echo", timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED
         assert remote.effects == ["committed"]
@@ -617,14 +608,10 @@ async def test_lost_remote_result_requires_confirmation_and_recovery_does_not_re
     async with _serve() as remote:
         remote.lose_result = True
         state_path = tmp_path / "runtime"
-        storage = RuntimeStorage.filesystem(state_path)
+        storage = PersistenceStorage.filesystem(state_path)
         features = _group(_spec(remote))
         features.capability(CheckpointCapability(), scope="runtime")
-        async with Runtime.open(
-            "remote-recovery",
-            storage=storage,
-            features=model_features(_RemoteModels(), features),
-        ) as runtime:
+        async with Persistence.open('remote-recovery', storage=storage) as persistence_623, Runtime.attach(persistence=persistence_623, features=model_features(_RemoteModels(), features)) as runtime:
             execution = await runtime.agents.get("default").start("echo")
             with pytest.raises(AIError) as raised:
                 await execution.wait(timeout_seconds=10)
@@ -639,15 +626,11 @@ async def test_lost_remote_result_requires_confirmation_and_recovery_does_not_re
             assert remote.effects == ["committed"]
         await runtime._state.close()
         remote.lose_result = False
-        restored = RuntimeStorage.filesystem(state_path)
+        restored = PersistenceStorage.filesystem(state_path)
         restored_features = _group(_spec(remote, headers={"X-Rotated": "true"}))
         restored_features.capability(CheckpointCapability(), scope="runtime")
         try:
-            async with Runtime.open(
-                "remote-recovery",
-                storage=restored,
-                features=model_features(_RemoteModels(), restored_features),
-            ) as runtime:
+            async with Persistence.open('remote-recovery', storage=restored) as persistence_646, Runtime.attach(persistence=persistence_646, features=model_features(_RemoteModels(), restored_features)) as runtime:
                 execution = await runtime.executions.get(execution_id)
                 resolution = await execution.resolve_tool_effect(
                     effect.operation_id,
@@ -740,11 +723,7 @@ async def test_parallel_runtimes_do_not_share_service_credentials() -> None:
     async with _serve() as remote:
 
         async def run(label: str) -> None:
-            async with Runtime.open(
-                f"remote-{label}",
-                storage=RuntimeStorage.in_memory(),
-                features=model_features(_RemoteModels(), _group(_spec(remote, headers={"Authorization": f"Bearer {label}"}))),
-            ) as runtime:
+            async with Persistence.open(f'remote-{label}', storage=PersistenceStorage.in_memory()) as persistence_743, Runtime.attach(persistence=persistence_743, features=model_features(_RemoteModels(), _group(_spec(remote, headers={'Authorization': f'Bearer {label}'})))) as runtime:
                 result = (await runtime.agents.get("default").run(
                     "echo", timeout_seconds=10
                 )).result
@@ -778,19 +757,13 @@ async def test_malformed_protocol_responses_are_typed_without_disclosing_body(
         await _wait_closed(remote)
 
 
-class _RecordingLocalSandbox(LocalSandbox):
-    def __init__(self) -> None:
-        super().__init__()
-        self.roots: list[Path] = []
+class _RecordingLocalWorkspace(LocalWorkspaceBackend):
+    roots: list[Path] = []
 
-    async def open(
-        self,
-        *,
-        root: Path,
-        resources: tuple[SandboxResource, ...] = (),
-    ) -> SandboxSession:
-        self.roots.append(root)
-        return await super().open(root=root, resources=resources)
+    async def working_dir(self) -> str:
+        root = await super().working_dir()
+        self.roots.append(Path(root))
+        return root
 
 
 class _MixedModelBinding(_RemoteModelBinding):
@@ -815,12 +788,13 @@ async def test_mixed_stdio_and_http_keep_separate_process_and_network_boundaries
         from .test_bubblewrap_integration import _sandbox_configuration
 
         runtime_root, executable = _sandbox_configuration()
-        sandbox = BubblewrapSandbox(
+        sandbox = partial(BubblewrapWorkspaceBackend,
             runtime_root=runtime_root, bwrap_executable=executable
         )
         command, argument = "/usr/bin/python3", "/workspace/server.py"
     else:
-        sandbox = _RecordingLocalSandbox()
+        sandbox = _RecordingLocalWorkspace
+        sandbox.roots = []
         command, argument = sys.executable, str(tmp_path / "server.py")
     script = tmp_path / "server.py"
     script.write_text(
@@ -847,7 +821,7 @@ async def test_mixed_stdio_and_http_keep_separate_process_and_network_boundaries
     )
     monkeypatch.chdir(tmp_path)
     async with _serve() as remote:
-        group = RuntimeFeatures[object]("mixed", sandbox=sandbox)
+        group = RuntimeFeatures[object]("mixed", workspace_factory=sandbox)
         group.mcp(_spec(remote))
         group.mcp(
             MCPServerSpec(
@@ -864,17 +838,13 @@ async def test_mixed_stdio_and_http_keep_separate_process_and_network_boundaries
                 mcp_tool_selector("local", "record"),
             ),
         )
-        async with Runtime.open(
-            "mixed-mcp",
-            storage=RuntimeStorage.in_memory(),
-            features=model_features(_MixedModels(), group),
-        ) as runtime:
+        async with Persistence.open('mixed-mcp', storage=PersistenceStorage.in_memory()) as persistence_867, Runtime.attach(persistence=persistence_867, features=model_features(_MixedModels(), group)) as runtime:
             result = (await runtime.agents.get("default").run(
                 "call both", timeout_seconds=15
             )).result
             assert result.status is ExecutionStatus.SUCCEEDED
-        if isinstance(sandbox, _RecordingLocalSandbox):
-            assert sandbox.roots == [tmp_path]
+        if sandbox is _RecordingLocalWorkspace:
+            assert sandbox.roots and set(sandbox.roots) == {tmp_path}
         assert json.loads((tmp_path / "local-effect.txt").read_text()) == {
             "cwd": str(tmp_path) if sandbox_kind == "local" else "/workspace",
             "network": "allowed" if sandbox_kind == "local" else "blocked",
@@ -953,12 +923,8 @@ async def test_cleanup_failure_preserves_confirmed_tool_result_and_idempotent_re
 
     monkeypatch.setattr(Client, "close", failing_close)
     async with _serve() as remote:
-        storage = RuntimeStorage.in_memory()
-        async with Runtime.open(
-            "remote-cleanup",
-            storage=storage,
-            features=model_features(_RemoteModels(), _group(_spec(remote))),
-        ) as runtime:
+        storage = PersistenceStorage.in_memory()
+        async with Persistence.open('remote-cleanup', storage=storage) as persistence_957, Runtime.attach(persistence=persistence_957, features=model_features(_RemoteModels(), _group(_spec(remote)))) as runtime:
             execution = await runtime.agents.get("default").start(
                 "echo",
                 idempotency_key="confirmed-before-close",
@@ -1024,19 +990,13 @@ async def test_one_failed_client_cleanup_still_closes_other_clients(
 
 @pytest.mark.asyncio
 async def test_mixed_runtime_does_not_bypass_failed_local_sandbox() -> None:
-    class UnavailableSandbox(LocalSandbox):
-        async def open(
-            self,
-            *,
-            root: Path,
-            resources: tuple[SandboxResource, ...] = (),
-        ) -> SandboxSession:
-            del root, resources
+    class UnavailableWorkspace(LocalWorkspaceBackend):
+        async def working_dir(self) -> str:
             raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
 
     async with _serve() as remote:
         group = RuntimeFeatures[object](
-            "mixed-unavailable", sandbox=UnavailableSandbox()
+            "mixed-unavailable", workspace_factory=UnavailableWorkspace
         )
         group.mcp(_spec(remote))
         group.mcp(MCPServerSpec("local", "unavailable-local-mcp"))
@@ -1047,11 +1007,7 @@ async def test_mixed_runtime_does_not_bypass_failed_local_sandbox() -> None:
                 mcp_server_selector("local"),
             ),
         )
-        async with Runtime.open(
-            "mixed-unavailable",
-            storage=RuntimeStorage.in_memory(),
-            features=model_features(_MixedModels(), group),
-        ) as runtime:
+        async with Persistence.open('mixed-unavailable', storage=PersistenceStorage.in_memory()) as persistence_1050, Runtime.attach(persistence=persistence_1050, features=model_features(_MixedModels(), group)) as runtime:
             result = (await runtime.agents.get("default").run(
                 "call both", timeout_seconds=10
             )).result

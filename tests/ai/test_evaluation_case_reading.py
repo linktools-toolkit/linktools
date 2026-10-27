@@ -8,7 +8,7 @@ import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import CaseRef, TargetTrialRef
-from linktools.ai.runtime._evaluation import RuntimeEvaluations
+from linktools.ai.evaluation.engine._service import Evaluations
 
 
 @pytest.mark.asyncio
@@ -18,7 +18,7 @@ async def test_coordinator_reads_distinct_case_versions_afresh(
 ) -> None:
     import asyncio
 
-    owner = object.__new__(RuntimeEvaluations)
+    owner = object.__new__(Evaluations)
     refs = (CaseRef("dataset", "case", 1), CaseRef("dataset", "case", 2),
             CaseRef("other", "case", 1))
     trials = tuple(SimpleNamespace(case_ref=ref, trial=TargetTrialRef("run", str(index)))

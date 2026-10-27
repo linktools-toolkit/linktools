@@ -69,7 +69,7 @@ default. Type parameters add no fields to persisted references or graph identity
 ## Conditional batch expansion and collection
 
 The runnable [batch example](../../examples/task_graph.py) uses only public APIs
-and an in-memory Runtime, with no model/provider calls:
+and a Runtime-bound TaskEngine with in-memory storage, with no model/provider calls:
 
 ```bash
 python examples/task_graph.py

@@ -3,7 +3,7 @@
 
 """Conversation preparation reuses only one pre-body metadata capture."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from dataclasses import replace
 from pathlib import Path
 
@@ -11,10 +11,10 @@ import pytest
 from sqlalchemy import event
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeDomain
-from linktools.ai.runtime.state._model_interaction_store import ModelInteractionStateStepArchive
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord
-from linktools.ai.runtime.state._store import active_state_scope
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
+from linktools.ai.persistence._step_contracts import AgentRunRecord
+from linktools.ai.persistence.state import active_state_scope
 
 from .test_checkpoint_metadata_snapshot_io import _checkpoint
 from .test_incremental_projection_boundaries import _storage
@@ -27,9 +27,9 @@ async def test_conversation_preparation_reuses_new_run_metadata(
     tmp_path: Path, existing: str,
 ) -> None:
     state = _storage("sqlite", tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="conversation-preparation", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CONVERSATION)
+    archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
     run = AgentRunRecord("run")
     engine = archive.state_store.storage_group.context.engine.sync_engine
     statements = []
@@ -80,9 +80,9 @@ async def test_conversation_preparation_preserves_custom_owner_operations(
     tmp_path: Path, override: str,
 ) -> None:
     state = _storage("memory", tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="conversation-preparation", tenant_id="tenant")
-    original = state.run_store.read_store(RuntimeDomain.CONVERSATION)
+    original = state.run_store.read_store(PersistenceDomain.CONVERSATION)
     run = AgentRunRecord("run")
 
     class RelocatingArchive(ModelInteractionStateStepArchive):
@@ -97,7 +97,7 @@ async def test_conversation_preparation_preserves_custom_owner_operations(
 
     custom = (RelocatingArchive if override == "relocate" else PreparingArchive)(
         original.state_store, object_store=None, namespace="conversation-preparation",
-        tenant_id="tenant", runtime_domain=RuntimeDomain.CONVERSATION,
+        tenant_id="tenant", runtime_domain=PersistenceDomain.CONVERSATION,
     )
     try:
         checkpoint = _checkpoint(1)
@@ -114,9 +114,9 @@ async def test_conversation_preparation_keeps_fresh_commit_guard(
     tmp_path: Path, backend: str,
 ) -> None:
     state = _storage(backend, tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="conversation-preparation", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CONVERSATION)
+    archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
     run = AgentRunRecord("run")
     try:
         _, batch = await archive.prepare_conversation_checkpoint(run, _checkpoint(2))

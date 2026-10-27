@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Agent node deadlines cancel execution trees and survive durable recovery."""
 from ._runtime_test_helpers import model_features
 
 import asyncio
 import multiprocessing
+from contextlib import AsyncExitStack
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
@@ -16,10 +19,13 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, RunBudget, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import CheckpointCapability
-from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime._agent_task import RuntimeAgentTaskRunner
-from linktools.ai.task import TaskGraph, TaskNode
+from linktools.ai.inputs import AgentTaskInput
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import Persistence
+from linktools.ai.task.engine._agent import AgentTaskRunner
+from linktools.ai.task import Task, TaskGraph, TaskNode
+from linktools.ai.task.engine import TaskEngine
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
@@ -43,7 +49,7 @@ async def test_agent_node_deadline_cancels_work_and_preserves_unknown_effects(
             current_time = initial_time + timedelta(seconds=elapsed)
             return current_time.replace(tzinfo=None) if tz is None else current_time.astimezone(tz)
 
-    wait_execution = RuntimeAgentTaskRunner._wait_execution
+    wait_execution = AgentTaskRunner._wait_execution
 
     async def wait_after_work_started(self, *args, **kwargs):
         nonlocal clock_resumed_at
@@ -53,9 +59,9 @@ async def test_agent_node_deadline_cancels_work_and_preserves_unknown_effects(
 
     # Exclude setup from the deadline, then let real elapsed time drive the
     # original wait and cancellation after the intended work has started.
-    for module in ("_agent_task", "_execution", "_local"):
-        monkeypatch.setattr(f"linktools.ai.runtime.{module}.datetime", Clock)
-    monkeypatch.setattr(RuntimeAgentTaskRunner, "_wait_execution", wait_after_work_started)
+    for module in ("task.engine._agent", "execution._service", "runtime._execution", "runtime._local"):
+        monkeypatch.setattr(f"linktools.ai.{module}.datetime", Clock)
+    monkeypatch.setattr(AgentTaskRunner, "_wait_execution", wait_after_work_started)
 
     async def work() -> str:
         entered.set()
@@ -86,15 +92,12 @@ async def test_agent_node_deadline_cancels_work_and_preserves_unknown_effects(
     group.agent("default", model="default", allow_tools=() if phase in {"model", "subagent"} else ("slow",),
                 allow_skills=(), allow_subagents=("child",) if phase == "subagent" else ())
     group.agent("child", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open(
-        "deadline",
-        storage=RuntimeStorage.in_memory(), features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as runtime:
-        task = runtime.tasks.from_agent("deadline.agent", runtime.agents.get())
-        run = await runtime.tasks.bind(task).start(
+    async with Persistence.open('deadline', storage=PersistenceStorage.in_memory()) as persistence_89, Runtime.attach(persistence=persistence_89, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_89) as engine:
+        task = Task.from_agent("deadline.agent", runtime.agents.get())
+        run = await engine.with_definitions(task).start(
             TaskGraph("deadline", (TaskNode("agent", task=task, input=AgentTaskInput("work"), timeout_seconds=0.3),)),
             idempotency_key="start",
-        )
+         principal=runtime.default_principal)
         result = (await run.wait(timeout_seconds=3)).result
         node, = (await run.state()).node_states
         execution = await runtime.executions.inspect(node.execution_id, principal=runtime.default_principal)
@@ -130,7 +133,7 @@ async def test_agent_node_deadline_uses_tighter_limit_without_replacing_shared_b
         def now(cls, tz: tzinfo | None = None) -> datetime:
             return current_time.replace(tzinfo=None) if tz is None else current_time.astimezone(tz)
 
-    wait_execution = RuntimeAgentTaskRunner._wait_execution
+    wait_execution = AgentTaskRunner._wait_execution
 
     async def wait_after_model_started(self, *args, **kwargs):
         nonlocal current_time
@@ -141,9 +144,9 @@ async def test_agent_node_deadline_uses_tighter_limit_without_replacing_shared_b
 
     # First establish a real shared-budget reservation, then expire only the
     # tighter limit. Startup speed must not decide whether a request exists.
-    for module in ("_agent_task", "_execution", "_local", "state._budget"):
-        monkeypatch.setattr(f"linktools.ai.runtime.{module}.datetime", Clock)
-    monkeypatch.setattr(RuntimeAgentTaskRunner, "_wait_execution", wait_after_model_started)
+    for module in ("task.engine._agent", "execution._service", "runtime._execution", "runtime._local", "persistence._budget"):
+        monkeypatch.setattr(f"linktools.ai.{module}.datetime", Clock)
+    monkeypatch.setattr(AgentTaskRunner, "_wait_execution", wait_after_model_started)
 
     async def model(messages, info):
         del messages, info
@@ -158,20 +161,17 @@ async def test_agent_node_deadline_uses_tighter_limit_without_replacing_shared_b
 
     group = RuntimeFeatures("deadline-budget")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open(
-        "deadline-budget",
-        storage=RuntimeStorage.in_memory(), features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as runtime:
-        task = runtime.tasks.from_agent("deadline.agent", runtime.agents.get())
+    async with Persistence.open('deadline-budget', storage=PersistenceStorage.in_memory()) as persistence_161, Runtime.attach(persistence=persistence_161, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_161) as engine:
+        task = Task.from_agent("deadline.agent", runtime.agents.get())
         budget = RunBudget(model_requests=4, deadline_at=(
             None if earlier == "none" else current_time + timedelta(seconds=3 if earlier == "node" else 0.3)
         ))
-        run = await runtime.tasks.bind(task).start(
+        run = await engine.with_definitions(task).start(
             TaskGraph("deadline-budget", (TaskNode(
                 "agent", task=task, input=AgentTaskInput("work"),
                 timeout_seconds=None if earlier in {"none", "graph_only"} else 0.3 if earlier == "node" else 3,
             ),)), idempotency_key="start", budget=budget,
-        )
+         principal=runtime.default_principal)
         result = (await run.wait(timeout_seconds=4)).result
         node, = (await run.state()).node_states
         usage = await run.budget_usage()
@@ -206,9 +206,10 @@ def _recovery_group(subagent: bool, change: str = "none") -> RuntimeFeatures:
 
 def _start_interrupted_graph(
     path: str, ready: object, backend: str, timeout: float | None = 0.5, subagent: bool = False,
-    interrupt_child: bool = True,
+    interrupt_child: bool = True, missing_capture: bool = False,
 ) -> None:
     observer_entered = asyncio.Event()
+    model_entered = asyncio.Event()
 
     async def pause_before_deadline_observation(*args, **kwargs):
         del args, kwargs
@@ -216,7 +217,7 @@ def _start_interrupted_graph(
         await asyncio.Event().wait()
 
     async def start() -> None:
-        entered = asyncio.Event()
+        entered = model_entered
 
         async def model(messages, info):
             del messages
@@ -227,15 +228,12 @@ def _start_interrupted_graph(
             return ModelResponse(parts=[TextPart("late")])
 
         group = _recovery_group(subagent)
-        async with Runtime.open(
-            "deadline-recovery",
-            storage=(RuntimeStorage.sqlite(Path(path)) if backend == "sqlite" else RuntimeStorage.filesystem(Path(path))), features=model_features(_Models(_UsageFunctionModel(model)), group),
-        ) as runtime:
-            task = runtime.tasks.from_agent("deadline.agent", runtime.agents.get())
-            run = await runtime.tasks.bind(task).start(
+        async with Persistence.open('deadline-recovery', storage=PersistenceStorage.sqlite(Path(path)) if backend == 'sqlite' else PersistenceStorage.filesystem(Path(path))) as persistence_230, Runtime.attach(persistence=persistence_230, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_230) as engine:
+            task = Task.from_agent("deadline.agent", runtime.agents.get())
+            run = await engine.with_definitions(task).start(
                 TaskGraph("deadline-recovery", (TaskNode("agent", task=task, input=AgentTaskInput("work"), timeout_seconds=timeout),)),
                 idempotency_key="start",
-            )
+             principal=runtime.default_principal)
             # The parent bounds the complete startup handshake, including
             # filesystem persistence and child execution admission.
             await entered.wait()
@@ -252,7 +250,17 @@ def _start_interrupted_graph(
     # settle cancellation before the parent can kill it. Model/child work and
     # all recovery-side deadline handling remain real.
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(RuntimeAgentTaskRunner, "_wait_execution", pause_before_deadline_observation)
+        patch.setattr(AgentTaskRunner, "_wait_execution", pause_before_deadline_observation)
+        if missing_capture:
+            from linktools.ai.inputs import InputCaptures
+
+            async def pause_before_capture(self, execution_id, invocation):
+                await model_entered.wait()
+                view = await self._execution.inspect(execution_id, principal=invocation.principal)
+                ready.send((execution_id, view.started_at, invocation.principal.tenant_id))
+                await asyncio.Event().wait()
+
+            patch.setattr(InputCaptures, "record_invocation", pause_before_capture)
         asyncio.run(start())
 
 
@@ -262,6 +270,7 @@ def _start_interrupted_graph(
     ("sqlite", True, "none"), ("filesystem", True, "none"),
     ("sqlite", True, "metadata"), ("sqlite", True, "prompt"),
     ("sqlite", True, "tool"), ("sqlite", True, "revision"),
+    ("sqlite", False, "missing_capture"), ("filesystem", False, "missing_capture"),
 ))
 async def test_agent_node_recovery_keeps_first_start_deadline(
     tmp_path: Path, backend: str, subagent: bool, change: str,
@@ -269,7 +278,7 @@ async def test_agent_node_recovery_keeps_first_start_deadline(
     path = tmp_path / "state.db"
     context = multiprocessing.get_context("spawn")
     read, write = context.Pipe(duplex=False)
-    process = context.Process(target=_start_interrupted_graph, args=(str(path), write, backend, 0.5, subagent))
+    process = context.Process(target=_start_interrupted_graph, args=(str(path), write, backend, None if change == "missing_capture" else 0.5, subagent, True, change == "missing_capture"))
     process.start()
     try:
         assert await asyncio.to_thread(read.poll, 30), "Interrupted execution did not reach its ready boundary"
@@ -284,7 +293,7 @@ async def test_agent_node_recovery_keeps_first_start_deadline(
         write.close()
     # Read without a Runtime: startup reconciliation must not run before the
     # crash premise (including the real in-flight child) has been verified.
-    snapshot = RuntimeState(RuntimeStorage.sqlite(path) if backend == "sqlite" else RuntimeStorage.filesystem(path))
+    snapshot = Persistence(PersistenceStorage.sqlite(path) if backend == "sqlite" else PersistenceStorage.filesystem(path))
     await snapshot.initialize(namespace="deadline-recovery", tenant_id=tenant_id, read_only=True)
     try:
         original = await snapshot.execution.executions.get(execution_id, tenant_id=tenant_id)
@@ -308,18 +317,24 @@ async def test_agent_node_recovery_keeps_first_start_deadline(
         return ModelResponse(parts=[TextPart("late")])
 
     group = _recovery_group(subagent, change)
-    runtime_context = Runtime.open(
+    owners = AsyncExitStack()
+    persistence = await owners.enter_async_context(Persistence.open(
         "deadline-recovery",
-        storage=(RuntimeStorage.sqlite(path) if backend == "sqlite" else RuntimeStorage.filesystem(path)), features=model_features(_Models(_UsageFunctionModel(model)), group),
-    )
-    runtime = await runtime_context.__aenter__()
+        storage=PersistenceStorage.sqlite(path) if backend == "sqlite" else PersistenceStorage.filesystem(path),
+    ))
+    runtime = await owners.enter_async_context(Runtime.attach(
+        persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), group),
+    ))
+    engine = await owners.enter_async_context(TaskEngine.open(persistence=persistence))
     try:
         await asyncio.sleep(0.15)
         assert calls == 0
         current = await runtime.executions.inspect(execution_id, principal=runtime.default_principal)
         assert current.started_at == started_at
-        task = runtime.tasks.from_agent("deadline.agent", runtime.agents.get())
-        run = await runtime.tasks.bind(task).get("deadline-recovery")
+        if change == "missing_capture":
+            return
+        task = Task.from_agent("deadline.agent", runtime.agents.get())
+        run = await engine.with_definitions(task).get("deadline-recovery", principal=runtime.default_principal)
         if change in {"prompt", "tool", "revision"}:
             with pytest.raises(AIError) as caught:
                 await run.recover(idempotency_key="recover")
@@ -341,10 +356,10 @@ async def test_agent_node_recovery_keeps_first_start_deadline(
         if subagent and change in {"none", "metadata"}:
             # The interrupted delegated effect remains unknown on close too.
             with pytest.raises(AIError) as caught:
-                await runtime_context.__aexit__(None, None, None)
+                await owners.aclose()
             assert caught.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
         else:
-            await runtime_context.__aexit__(None, None, None)
+            await owners.aclose()
 
 
 @pytest.mark.asyncio
@@ -376,16 +391,13 @@ async def test_agent_recovery_relaunches_with_original_binding(tmp_path: Path, s
         return ModelResponse(parts=[TextPart("recovered")])
 
     group = _recovery_group(subagent)
-    storage = RuntimeStorage.sqlite(path) if subagent else RuntimeStorage.filesystem(path)
-    async with Runtime.open(
-        "deadline-recovery",
-        storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as runtime:
+    storage = PersistenceStorage.sqlite(path) if subagent else PersistenceStorage.filesystem(path)
+    async with Persistence.open('deadline-recovery', storage=storage) as persistence_380, Runtime.attach(persistence=persistence_380, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_380) as engine:
         original_binding = (await runtime._state.execution.executions.get(
             execution_id, tenant_id=runtime.default_principal.tenant_id,
         )).binding
-        task = runtime.tasks.from_agent("deadline.agent", runtime.agents.get())
-        run = await runtime.tasks.bind(task).get("deadline-recovery")
+        task = Task.from_agent("deadline.agent", runtime.agents.get())
+        run = await engine.with_definitions(task).get("deadline-recovery", principal=runtime.default_principal)
         if subagent:
             await run.recover(idempotency_key="recover")
         execution = await runtime.executions.get(execution_id)

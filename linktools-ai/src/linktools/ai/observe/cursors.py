@@ -1,0 +1,440 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Opaque resumable cursors for Runtime watch projections.
+
+Cursor validation protects resumable state from accidental corruption; service
+authorization remains the access-control boundary.
+"""
+
+import json
+from collections.abc import Mapping
+
+from ..core import HmacCursorSigner, canonical_sha256
+from ..errors import AIError, ErrorCode
+from ..core import decode_cursor as decode_runtime_cursor
+from ..core import encode_cursor as encode_runtime_cursor
+from ..core import token_seed
+
+_WATCH_CURSOR_VERSION = 1
+_RESULTS_CURSOR_VERSION = 1
+
+
+class ExecutionWatchPositions(dict[str, int]):
+    def __init__(self, events: Mapping[str, int], previews: Mapping[str, tuple[str, int]]) -> None:
+        super().__init__(events)
+        self.previews = dict(previews)
+
+
+def get_preview_positions(events: Mapping[str, int] | None) -> dict[str, tuple[str, int]]:
+    return dict(events.previews) if isinstance(events, ExecutionWatchPositions) else {}
+
+
+def _decode_execution_positions(value: Mapping[str, object]) -> Mapping[str, int]:
+    if isinstance(value.get("events"), Mapping):
+        if set(value) != {"events", "previews"} or not isinstance(value["previews"], dict):
+            raise AIError(ErrorCode.CURSOR_INVALID)
+        previews = {}
+        for key, position in value["previews"].items():
+            if (not isinstance(key, str) or not key or not isinstance(position, list)
+                    or len(position) != 2 or not isinstance(position[0], str) or not position[0]
+                    or len(position[0]) > 4096 or isinstance(position[1], bool)
+                    or not isinstance(position[1], int) or position[1] < 0):
+                raise AIError(ErrorCode.CURSOR_INVALID)
+            previews[key] = (position[0], position[1])
+        return ExecutionWatchPositions(_execution_event_seqs(value["events"]), previews)
+    return _execution_event_seqs(value)
+
+
+def encode_execution_watch_cursor(
+    namespace: str,
+    tenant_id: str,
+    execution_id: str,
+    *,
+    include_content: bool,
+    event_seqs: Mapping[str, int],
+    preview_positions: Mapping[str, tuple[str, int]] | None = None,
+) -> str:
+    normalized = _execution_event_seqs(event_seqs)
+    return encode_runtime_cursor(
+        _signer(namespace, "execution-watch"),
+        tenant_id=tenant_id,
+        resource_kind="EXECUTION_WATCH",
+        filter_digest=_filter_digest(
+            execution_id,
+            include_content=include_content,
+            kind="execution",
+        ),
+        position=json.dumps(
+            ({"events": normalized, "previews": dict(preview_positions)} if preview_positions else normalized),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )
+
+
+def decode_execution_watch_cursor(
+    namespace: str,
+    tenant_id: str,
+    execution_id: str,
+    cursor: str,
+    *,
+    include_content: bool,
+) -> Mapping[str, int]:
+    payload = decode_runtime_cursor(
+        cursor,
+        _signer(namespace, "execution-watch"),
+        tenant_id=tenant_id,
+        resource_kind="EXECUTION_WATCH",
+        filter_digest=_filter_digest(
+            execution_id,
+            include_content=include_content,
+            kind="execution",
+        ),
+    )
+    if payload.revision != 0:
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    try:
+        value = json.loads(payload.position)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    try:
+        return _decode_execution_positions(value)
+    except AIError as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
+
+
+def encode_execution_observation_cursor(
+    namespace: str,
+    tenant_id: str,
+    execution_id: str,
+    *,
+    include_content: bool,
+    event_seqs: Mapping[str, int],
+    preview_positions: Mapping[str, tuple[str, int]] | None = None,
+) -> str:
+    normalized = _execution_event_seqs(event_seqs)
+    return encode_runtime_cursor(
+        _signer(namespace, "execution-observation"),
+        tenant_id=tenant_id,
+        resource_kind="EXECUTION_OBSERVATION",
+        filter_digest=_filter_digest(
+            execution_id,
+            include_content=include_content,
+            kind="execution_observation",
+        ),
+        position=json.dumps(
+            ({"events": normalized, "previews": dict(preview_positions)} if preview_positions else normalized),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )
+
+
+def decode_execution_observation_cursor(
+    namespace: str,
+    tenant_id: str,
+    execution_id: str,
+    cursor: str,
+    *,
+    include_content: bool,
+) -> Mapping[str, int]:
+    payload = decode_runtime_cursor(
+        cursor,
+        _signer(namespace, "execution-observation"),
+        tenant_id=tenant_id,
+        resource_kind="EXECUTION_OBSERVATION",
+        filter_digest=_filter_digest(
+            execution_id,
+            include_content=include_content,
+            kind="execution_observation",
+        ),
+    )
+    if payload.revision != 0:
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    try:
+        value = json.loads(payload.position)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    try:
+        return _decode_execution_positions(value)
+    except AIError as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
+
+
+def encode_graph_watch_cursor(
+    namespace: str,
+    tenant_id: str,
+    graph_id: str,
+    *,
+    include_content: bool,
+    graph_event_seq: int,
+    execution_event_seqs: Mapping[str, Mapping[str, int]],
+) -> str:
+    if (
+        isinstance(graph_event_seq, bool)
+        or not isinstance(graph_event_seq, int)
+        or graph_event_seq < 0
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    normalized = _graph_execution_event_seqs(execution_event_seqs)
+    return encode_runtime_cursor(
+        _signer(namespace, "task-graph-watch"),
+        tenant_id=tenant_id,
+        resource_kind="TASK_GRAPH_WATCH",
+        filter_digest=_filter_digest(
+            graph_id,
+            include_content=include_content,
+            kind="task_graph",
+        ),
+        position=json.dumps(
+            {
+                "graph_event_seq": graph_event_seq,
+                "execution_event_seqs": normalized,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )
+
+
+def decode_graph_watch_cursor(
+    namespace: str,
+    tenant_id: str,
+    graph_id: str,
+    cursor: str,
+    *,
+    include_content: bool,
+) -> tuple[int, Mapping[str, Mapping[str, int]]]:
+    payload = decode_runtime_cursor(
+        cursor,
+        _signer(namespace, "task-graph-watch"),
+        tenant_id=tenant_id,
+        resource_kind="TASK_GRAPH_WATCH",
+        filter_digest=_filter_digest(
+            graph_id,
+            include_content=include_content,
+            kind="task_graph",
+        ),
+    )
+    if payload.revision != 0:
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    try:
+        value = json.loads(payload.position)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    if not isinstance(value, Mapping) or set(value) != {
+        "graph_event_seq",
+        "execution_event_seqs",
+    }:
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    sequence = value.get("graph_event_seq")
+    if (
+        isinstance(sequence, bool)
+        or not isinstance(sequence, int)
+        or sequence < 0
+    ):
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    raw_execution = value.get("execution_event_seqs")
+    if not isinstance(raw_execution, Mapping):
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    try:
+        execution = _graph_execution_event_seqs(raw_execution)
+    except AIError as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    return sequence, execution
+
+
+def encode_task_results_cursor(
+    namespace: str,
+    tenant_id: str,
+    graph_id: str,
+    *,
+    include_content: bool,
+    max_content_bytes: int,
+    graph_event_seq: int,
+    last_node_id: str,
+) -> str:
+    if (
+        isinstance(graph_event_seq, bool)
+        or not isinstance(graph_event_seq, int)
+        or graph_event_seq < 0
+        or not isinstance(last_node_id, str)
+        or not last_node_id
+    ):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return encode_runtime_cursor(
+        _signer(namespace, "task-graph-results"),
+        tenant_id=tenant_id,
+        resource_kind="TASK_GRAPH_RESULTS",
+        filter_digest=_results_filter_digest(
+            graph_id,
+            include_content=include_content,
+            max_content_bytes=max_content_bytes,
+        ),
+        position=last_node_id,
+        revision=graph_event_seq,
+    )
+
+
+def decode_task_results_cursor(
+    namespace: str,
+    tenant_id: str,
+    graph_id: str,
+    cursor: str,
+    *,
+    include_content: bool,
+    max_content_bytes: int,
+) -> tuple[int, str]:
+    payload = decode_runtime_cursor(
+        cursor,
+        _signer(namespace, "task-graph-results"),
+        tenant_id=tenant_id,
+        resource_kind="TASK_GRAPH_RESULTS",
+        filter_digest=_results_filter_digest(
+            graph_id,
+            include_content=include_content,
+            max_content_bytes=max_content_bytes,
+        ),
+    )
+    if not payload.position:
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    return payload.revision, payload.position
+
+
+def _signer(namespace: str, purpose: str) -> HmacCursorSigner:
+    return HmacCursorSigner(purpose, token_seed(namespace))
+
+
+def _filter_digest(
+    resource_id: str,
+    *,
+    include_content: bool,
+    kind: str,
+) -> str:
+    if (
+        not isinstance(resource_id, str)
+        or not resource_id
+        or not isinstance(include_content, bool)
+    ):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return canonical_sha256(
+        {
+            "version": _WATCH_CURSOR_VERSION,
+            "kind": kind,
+            "resource_id": resource_id,
+            "include_content": include_content,
+        }
+    )
+
+
+def _results_filter_digest(
+    graph_id: str,
+    *,
+    include_content: bool,
+    max_content_bytes: int,
+) -> str:
+    if (
+        not isinstance(graph_id, str)
+        or not graph_id
+        or not isinstance(include_content, bool)
+        or isinstance(max_content_bytes, bool)
+        or not isinstance(max_content_bytes, int)
+        or max_content_bytes < 1
+    ):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return canonical_sha256(
+        {
+            "version": _RESULTS_CURSOR_VERSION,
+            "kind": "task_graph_results",
+            "graph_id": graph_id,
+            "include_content": include_content,
+            "max_content_bytes": max_content_bytes,
+        }
+    )
+
+
+def _execution_event_seqs(value: Mapping[object, object]) -> dict[str, int]:
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    result: dict[str, int] = {}
+    for execution_id, sequence in value.items():
+        if (
+            not isinstance(execution_id, str)
+            or not execution_id
+            or isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or sequence < 0
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        result[execution_id] = sequence
+    return result
+
+
+def _graph_execution_event_seqs(
+    value: Mapping[object, object],
+) -> dict[str, dict[str, int]]:
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    result: dict[str, dict[str, int]] = {}
+    for node_id, raw_sequences in value.items():
+        if (
+            not isinstance(node_id, str)
+            or not node_id
+            or not isinstance(raw_sequences, Mapping)
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        result[node_id] = _execution_event_seqs(raw_sequences)
+    return result
+
+
+__all__ = [
+    "get_preview_positions", "ExecutionWatchPositions",
+    "decode_evaluation_watch_cursor",
+    "decode_task_results_cursor",
+    "decode_execution_watch_cursor",
+    "decode_execution_observation_cursor",
+    "decode_graph_watch_cursor",
+    "encode_evaluation_watch_cursor",
+    "encode_task_results_cursor",
+    "encode_execution_watch_cursor",
+    "encode_execution_observation_cursor",
+    "encode_graph_watch_cursor",
+]
+
+
+def encode_evaluation_watch_cursor(
+    namespace: str, tenant_id: str, experiment_id: str, *,
+    include_content: bool, graph_cursors: Mapping[str, str],
+) -> str:
+    return encode_runtime_cursor(
+        _signer(namespace, "evaluation-watch"), tenant_id=tenant_id,
+        resource_kind="EVALUATION_WATCH",
+        filter_digest=_filter_digest(experiment_id, include_content=include_content, kind="evaluation"),
+        position=json.dumps(dict(graph_cursors), sort_keys=True, separators=(",", ":")),
+    )
+
+
+def decode_evaluation_watch_cursor(
+    namespace: str, tenant_id: str, experiment_id: str, cursor: str, *, include_content: bool,
+) -> dict[str, str]:
+    payload = decode_runtime_cursor(
+        cursor, _signer(namespace, "evaluation-watch"), tenant_id=tenant_id,
+        resource_kind="EVALUATION_WATCH",
+        filter_digest=_filter_digest(experiment_id, include_content=include_content, kind="evaluation"),
+    )
+    try:
+        values = json.loads(payload.position)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    if (payload.revision != 0 or not isinstance(values, dict)
+            or any(not isinstance(key, str) or not key or not isinstance(value, str) or not value
+                   for key, value in values.items())):
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    return values

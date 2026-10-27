@@ -55,7 +55,7 @@ observable or budgeted by this feature.
 Custom `Task.from_runner` adapters receive graph deadline/token admission checks
 before dispatch, but own the executions and arbitrary effects they create. An
 adapter creating a Runtime execution can obtain its admitted scope with
-`runtime.tasks.budget_usage(invocation.graph_id, principal=invocation.principal)`
+`engine.budget_usage(invocation.graph_id, principal=invocation.principal)`
 and pass the returned `scope_id` as `budget_scope_id` to the existing
 `ExecutionService.start` or `start_task` operation. The service authorizes the
 owner and validates the durable scope. Supplying both a fresh `budget` and an

@@ -9,11 +9,12 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeDomain, RuntimeStorage, SnapshotLimits
+from linktools.ai.persistence.snapshots import SnapshotLimits
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime.state._codec import _decode_step_envelope, _encode_step_envelope
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord, StepEvent, StepEventType
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence.codec import _decode_step_envelope, _encode_step_envelope
+from linktools.ai.persistence._step_contracts import AgentRunRecord, StepEvent, StepEventType
 from linktools.ai.storage import InMemoryObjectStore
 
 _EVENT_TYPES: tuple[StepEventType, ...] = (
@@ -68,10 +69,10 @@ def test_step_event_wire_accepts_additive_metadata_fields() -> None:
     assert _decode_step_envelope(encoded) == event
 
 
-def _storage(backend: str, root: Path) -> RuntimeStorage:
+def _storage(backend: str, root: Path) -> PersistenceStorage:
     if backend == "filesystem":
-        return RuntimeStorage.filesystem(root)
-    return RuntimeStorage.sqlite(root / "state.db")
+        return PersistenceStorage.filesystem(root)
+    return PersistenceStorage.sqlite(root / "state.db")
 
 
 @pytest.mark.asyncio
@@ -81,10 +82,10 @@ async def test_step_event_archive_and_idempotency_survive_snapshot(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "runtime"
-    state = RuntimeState(_storage(backend, root))
+    state = Persistence(_storage(backend, root))
     await state.initialize(namespace="steps", tenant_id="tenant")
     try:
-        archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
         run = AgentRunRecord("run", started_at=_NOW)
         recorder = AgentRunRecorder(archive, execution_id=None, agent_run_id="run")
         await recorder.register_agent_run(run)
@@ -106,20 +107,20 @@ async def test_step_event_archive_and_idempotency_survive_snapshot(
 
     objects = InMemoryObjectStore("snapshot")
     limits = SnapshotLimits(max_entries=100, max_bytes=1024 * 1024)
-    reader = RuntimeState(_storage(backend, root))
+    reader = Persistence(_storage(backend, root))
     await reader.initialize(namespace="steps", tenant_id="tenant", read_only=True)
     try:
         reference = await reader.export_snapshot(object_store=objects, limits=limits)
     finally:
         await reader.close()
     restored_root = tmp_path / "restored"
-    await RuntimeState.restore_snapshot(
+    await Persistence.restore_snapshot(
         reference, object_store=objects, root=restored_root, limits=limits
     )
-    restored = RuntimeState(RuntimeStorage.from_root(restored_root))
+    restored = Persistence(PersistenceStorage.from_root(restored_root))
     await restored.initialize(namespace="steps", tenant_id="tenant")
     try:
-        restored_archive = restored.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        restored_archive = restored.run_store.read_store(PersistenceDomain.CHECKPOINT)
         assert await restored_archive.list_events(agent_run_id="run") == events
         recorder = AgentRunRecorder(restored_archive, execution_id=None, agent_run_id="run")
         await recorder.register_agent_run(run)

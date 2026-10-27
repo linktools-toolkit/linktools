@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """End-to-end evidence for current Runtime persistence contracts."""
 from ._runtime_test_helpers import model_features
 
@@ -25,16 +27,17 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._agent_executor import AgentExecutor
-from linktools.ai.runtime.state._codec import (
+from linktools.ai.persistence.codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
     decode_domain,
     encode_domain,
     encode_envelope,
 )
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence.contracts import (
     ExecutionRecord,
     ExecutionStartReservation,
     IdempotencyRecord,
@@ -223,23 +226,19 @@ async def test_terminal_stream_allows_immediate_runtime_close(
     backend: str,
 ) -> None:
     if backend == "filesystem":
-        state = RuntimeStorage.filesystem(tmp_path / "runtime")
+        state = PersistenceStorage.filesystem(tmp_path / "runtime")
     else:
         database = tmp_path / "runtime.db"
         engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
         await provision_runtime_database(engine)
         await engine.dispose()
-        state = RuntimeStorage.sqlite(
+        state = PersistenceStorage.sqlite(
             database,
             object_store=FilesystemObjectStore(tmp_path / "objects"),
         )
 
     try:
-        async with Runtime.open(
-            "default",
-            storage=state,
-            features=model_features(_PersistenceTestModels(), _agent_group()),
-        ) as runtime:
+        async with Persistence.open('default', storage=state) as persistence_238, Runtime.attach(persistence=persistence_238, features=model_features(_PersistenceTestModels(), _agent_group())) as runtime:
             execution = await runtime.agents.get("default").start("hello")
             terminal_events = []
             async for item in execution.watch():
@@ -276,18 +275,14 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
         raise AssertionError("blocked execution unexpectedly completed")
 
     monkeypatch.setattr(AgentExecutor, "execute", blocking_execute)
-    state = RuntimeStorage.sqlite(
+    state = PersistenceStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
     features = _agent_group()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     try:
-        async with Runtime.open(
-            "default",
-            storage=state,
-            features=model_features(_PersistenceTestModels(), features),
-        ) as runtime:
+        async with Persistence.open('default', storage=state) as persistence_286, Runtime.attach(persistence=persistence_286, features=model_features(_PersistenceTestModels(), features)) as runtime:
             task = asyncio.create_task(
                 _emit_result(
                     runtime,
@@ -306,16 +301,12 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
     finally:
         await runtime._state.close()
 
-    reopened = RuntimeStorage.sqlite(
+    reopened = PersistenceStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
     try:
-        async with Runtime.open(
-            "default",
-            storage=reopened,
-            features=model_features(_PersistenceTestModels(), features),
-        ) as reopened_runtime:
+        async with Persistence.open('default', storage=reopened) as persistence_314, Runtime.attach(persistence=persistence_314, features=model_features(_PersistenceTestModels(), features)) as reopened_runtime:
             pass
     finally:
         await reopened_runtime._state.close()
@@ -329,7 +320,7 @@ async def test_session_runtime_persists_and_reads_terminal_result(
     engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
     await provision_runtime_database(engine)
     await engine.dispose()
-    state = RuntimeStorage.sqlite(
+    state = PersistenceStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
@@ -337,11 +328,7 @@ async def test_session_runtime_persists_and_reads_terminal_result(
     features = _agent_group()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     try:
-        async with Runtime.open(
-            "default",
-            storage=state,
-            features=model_features(_PersistenceTestModels(), features),
-        ) as runtime:
+        async with Persistence.open('default', storage=state) as persistence_340, Runtime.attach(persistence=persistence_340, features=model_features(_PersistenceTestModels(), features)) as runtime:
             created = await runtime.agents.get("default").create_session("session")
             loaded = await runtime.sessions.get(
                 created.session_id,

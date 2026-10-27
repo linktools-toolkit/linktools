@@ -1,73 +1,54 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Workspace byte access backed by one lazy SandboxSession."""
+"""Workspace byte access through an existing native environment backend."""
 
 import asyncio
-from pathlib import Path
 
 from ..errors import AIError, ErrorCode
 from ._root import Workspace
-from ._sandbox import Sandbox, SandboxSession
+from ._sandbox import SupportsClose, SupportsFileTools
 
 
 class WorkspaceAccess:
-    """Own one lazy SandboxSession for Workspace path and byte access."""
+    """Borrow checked byte access; ownership is explicit when the caller creates it."""
 
-    def __init__(
-        self,
-        sandbox: Sandbox,
-        *,
-        root: Path,
-        session: SandboxSession | None = None,
-        workspace: Workspace | None = None,
-    ) -> None:
-        self._sandbox = sandbox
-        self._root = root
-        self._workspace = workspace if workspace is not None else Workspace(root, {})
-        self._session = session
+    def __init__(self, backend: SupportsFileTools | None, *, workspace: Workspace | None = None,
+                 owns_backend: bool = False) -> None:
+        self.backend = backend
+        self._workspace = workspace
+        self._owns_backend = owns_backend
         self._lock = asyncio.Lock()
         self._closed = False
+        self._cleanup_complete = False
 
     @classmethod
-    def for_workspace(
-        cls,
-        workspace: Workspace,
-        *,
-        sandbox: Sandbox,
-    ) -> "WorkspaceAccess":
-        return cls(
-            sandbox,
-            root=workspace.root,
-            workspace=workspace,
-        )
-
-    async def _ensure_session(self) -> SandboxSession:
-        async with self._lock:
-            if self._closed:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            if self._session is None:
-                self._session = await self._sandbox.open(root=self._root)
-            return self._session
+    def for_workspace(cls, workspace: Workspace, *, backend: SupportsFileTools | None,
+                      owns_backend: bool = False) -> "WorkspaceAccess":
+        return cls(backend, workspace=workspace, owns_backend=owns_backend)
 
     async def canonicalize_path(self, path: str) -> str:
-        session = await self._ensure_session()
-        return self._workspace.validate_path(await session.canonicalize_path(path))
+        if self._closed:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if self.backend is None:
+            raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
+        canonical = await self.backend.canonicalize_path(path)
+        return canonical if self._workspace is None else self._workspace.validate_path(canonical)
 
-    async def read_bytes(
-        self,
-        path: str,
-        *,
-        max_bytes: int | None = None,
-    ) -> bytes:
-        session = await self._ensure_session()
-        return await session.read_bytes(path, max_bytes=max_bytes)
+    async def read_bytes(self, path: str, *, max_bytes: int | None = None) -> bytes:
+        if self._closed:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if self.backend is None:
+            raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
+        return await self.backend.read_bytes(path, max_bytes=max_bytes)
 
     async def close(self) -> None:
         async with self._lock:
+            if self._cleanup_complete:
+                return
             self._closed = True
-            if self._session is not None:
-                await self._session.close()
-            self._session = None
+            if self._owns_backend and isinstance(self.backend, SupportsClose):
+                await self.backend.close()
+            self._cleanup_complete = True
 
 
 __all__ = ["WorkspaceAccess"]

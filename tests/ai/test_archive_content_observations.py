@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import AIError
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime.state._archive import ContentArchive, PreparedArchive
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence._archive import ContentArchive, PreparedArchive
 from linktools.ai.storage import StoredPayload
 from .test_incremental_projection_boundaries import _storage
 from .test_shared_content_archive import _archive, _publish
@@ -20,7 +20,7 @@ pytestmark = pytest.mark.asyncio
 async def test_content_observation_consumes_missing_and_preserves_fresh_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
     try:
         archive = await _archive(state)
@@ -51,7 +51,7 @@ async def test_content_observation_consumes_missing_and_preserves_fresh_publicat
 
 
 async def test_observation_still_checks_corrupt_body_and_does_not_propagate(tmp_path: Path) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
     try:
         archive = await _archive(state)
@@ -85,7 +85,7 @@ async def test_observation_still_checks_corrupt_body_and_does_not_propagate(tmp_
 async def test_observation_unknown_key_failure_does_not_retain_consumed_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
     try:
         archive = await _archive(state)
@@ -107,15 +107,15 @@ async def test_observation_unknown_key_failure_does_not_retain_consumed_missing(
 async def test_unsupported_group_keeps_preparation_metadata_before_archive_open(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    from linktools.ai.runtime import RuntimeDomain
-    from linktools.ai.runtime.state import GroupRecordReader
-    from linktools.ai.runtime.state._step_contracts import AgentRunRecord
+    from linktools.ai.persistence import PersistenceDomain
+    from linktools.ai.persistence.state import GroupRecordReader
+    from linktools.ai.persistence._step_contracts import AgentRunRecord
     from .test_checkpoint_metadata_snapshot_io import _checkpoint
 
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
     try:
-        archive = state.run_store.read_store(RuntimeDomain.CONVERSATION)
+        archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         assert not isinstance(archive.state_store.storage_group, GroupRecordReader)
         original_read = archive.state_store.read
         original_content = archive.transcript_repository.content_archive

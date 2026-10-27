@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Public cursors bind membership and associations to committed read cuts."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,13 +11,13 @@ import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
 from linktools.ai.core import HmacCursorSigner, agent_conversation_id, agent_run_id
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
-from linktools.ai.runtime._runtime_history import _merge_usage_summaries
-from linktools.ai.runtime.service_api import UsageSummary
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._contracts import ExecutionHistoryHeadRecord, ExecutionHistoryState
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord, StepEvent
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.history._projection import StepExecutionHistoryReader
+from linktools.ai.history._history import _merge_usage_summaries
+from linktools.ai.execution import UsageSummary
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.contracts import ExecutionHistoryHeadRecord, ExecutionHistoryState
+from linktools.ai.persistence._step_contracts import AgentRunRecord, StepEvent
 
 from .test_model_interaction_lifecycle_paging import _Executions, _HistoryStore, _interaction, _record
 
@@ -54,14 +54,14 @@ async def test_usage_retains_running_and_interrupted_unknowns_without_fake_cance
 
 @pytest.mark.asyncio
 async def test_trace_index_preserves_timestamp_order_and_fixed_event_membership(tmp_path: Path) -> None:
-    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "history.db"))
+    storage = Persistence(PersistenceStorage.sqlite(tmp_path / "history.db"))
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
         executions = storage.execution.executions
         await executions.state_store.mutate(lambda transaction: executions.insert_history_head_in_transaction(
             transaction, ExecutionHistoryHeadRecord("root", ExecutionHistoryState.OPEN, 0, None),
         ))
-        archive = storage.run_store.read_store(RuntimeDomain.TRACE)
+        archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         run_id = agent_run_id(namespace="history", tenant_id="tenant", execution_id="root", agent_run_seq=1)
         conversation_id = agent_conversation_id(namespace="history", tenant_id="tenant", execution_id="root")
         run = AgentRunRecord(run_id, agent_conversation_id=conversation_id, metadata={"agent_run_seq": "1"})
@@ -95,14 +95,14 @@ async def test_trace_index_preserves_timestamp_order_and_fixed_event_membership(
 
 @pytest.mark.asyncio
 async def test_history_cursor_preserves_response_association_cutoff(tmp_path: Path) -> None:
-    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "associations.db"))
+    storage = Persistence(PersistenceStorage.sqlite(tmp_path / "associations.db"))
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
         executions = storage.execution.executions
         await executions.state_store.mutate(lambda transaction: executions.insert_history_head_in_transaction(
             transaction, ExecutionHistoryHeadRecord("root", ExecutionHistoryState.OPEN, 0, None),
         ))
-        archive = storage.run_store.read_store(RuntimeDomain.TRACE)
+        archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         run_id = agent_run_id(namespace="history", tenant_id="tenant", execution_id="root", agent_run_seq=1)
         conversation_id = agent_conversation_id(namespace="history", tenant_id="tenant", execution_id="root")
         run = AgentRunRecord(run_id, agent_conversation_id=conversation_id, metadata={"agent_run_seq": "1"})
@@ -140,14 +140,14 @@ async def test_history_cursor_preserves_response_association_cutoff(tmp_path: Pa
 async def test_history_cursor_keeps_an_empty_captured_run_empty_after_completion(tmp_path: Path) -> None:
     from linktools.ai.core import ExecutionStatus
 
-    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "empty-run.db"))
+    storage = Persistence(PersistenceStorage.sqlite(tmp_path / "empty-run.db"))
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
         executions = storage.execution.executions
         await executions.state_store.mutate(lambda transaction: executions.insert_history_head_in_transaction(
             transaction, ExecutionHistoryHeadRecord("root", ExecutionHistoryState.OPEN, 0, None),
         ))
-        archive = storage.run_store.read_store(RuntimeDomain.TRACE)
+        archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         conversation_id = agent_conversation_id(namespace="history", tenant_id="tenant", execution_id="root")
         run_ids = tuple(agent_run_id(namespace="history", tenant_id="tenant", execution_id="root", agent_run_seq=sequence)
                         for sequence in (1, 2))
@@ -184,11 +184,11 @@ async def test_history_cursor_keeps_an_empty_captured_run_empty_after_completion
 
 @pytest.mark.asyncio
 async def test_history_and_trace_pagination_preserve_cross_run_and_child_order(tmp_path: Path) -> None:
-    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "source-order.db"))
+    storage = Persistence(PersistenceStorage.sqlite(tmp_path / "source-order.db"))
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
         executions = storage.execution.executions
-        archive = storage.run_store.read_store(RuntimeDomain.TRACE)
+        archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         root = _record("root")
         root.agent_run_seq = 2
         child = _record("child", child=True)
@@ -254,14 +254,14 @@ async def test_history_and_trace_pagination_preserve_cross_run_and_child_order(t
 async def test_history_replay_projection_omits_only_duplicate_calls_at_original_coordinates(tmp_path: Path) -> None:
     from pydantic_ai.messages import ToolCallPart, ToolReturnPart
 
-    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "replayed-calls.db"))
+    storage = Persistence(PersistenceStorage.sqlite(tmp_path / "replayed-calls.db"))
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
         executions = storage.execution.executions
         await executions.state_store.mutate(lambda transaction: executions.insert_history_head_in_transaction(
             transaction, ExecutionHistoryHeadRecord("root", ExecutionHistoryState.OPEN, 0, None),
         ))
-        archive = storage.run_store.read_store(RuntimeDomain.TRACE)
+        archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         run_id = agent_run_id(namespace="history", tenant_id="tenant", execution_id="root", agent_run_seq=1)
         conversation_id = agent_conversation_id(namespace="history", tenant_id="tenant", execution_id="root")
         await archive.register_agent_run(AgentRunRecord(

@@ -5,6 +5,7 @@
 from ._persistence import CheckpointCapability, TraceCapability
 from ._tool_responses import ToolResponseFixture, ToolResponsesCapability
 from ._tool_results import ToolResultsCapability
+from ._run_callbacks import RunCallbacks, RunCallbackScope, bind_run_callbacks
 from ._referenced_inputs import ReferencedInputsCapability
 from ._asset import AssetCapability
 from ._context import AgentContext
@@ -28,6 +29,7 @@ from ._skill_source import (
 )
 from ._subagent import SubagentCapability, SubagentDelegate
 from ._tool_signal import ToolCallFailed, ToolCallRetry
+from ._pydantic_tool_control import PydanticToolControlCapability
 from ._tool_metadata import (
     ToolClass,
     ToolEffectPolicy,
@@ -49,11 +51,12 @@ from ._tool_metadata import (
     tool_metadata,
     validate_tool_metadata,
 )
-from ._workspace import (
-    WorkspaceCapability,
-    WorkspaceToolDeclaration,
-    workspace_capabilities,
-    workspace_tool_declarations,
+from ._shell import ShellCapability
+from ._filesystem import (
+    FileSystem,
+    FileSystemToolDeclaration,
+    filesystem_capabilities,
+    filesystem_tool_declarations,
 )
 from ..spec import mcp_server_selector, mcp_tool_selector
 
@@ -68,8 +71,10 @@ __all__ = [
     "CheckpointCapability", "TraceCapability",
     "ToolResponsesCapability",
     "ToolResultsCapability",
+    "RunCallbacks", "RunCallbackScope", "bind_run_callbacks",
     "AssetCapability",
-    "WorkspaceCapability",
+    "FileSystem",
+    "ShellCapability",
     "ToolClass",
     "ToolEffectPolicy",
     "is_tool_class",
@@ -91,7 +96,7 @@ __all__ = [
     "TOOL_EFFECT_POLICY_METADATA_KEY",
     "TOOL_PATH_FIELDS_METADATA_KEY",
     "TOOL_PLAN_SAFE_METADATA_KEY",
-    "WorkspaceToolDeclaration",
+    "FileSystemToolDeclaration",
     "SkillDefinition",
     "SkillLocation",
     "SkillSource",
@@ -102,11 +107,12 @@ __all__ = [
     "SubagentDelegate",
     "ToolCallFailed",
     "ToolCallRetry",
+    "PydanticToolControlCapability",
     "mcp_resource_path",
     "mcp_server_selector",
     "mcp_tool_selector",
-    "workspace_capabilities",
-    "workspace_tool_declarations",
+    "filesystem_capabilities",
+    "filesystem_tool_declarations",
     "validate_resource_path",
     "validate_resource_tree",
     "tool_class_from_metadata",

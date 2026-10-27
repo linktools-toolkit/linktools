@@ -13,20 +13,21 @@ from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserProm
 from linktools.ai.core import ExecutionStatus, HmacCursorSigner, UsageMetrics, agent_conversation_id, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelClientRequest
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
-from linktools.ai.runtime._model_interaction import (
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.history._projection import StepExecutionHistoryReader
+from linktools.ai.persistence._model_interaction import (
     StagedContextProjection, StagedContextSpan, StagedModelInteraction,
     StagedStreamAttemptRecord, build_inline_context_projection,
 )
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeState, SnapshotLimits
-from linktools.ai.runtime.state._archive import PreparedArchive
-from linktools.ai.runtime.state._codec import (
+from linktools.ai.persistence import PersistenceDomain, Persistence
+from linktools.ai.persistence.snapshots import SnapshotLimits
+from linktools.ai.persistence._archive import PreparedArchive
+from linktools.ai.persistence.codec import (
     _CURRENT_CODEC, _decode_domain, _decode_step_envelope,
     _encode_persisted_domain, _encode_step_envelope,
 )
-from linktools.ai.runtime.state._contracts import ModelInteractionRecord
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord
+from linktools.ai.persistence.contracts import ModelInteractionRecord
+from linktools.ai.persistence._step_contracts import AgentRunRecord
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef
 
 from .test_evaluation_retention import Offline
@@ -41,18 +42,18 @@ def _run() -> AgentRunRecord:
     return AgentRunRecord(_RUN, agent_conversation_id=_CONVERSATION, metadata={"agent_run_seq": "1"})
 
 
-def _storage(backend: str, root: Path) -> RuntimeStorage:
+def _storage(backend: str, root: Path) -> PersistenceStorage:
     if backend == "memory":
-        return RuntimeStorage.in_memory()
+        return PersistenceStorage.in_memory()
     if backend == "filesystem":
-        return RuntimeStorage.filesystem(root / "state")
-    return RuntimeStorage.sqlite(root / "state.db")
+        return PersistenceStorage.filesystem(root / "state")
+    return PersistenceStorage.sqlite(root / "state.db")
 
 
 
-async def _object_refs(state: RuntimeState) -> tuple[tuple[RuntimeDomain, ObjectRef], ...]:
-    store = state.archive_object_store(RuntimeDomain.TRACE)
-    return tuple([(RuntimeDomain.TRACE, ObjectRef(store.store_id, item.key, item.digest, item.size))
+async def _object_refs(state: Persistence) -> tuple[tuple[PersistenceDomain, ObjectRef], ...]:
+    store = state.archive_object_store(PersistenceDomain.TRACE)
+    return tuple([(PersistenceDomain.TRACE, ObjectRef(store.store_id, item.key, item.digest, item.size))
                   async for item in store.list_objects()])
 
 
@@ -121,12 +122,12 @@ async def test_interrupted_stream_aggregate_stays_trace_only(
 ) -> None:
     staged, payloads, _, response = _interrupted(status)
     run = _run()
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="stream-observation", tenant_id="tenant")
     await state.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
     try:
-        trace = state.run_store.read_store(RuntimeDomain.TRACE)
-        checkpoint = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        trace = state.run_store.read_store(PersistenceDomain.TRACE)
+        checkpoint = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
         prepared = PreparedArchive()
         records = await trace.prepare_interactions(run, (staged,), payloads.__getitem__, prepared=prepared)
         record, = records
@@ -136,7 +137,7 @@ async def test_interrupted_stream_aggregate_stays_trace_only(
         assert resolved[0][1] == response
         assert all(attempt.response_context is None for attempt in record.stream_attempts)
         with pytest.raises(AIError) as rejected:
-            record.validate_storage_domain(RuntimeDomain.CHECKPOINT)
+            record.validate_storage_domain(PersistenceDomain.CHECKPOINT)
         assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         for projected in (
             await checkpoint.prepare_interactions(run, (staged,), payloads.__getitem__, prepared=prepared),
@@ -144,7 +145,7 @@ async def test_interrupted_stream_aggregate_stays_trace_only(
         ):
             assert projected[0].response_context is None
             assert projected[0].usage == staged.usage
-            projected[0].validate_storage_domain(RuntimeDomain.CHECKPOINT)
+            projected[0].validate_storage_domain(PersistenceDomain.CHECKPOINT)
             await checkpoint.sync_projection(run, events=(), checkpoints=(), interactions=projected,
                                              execution_id="execution", archive=prepared)
             read = await checkpoint.resolve_model_interactions(projected, include_client_requests=True)
@@ -164,13 +165,13 @@ async def test_interrupted_stream_aggregate_stays_trace_only(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
 async def test_stream_attempts_round_trip_relocate_and_omit_content(tmp_path: Path, backend: str) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="stream-observation", tenant_id="tenant")
     await state.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
     staged, payloads, request, winner, partial = _staged()
     prepared = PreparedArchive()
     try:
-        trace = state.run_store.read_store(RuntimeDomain.TRACE)
+        trace = state.run_store.read_store(PersistenceDomain.TRACE)
         run = _run()
         records = await trace.prepare_interactions(run, (staged,), payloads.__getitem__, prepared=prepared)
         record, = records
@@ -198,7 +199,7 @@ async def test_stream_attempts_round_trip_relocate_and_omit_content(tmp_path: Pa
         light, = page.items
         assert all(attempt.response is None for attempt in light.stream_attempts)
         assert light.stream_attempts[0].usage == staged.stream_attempts[0].usage
-        for domain in (RuntimeDomain.CHECKPOINT,):
+        for domain in (PersistenceDomain.CHECKPOINT,):
             target = state.run_store.read_store(domain)
             relocated = await target.prepare_relocated_interactions(records, resolved, prepared=prepared)
             assert all(attempt.response_context is None for attempt in relocated[0].stream_attempts)
@@ -233,10 +234,10 @@ def test_stream_attempt_metadata_requires_ordered_actual_ranges_and_separate_par
 @pytest.mark.parametrize("observed", (False, True))
 async def test_old_missing_attempts_and_observed_empty_remain_distinct(observed: bool) -> None:
     interaction, payloads, _, _, _ = _staged()
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="stream-observation", tenant_id="tenant")
     try:
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         record, = await archive.prepare_interactions(_run(),
             (replace(interaction, stream_attempts=() if observed else None),), payloads.__getitem__,
             prepared=PreparedArchive())
@@ -265,11 +266,11 @@ async def test_failed_partial_survives_snapshot_and_owned_cleanup(
     else:
         staged, payloads, request, winner, partial = _staged(large=True)
         attempt_responses = (partial, None)
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="stream-observation", tenant_id="tenant")
     await state.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
     try:
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         prepared = PreparedArchive()
         run = _run()
         records = await archive.prepare_interactions(run, (staged,), payloads.__getitem__, prepared=prepared)
@@ -282,18 +283,18 @@ async def test_failed_partial_survives_snapshot_and_owned_cleanup(
         await state.close()
     objects = InMemoryObjectStore("snapshot")
     limits = SnapshotLimits(max_entries=100, max_bytes=2 * 1024 * 1024)
-    reader = RuntimeState(_storage(backend, tmp_path))
+    reader = Persistence(_storage(backend, tmp_path))
     await reader.initialize(namespace="stream-observation", tenant_id="tenant", read_only=True)
     try:
         snapshot = await reader.export_snapshot(object_store=objects, limits=limits)
     finally:
         await reader.close()
     root = tmp_path / "restored"
-    await RuntimeState.restore_snapshot(snapshot, object_store=objects, root=root, limits=limits)
-    restored = RuntimeState(RuntimeStorage.from_root(root))
+    await Persistence.restore_snapshot(snapshot, object_store=objects, root=root, limits=limits)
+    restored = Persistence(PersistenceStorage.from_root(root))
     await restored.initialize(namespace="stream-observation", tenant_id="tenant")
     try:
-        archive = restored.run_store.read_store(RuntimeDomain.TRACE)
+        archive = restored.run_store.read_store(PersistenceDomain.TRACE)
         records = await archive.list_model_interactions(agent_run_id=_RUN)
         resolved = await archive.resolve_model_interactions(records)
         assert resolved == [(request, winner, b'{"streaming":true}', None, attempt_responses)]
@@ -314,11 +315,11 @@ async def test_successful_continuation_segments_share_one_canonical_response() -
     staged = replace(staged, stream_attempts=(first, replace(failed, stream_attempt_seq=2),
                                              replace(succeeded, stream_attempt_seq=3)),
                      usage=UsageMetrics(3, 0, 26, 10))
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="stream-observation", tenant_id="tenant")
     await state.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
     try:
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         prepared = PreparedArchive()
         record, = await archive.prepare_interactions(_run(), (staged,), payloads.__getitem__, prepared=prepared)
         await archive.sync_projection(_run(), events=(), checkpoints=(), interactions=(record,),

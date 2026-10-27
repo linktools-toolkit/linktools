@@ -16,11 +16,11 @@ from linktools.ai.core import (
     canonical_sha256,
     idempotency_key_digest,
 )
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._commands import RuntimeStateCommands
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.commands import StateCommands
+from linktools.ai.persistence.contracts import (
     deferred_resource_id,
     ApprovalRecord,
     ExecutionCancelRequestCommit,
@@ -143,8 +143,8 @@ def _approval(
     )
 
 
-def _commands(state: RuntimeState, namespace: str) -> RuntimeStateCommands:
-    return RuntimeStateCommands(
+def _commands(state: Persistence, namespace: str) -> StateCommands:
+    return StateCommands(
         state.execution.executions,
         namespace=namespace,
         events=state.execution.events,
@@ -155,9 +155,9 @@ def _commands(state: RuntimeState, namespace: str) -> RuntimeStateCommands:
         recovery=state.recovery.checkpoints,
         conversation_history=state.conversation.histories,
         tools=state.recovery.tools,
-        conversation_run_store=state.run_store.read_store(RuntimeDomain.CONVERSATION),
-        execution_run_store=state.run_store.read_store(RuntimeDomain.TRACE),
-        recovery_run_store=state.run_store.read_store(RuntimeDomain.CHECKPOINT),
+        conversation_run_store=state.run_store.read_store(PersistenceDomain.CONVERSATION),
+        execution_run_store=state.run_store.read_store(PersistenceDomain.TRACE),
+        recovery_run_store=state.run_store.read_store(PersistenceDomain.CHECKPOINT),
         background_tasks=set(),
     )
 
@@ -165,13 +165,13 @@ def _commands(state: RuntimeState, namespace: str) -> RuntimeStateCommands:
 async def _enter_waiting(
     namespace: str,
 ) -> tuple[
-    RuntimeState,
-    RuntimeStateCommands,
+    Persistence,
+    StateCommands,
     ExecutionRecord,
     RecoveryCheckpoint,
     PendingToolContinuation,
 ]:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace=namespace, tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = _execution(now)

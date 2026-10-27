@@ -9,6 +9,8 @@ from ._runtime_test_helpers import workspace_features
 import asyncio
 from pathlib import Path
 
+from ._runtime_test_helpers import FileToolsStub
+
 import pytest
 from linktools.ai.agent import AgentCompiler
 from linktools.ai.asset import AssetStore, DirectoryAssetBackend, PrefixAssetPathAdapter
@@ -16,8 +18,8 @@ from linktools.ai.capability import (
     CapabilityContribution,
     ToolCallFailed,
     tool_class_from_metadata,
-    workspace_capabilities,
-    workspace_tool_declarations,
+    filesystem_capabilities,
+    filesystem_tool_declarations,
 )
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
@@ -34,14 +36,14 @@ from linktools.ai.runtime._tool_boundary import (
     BoundaryToolset,
 )
 from linktools.ai.workspace import (
-    DisabledSandbox,
-    SandboxResource,
-    SandboxSession,
+    WorkspaceResource,
+    SupportsFileTools,
     ToolPermissionRule,
     Workspace,
     ToolPermissionPolicy,
 )
 from pydantic_ai.capabilities import AbstractCapability
+from linktools.ai.capability import ShellCapability
 from pydantic_ai.exceptions import ApprovalRequired
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
@@ -55,7 +57,7 @@ def _workspace_tool_contributions(workspace: Workspace):
     )
 
 
-class _RecordingSession:
+class _RecordingSession(FileToolsStub):
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
         self.closed = 0
@@ -67,8 +69,6 @@ class _RecordingSession:
         self.calls.append((name, args, kwargs))
         return name
 
-    async def read_file(self, path: str, *, offset: int = 0, limit: "int | None" = None) -> str:
-        return await self._record("read_file", path, offset=offset, limit=limit)
 
     async def inspect_file(self, path: str, *, max_bytes=None):
         return {"path": path, "is_text": True, "mime_type": "text/plain",
@@ -83,51 +83,16 @@ class _RecordingSession:
         path: str,
         content: str,
         *,
+        old_text: "str | None" = None,
         expected_hash: "str | None" = None,
     ) -> str:
-        return await self._record("write_file", path, content, expected_hash=expected_hash)
+        return await self._record("write_file", path, content, old_text=old_text, expected_hash=expected_hash)
 
-    async def edit_file(
-        self,
-        path: str,
-        old_text: str,
-        new_text: str,
-        *,
-        expected_hash: "str | None" = None,
-    ) -> str:
-        return await self._record(
-            "edit_file",
-            path,
-            old_text,
-            new_text,
-            expected_hash=expected_hash,
-        )
 
-    async def list_directory(self, path: str = ".") -> str:
-        return await self._record("list_directory", path)
 
-    async def search_files(
-        self,
-        pattern: str,
-        *,
-        path: str = ".",
-        include_glob: "str | None" = None,
-    ) -> str:
-        return await self._record(
-            "search_files",
-            pattern,
-            path=path,
-            include_glob=include_glob,
-        )
 
-    async def find_files(self, pattern: str, *, path: str = ".") -> str:
-        return await self._record("find_files", pattern, path=path)
 
-    async def create_directory(self, path: str) -> str:
-        return await self._record("create_directory", path)
 
-    async def file_info(self, path: str) -> str:
-        return await self._record("file_info", path)
 
     async def run_command(
         self,
@@ -154,12 +119,12 @@ class _RecordingSandbox:
     def __init__(self) -> None:
         self.sessions: list[_RecordingSession] = []
 
-    async def open(
+    def __call__(
         self,
-        *,
         root: Path,
-        resources: tuple[SandboxResource, ...] = (),
-    ) -> SandboxSession:
+        *,
+        resources: tuple[WorkspaceResource, ...] = (),
+    ) -> SupportsFileTools:
         del root, resources
         session = _RecordingSession()
         self.sessions.append(session)
@@ -192,7 +157,7 @@ def _tool_contract(tool: object) -> dict[str, object]:
     definition = tool.tool_def  # type: ignore[attr-defined]
     return {
         "version": 1,
-        "revision": next(item.revision for item in workspace_tool_declarations()
+        "revision": next(item.revision for item in filesystem_tool_declarations()
                          if item.name == definition.name),
         "description": definition.description,
         "parameters": definition.parameters_json_schema,
@@ -215,14 +180,8 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
     workspace = Workspace.load(tmp_path)
     contributions = _workspace_tool_contributions(workspace)
 
-    assert tuple(item.id for item in contributions) == (
-        "attach_files",
+    assert tuple(sorted(item.id for item in contributions)) == (
         "check_command",
-        "create_directory",
-        "edit_file",
-        "file_info",
-        "find_files",
-        "list_directory",
         "list_files",
         "read_file",
         "run_command",
@@ -232,29 +191,11 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
         "write_file",
     )
     assert all(item.kind == "tool" for item in contributions)
-    assert {item.id: item.revision for item in contributions} == {
-        item.id: 2 if item.id in {"read_file", "attach_files"} else 1
-        for item in contributions
+    assert all(item.revision == 1 for item in contributions)
+    assert {item.id: tool_class_from_metadata(item.value.tool_def.metadata) for item in contributions} == {
+        **{item.name: item.metadata["linktools.ai.tool_class"] for item in filesystem_tool_declarations()},
+        **{name: "shell" for name in ("check_command", "run_command", "start_command", "stop_command")},
     }
-    assert tuple(
-        tool_class_from_metadata(item.value.tool_def.metadata)
-        for item in contributions
-    ) == (
-        "filesystem.read",
-        "shell",
-        "filesystem.write",
-        "filesystem.write",
-        "filesystem.read",
-        "filesystem.read",
-        "filesystem.read",
-        "filesystem.read",
-        "filesystem.read",
-        "shell",
-        "filesystem.read",
-        "shell",
-        "shell",
-        "filesystem.write",
-    )
     assert tuple(item.revision for item in contributions) == tuple(
         item.revision for item in _workspace_tool_contributions(workspace)
     )
@@ -286,7 +227,7 @@ async def test_workspace_selector_expands_registered_tool_declarations(
         allow_capabilities=(),
     )
     compiler = AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=snapshot.contributions,
         agents={"agent": spec},
     )
@@ -294,9 +235,11 @@ async def test_workspace_selector_expands_registered_tool_declarations(
     definition = compiler.compile(spec)
     expected = {
         declaration.name
-        for declaration in workspace_tool_declarations()
+        for declaration in filesystem_tool_declarations()
         if tool_class_from_metadata(declaration.metadata) in tool_classes
     }
+    if "shell" in tool_classes:
+        expected.update(tool.name for tool in ShellCapability().tool_definitions())
     assert {item.id for item in definition.selected_tools} == expected
 
 
@@ -310,10 +253,10 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
 
     workspace = Workspace.load(tmp_path)
     snapshot = await workspace_features("workspace", workspace=workspace).capture()
-    for selectors in (("new_tool",), ("*", "new_tool")):
+    for selectors in (("new_tool",), ("*", "new_tool"), ("edit_file",), ("*", "edit_file")):
         spec = AgentSpec("agent", allow_tools=selectors)
         compiler = AgentCompiler(
-            models={"default": create_model(protocol='openai', model="gpt-test")},
+            models={"default": create_model(api='openai', model="gpt-test")},
             candidates=snapshot.contributions,
             agents={"agent": spec},
         )
@@ -331,7 +274,7 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
         }
         spec = AgentSpec("agent", **kwargs)
         compiler = AgentCompiler(
-            models={"default": create_model(protocol='openai', model="gpt-test")},
+            models={"default": create_model(api='openai', model="gpt-test")},
             candidates=(),
             agents={"agent": spec},
         )
@@ -341,7 +284,7 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
 
     empty = AgentSpec("agent", allow_tools=())
     empty_compiler = AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=(),
         agents={"agent": empty},
     )
@@ -359,7 +302,7 @@ def test_global_tool_wildcard_preserves_exact_mcp_requirement() -> None:
         allow_capabilities=(),
     )
     compiler = AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=(CapabilityContribution.from_declaration(server),),
         agents={"agent": spec},
     )
@@ -411,15 +354,15 @@ async def test_workspace_group_preserves_custom_asset_path_discovery(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_workspace_tool_declarations_do_not_depend_on_sandbox_selection(
+async def test_filesystem_tool_declarations_do_not_depend_on_sandbox_selection(
     tmp_path: Path,
 ) -> None:
     sandbox = _RecordingSandbox()
     workspace = Workspace.load(tmp_path)
     groups = (
         workspace_features("workspace", workspace=workspace),
-        workspace_features("workspace", workspace=workspace, sandbox=sandbox),
-        workspace_features("workspace", workspace=workspace, sandbox=DisabledSandbox()),
+        workspace_features("workspace", workspace=workspace, workspace_factory=sandbox),
+        workspace_features("workspace", workspace=workspace, workspace_factory=None),
     )
     snapshots = [await group.capture() for group in groups]
     projected = tuple(
@@ -433,18 +376,18 @@ async def test_workspace_tool_declarations_do_not_depend_on_sandbox_selection(
     assert sandbox.sessions == []
 
 
-def test_workspace_capabilities_materialize_one_sandbox_group(tmp_path: Path) -> None:
+def test_filesystem_capabilities_materialize_one_sandbox_group(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
 
     with pytest.raises(AIError) as raised:
-        workspace_capabilities(workspace, ("read_file", "run_command"))
+        filesystem_capabilities(workspace, ("read_file",))
     assert raised.value.code is ErrorCode.SANDBOX_SESSION_CLOSED
-    assert workspace_capabilities(workspace, ()) == ()
+    assert filesystem_capabilities(workspace, ()) == ()
 
 
-def test_workspace_capabilities_reject_unknown_tool_names(tmp_path: Path) -> None:
+def test_filesystem_capabilities_reject_unknown_tool_names(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown workspace tools"):
-        workspace_capabilities(Workspace.load(tmp_path), ("missing_tool",))
+        filesystem_capabilities(Workspace.load(tmp_path), ("missing_tool",))
 
 
 def test_workspace_sandbox_capability_id_is_reserved() -> None:
@@ -459,26 +402,17 @@ async def test_workspace_runtime_tool_contracts_match_durable_contributions(tmp_
     sandbox = _RecordingSandbox()
     workspace = Workspace.load(tmp_path)
     contributions = _workspace_tool_contributions(workspace)
-    expected = {item.id: item.contract for item in contributions}
-    capability = workspace_capabilities(
+    expected = {item.id: item.contract for item in contributions
+                if item.contract["metadata"]["linktools.ai.tool_class"] != "shell"}
+    capability = filesystem_capabilities(
         workspace,
         (
-            "attach_files",
-            "create_directory",
-            "edit_file",
-            "file_info",
-            "find_files",
-            "list_directory",
-            "list_files",
+                                    "list_files",
             "read_file",
             "search_files",
             "write_file",
-            "check_command",
-            "run_command",
-            "start_command",
-            "stop_command",
         ),
-        session=await sandbox.open(root=workspace.root),
+        backend=sandbox(root=workspace.root),
     )[0]
     run_toolset = capability.get_toolset()
 
@@ -493,24 +427,16 @@ async def test_workspace_runtime_tool_contracts_match_durable_contributions(tmp_
 async def test_workspace_capability_uses_the_caller_owned_session(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
     workspace = Workspace.load(tmp_path)
-    capability = workspace_capabilities(
+    capability = filesystem_capabilities(
         workspace,
-        ("read_file", "start_command", "check_command", "stop_command"),
-        session=await sandbox.open(root=workspace.root),
+        ("read_file",),
+        backend=sandbox(root=workspace.root),
     )[0]
     toolset = capability.get_toolset()
 
     assert len(sandbox.sessions) == 1
     await toolset.tools["read_file"].function("sample.txt")  # type: ignore[attr-defined]
-    await toolset.tools["start_command"].function("echo one")  # type: ignore[attr-defined]
-    await toolset.tools["check_command"].function("command")  # type: ignore[attr-defined]
-    await toolset.tools["stop_command"].function("command")  # type: ignore[attr-defined]
-    assert [name for name, _, _ in sandbox.sessions[0].calls] == [
-        "read_text",
-        "start_command",
-        "check_command",
-        "stop_command",
-    ]
+    assert [name for name, _, _ in sandbox.sessions[0].calls] == ["read_text"]
     await toolset.__aexit__(None, None, None)
     await sandbox.sessions[0].close()
     assert [session.closed for session in sandbox.sessions] == [1]
@@ -528,11 +454,11 @@ async def test_permission_rejection_has_no_sandbox_operation_side_effect(
 ) -> None:
     sandbox = _RecordingSandbox()
     workspace = Workspace.load(tmp_path)
-    session = await sandbox.open(root=workspace.root)
-    capability = workspace_capabilities(
+    session = sandbox(root=workspace.root)
+    capability = filesystem_capabilities(
         workspace,
         ("read_file",),
-        session=session,
+        backend=session,
     )[0]
     run_toolset = capability.get_toolset()
     boundary = BoundaryToolset(
@@ -549,7 +475,7 @@ async def test_permission_rejection_has_no_sandbox_operation_side_effect(
             permission_policy=ToolPermissionPolicy(
                 (ToolPermissionRule(decision, tool_name="read_file"),)  # type: ignore[arg-type]
             ),
-        sandbox_session=session,
+        workspace_backend=session,
     )
     context = RunContext(
         deps=None,
@@ -576,18 +502,18 @@ async def test_permission_rejection_has_no_sandbox_operation_side_effect(
 async def test_custom_sandbox_does_not_fallback_to_host_filesystem(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
     workspace = Workspace.load(tmp_path)
-    session = await sandbox.open(root=workspace.root)
-    capability = workspace_capabilities(
+    session = sandbox(root=workspace.root)
+    capability = filesystem_capabilities(
         workspace,
         ("write_file",),
-        session=session,
+        backend=session,
     )[0]
     run_toolset = capability.get_toolset()
 
     await run_toolset.tools["write_file"].function("host.txt", "content")  # type: ignore[attr-defined]
     assert not (tmp_path / "host.txt").exists()
     assert sandbox.sessions[0].calls == [
-        ("write_file", ("host.txt", "content"), {"expected_hash": None})
+        ("write_file", ("host.txt", "content"), {"old_text": None, "expected_hash": None})
     ]
     await run_toolset.__aexit__(None, None, None)
     await session.close()
@@ -619,11 +545,12 @@ async def test_workspace_sandbox_close_is_completed_during_cancellation(tmp_path
 @pytest.mark.asyncio
 async def test_disabled_sandbox_fails_before_workspace_tool_execution(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
-    group = workspace_features("workspace", workspace=workspace, sandbox=DisabledSandbox())
+    group = workspace_features("workspace", workspace=workspace, workspace_factory=None)
 
+    assert group.workspace_factory is None
     with pytest.raises(AIError) as raised:
-        await group.sandbox.open(root=workspace.root)  # type: ignore[union-attr]
-    assert raised.value.code is ErrorCode.SANDBOX_UNAVAILABLE
+        filesystem_capabilities(workspace, ("read_file",), backend=None)
+    assert raised.value.code is ErrorCode.SANDBOX_SESSION_CLOSED
 
 
 @pytest.mark.asyncio
@@ -637,12 +564,12 @@ async def test_workspace_group_does_not_discover_declarations(
     sandbox = _RecordingSandbox()
     workspace = Workspace.load(tmp_path)
 
-    group = workspace_features("workspace", workspace=workspace, sandbox=sandbox)
+    group = workspace_features("workspace", workspace=workspace, workspace_factory=sandbox)
     snapshot = await group.capture()
 
     assert group.workspace is workspace
-    assert snapshot.sandbox is sandbox
+    assert snapshot.workspace_factory is sandbox
     assert snapshot
-    assert all(item.kind == "tool" or (item.kind == "capability" and item.id == "runtime.workspace")
+    assert all(item.kind == "tool" or (item.kind == "capability" and item.id in {"runtime.filesystem", "runtime.shell"})
                for item in snapshot.contributions)
     assert sandbox.sessions == []

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Recovery settles against terminal graph truth after local binding cleanup."""
 
 import asyncio
@@ -11,11 +13,12 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.core import (
-    OperationStatus, TaskStatus, TenantAuthorizationPolicy, canonical_sha256, idempotency_key_digest,
+    OperationStatus, Principal, TaskStatus, TenantAuthorizationPolicy, canonical_sha256, idempotency_key_digest,
 )
 from linktools.ai.errors import AIError, ErrorCode
 
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.task.engine import TaskEngine
 from linktools.ai.task import (
     DefaultTaskGraphService, RecoverGraphRequest, Task, TaskGraph, TaskNode, TaskNodeContext,
 )
@@ -24,31 +27,29 @@ from .test_task_recovery_service import _Launcher
 
 
 @asynccontextmanager
-async def _running_graph(storage: RuntimeStorage) -> AsyncIterator[tuple]:
+async def _running_graph(storage: PersistenceStorage) -> AsyncIterator[tuple]:
     async def target(context: TaskNodeContext[None]) -> str:
         return "result"
 
     task = Task("terminal-recovery.target", target, effect_policy="none")
-    async with Runtime.open(
-        "terminal-recovery", storage=storage, auto_recover=False,
-    ) as runtime:
-        principal = runtime.default_principal
-        submission = await runtime.tasks.bind(task).prepare_submission(
+    async with Persistence.open('terminal-recovery', storage=storage) as persistence_32, TaskEngine.open(persistence=persistence_32) as engine:
+        principal = Principal("owner", "default")
+        submission = await engine.with_definitions(task).prepare_submission(
             TaskGraph("graph", (TaskNode("target", task=task),)),
             principal=principal, idempotency_key="submit",
         )
-        await runtime._state.task.admissions.admit_prepared(submission)
-        runner = runtime._task_node_runtime
+        await engine.persistence.task.admissions.admit_prepared(submission)
+        runner = engine._task_node_runtime
         await runner.activate_graph(submission.graph, (task,), ())
-        lease = await runtime._state.task.tasks.claim(
+        lease = await engine.persistence.task.tasks.claim(
             "graph", "target", tenant_id=principal.tenant_id, owner="worker", lease_seconds=30,
         )
         launcher = _Launcher()
         service = DefaultTaskGraphService(
-            runtime._state.task, TenantAuthorizationPolicy(principal.tenant_id), launcher,
+            engine.persistence.task, TenantAuthorizationPolicy(principal.tenant_id), launcher,
             preflight=runner, bound_execution_recovery=runner,
         )
-        yield runtime, runner, service, launcher, lease
+        yield engine, runner, service, launcher, lease
 
 
 @pytest.mark.asyncio
@@ -57,10 +58,10 @@ async def _running_graph(storage: RuntimeStorage) -> AsyncIterator[tuple]:
 async def test_recovery_settles_terminal_graph_without_rearming(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, boundary: str,
 ) -> None:
-    storage = (RuntimeStorage.in_memory() if backend == "memory"
-               else RuntimeStorage.sqlite(tmp_path / "state.sqlite"))
-    async with _running_graph(storage) as (runtime, runner, service, launcher, lease):
-        principal = runtime.default_principal
+    storage = (PersistenceStorage.in_memory() if backend == "memory"
+               else PersistenceStorage.sqlite(tmp_path / "state.sqlite"))
+    async with _running_graph(storage) as (engine, runner, service, launcher, lease):
+        principal = Principal("owner", "default")
         request = RecoverGraphRequest(principal, "recover")
         definitions = runner._active_definitions["graph"]
         if boundary == "replay_retained_binding":
@@ -97,11 +98,11 @@ async def test_recovery_settles_terminal_graph_without_rearming(
         pending = asyncio.create_task(service.recover("graph", request))
         try:
             await asyncio.wait_for(entered.wait(), 10)
-            await runtime._state.task.tasks.complete(
+            await engine.persistence.task.tasks.complete(
                 lease, tenant_id=principal.tenant_id, execution_id="execution",
                 result_digest=canonical_sha256("result"),
             )
-            completed = await runtime._state.task.tasks.graph_state("graph", tenant_id=principal.tenant_id)
+            completed = await engine.persistence.task.tasks.graph_state("graph", tenant_id=principal.tenant_id)
             assert completed.status is TaskStatus.SUCCEEDED
             await runner.release_graph_dependencies(completed, tenant_id=principal.tenant_id)
             release.set()
@@ -109,7 +110,7 @@ async def test_recovery_settles_terminal_graph_without_rearming(
             assert result.status is TaskStatus.SUCCEEDED
             assert result.node_results[0].execution_id == "execution"
             assert launcher.started == []
-            operation = await runtime._state.task.operations.get(
+            operation = await engine.persistence.task.operations.get(
                 idempotency_key_digest(request.idempotency_key), tenant_id=principal.tenant_id,
             )
             assert operation.status is OperationStatus.SUCCEEDED
@@ -119,7 +120,7 @@ async def test_recovery_settles_terminal_graph_without_rearming(
             await runner.activate_graph(
                 TaskGraph(completed.graph_id, completed.nodes), tuple(definitions[0].values()), (),
             )
-            admission = await runtime._state.task.admissions.get("graph", tenant_id=principal.tenant_id)
+            admission = await engine.persistence.task.admissions.get("graph", tenant_id=principal.tenant_id)
             await runner.load_admission(admission)
             assert "graph" in runner._active_definitions
             assert "graph" in runner._admitted_binding_captures
@@ -135,11 +136,11 @@ async def test_recovery_settles_terminal_graph_without_rearming(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("effect_unknown", (False, True))
 async def test_missing_binding_does_not_settle_nonterminal_recovery(effect_unknown: bool) -> None:
-    storage = RuntimeStorage.in_memory()
-    async with _running_graph(storage) as (runtime, runner, service, launcher, lease):
-        principal = runtime.default_principal
+    storage = PersistenceStorage.in_memory()
+    async with _running_graph(storage) as (engine, runner, service, launcher, lease):
+        principal = Principal("owner", "default")
         if effect_unknown:
-            await runtime._state.task.tasks.mark_recovery_required(
+            await engine.persistence.task.tasks.mark_recovery_required(
                 lease, tenant_id=principal.tenant_id, execution_id="external-execution",
                 error_code=ErrorCode.TOOL_EFFECT_UNKNOWN.value,
                 error_digest=canonical_sha256("unknown external outcome"),
@@ -148,12 +149,12 @@ async def test_missing_binding_does_not_settle_nonterminal_recovery(effect_unkno
         with pytest.raises(AIError) as raised:
             await service.recover("graph", RecoverGraphRequest(principal, "missing-binding"))
         assert raised.value.code is ErrorCode.BINDING_NOT_REGISTERED
-        state = await runtime._state.task.tasks.graph_state("graph", tenant_id=principal.tenant_id)
+        state = await engine.persistence.task.tasks.graph_state("graph", tenant_id=principal.tenant_id)
         expected = TaskStatus.RECOVERY_REQUIRED if effect_unknown else TaskStatus.RUNNING
         assert state.status is expected
         assert state.node_states[0].status is expected
         assert launcher.started == []
-        operation = await runtime._state.task.operations.get(
+        operation = await engine.persistence.task.operations.get(
             idempotency_key_digest("missing-binding"), tenant_id=principal.tenant_id,
         )
         assert operation.status is OperationStatus.RUNNING
@@ -164,12 +165,12 @@ async def test_missing_binding_does_not_settle_nonterminal_recovery(effect_unkno
 async def test_terminal_graph_does_not_hide_recovery_integrity_or_effect_error(
     monkeypatch: pytest.MonkeyPatch, code: ErrorCode,
 ) -> None:
-    storage = RuntimeStorage.in_memory()
-    async with _running_graph(storage) as (runtime, runner, service, launcher, lease):
-        principal = runtime.default_principal
+    storage = PersistenceStorage.in_memory()
+    async with _running_graph(storage) as (engine, runner, service, launcher, lease):
+        principal = Principal("owner", "default")
 
         async def fail_after_completion(graph_id, request):
-            await runtime._state.task.tasks.complete(
+            await engine.persistence.task.tasks.complete(
                 lease, tenant_id=principal.tenant_id, execution_id="execution",
                 result_digest=canonical_sha256("result"),
             )
@@ -180,7 +181,7 @@ async def test_terminal_graph_does_not_hide_recovery_integrity_or_effect_error(
             await service.recover("graph", RecoverGraphRequest(principal, "failed-recovery"))
         assert raised.value.code is code
         assert launcher.started == []
-        operation = await runtime._state.task.operations.get(
+        operation = await engine.persistence.task.operations.get(
             idempotency_key_digest("failed-recovery"), tenant_id=principal.tenant_id,
         )
         assert operation.status is OperationStatus.RUNNING

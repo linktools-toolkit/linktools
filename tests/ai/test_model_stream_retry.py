@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Stream retry commitment follows the first outward SDK event, not headers."""
 
 import asyncio
@@ -24,7 +26,8 @@ from linktools.ai.model import ModelClientRequestRecorder, create_model
 from linktools.ai.model import _binding, _openai
 from linktools.ai.model._binding import _RetryingModel
 from linktools.ai.model._stream import _RetryingStreamedResponse
-from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import PersistenceStorage
 
 
 def _event(delta: dict[str, object], *, finish: str | None = None) -> bytes:
@@ -85,7 +88,7 @@ def _model(
         return httpx2.AsyncClient(transport=httpx2.MockTransport(handle), **kwargs)
 
     monkeypatch.setattr(_openai, "DefaultAsyncHttpxClient", client)
-    binding = create_model(protocol="openai", model="fixture", api_key="synthetic",
+    binding = create_model(api="openai", model="fixture", api_key="synthetic",
                            base_url="https://offline.invalid/v1", max_retries=retries,
                            retry_delay=5, retry_max_delay=120, retry_backoff_factor=4)
     return binding, sources, depths
@@ -145,7 +148,7 @@ async def test_runtime_role_only_disconnect_retries_in_one_logical_request(
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     features.model("default", binding)
     features.capability(TraceCapability(record_http_bodies=True), scope="runtime")
-    async with Runtime.open("stream-retry", storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Persistence.open('stream-retry', storage=PersistenceStorage.in_memory()) as persistence_148, Runtime.attach(persistence=persistence_148, features=features) as runtime:
         execution = await runtime.agents.get().start("synthetic")
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status == "SUCCEEDED"
@@ -423,7 +426,7 @@ async def test_runtime_partial_replacement_commits_only_winner_and_its_tools(kin
     features.tool(old_tool, effect_policy="none")
     features.tool(new_tool, effect_policy="none")
     features.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open("partial-retry", storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Persistence.open('partial-retry', storage=PersistenceStorage.in_memory()) as persistence_426, Runtime.attach(persistence=persistence_426, features=features) as runtime:
         execution = await runtime.agents.get().start("synthetic", **({"output": Answer} if kind == "output" else {}))
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status == "SUCCEEDED", result.error_code
@@ -457,7 +460,7 @@ async def test_runtime_exhausted_partial_is_trace_only_and_keeps_known_usage(mon
     features.model("default", binding)
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     features.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open("exhausted-partial", storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Persistence.open('exhausted-partial', storage=PersistenceStorage.in_memory()) as persistence_460, Runtime.attach(persistence=persistence_460, features=features) as runtime:
         execution = await runtime.agents.get().start("synthetic")
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status == "FAILED" and result.error_code == "MODEL_UNAVAILABLE"
@@ -556,7 +559,7 @@ def _continuation_retry_features(same_id: bool, *, retry_delay: float = 5, fail_
 async def runtime_continuation_retry_events(same_id: bool = False, *, include_models: bool = False):
     """Real SDK/Runtime watch events for consumer contract replay, no network."""
     features, _ = _continuation_retry_features(same_id, retry_delay=0)
-    async with Runtime.open("continuation-retry", storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Persistence.open('continuation-retry', storage=PersistenceStorage.in_memory()) as persistence_559, Runtime.attach(persistence=persistence_559, features=features) as runtime:
         execution = await runtime.agents.get().start("synthetic")
         observed = [item async for item in execution.watch(include_content=True)]
         result = (await execution.wait(timeout_seconds=10)).result
@@ -571,7 +574,7 @@ async def runtime_continuation_retry_events(same_id: bool = False, *, include_mo
 @pytest.mark.parametrize("same_id", (False, True))
 async def test_retry_then_normal_continuation_keeps_segments_and_exact_usage(same_id, waits):
     features, model = _continuation_retry_features(same_id)
-    async with Runtime.open("continuation-retry", storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Persistence.open('continuation-retry', storage=PersistenceStorage.in_memory()) as persistence_574, Runtime.attach(persistence=persistence_574, features=features) as runtime:
         execution = await runtime.agents.get().start("synthetic")
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status == "SUCCEEDED", result.error_code
@@ -669,7 +672,7 @@ async def test_native_fallback_known_usage_is_not_overwritten_by_stream_attempt_
     features.model("default", _FixtureBinding(_RetryingModel(Bridge(), 3, 0)))
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     features.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open("native-fallback-usage", storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Persistence.open('native-fallback-usage', storage=PersistenceStorage.in_memory()) as persistence_672, Runtime.attach(persistence=persistence_672, features=features) as runtime:
         execution = await runtime.agents.get().start("synthetic")
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status == "SUCCEEDED", result.error_code
@@ -700,7 +703,7 @@ async def test_real_watch_preserves_part_start_and_attempt_boundaries(same_id):
 @pytest.mark.asyncio
 async def test_empty_part_start_has_replay_position_and_never_coalesces_across_attempts():
     from linktools.ai.core import ExecutionDeltaType
-    from linktools.ai.runtime._event import ExecutionDelta, LiveExecutionEventBroker
+    from linktools.ai.execution.events import ExecutionDelta, LiveExecutionEventBroker
     broker = LiveExecutionEventBroker()
     broker.register_local_producer("fixture", 0)
     position = {"agent_run_seq": 1, "model_request_seq": 1, "stream_attempt_seq": 1,
@@ -741,7 +744,7 @@ async def test_parallel_runs_and_consecutive_requests_keep_committed_message_pos
     features.agent("default", model="default", allow_tools=("lookup",), allow_skills=(), allow_subagents=())
     features.tool(lookup, effect_policy="none")
     features.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open("parallel-retry", storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Persistence.open('parallel-retry', storage=PersistenceStorage.in_memory()) as persistence_744, Runtime.attach(persistence=persistence_744, features=features) as runtime:
         executions = await asyncio.gather(*(runtime.agents.get().start(value) for value in ("a", "b")))
         results = await asyncio.gather(*(execution.wait(timeout_seconds=10) for execution in executions))
         assert [value.result.output for value in results] == [{"text": "winner-a"}, {"text": "winner-b"}]
@@ -770,7 +773,7 @@ async def runtime_empty_start_events(*, include_models: bool = False):
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     if include_models:
         features.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open("empty-start", storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Persistence.open('empty-start', storage=PersistenceStorage.in_memory()) as persistence_773, Runtime.attach(persistence=persistence_773, features=features) as runtime:
         execution = await runtime.agents.get().start("synthetic")
         observed = [item async for item in execution.watch(include_content=True)]
         assert (await execution.wait(timeout_seconds=10)).result.status == "SUCCEEDED"
@@ -790,7 +793,7 @@ async def test_real_watch_preserves_empty_start_before_text():
 @pytest.mark.asyncio
 async def test_long_part_keeps_active_subscriber_live_and_late_subscriber_sees_gap():
     from linktools.ai.core import ExecutionDeltaType
-    from linktools.ai.runtime._event import ExecutionDelta, LiveExecutionEventBroker
+    from linktools.ai.execution.events import ExecutionDelta, LiveExecutionEventBroker
     broker = LiveExecutionEventBroker(max_bytes=8)
     broker.register_local_producer("fixture", 0)
     subscription = broker.subscribe("fixture")
@@ -817,7 +820,7 @@ async def test_long_part_keeps_active_subscriber_live_and_late_subscriber_sees_g
 @pytest.mark.asyncio
 async def test_failed_continuation_retains_prior_success_only_as_interrupted_trace(waits):
     features, model = _continuation_retry_features(False, fail_continuation=True)
-    async with Runtime.open("continuation-retry", storage=RuntimeStorage.in_memory(), features=features) as runtime:
+    async with Persistence.open('continuation-retry', storage=PersistenceStorage.in_memory()) as persistence_820, Runtime.attach(persistence=persistence_820, features=features) as runtime:
         execution = await runtime.agents.get().start("synthetic")
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status == "FAILED"

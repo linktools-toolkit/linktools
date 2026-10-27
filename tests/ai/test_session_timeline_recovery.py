@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Session timeline recovery handoff regressions."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -18,8 +18,8 @@ from linktools.ai.core import (
     UsageMetrics,
 )
 from linktools.ai.runtime._local import LocalExecutionBackend
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.persistence.contracts import (
     ConversationCursor,
     RecoveryConversationIntent,
     RecoveryTerminalHandoff,
@@ -29,12 +29,12 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryHandoffPhase,
     SessionRecord,
 )
-from linktools.ai.runtime.state._step_contracts import (
+from linktools.ai.persistence._step_contracts import (
     AgentRunCheckpoint,
     AgentRunRecord,
 )
 from linktools.ai.storage import StoredPayload
-from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
+from linktools.ai.persistence._runtime_commands import StateCommands
 from tests.ai.test_session_timeline import _execution
 
 
@@ -57,8 +57,8 @@ def _session() -> SessionRecord:
 
 @pytest.mark.asyncio
 async def test_recovery_handoff_commits_timeline_with_session_continuation() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="session-timeline-recovery", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
@@ -70,7 +70,7 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
             expected=None,
         )
 
-        archive = state.run_store.read_store(RuntimeDomain.CONVERSATION)
+        archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         now = datetime.now(timezone.utc)
         run = AgentRunRecord(
             agent_run_id="run",
@@ -98,7 +98,7 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
         class Lifecycle:
             async def materialize_from_recovery(self, **kwargs: object) -> None:
                 assert kwargs == {
-                    "target": RuntimeDomain.CONVERSATION,
+                    "target": PersistenceDomain.CONVERSATION,
                     "agent_run_id": "run",
                 }
                 if await archive.latest_checkpoint(agent_run_id="run") is None:
@@ -109,9 +109,9 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
         backend._conversation = state.conversation
         backend._conversation_durable = True
         backend._run_stores = {
-            RuntimeDomain.CONVERSATION: archive,
-            RuntimeDomain.EXECUTION: object(),
-            RuntimeDomain.RECOVERY: object(),
+            PersistenceDomain.CONVERSATION: archive,
+            PersistenceDomain.EXECUTION: object(),
+            PersistenceDomain.RECOVERY: object(),
         }
         backend._run_store = state.run_store
         backend._agent_run_lifecycle = Lifecycle()
@@ -133,7 +133,7 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
         backend._execution = SimpleNamespace(
             executions=SimpleNamespace(get_result=get_result)
         )
-        backend._runtime_commands = RuntimeStateCommands(
+        backend._runtime_commands = StateCommands(
             state.execution.executions,
             namespace="session-timeline-recovery",
             events=state.execution.events,

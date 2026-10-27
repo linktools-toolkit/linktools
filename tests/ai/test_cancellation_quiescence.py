@@ -558,9 +558,9 @@ async def test_execution_cancel_metric_wait_follows_finalizer_and_consumer_relea
         nonlocal handoff_done
         handoff_done = True
 
-    service._execution_consumer = consumer
+    service.execution_consumer = consumer
     service.cancel_authorized = cancel_authorized
-    service._request_handoff_if_terminal = handoff
+    service.request_handoff_if_terminal = handoff
     request = SimpleNamespace(principal=SimpleNamespace(tenant_id="tenant"))
     caller = asyncio.create_task(service.cancel("execution", request))
     await asyncio.wait_for(metric_entered.wait(), timeout=1)
@@ -599,7 +599,7 @@ async def test_detached_execution_cancel_finalizer_does_not_deliver_metrics(canc
         handoff_done.set()
 
     service.cancel_authorized = cancel_authorized
-    service._request_handoff_if_terminal = handoff
+    service.request_handoff_if_terminal = handoff
     request = SimpleNamespace(principal=SimpleNamespace(tenant_id="tenant"))
     caller = asyncio.create_task(service.cancel("execution", request))
     await asyncio.wait_for(entered.wait(), timeout=1)

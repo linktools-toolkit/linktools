@@ -9,8 +9,8 @@ from dataclasses import dataclass
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
-from linktools.ai.runtime import WaitResult
-from linktools.ai.runtime._observation import _ObservationSession, _wait
+from linktools.ai.observe import WaitResult
+from linktools.ai.observe.stream import ObservationSession, wait_for_result
 
 
 @dataclass(frozen=True)
@@ -21,7 +21,7 @@ class _Event:
 
 class _Owner:
     def __init__(self) -> None:
-        self.sessions: set[_ObservationSession] = set()
+        self.sessions: set[ObservationSession] = set()
 
     async def close(self) -> None:
         for session in tuple(self.sessions):
@@ -34,7 +34,7 @@ class _Owner:
         watch: Callable[[asyncio.Event], AsyncIterator[_Event]] | None = None,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 0.2,
     ) -> WaitResult[object]:
-        return await _wait(
+        return await wait_for_result(
             scope="execution", resource_id="execution", waiter=waiter,
             watch=_empty_watch if watch is None else watch, on_event=callback,
             cursor="previous", timeout_seconds=timeout_seconds,
@@ -189,7 +189,7 @@ async def test_authority_ready_at_deadline_is_retained_without_starting_final_co
 async def test_final_coverage_has_internal_budget_even_without_business_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import linktools.ai.runtime._observation as observation
+    import linktools.ai.observe.stream as observation
 
     monkeypatch.setattr(observation, "_FINAL_DRAIN_TIMEOUT", 0.01)
     owner = _Owner()
@@ -238,7 +238,7 @@ async def test_final_coverage_contract_failure_is_not_downgraded_to_presentation
 async def test_noncooperative_finalizer_stays_owned_and_never_calls_back_after_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import linktools.ai.runtime._observation as observation
+    import linktools.ai.observe.stream as observation
 
     monkeypatch.setattr(observation, "_FINAL_DRAIN_TIMEOUT", 0.01)
     owner = _Owner()

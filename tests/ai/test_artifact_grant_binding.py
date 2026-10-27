@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Artifact grants stay bound to the durable authorization receipt."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import hashlib
 import hmac
 from datetime import datetime, timezone
@@ -21,14 +21,14 @@ from linktools.ai.core import (
     canonical_json_bytes,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime import _artifact as artifact_module
-from linktools.ai.runtime._artifact import (
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.history import _artifact as artifact_module
+from linktools.ai.history._artifact import (
     DefaultArtifactService,
     _decode_grant,
     _encode_grant,
 )
-from linktools.ai.runtime.state._contracts import ArtifactRecord
+from linktools.ai.persistence.contracts import ArtifactRecord
 from linktools.ai.storage import ObjectRef
 
 
@@ -62,8 +62,8 @@ class _RecordingAuthorization:
 
 @pytest.mark.asyncio
 async def test_artifact_list_authorizes_the_execution_identity() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="artifact-list", tenant_id="tenant")
     try:
         await state.artifact.records.put_metadata(
@@ -103,8 +103,8 @@ async def test_artifact_list_authorizes_the_execution_identity() -> None:
 async def test_artifact_grant_is_bound_to_receipt_identity_and_expiry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="artifact-grant", tenant_id="tenant")
     try:
         reference = ObjectRef(

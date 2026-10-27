@@ -10,13 +10,13 @@ import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolReturnPart
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state import _history
-from linktools.ai.runtime.state._filesystem import FilesystemStateStore
-from linktools.ai.runtime.state._history import TranscriptRepository
-from linktools.ai.runtime.state._memory import InMemoryStateStore
-from linktools.ai.runtime.state._memory_transaction import _MemoryTransaction
-from linktools.ai.runtime.state._store import StateStore
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence import _history
+from linktools.ai.persistence._filesystem import FilesystemStateStore
+from linktools.ai.persistence._history import TranscriptRepository
+from linktools.ai.persistence._memory import InMemoryStateStore
+from linktools.ai.persistence._memory_transaction import _MemoryTransaction
+from linktools.ai.persistence.state import StateStore
 from linktools.ai.storage import InMemoryObjectStore
 
 
@@ -33,7 +33,7 @@ def observation_store(request: pytest.FixtureRequest, tmp_path: Path) -> StateSt
 def _repository(store: StateStore) -> TranscriptRepository:
     return TranscriptRepository(
         store, object_store=None, namespace="observation", tenant_id="tenant",
-        runtime_domain=RuntimeDomain.TRACE,
+        runtime_domain=PersistenceDomain.TRACE,
     )
 
 
@@ -166,7 +166,7 @@ async def test_pending_object_bytes_scale_with_new_content(monkeypatch: pytest.M
         objects = InMemoryObjectStore("runtime")
         repository = TranscriptRepository(
             store, object_store=objects, namespace="observation", tenant_id="tenant",
-            runtime_domain=RuntimeDomain.TRACE,
+            runtime_domain=PersistenceDomain.TRACE,
         )
         await repository.create_head("run")
         generator = random.Random(17)

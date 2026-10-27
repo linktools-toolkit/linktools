@@ -3,7 +3,7 @@
 """Raw history retains proven model-request origins across durable boundaries."""
 
 from __future__ import annotations
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -40,23 +40,23 @@ from linktools.ai.core import (
     agent_conversation_id,
     agent_run_id,
 )
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._run_hooks import AgentRunCapture
 from linktools.ai.capability import CheckpointCapability
-from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
-from linktools.ai.runtime._journal import ModelRequestJournal
+from linktools.ai.history._projection import StepExecutionHistoryReader
+from linktools.ai.observe.journal import ModelRequestJournal
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
-from linktools.ai.runtime.state._steps import StagingAgentRunStore
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
+from linktools.ai.persistence.runs import StagingAgentRunStore
 
 from .test_history_projection_conformance import _record
 
 
 @dataclass
 class _History:
-    state: RuntimeState
+    state: Persistence
     reader: StepExecutionHistoryReader
     recorders: tuple[AgentRunRecorder, ...]
     journals: tuple[ModelRequestJournal, ...]
@@ -85,7 +85,7 @@ class _History:
 
 @asynccontextmanager
 async def _history(run_count: int = 1) -> AsyncIterator[_History]:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         await state.execution.executions.create_with_history_head(
@@ -94,7 +94,7 @@ async def _history(run_count: int = 1) -> AsyncIterator[_History]:
         reader = StepExecutionHistoryReader(
             namespace="history",
             executions=state.execution.executions,
-            store=state.run_store.read_store(RuntimeDomain.TRACE),
+            store=state.run_store.read_store(PersistenceDomain.TRACE),
             notifications=state.run_store,
             cursor_signer=HmacCursorSigner("history", b"history-key"),
         )

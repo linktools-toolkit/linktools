@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Pending execution consumers defer terminal truth to the shared source."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 import json
 from contextlib import asynccontextmanager
@@ -20,16 +20,17 @@ from linktools.ai.core import (
     canonical_json_bytes,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import CancelExecutionRequest, RuntimeDomain, RuntimeStorage
-from linktools.ai.runtime._event import LiveExecutionEventBroker
+from linktools.ai.execution import CancelExecutionRequest
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.execution.events import LiveExecutionEventBroker
 from linktools.ai.runtime._execution import (
     DefaultExecutionService,
     _ExecutionRuntimeBridge,
 )
-from linktools.ai.runtime._pending_coordination import _PendingTurnCoordination
+from linktools.ai.persistence.coordination import PendingTurnCoordination
 from linktools.ai.runtime._pending_turn import _PendingExecutionTurns
-from linktools.ai.runtime.state._codec import encode_domain
-from linktools.ai.runtime.state._contracts import ResultRecord
+from linktools.ai.persistence.codec import encode_domain
+from linktools.ai.persistence.contracts import ResultRecord
 from linktools.ai.storage import InMemoryCacheBackend, StoredPayload
 
 from .test_history_projection_conformance import _record
@@ -54,11 +55,11 @@ class _RemotePendingTurns(_PendingExecutionTurns):
 
 @asynccontextmanager
 async def _consumer(*, authorization=None):
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="remote-pending", tenant_id="tenant")
     cache = InMemoryCacheBackend(max_bytes=1024 * 1024)
-    coordination = _PendingTurnCoordination(cache, cache, namespace="remote-pending", tenant_id="tenant")
+    coordination = PendingTurnCoordination(cache, cache, namespace="remote-pending", tenant_id="tenant")
     owned = await coordination.claim(
         session_key="session", request_key="request", request_digest="digest",
         execution_id="execution", owner_id="owner", lease_seconds=30,
@@ -69,7 +70,7 @@ async def _consumer(*, authorization=None):
     bridge = _ExecutionRuntimeBridge()
     bridge.pending_turns = pending
     service = DefaultExecutionService(
-        state.execution, state.object_store(RuntimeDomain.EXECUTION),
+        state.execution, state.object_store(PersistenceDomain.EXECUTION),
         authorization or TenantAuthorizationPolicy("tenant"), sessions=state.conversation.sessions,
         catalog=None, compiler=None, runtime_bridge=bridge,
         live_broker=LiveExecutionEventBroker(), history_reader=None,

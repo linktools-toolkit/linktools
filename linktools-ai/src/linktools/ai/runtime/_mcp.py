@@ -50,11 +50,11 @@ from ..spec import (
     mcp_tool_selector,
     parse_mcp_tool_selector,
 )
+
 from ..workspace import (
-    Sandbox,
-    SandboxResource,
-    SandboxResourcePath,
-    StdioSandbox,
+    WorkspaceResource,
+    WorkspaceResourcePath,
+    SupportsStdio,
 )
 from ._budget import RunBudgetContext
 from ._tool import ToolOperationBridge
@@ -67,7 +67,8 @@ from ._mcp_transport import _create_mcp_transport
 from ._tool_response_fixture import _FixtureToolset, _ToolResponseManifest
 
 if TYPE_CHECKING:
-    from ._run_callbacks import RunCallbacks
+    from pydantic_ai.workspaces import WorkspaceBackend
+    from ..capability import RunCallbacks
 
 _logger = environ.get_logger("ai.runtime.mcp")
 _MCP_TOOL_METADATA = tool_metadata(
@@ -92,8 +93,8 @@ class _MCPBinding:
 @dataclass(frozen=True, slots=True)
 class _MCPProjection:
     server_id: str
-    args: tuple[str | SandboxResourcePath, ...]
-    resources: tuple[SandboxResource, ...]
+    args: tuple[str | WorkspaceResourcePath, ...]
+    resources: tuple[WorkspaceResource, ...]
     resource_root: str | None = None
 
 
@@ -455,7 +456,7 @@ async def prepare_mcp_projections(
                 },
             )
         versions = _bound_resource_versions(server, binding)
-        resource = await SandboxResource.from_asset_versions(
+        resource = await WorkspaceResource.from_asset_versions(
             server.id,
             reader,
             versions,
@@ -463,9 +464,9 @@ async def prepare_mcp_projections(
         )
         if resource is None and not versions and materializer is not None:
             materialized = await materializer.materialize(reader, versions)
-            resource = SandboxResource(server.id, materialized.root)
+            resource = WorkspaceResource(server.id, materialized.root)
         local_files = None if resource is None else resource.files
-        arguments: list[str | SandboxResourcePath] = []
+        arguments: list[str | WorkspaceResourcePath] = []
         for argument in server.args:
             if not argument.startswith("resource:"):
                 arguments.append(argument)
@@ -477,7 +478,7 @@ async def prepare_mcp_projections(
                     safe_details={"kind": "mcp_local_resource", "server_id": server.id},
                 )
             arguments.append(
-                SandboxResourcePath(server.id, relative)
+                WorkspaceResourcePath(server.id, relative)
                 if sandboxed
                 else str(local_files[relative])
             )
@@ -494,8 +495,7 @@ async def materialize_mcp_capabilities(
     servers: Sequence[MCPServerSpec],
     selectors: Sequence[str],
     *,
-    sandbox: Sandbox | None,
-    sandbox_session: object | None,
+    workspace_backend: "WorkspaceBackend | None",
     host_cwd: "str | None",
     bindings: Mapping[str, _MCPBinding],
     projections: Mapping[str, _MCPProjection],
@@ -522,7 +522,7 @@ async def materialize_mcp_capabilities(
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if response_fixture is None:
-                current_policy = _mcp_execution_policy(server, sandbox)
+                current_policy = _mcp_execution_policy(server, workspace_backend)
                 if dict(binding.execution_policy) != dict(current_policy):
                     raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
             allowed = policy[server.id]
@@ -538,8 +538,7 @@ async def materialize_mcp_capabilities(
             else:
                 transport = _create_mcp_transport(
                     server,
-                    sandboxed=sandbox is not None,
-                    sandbox_session=sandbox_session,
+                    workspace_backend=workspace_backend,
                     host_cwd=(
                         host_cwd if projection is None or projection.resource_root is None
                         else projection.resource_root
@@ -673,16 +672,13 @@ def _model_tool_name(server_id: str, tool_name: str) -> str:
 
 def _mcp_execution_policy(
     server: MCPServerSpec,
-    sandbox: Sandbox | None,
+    workspace_backend: "WorkspaceBackend | None",
 ) -> Mapping[str, JsonValue]:
     if server.transport != "stdio":
         return {"version": 1, "boundary": "host-network"}
-    if sandbox is None:
-        policy: dict[str, JsonValue] = {"version": 1, "boundary": "host-stdio"}
-    else:
-        if not isinstance(sandbox, StdioSandbox):
-            raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
-        policy = dict(sandbox.stdio_execution_policy())
+    if not isinstance(workspace_backend, SupportsStdio):
+        raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
+    policy = dict(workspace_backend.stdio_execution_policy())
     if server.resource is not None:
         policy["cwd"] = "resource"
     return policy

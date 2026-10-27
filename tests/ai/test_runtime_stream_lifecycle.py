@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Local preview independence and Runtime-owned remote observation lifetimes."""
 from ._runtime_test_helpers import model_features
 
@@ -12,7 +14,8 @@ from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.storage import InMemoryStreamBackend, StreamBatch, StreamWriter
 from ._runtime_test_helpers import _Models
 
@@ -60,13 +63,12 @@ async def _runtimes(tmp_path, cache, *, finish_provider: asyncio.Event | None = 
 
     group = RuntimeFeatures[None]("stream-lifecycle")
     group.agent("default", model="default", allow_tools=())
-    group.capability(ExecutionCapability(coordination=cache), scope="runtime")
+    group.capability(ExecutionCapability(), scope="runtime")
     models = _Models(FunctionModel(stream_function=model))
     path = tmp_path / "state.db"
-    async with Runtime.open("stream-lifecycle", features=model_features(models, group),
-                            storage=RuntimeStorage.sqlite(path)) as owner:
-        storage = RuntimeStorage.sqlite(path)
-        async with Runtime.open("stream-lifecycle", features=model_features(models, group), storage=storage) as reader:
+    async with Persistence.open('stream-lifecycle', storage=PersistenceStorage.sqlite(path, coordination=cache)) as persistence_66, Runtime.attach(persistence=persistence_66, features=model_features(models, group)) as owner:
+        storage = PersistenceStorage.sqlite(path, coordination=cache)
+        async with Persistence.open('stream-lifecycle', storage=storage) as persistence_69, Runtime.attach(persistence=persistence_69, features=model_features(models, group)) as reader:
             execution = await owner.agents.get().start("question")
             try:
                 await asyncio.wait_for(entered.wait(), 5)
@@ -118,7 +120,7 @@ async def test_runtime_close_drains_default_remote_watch(tmp_path: Path, mode: s
             else:
                 await asyncio.wait_for(reader.close(), 5)
             assert cache.active_reads == 0
-            assert not reader._state.ready
+            assert reader._state.ready
             assert not reader._observation_sessions
             assert not release.is_set()
             if pending is not None:
@@ -250,14 +252,12 @@ async def test_remote_watch_before_first_admission_receives_later_preview(tmp_pa
     cache = _Streams()
     group = RuntimeFeatures("early-preview")
     group.agent("default", model="default", allow_tools=())
-    group.capability(ExecutionCapability(coordination=cache), scope="runtime")
+    group.capability(ExecutionCapability(), scope="runtime")
     models = _Models(FunctionModel(stream_function=model))
     path = tmp_path / "early.db"
-    async with Runtime.open("early-preview", features=model_features(models, group),
-                            storage=RuntimeStorage.sqlite(path)) as owner:
-        reader_storage = RuntimeStorage.sqlite(path)
-        async with Runtime.open("early-preview", features=model_features(models, group),
-                                storage=reader_storage) as reader:
+    async with Persistence.open('early-preview', storage=PersistenceStorage.sqlite(path, coordination=cache)) as persistence_256, Runtime.attach(persistence=persistence_256, features=model_features(models, group)) as owner:
+        reader_storage = PersistenceStorage.sqlite(path, coordination=cache)
+        async with Persistence.open('early-preview', storage=reader_storage) as persistence_259, Runtime.attach(persistence=persistence_259, features=model_features(models, group)) as reader:
             execution = await owner.agents.get().start("question")
             repository = reader._state.execution.executions
             read_head = repository.get_history_head

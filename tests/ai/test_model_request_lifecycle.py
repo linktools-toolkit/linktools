@@ -3,6 +3,8 @@
 """Logical model request progress is visible and converges to one result."""
 
 from __future__ import annotations
+
+from linktools.ai.persistence import Persistence
 from ._runtime_test_helpers import model_features
 
 import asyncio
@@ -33,16 +35,17 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._compaction import _ObservedCompactionModel
-from linktools.ai.runtime import _event as runtime_event
-from linktools.ai.runtime._journal import ModelRequestFact, ModelRequestJournal
+import linktools.ai.execution.events as runtime_event
+from linktools.ai.observe.journal import ModelRequestFact, ModelRequestJournal
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
-from linktools.ai.runtime.service_api import ModelInteractionItem
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord
-from linktools.ai.runtime.state._steps import StagingAgentRunStore
+from linktools.ai.execution import ModelInteractionItem
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._step_contracts import AgentRunRecord
+from linktools.ai.persistence.runs import StagingAgentRunStore
 from linktools.ai.observe._memory import InMemoryMetricStore
 from linktools.ai.capability import TraceCapability
 
@@ -1180,16 +1183,12 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
         group.agent("default", model="default", allow_tools=())
         storage_path = tmp_path / "runtime-storage"
         storage = (
-            RuntimeStorage.filesystem(storage_path)
+            PersistenceStorage.filesystem(storage_path)
             if persistent
-            else RuntimeStorage.in_memory()
+            else PersistenceStorage.in_memory()
         )
 
-        async with Runtime.open(
-            "default",
-            storage=storage,
-            features=model_features(models, group),
-        ) as runtime:
+        async with Persistence.open('default', storage=storage) as persistence_1188, Runtime.attach(persistence=persistence_1188, features=model_features(models, group)) as runtime:
             execution = await runtime.agents.get("default").start("TOP_SECRET_PROMPT")
             wait_task = asyncio.create_task(execution.wait())
             await asyncio.wait_for(models.entered.wait(), timeout=5)
@@ -1239,11 +1238,7 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
             assert finished.usage is not None
 
         if persistent:
-            async with Runtime.open(
-                "default",
-                storage=RuntimeStorage.filesystem(storage_path),
-                features=model_features(models, group),
-            ) as reopened:
+            async with Persistence.open('default', storage=PersistenceStorage.filesystem(storage_path)) as persistence_1242, Runtime.attach(persistence=persistence_1242, features=model_features(models, group)) as reopened:
                 assert reopened.history is not None
                 page = await reopened.history.model_interactions(
                     execution.execution_id,
@@ -1273,13 +1268,9 @@ def test_history_cursor_keeps_captured_identity_during_durable_completion(
 
         group.tool(complete, effect_policy="none")
         group.agent("default", model="default", allow_tools=("complete",))
-        storage = RuntimeStorage.filesystem(tmp_path / "handoff-storage")
+        storage = PersistenceStorage.filesystem(tmp_path / "handoff-storage")
 
-        async with Runtime.open(
-            "default",
-            storage=storage,
-            features=model_features(models, group),
-        ) as runtime:
+        async with Persistence.open('default', storage=storage) as persistence_1278, Runtime.attach(persistence=persistence_1278, features=model_features(models, group)) as runtime:
             execution = await runtime.agents.get("default").start("continue")
             wait_task = asyncio.create_task(execution.wait())
             try:
@@ -1294,7 +1285,7 @@ def test_history_cursor_keeps_captured_identity_during_durable_completion(
                 ]
                 assert first.next_cursor is not None
 
-                archive = runtime._state.run_store.read_store(RuntimeDomain.TRACE)
+                archive = runtime._run_store.read_store(PersistenceDomain.TRACE)
                 original_list = archive.list_model_interactions
                 archive_read_started = asyncio.Event()
                 allow_archive_read_to_return = asyncio.Event()
@@ -1370,13 +1361,9 @@ def test_public_content_mutation_does_not_change_live_or_archived_history(
         group = RuntimeFeatures[object]("application")
         group.capability(TraceCapability(), scope="runtime")
         group.agent("default", model="default", allow_tools=())
-        storage = RuntimeStorage.filesystem(tmp_path / "content-storage")
+        storage = PersistenceStorage.filesystem(tmp_path / "content-storage")
 
-        async with Runtime.open(
-            "default",
-            storage=storage,
-            features=model_features(models, group),
-        ) as runtime:
+        async with Persistence.open('default', storage=storage) as persistence_1375, Runtime.attach(persistence=persistence_1375, features=model_features(models, group)) as runtime:
             execution = await runtime.agents.get("default").start("preserve content")
             wait_task = asyncio.create_task(execution.wait())
             try:
@@ -1475,12 +1462,7 @@ def test_history_refresh_survives_event_buffer_fallback_for_blocked_request(
         metrics = Metrics.from_store(metric_store, namespace="model-lifecycle-fallback")
         metric_start = datetime.now(timezone.utc) - timedelta(seconds=1)
 
-        async with Runtime.open(
-            "default",
-            metrics=metrics,   # type: ignore[arg-type]
-            storage=RuntimeStorage.in_memory(),
-            features=model_features(models, group),
-        ) as runtime:
+        async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_1478, Runtime.attach(persistence=persistence_1478, metrics=metrics, features=model_features(models, group)) as runtime:
             execution = await runtime.agents.get("default").start("continue")
             wait_task = asyncio.create_task(execution.wait())
             try:

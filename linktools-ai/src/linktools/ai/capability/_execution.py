@@ -13,7 +13,6 @@ from pydantic_ai.tools import RunContext
 
 from ..core import CommitPolicy
 from ..errors import AIError, ErrorCode
-from ..storage import CacheBackend, StreamBackend, TurnCoordinationBackend
 from ._context import AgentContext
 
 
@@ -33,7 +32,6 @@ class ExecutionCapability(AbstractCapability[AgentContext[object]]):
     def __init__(
         self, *, commit: CommitPolicy = CommitPolicy.sync(),
         retain_history: bool = False,
-        coordination: CacheBackend | TurnCoordinationBackend | StreamBackend | None = None,
     ) -> None:
         if not isinstance(retain_history, bool):
             raise TypeError("retain_history must be bool")
@@ -42,19 +40,6 @@ class ExecutionCapability(AbstractCapability[AgentContext[object]]):
             "terminal",
         }:
             raise ValueError("Execution requires sync or terminal commit")
-        if coordination is not None and not isinstance(
-            coordination, (CacheBackend, TurnCoordinationBackend, StreamBackend),
-        ):
-            raise TypeError("coordination must implement cache, turn coordination or stream operations")
-        for names in (
-            ("get", "put", "delete"),
-            ("claim_turn", "read_turn", "renew_turn", "release_turn", "cancel_turn"),
-            ("open_stream", "read_stream"),
-        ):
-            methods = tuple(getattr(coordination, name, None) for name in names)
-            if any(method is not None for method in methods) and not all(callable(method) for method in methods):
-                raise TypeError(f"coordination must implement {', '.join(names)} together")
-        self._coordination = coordination
         self._commit = commit
         self._retain_history = retain_history
 
@@ -71,6 +56,10 @@ class ExecutionCapability(AbstractCapability[AgentContext[object]]):
         bound._service = service
         bound._retain_history = retain_history
         return bound
+
+    def for_agent(self, agent: object) -> ExecutionCapability:
+        self._bound_service()
+        return self
 
     def _bound_service(self) -> AbstractCapability[AgentContext[object]]:
         if self._service is None:
@@ -95,9 +84,6 @@ class ExecutionCapability(AbstractCapability[AgentContext[object]]):
     def commit(self) -> CommitPolicy:
         return self._commit
 
-    @property
-    def coordination(self) -> CacheBackend | TurnCoordinationBackend | StreamBackend | None:
-        return self._coordination
 
 
 __all__ = ["ExecutionCapability"]

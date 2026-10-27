@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Subscriptions preserve fresh authorization without duplicate owner queries."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from dataclasses import replace
 from pathlib import Path
 
@@ -11,10 +11,10 @@ from sqlalchemy import event
 
 from linktools.ai.core import HmacCursorSigner
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeDomain
-from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
-from linktools.ai.runtime.state._execution_repositories import ExecutionRepositoryImpl
-from linktools.ai.runtime.state._store import active_state_scope
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.history._projection import StepExecutionHistoryReader
+from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
+from linktools.ai.persistence.state import active_state_scope
 
 from .test_incremental_projection_boundaries import _storage
 from .test_model_capture_reads import _NAMESPACE, _PRINCIPAL, _service
@@ -27,14 +27,14 @@ def _reader(state, *, executions=None, reader_type=StepExecutionHistoryReader):
     return reader_type(
         namespace=_NAMESPACE,
         executions=state.execution.executions if executions is None else executions,
-        store=state.run_store.read_store(RuntimeDomain.TRACE),
+        store=state.run_store.read_store(PersistenceDomain.TRACE),
         cursor_signer=HmacCursorSigner("subscription", b"subscription-key"),
         notifications=state.run_store,
     )
 
 
 async def test_model_subscription_eliminates_duplicate_sql_owner_lookup(tmp_path: Path) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await state.execution.executions.create_with_history_head(_execution())
@@ -72,7 +72,7 @@ async def test_model_subscription_eliminates_duplicate_sql_owner_lookup(tmp_path
 async def test_model_subscription_fails_closed_before_registering(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, denial: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await state.execution.executions.create_with_history_head(_execution())
@@ -105,7 +105,7 @@ async def test_model_subscription_fails_closed_before_registering(
 async def test_model_subscription_preserves_custom_and_different_reader_authority(
     tmp_path: Path, owner: str,
 ) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await state.execution.executions.create_with_history_head(_execution())
@@ -140,7 +140,7 @@ async def test_model_subscription_preserves_custom_and_different_reader_authorit
 
 
 async def test_model_subscription_preserves_custom_reader_override(tmp_path: Path) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await state.execution.executions.create_with_history_head(_execution())

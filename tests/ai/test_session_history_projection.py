@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 """Committed Session history projection and continuation behavior."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from datetime import datetime, timezone
 
 import pytest
 from linktools.ai.core import (
     HmacCursorSigner,
+    canonical_sha256,
     Principal,
     SessionStatus,
     TenantAuthorizationPolicy,
@@ -16,11 +17,13 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime import ForkSessionRequest, RuntimeStorage
-from linktools.ai.runtime._history_projection import StepSessionHistoryReader
+from linktools.ai.execution import ForkSessionRequest
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.history._projection import StepSessionHistoryReader
 from linktools.ai.runtime._session import RuntimeSessionService
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._contracts import ConversationCursor, SessionRecord
+from linktools.ai.persistence.runs import SESSION_HISTORY_VIEW_V1
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.contracts import ConversationCursor, SessionRecord
 from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
@@ -32,7 +35,7 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     UserPromptPart,
 )
-from linktools.ai.runtime.state._step_contracts import (
+from linktools.ai.persistence._step_contracts import (
     AgentRunCheckpoint,
     AgentRunRecord,
 )
@@ -56,16 +59,16 @@ def _session(session_id: str = "session") -> SessionRecord:
     )
 
 
-def _reader(state: RuntimeState) -> StepSessionHistoryReader:
+def _reader(state: Persistence) -> StepSessionHistoryReader:
     return StepSessionHistoryReader(
-        store=state.run_store.read_store(RuntimeDomain.CONVERSATION),
+        store=state.run_store.read_store(PersistenceDomain.CONVERSATION),
         cursor_signer=HmacCursorSigner("session-history", b"session-history-key"),
         sessions=state.conversation.sessions,
     )
 
 
 async def _advance(
-    state: RuntimeState,
+    state: Persistence,
     expected: ConversationCursor | None,
     next_cursor: ConversationCursor,
 ) -> None:
@@ -108,7 +111,7 @@ async def _advance(
         )
 
 
-def _service(state: RuntimeState) -> RuntimeSessionService:
+def _service(state: Persistence) -> RuntimeSessionService:
     return RuntimeSessionService(
         state.conversation,
         state.execution.executions,
@@ -120,7 +123,7 @@ def _service(state: RuntimeState) -> RuntimeSessionService:
 
 
 async def _materialize(
-    state: RuntimeState,
+    state: Persistence,
     agent_run_id: str,
     prompts: tuple[str, ...],
     messages: list[object] | None = None,
@@ -179,8 +182,8 @@ async def _materialize(
 
 @pytest.mark.asyncio
 async def test_empty_and_committed_session_history_use_continuation_only() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="session-history", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -219,8 +222,8 @@ async def test_empty_and_committed_session_history_use_continuation_only() -> No
 
 @pytest.mark.asyncio
 async def test_session_history_cursor_binds_to_current_continuation() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="session-history-cursor", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -233,6 +236,16 @@ async def test_session_history_cursor_binds_to_current_continuation() -> None:
             "session", principal=Principal("owner", "tenant"), limit=2
         )
         assert first_page.next_cursor is not None
+        assert SESSION_HISTORY_VIEW_V1 == 1
+        payload = HmacCursorSigner("session-history", b"session-history-key").decode(first_page.next_cursor)
+        assert payload.filter_digest == canonical_sha256({
+            "session_id": "session", "projection_version": 1,
+        })
+        continuation = await service.history(
+            "session", principal=Principal("owner", "tenant"),
+            cursor=first_page.next_cursor, limit=2,
+        )
+        assert [item.content for item in continuation.items] == ["B", "answer:B"]
 
         await _materialize(state, second_run, ("C",))
         await _advance(
@@ -254,8 +267,8 @@ async def test_session_history_cursor_binds_to_current_continuation() -> None:
 
 @pytest.mark.asyncio
 async def test_session_history_uses_projection_v1_mapping_and_empty_strings() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="session-history-projection", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -338,8 +351,8 @@ async def test_session_history_uses_projection_v1_mapping_and_empty_strings() ->
 
 @pytest.mark.asyncio
 async def test_session_fork_excludes_uncommitted_physical_tail() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="session-history-uncommitted-fork", tenant_id="tenant")
     try:
         source = await state.conversation.sessions.create(_session())
@@ -380,8 +393,8 @@ async def test_session_fork_excludes_uncommitted_physical_tail() -> None:
 async def test_session_history_fork_copies_continuation_without_execution_lookup() -> (
     None
 ):
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="session-history-fork", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -405,8 +418,8 @@ async def test_session_history_fork_copies_continuation_without_execution_lookup
 
 @pytest.mark.asyncio
 async def test_session_history_reports_missing_committed_checkpoint() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="session-history-missing", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -423,8 +436,8 @@ async def test_session_history_reports_missing_committed_checkpoint() -> None:
 
 @pytest.mark.asyncio
 async def test_durable_session_history_survives_runtime_storage_reopen(tmp_path) -> None:
-    state = RuntimeStorage.filesystem(tmp_path / "runtime")
-    state = RuntimeState(state)
+    state = PersistenceStorage.filesystem(tmp_path / "runtime")
+    state = Persistence(state)
     await state.initialize(namespace="session-history-durable", tenant_id="tenant")
     agent_run_id = "session-history-durable-run"
     await state.conversation.sessions.create(_session())
@@ -436,8 +449,8 @@ async def test_durable_session_history_survives_runtime_storage_reopen(tmp_path)
     )
     await state.close()
 
-    reopened = RuntimeStorage.filesystem(tmp_path / "runtime")
-    reopened = RuntimeState(reopened)
+    reopened = PersistenceStorage.filesystem(tmp_path / "runtime")
+    reopened = Persistence(reopened)
     await reopened.initialize(namespace="session-history-durable", tenant_id="tenant")
     try:
         after_reopen = await _service(reopened).history(
@@ -453,8 +466,8 @@ async def test_durable_session_history_survives_runtime_storage_reopen(tmp_path)
 async def test_sql_session_history_survives_runtime_storage_reopen(tmp_path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
     await provision_database(engine)
-    state = RuntimeStorage.sql(engine)
-    state = RuntimeState(state)
+    state = PersistenceStorage.sql(engine)
+    state = Persistence(state)
     await state.initialize(namespace="session-history-sql", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -467,8 +480,8 @@ async def test_sql_session_history_survives_runtime_storage_reopen(tmp_path) -> 
         )
         await state.close()
 
-        reopened = RuntimeStorage.sql(engine)
-        reopened = RuntimeState(reopened)
+        reopened = PersistenceStorage.sql(engine)
+        reopened = Persistence(reopened)
         await reopened.initialize(namespace="session-history-sql", tenant_id="tenant")
         try:
             after_reopen = await _service(reopened).history(

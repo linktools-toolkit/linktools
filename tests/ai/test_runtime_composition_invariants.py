@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Runtime composition and ownership invariants."""
 from ._runtime_test_helpers import model_features
 from linktools.ai.model import create_model
@@ -32,9 +34,9 @@ from linktools.ai.runtime import Runtime
 from linktools.ai.runtime import _factory as runtime_factory
 from linktools.ai.runtime._factory import compose_runtime_components
 from linktools.ai.runtime._subagent import SubagentDispatcher
-from linktools.ai.runtime.state import RuntimeStorage
-from linktools.ai.runtime.state._codec import decode_domain, encode_domain
-from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.codec import decode_domain, encode_domain
+from linktools.ai.persistence.contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StorageOverlay, StoredPayload
 from pydantic import BaseModel
@@ -60,7 +62,9 @@ def test_runtime_runs_agents_and_tasks_when_mcp_client_is_unavailable(tmp_path: 
 
         from pydantic_ai.models.test import TestModel
         from linktools.ai.core import ExecutionStatus, TaskStatus
-        from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
+        from linktools.ai.runtime import Runtime, RuntimeFeatures
+        from linktools.ai.persistence import Persistence, PersistenceStorage
+        from linktools.ai.task.engine import TaskEngine
         from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
 
         class OfflineModelBinding:
@@ -79,15 +83,15 @@ def test_runtime_runs_agents_and_tasks_when_mcp_client_is_unavailable(tmp_path: 
             features = RuntimeFeatures()
             features.model("default", OfflineModelBinding())
             task = Task("local.answer", answer, effect_policy="none")
-            async with Runtime.open(
-                "without-mcp-client", features=features, storage=RuntimeStorage.in_memory(),
-            ) as runtime:
+            async with Persistence.open("without-mcp-client", storage=PersistenceStorage.in_memory()) as persistence, Runtime.attach(
+                persistence=persistence, features=features,
+            ) as runtime, TaskEngine.open(task, persistence=persistence) as engine:
                 agent_result = (await runtime.agents.get("default").run(
                     "Answer offline", timeout_seconds=10,
                 )).result
                 assert agent_result.status is ExecutionStatus.SUCCEEDED
                 assert agent_result.output == {"text": "offline answer"}
-                graph = await runtime.tasks.bind(task).start(
+                graph = await engine.start(
                     TaskGraph("local-graph", (TaskNode("answer", task=task),)),
                     idempotency_key="local-graph-start",
                 )
@@ -190,13 +194,12 @@ async def test_runtime_does_not_close_borrowed_asset_store(tmp_path: Path) -> No
     group = RuntimeFeatures("workspace")
     group_assets = AssetCapability(store)
     group.capability(group_assets, scope="runtime")
-    components = await compose_runtime_components(
-        "workspace",
-        storage=RuntimeStorage.in_memory(),
-        features=model_features(create_model(protocol='openai', model="gpt-test"), group),
-    )
-
-    await components.close_callback()
+    async with Persistence.open("workspace", storage=PersistenceStorage.in_memory()) as persistence:
+        components = await compose_runtime_components(
+            persistence=persistence,
+            features=model_features(create_model(api='openai', model="gpt-test"), group),
+        )
+        await components.close_callback()
 
     assert store.ready
     await store.close()
@@ -226,11 +229,11 @@ async def test_runtime_rejects_source_change_during_assembly(
         with pytest.raises(AIError) as error:
             asset_features = RuntimeFeatures("workspace")
             asset_features.capability(AssetCapability(store), scope="runtime")
-            await compose_runtime_components(
-                "workspace",
-                storage=RuntimeStorage.in_memory(),
-                features=model_features(RuntimeUsageModels(), asset_features),
-            )
+            async with Persistence.open("workspace", storage=PersistenceStorage.in_memory()) as persistence:
+                await compose_runtime_components(
+                    persistence=persistence,
+                    features=model_features(RuntimeUsageModels(), asset_features),
+                )
 
         assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
         assert store.ready
@@ -309,11 +312,7 @@ async def test_runtime_persists_model_usage_through_history_views() -> None:
     application.agent("default", model="default", allow_tools=())
 
     application.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open(
-        "default",
-        storage=RuntimeStorage.in_memory(),
-        features=model_features(RuntimeUsageModels(), application),
-    ) as runtime:
+    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_312, Runtime.attach(persistence=persistence_312, features=model_features(RuntimeUsageModels(), application)) as runtime:
         result = (await runtime.agents.get("default").run(
             "hello",
             timeout_seconds=10,

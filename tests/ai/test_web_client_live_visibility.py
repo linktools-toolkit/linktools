@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Completed client exchanges are readable before their execution finishes."""
 from ._runtime_test_helpers import model_features
 
 from linktools.ai.core import CommitPolicy
 from linktools.ai.capability import TraceCapability
 from linktools.ai.storage import InMemoryCacheBackend
-from linktools.ai.runtime import RuntimeDomain
+from linktools.ai.persistence import PersistenceDomain
 import asyncio
 import base64
 import json
@@ -22,8 +24,10 @@ pytest.importorskip("starlette")
 from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.runtime import Runtime, RuntimeStorage, TaskModelProjection
-from linktools.ai.runtime.state._step_archive import (
+from linktools.ai.runtime import Runtime
+from linktools.ai.execution import TaskModelProjection
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence._step_archive import (
     CapturedExecutionProjection, _AgentRunProjectionFlight,
 )
 from linktools.ai.web import create_app
@@ -74,16 +78,13 @@ async def test_web_client_live_visibility_follows_completed_request_commit(
         return "tool finished"
 
     models, clients = _binding(monkeypatch, handler)
-    storage = RuntimeStorage.sqlite(tmp_path / "state.db")
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db")
     group = RuntimeFeatures[None]("web-client-live")
     group.tool(wait_for_release, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("wait_for_release",))
-    group.capability(TraceCapability(record_http_bodies=True, storage=storage.plan.route(RuntimeDomain.TRACE), commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=3.0)), scope="runtime")
-    async with Runtime.open(
-        "web-client-live", storage=storage,
-        features=model_features(models, group),
-    ) as runtime:
-        commit = runtime._state.run_store.commit_captured_execution_projection
+    group.capability(TraceCapability(record_http_bodies=True, commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=3.0)), scope="runtime")
+    async with Persistence.open('web-client-live', storage=storage) as persistence_82, Runtime.attach(persistence=persistence_82, features=model_features(models, group)) as runtime:
+        commit = runtime._run_store.commit_captured_execution_projection
 
         async def observed_commit(
             captured: CapturedExecutionProjection, flight: _AgentRunProjectionFlight,
@@ -100,7 +101,7 @@ async def test_web_client_live_visibility_follows_completed_request_commit(
                     await release_commit.wait()
             await commit(captured, flight, execution_id=execution_id)
 
-        monkeypatch.setattr(runtime._state.run_store, "commit_captured_execution_projection", observed_commit)
+        monkeypatch.setattr(runtime._run_store, "commit_captured_execution_projection", observed_commit)
         execution = await runtime.agents.get("default").start("原始\nrequest with  spaces")
         async with _client(create_app(runtime=runtime)) as http:
             path = f"/api/executions/{execution.execution_id}/models?include_client_requests=true"

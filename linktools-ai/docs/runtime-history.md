@@ -48,7 +48,7 @@ Raw HTTP body capture is disabled by default. Model metadata
 may be refined during preparation without changing request identity or start time.
 
 With shared retained backing storage, independently opened
-`RuntimeHistory.open(...)` readers see the committed prefix while the execution
+`History.open(persistence=p)` readers see the committed prefix while the execution
 is active. An immediate read after a live notification can be empty; a fresh
 read after publication includes the new facts. Opted-in recovery checkpoints
 remain durable independently of public observation publication. Terminal handoffs and
@@ -441,11 +441,16 @@ after more results arrive, finalization, or reopening reads the original set
 exactly once. Start a fresh query to see newer facts. Pending tool results retain
 call-based identities and `part_index=None`.
 
-Independent readers of shared retained storage refresh durable state rather
-than relying on the producer's local staging, a live Runtime registry, or
-recovery checkpoint bodies. The explicit TRANSIENT route reads its existing
-process-local recorder owner through the same read contract; it creates no
-retained archive and cannot provide cross-process readback. A dropped
+Independent `History.open(persistence=p)` readers refresh persisted facts and
+may see validated pending metadata through `p`'s configured shared coordination.
+They do not discover another Runtime's local staging, even when both borrow the
+same Persistence in the same process. `runtime.history` is the producer-bound
+view: it additionally reads that Runtime's transient recorder and can expose
+content that has not been retained. These are different visibility scopes, not
+interchangeable aliases. Neither reader starts another execution producer.
+The explicit TRANSIENT route creates no retained archive and cannot provide
+cross-process body readback. Shared coordination metadata does not turn
+producer-local request or response bodies into shared retained content. A dropped
 notification does not drop the committed fact. Completed retained publication
 wakes subscriptions; observation uses durable catch-up and rereads
 previously running identities. Process-local subscription generations are wake
@@ -513,7 +518,7 @@ finally:
 Always close a subscription when its owner finishes, including failure or
 cancellation while reading. Its generation is a coalesced process-local wake
 coordinate, not a persisted event sequence or resumable cursor. A standalone
-`RuntimeHistory.open(...)` reader returns None for the subscription. All three
+`History.open(persistence=p)` reader returns None for the subscription. All three
 operations authorize the selected execution and tenant.
 
 `ModelInteractionReadBoundary.cutoffs` bounds admitted identities per Agent run.
@@ -525,7 +530,14 @@ these canonical reads and does not determine active-run coverage. For an
 admitted TRANSIENT run it is true while the process-local owner remains
 available; `durable_history_available` stays false. Disabled or
 unavailable history is explicitly marked; authorization and integrity failures
-are not converted into empty successful reads.
+are not converted into empty successful reads. For an independent reader with
+no retained trace, both availability flags can be false and cutoffs empty while
+`runtime.history` reports local staging. Empty pages or `next_cursor=None` alone
+mean only that this read has no more visible items, not that the execution's
+history is complete. Consult `ModelInteractionReadBoundary` for coverage;
+unavailable completed content raises `EXECUTION_HISTORY_UNAVAILABLE` along the
+existing content-read contract. Task projection coverage likewise reports
+unavailable executions separately from observed local or durable content.
 
 Metadata reads return a bounded tuple of contiguous request identities, always
 with `content_included=False`, an empty request and no response. They do not
@@ -555,7 +567,7 @@ The built-in update operation authorizes once before reading its fresh boundary
 and first metadata page in one short metadata-owner scope. Authorization runs
 outside that scope. Later pages authorize independently and may observe newer
 lifecycle states without expanding their captured identities. Custom services
-may optionally implement this public operation; otherwise `RuntimeHistory`
+may optionally implement this public operation; otherwise `History`
 composes their existing capture and metadata operations, preserving their
 authorization and overrides. Custom history readers and service subclasses keep
 that same existing-operation composition.
@@ -707,10 +719,17 @@ this heuristic nor adds a token-counting network request on every model call.
 
 ## Resource declarations and read scopes
 
-`RuntimeStorage` is a reusable resource declaration. Opening a Runtime or
-`RuntimeHistory` creates a separate operational binding over those resources;
-closing one binding does not mutate the declaration or close borrowed backends.
-Repositories, retained-content readers, and snapshot/cleanup operations belong
-to the binding, rather than to the configuration object. Use the domain/history
-APIs for reads and `RuntimeSnapshot` for portable snapshots. Explicit route
-overrides must also be supplied when opening history over custom domain routes.
+`PersistenceStorage` is a reusable resource declaration. `Persistence.open(...)`
+binds repositories, physical routes, retained-content readers, and maintenance
+operations once. `Runtime.attach(persistence=p)` and
+`History.open(persistence=p)` borrow that owner; closing either view does not
+close `p` or borrowed backends. Custom routes and shared coordination are
+configured on Persistence, not supplied again as Runtime features to a reader.
+Use `Snapshot` for portable snapshots.
+
+Keep `runtime.history` when reads must follow that Runtime's producer-local
+staging. Use independent `History` for retained readback without initializing an
+Agent Runtime. Both expose the same read types, but availability is scoped to
+the selected reader, so a consumer must not promote a partial view to complete
+history. `runtime.executions.capture_input(...)` captures Agent-owned execution inputs;
+`engine.inputs` is the public capture and replay facade for a `TaskEngine`.

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Session admission ownership and status transition conformance."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -10,8 +10,8 @@ import pytest
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime.state._contracts import ConversationCursor, SessionRecord
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.contracts import ConversationCursor, SessionRecord
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
@@ -32,8 +32,8 @@ def _session() -> SessionRecord:
     )
 
 
-async def _assert_admission_contract(state: RuntimeStorage) -> None:
-    state = RuntimeState(state)
+async def _assert_admission_contract(state: PersistenceStorage) -> None:
+    state = Persistence(state)
     await state.initialize(namespace="admission", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -157,14 +157,14 @@ async def _assert_admission_contract(state: RuntimeStorage) -> None:
 
 @pytest.mark.asyncio
 async def test_memory_session_admission_contract() -> None:
-    await _assert_admission_contract(RuntimeStorage.in_memory())
+    await _assert_admission_contract(PersistenceStorage.in_memory())
 
 
 @pytest.mark.asyncio
 async def test_sql_session_admission_contract(tmp_path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
     await provision_database(engine)
-    state = RuntimeStorage.sql(engine)
+    state = PersistenceStorage.sql(engine)
     try:
         await _assert_admission_contract(state)
     finally:

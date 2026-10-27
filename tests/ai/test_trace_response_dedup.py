@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Shared response content preserves independent evidence and ordered occurrences."""
 from ._runtime_test_helpers import model_features
 
@@ -20,31 +22,32 @@ from linktools.ai.capability import TraceCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import agent_run_id, canonical_json_bytes
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._archive import ContentArchive, ContentRecord
-from linktools.ai.runtime.state._contracts import ArchivedContextBlock, ContextProjection, ModelInteractionRecord
-from linktools.ai.runtime.state._history import encode_model_messages
-from linktools.ai.runtime.state._step_archive import StateStepArchive
-from linktools.ai.runtime.state._store import FactQuery, RecordQuery, StateTransaction
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._archive import ContentArchive, ContentRecord
+from linktools.ai.persistence.contracts import ArchivedContextBlock, ContextProjection, ModelInteractionRecord
+from linktools.ai.persistence._history import encode_model_messages
+from linktools.ai.persistence._step_archive import StateStepArchive
+from linktools.ai.persistence.state import FactQuery, RecordQuery, StateTransaction
 from linktools.ai.storage import ObjectStat, SqlObjectStore
 
 from .test_explicit_runtime_features import _FeatureFunctionModel, _FeatureModels
 
 
 @asynccontextmanager
-async def _storage(backend: str, root: Path) -> AsyncIterator[RuntimeStorage]:
+async def _storage(backend: str, root: Path) -> AsyncIterator[PersistenceStorage]:
     engine = None
     if backend == "memory":
-        storage = RuntimeStorage.in_memory()
+        storage = PersistenceStorage.in_memory()
     elif backend == "filesystem":
-        storage = RuntimeStorage.filesystem(root / "state")
+        storage = PersistenceStorage.filesystem(root / "state")
     elif backend == "sqlite":
-        storage = RuntimeStorage.sqlite(root / "state.db")
+        storage = PersistenceStorage.sqlite(root / "state.db")
     else:
         engine = create_async_engine(f"sqlite+aiosqlite:///{root / 'state.db'}")
         await provision_runtime_database(engine)
-        storage = RuntimeStorage.sql(engine)
+        storage = PersistenceStorage.sql(engine)
     try:
         yield storage
     finally:
@@ -91,11 +94,9 @@ async def test_trace_response_payload_storage_and_metadata_reads(
         return ModelResponse(parts=[TextPart(content)], timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc))
 
     async with _storage(backend, tmp_path) as storage:
-        async with Runtime.open(
-            "response-dedup", storage=storage, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), _features()),
-        ) as runtime:
-            objects = runtime._state.archive_object_store(RuntimeDomain.TRACE)
-            domain_objects = runtime._state.object_store(RuntimeDomain.TRACE)
+        async with Persistence.open('response-dedup', storage=storage) as persistence_94, Runtime.attach(persistence=persistence_94, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), _features())) as runtime:
+            objects = runtime._state.archive_object_store(PersistenceDomain.TRACE)
+            domain_objects = runtime._state.object_store(PersistenceDomain.TRACE)
             sources = {"archive": objects}
             if domain_objects is not objects:
                 sources["domain"] = domain_objects
@@ -123,7 +124,7 @@ async def test_trace_response_payload_storage_and_metadata_reads(
                 namespace=runtime.namespace, tenant_id=runtime.tenant_id,
                 execution_id=execution.execution_id, agent_run_seq=1,
             )
-            archive = runtime._state.run_store.read_store(RuntimeDomain.TRACE)
+            archive = runtime._run_store.read_store(PersistenceDomain.TRACE)
             records = await archive.list_model_interactions(agent_run_id=run_id)
             assert len(records) == 1 and isinstance(records[0], ModelInteractionRecord)
             block = _archived_block(records[0].response_context)
@@ -232,9 +233,7 @@ async def test_unsuccessful_requests_without_response_preserve_no_response(
         raise AssertionError("cancelled request resumed")
 
     async with _storage(backend, tmp_path) as storage:
-        async with Runtime.open(
-            "response-dedup", storage=storage, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), _features()),
-        ) as runtime:
+        async with Persistence.open('response-dedup', storage=storage) as persistence_235, Runtime.attach(persistence=persistence_235, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), _features())) as runtime:
             execution = await runtime.agents.get().start("question")
             if outcome == "CANCELLED":
                 await asyncio.wait_for(entered.wait(), 5)
@@ -252,7 +251,7 @@ async def test_unsuccessful_requests_without_response_preserve_no_response(
 async def test_compaction_response_retains_independent_evidence(
     tmp_path: Path, backend: str,
 ) -> None:
-    from linktools.ai.runtime import ExecutionInputContext
+    from linktools.ai.execution import ExecutionInputContext
 
     responses: list[ModelResponse] = []
 
@@ -270,9 +269,7 @@ async def test_compaction_response_retains_independent_evidence(
             ModelResponse(parts=[TextPart(f"answer-{index} " + "y" * 240)]),
         ))
     async with _storage(backend, tmp_path) as storage:
-        async with Runtime.open(
-            "response-dedup", storage=storage, features=model_features(_FeatureModels(_FeatureFunctionModel(model, profile={"context_window": 1000})), _features()),
-        ) as runtime:
+        async with Persistence.open('response-dedup', storage=storage) as persistence_273, Runtime.attach(persistence=persistence_273, features=model_features(_FeatureModels(_FeatureFunctionModel(model, profile={'context_window': 1000})), _features())) as runtime:
             execution = await runtime.agents.get().start(
                 "continue", input_context=ExecutionInputContext.from_messages(history),
             )
@@ -281,7 +278,7 @@ async def test_compaction_response_retains_independent_evidence(
                 namespace=runtime.namespace, tenant_id=runtime.tenant_id,
                 execution_id=execution.execution_id, agent_run_seq=1,
             )
-            archive = runtime._state.run_store.read_store(RuntimeDomain.TRACE)
+            archive = runtime._run_store.read_store(PersistenceDomain.TRACE)
             records = await archive.list_model_interactions(agent_run_id=run_id)
             assert [record.purpose for record in records] == ["compaction", "agent"]
             blocks = tuple(_archived_block(record.response_context) for record in records)
@@ -306,9 +303,9 @@ async def test_identical_responses_keep_occurrences_through_checkpoint_reopen_an
     from pydantic_ai.models import ModelRequestParameters
     from pydantic_ai.models.test import TestModel
     from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-    from linktools.ai.runtime._journal import ModelRequestJournal
-    from linktools.ai.runtime.state import RuntimeState
-    from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
+    from linktools.ai.observe.journal import ModelRequestJournal
+    from linktools.ai.persistence import Persistence
+    from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
     from linktools.ai.storage import ObjectRef, ObjectStoreMaintenance
     from .test_evaluation_retention import Offline
 
@@ -317,7 +314,7 @@ async def test_identical_responses_keep_occurrences_through_checkpoint_reopen_an
         timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
     async with _storage(backend, tmp_path) as storage:
-        state = RuntimeState(storage)
+        state = Persistence(storage)
         await state.initialize(namespace="response-checkpoint", tenant_id="tenant")
         try:
             capture = AgentRunRecorder(state.run_store, execution_id=None, agent_run_id="run")
@@ -349,9 +346,9 @@ async def test_identical_responses_keep_occurrences_through_checkpoint_reopen_an
                 )
             if backend != "memory":
                 await state.close()
-                state = RuntimeState(storage)
+                state = Persistence(storage)
                 await state.initialize(namespace="response-checkpoint", tenant_id="tenant")
-            archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+            archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
             records = await archive.list_model_interactions(agent_run_id="run")
             assert [record.model_request_seq for record in records] == [1, 2]
             blocks = tuple(_archived_block(record.response_context) for record in records)
@@ -376,8 +373,8 @@ async def test_identical_responses_keep_occurrences_through_checkpoint_reopen_an
             assert checkpoint.messages[1] == checkpoint.messages[3] == response
             resolved = await archive.resolve_model_interactions(records)
             assert [value[1] for value in resolved] == [(response,), (response,)]
-            objects = state.archive_object_store(RuntimeDomain.CHECKPOINT)
-            candidates = tuple([(RuntimeDomain.CHECKPOINT, ObjectRef(
+            objects = state.archive_object_store(PersistenceDomain.CHECKPOINT)
+            candidates = tuple([(PersistenceDomain.CHECKPOINT, ObjectRef(
                 objects.store_id, item.key, item.digest, item.size,
             )) async for item in objects.list_objects()])
             assert candidates
@@ -444,9 +441,7 @@ async def test_interrupted_partial_response_shares_retained_transcript(
         await asyncio.Event().wait()
 
     async with _storage(backend, tmp_path) as storage:
-        async with Runtime.open(
-            "response-dedup", storage=storage, features=model_features(_FeatureModels(FunctionModel(stream_function=stream)), _features()),
-        ) as runtime:
+        async with Persistence.open('response-dedup', storage=storage) as persistence_447, Runtime.attach(persistence=persistence_447, features=model_features(_FeatureModels(FunctionModel(stream_function=stream)), _features())) as runtime:
             execution = await runtime.agents.get().start("question")
             if outcome == "CANCELLED":
                 await asyncio.wait_for(entered.wait(), 5)
@@ -456,7 +451,7 @@ async def test_interrupted_partial_response_shares_retained_transcript(
                 namespace=runtime.namespace, tenant_id=runtime.tenant_id,
                 execution_id=execution.execution_id, agent_run_seq=1,
             )
-            archive = runtime._state.run_store.read_store(RuntimeDomain.TRACE)
+            archive = runtime._run_store.read_store(PersistenceDomain.TRACE)
             record, = await archive.list_model_interactions(agent_run_id=run_id)
             assert record.status == outcome
             block = _archived_block(record.response_context)

@@ -38,18 +38,16 @@ from pydantic_ai_harness.compaction import (
 )
 
 from ._trace_capture import record_http_bodies_enabled
-from ._attachment import file_tool_result_metadata
+from ..model.messages import file_tool_result_metadata
 from ..core import PromptLimits
 from ..errors import AIError, ErrorCode
 from ..model import ModelClientRequest, ModelClientRequestRecorder, ReferencedContent
 from ..workspace import validate_workspace_path
 from ._budget import RunBudgetContext
-from ._journal import ModelRequestFact, ModelRequestJournal, await_request_handoff
+from ..observe.journal import ModelRequestFact, ModelRequestJournal, await_request_handoff
 from ._harness import SummaryProviderModel, prepare_input_retention
 from ._metric_capability import model_request_error
-from ._message import (
-    SummaryPromptPart, model_input_content, binary_content_usage, project_transient_binary_content, project_model_response_attempts,
-)
+from ..model.messages import SummaryPromptPart, model_input_content, binary_content_usage, project_transient_binary_content, project_model_response_attempts
 
 _KEEP_COMPLETED_PAIRS = 3
 _SUMMARY_TAIL_MESSAGES = 20

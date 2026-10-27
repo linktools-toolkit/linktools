@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 """Durable TaskGraph correlation and cancellation provenance regressions."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import pytest
 from linktools.ai.core import Principal, TaskStatus
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime.state._codec import (
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
     encode_envelope,
@@ -69,8 +69,8 @@ def _request(
 
 @pytest.mark.asyncio
 async def test_task_admission_correlation_is_durable_but_not_request_identity() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-correlation-durable", tenant_id="tenant")
     try:
         graph = TaskGraph("task-correlation-durable", (TaskNode("node"),))
@@ -97,8 +97,8 @@ async def test_task_admission_correlation_is_durable_but_not_request_identity() 
 
 @pytest.mark.asyncio
 async def test_task_admission_correlation_drift_reuses_durable_admission() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-correlation-replay", tenant_id="tenant")
     try:
         graph = TaskGraph("task-correlation-replay", (TaskNode("node"),))
@@ -123,8 +123,8 @@ async def test_task_admission_correlation_drift_reuses_durable_admission() -> No
 
 @pytest.mark.asyncio
 async def test_task_service_replay_uses_first_durable_correlation() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-correlation-service-replay", tenant_id="tenant")
     launcher = _CaptureLauncher()
     try:
@@ -152,8 +152,8 @@ async def test_task_service_replay_uses_first_durable_correlation() -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_cleanup_restores_durable_submission_principal_and_correlation() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-correlation-cancel", tenant_id="tenant")
     launcher = _CaptureLauncher()
     try:

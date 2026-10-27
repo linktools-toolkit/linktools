@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
+
+from linktools.ai.core import ExecutionContext
 """Runtime status reports bound resources without opening or probing them."""
 from ._runtime_test_helpers import model_features
 
 import asyncio
 from pathlib import Path
+from dataclasses import replace
 
 import pytest
 from sqlalchemy import event
@@ -14,7 +19,8 @@ from linktools.ai.capability import TraceCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.migrate import provision_database
 from linktools.ai.observe import Metrics
-from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.storage import FilesystemObjectStore, StorageRoute
 from ._runtime_test_helpers import RuntimeUsageModels
 
@@ -28,27 +34,25 @@ async def test_runtime_status_reports_bound_storage_without_io(
     features = RuntimeFeatures("status")
     objects = FilesystemObjectStore(tmp_path / "custom-objects", store_id="chosen-objects")
     if backend == "memory":
-        storage = RuntimeStorage.in_memory()
+        storage = PersistenceStorage.in_memory()
     elif backend == "filesystem":
-        storage = RuntimeStorage.filesystem(tmp_path / "state", object_store=objects)
-        features.capability(TraceCapability(storage=StorageRoute.filesystem(
+        storage = PersistenceStorage.filesystem(tmp_path / "state", object_store=objects)
+        storage = PersistenceStorage(replace(storage.plan, trace=StorageRoute.filesystem(
             tmp_path / "state" / "custom-trace", transaction_root=tmp_path / "state",
-        )))
+        )), object_store=objects)
+        features.capability(TraceCapability())
     elif backend == "sqlite":
-        storage = RuntimeStorage.sqlite(tmp_path / "chosen.db", object_store=objects)
+        storage = PersistenceStorage.sqlite(tmp_path / "chosen.db", object_store=objects)
     else:
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'private-connection.db'}")
         await provision_database(engine)
-        storage = RuntimeStorage.sql(engine)
+        storage = PersistenceStorage.sql(engine)
 
     def forbidden(*args: object, **kwargs: object) -> None:
         raise AssertionError("status must not query, provision, or start background work")
 
     try:
-        async with Runtime.open(
-            "actual-namespace", context=RuntimeContext(None, tenant_id="actual-tenant"),
-            storage=storage, features=model_features(RuntimeUsageModels(), features),
-        ) as runtime:
+        async with Persistence.open('actual-namespace', storage=storage, tenant_id='actual-tenant') as persistence_50, Runtime.attach(persistence=persistence_50, context=ExecutionContext(None), features=model_features(RuntimeUsageModels(), features)) as runtime:
             if engine is not None:
                 event.listen(engine.sync_engine, "before_cursor_execute", forbidden)
             try:
@@ -90,10 +94,7 @@ async def test_web_config_reads_live_runtime_metrics() -> None:
     from linktools.ai.web import create_app
     from .test_web_console import client
 
-    async with Runtime.open(
-        "live-status", storage=RuntimeStorage.in_memory(),
-        features=model_features(RuntimeUsageModels()), metrics=Metrics.in_memory(),
-    ) as runtime, client(create_app(runtime=runtime)) as http:
+    async with Persistence.open('live-status', storage=PersistenceStorage.in_memory()) as persistence_95, Runtime.attach(persistence=persistence_95, features=model_features(RuntimeUsageModels()), metrics=Metrics.in_memory()) as runtime, client(create_app(runtime=runtime)) as http:
         before = (await http.get("/api/config")).json()["runtime"]
         assert before["namespace"] == "live-status"
         assert before["metrics"]["enabled"] is True
@@ -104,3 +105,13 @@ async def test_web_config_reads_live_runtime_metrics() -> None:
         assert after["metrics"]["accepted"] > before["metrics"]["accepted"]
         assert after["metrics"]["pending"] == 0
         assert after["storage"] == before["storage"]
+        status = runtime.metrics.status()
+        assert after["metrics"]["accepted"] == status.accepted
+        assert after["metrics"]["persisted"] == status.persisted
+        assert after["metrics"]["queue_capacity"] == status.queue_capacity
+        assert len(after["metrics"]["recorders"]) == len(status.recorders)
+        for encoded, recorder in zip(after["metrics"]["recorders"], status.recorders):
+            assert encoded["accepted"] == recorder.accepted
+            assert encoded["persisted"] == recorder.persisted
+            assert encoded["pending"] == recorder.pending
+        assert after["metrics"]["failure_codes"] == list(status.failure_codes)

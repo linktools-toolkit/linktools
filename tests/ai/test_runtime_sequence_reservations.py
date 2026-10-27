@@ -13,12 +13,12 @@ from sqlalchemy.sql import Executable
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime.state._filesystem import FilesystemStateStore
-from linktools.ai.runtime.state._memory import InMemoryStateStore
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._schema import build_runtime_sql_metadata
-from linktools.ai.runtime.state._sql import SqlStateStore, _SqlTransaction
-from linktools.ai.runtime.state._store import StateStore, StateTransaction
+from linktools.ai.persistence._filesystem import FilesystemStateStore
+from linktools.ai.persistence._memory import InMemoryStateStore
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._schema import build_runtime_sql_metadata
+from linktools.ai.persistence._sql import SqlStateStore, _SqlTransaction
+from linktools.ai.persistence.state import StateStore, StateTransaction
 from linktools.ai.storage import MySQLDialect, SqlStorageContext
 
 
@@ -92,7 +92,7 @@ async def test_mysql_single_sequence_uses_insert_or_increment_result(
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     context = SqlStorageContext(engine, async_sessionmaker(engine), MySQLDialect())
-    transaction = _SqlTransaction(Session(), build_runtime_sql_metadata(frozenset(RuntimeDomain)), context, b"s" * 32)
+    transaction = _SqlTransaction(Session(), build_runtime_sql_metadata(frozenset(PersistenceDomain)), context, b"s" * 32)
     key = b"k" * 32
     try:
         assert await transaction.reserve_sequences({key: 5}) == {key: expected}
@@ -120,7 +120,7 @@ async def test_mysql_single_sequence_keeps_result_readback_when_driver_omits_id(
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     context = SqlStorageContext(engine, async_sessionmaker(engine), MySQLDialect())
-    transaction = _SqlTransaction(Session(), build_runtime_sql_metadata(frozenset(RuntimeDomain)), context, b"s" * 32)
+    transaction = _SqlTransaction(Session(), build_runtime_sql_metadata(frozenset(PersistenceDomain)), context, b"s" * 32)
     try:
         assert await transaction.reserve_sequences({b"k" * 32: 5}) == {b"k" * 32: 12}
         assert len(statements) == 2

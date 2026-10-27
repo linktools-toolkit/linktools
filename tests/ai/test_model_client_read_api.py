@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Authorized original client bodies load independently of SDK projections."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import hashlib
 from dataclasses import replace
 from pathlib import Path
@@ -14,19 +14,25 @@ from linktools.ai.core import (
     ExecutionStatus, HmacCursorSigner, Page, Principal, TenantAuthorizationPolicy, agent_conversation_id, agent_run_id,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeExecutions, RuntimeHistory, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.history import History
+from linktools.ai.runtime import RuntimeExecutions
+from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
-from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
-from linktools.ai.runtime._model_interaction import StagedContextInline, StagedContextProjection, build_context_projection
-from linktools.ai.runtime._transient_history import TransientExecutionHistoryStore
-from linktools.ai.runtime.service_api import UsageReadCutoff
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._archive import PreparedArchive
-from linktools.ai.runtime.state._archive_closure import iter_archive_roots
-from linktools.ai.runtime.state._codec import _encode_persisted_domain, iter_runtime_object_refs
-from linktools.ai.runtime.state._contracts import ContextProjection, RuntimePayloadRef
-from linktools.ai.runtime.state._model_interaction_store import ModelInteractionInMemoryStepArchive
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord
+from linktools.ai.history._service import DefaultExecutionHistoryService
+from linktools.ai.persistence._model_interaction import (
+    StagedContextInline,
+    StagedContextProjection,
+    build_context_projection,
+)
+from linktools.ai.history._transient import TransientExecutionHistoryStore
+from linktools.ai.execution import UsageReadCutoff
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._archive import PreparedArchive
+from linktools.ai.persistence._archive_closure import iter_archive_roots
+from linktools.ai.persistence.codec import _encode_persisted_domain, iter_runtime_object_refs
+from linktools.ai.persistence.contracts import ContextProjection, RuntimePayloadRef
+from linktools.ai.persistence._model_interaction_store import ModelInteractionInMemoryStepArchive
+from linktools.ai.persistence._step_contracts import AgentRunRecord
 from linktools.ai.storage import StoredPayload
 
 from .test_history_projection_conformance import _reader, _record
@@ -39,7 +45,7 @@ from .test_runtime_history_public import _Executions
 async def test_public_client_reads_are_independent_authorized_and_cursor_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    storage = RuntimeState(_storage(backend, tmp_path))
+    storage = Persistence(_storage(backend, tmp_path))
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
         await storage.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
@@ -72,7 +78,7 @@ async def test_public_client_reads_are_independent_authorized_and_cursor_bound(
                    replace(staged, model_request_seq=3, client_requests=()),
                    replace(staged, model_request_seq=4, status="INTERRUPTED", response_context=None,
                            duration_ns=None, finished_at=None, client_requests=(original[1],)))
-        archive = storage.run_store.read_store(RuntimeDomain.TRACE)
+        archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         bundle = PreparedArchive()
         records = await archive.prepare_interactions(run, entries, payloads.__getitem__, prepared=bundle)
         await archive.sync_projection(run, events=(), checkpoints=(), interactions=records, execution_id="execution", archive=bundle)
@@ -80,15 +86,15 @@ async def test_public_client_reads_are_independent_authorized_and_cursor_bound(
             storage.execution.executions, TenantAuthorizationPolicy("tenant"), _reader(storage),
             HmacCursorSigner("client-read", b"client-read-key"),
         )
-        history = RuntimeHistory(service, tenant_id="tenant")
+        history = History(service, tenant_id="tenant")
         principal = Principal("reader", "tenant")
-        objects = storage.object_store(RuntimeDomain.TRACE)
+        objects = storage.object_store(PersistenceDomain.TRACE)
         opened = []
 
 
 
         object_stores = {id(objects): objects}
-        archive_objects = storage.archive_object_store(RuntimeDomain.TRACE)
+        archive_objects = storage.archive_object_store(PersistenceDomain.TRACE)
         object_stores[id(archive_objects)] = archive_objects
         for object_store in object_stores.values():
             async def track_open(key, original_open=object_store.open):
@@ -100,7 +106,7 @@ async def test_public_client_reads_are_independent_authorized_and_cursor_bound(
         async def object_keys(value):
             encoded = _encode_persisted_domain(value)
             keys = {ref.key for _, ref in iter_runtime_object_refs(
-                encoded, default_domain=RuntimeDomain.TRACE,
+                encoded, default_domain=PersistenceDomain.TRACE,
             )}
             roots = tuple(iter_archive_roots(encoded))
             if roots:
@@ -211,10 +217,10 @@ async def test_existing_custom_readers_and_services_keep_default_call_shape() ->
 
     principal = Principal("reader", "tenant")
     readers = (
-        RuntimeHistory(DefaultExecutionHistoryService(
+        History(DefaultExecutionHistoryService(
             _Executions(), TenantAuthorizationPolicy("tenant"), ExistingReader(),
         ), tenant_id="tenant"),
-        RuntimeHistory(ExistingService(), tenant_id="tenant"),
+        History(ExistingService(), tenant_id="tenant"),
         RuntimeExecutions(ExistingService(), unused_get),
     )
     for reader in readers:
@@ -228,12 +234,12 @@ async def test_existing_custom_readers_and_services_keep_default_call_shape() ->
 @pytest.mark.asyncio
 async def test_raw_only_volatile_reads_do_not_require_sdk_checkpoint_or_payload() -> None:
     original = _requests()
-    archive = ModelInteractionInMemoryStepArchive(RuntimeDomain.TRACE)
+    archive = ModelInteractionInMemoryStepArchive(PersistenceDomain.TRACE)
     await archive.initialize()
     try:
         record, = await archive.prepare_interactions(AgentRunRecord("run"), (_staged(original),), lambda _: b"{}")
         pending_sdk = replace(record, request_context=ContextProjection(()), request_envelope=RuntimePayloadRef(
-            StoredPayload.inline_bytes(b"{}"), RuntimeDomain.TRACE,
+            StoredPayload.inline_bytes(b"{}"), PersistenceDomain.TRACE,
         ))
         assert await archive.resolve_model_interactions(
             (pending_sdk,), include_client_requests=True, include_content=False,
@@ -247,7 +253,7 @@ async def test_raw_only_volatile_reads_do_not_require_sdk_checkpoint_or_payload(
     finally:
         await archive.close()
 
-    storage = RuntimeState(RuntimeStorage(RuntimeStoragePlan(execution=StorageRoute.transient())))
+    storage = Persistence(PersistenceStorage(PersistencePlan(execution=StorageRoute.transient())))
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     try:
         staged = replace(
@@ -257,7 +263,7 @@ async def test_raw_only_volatile_reads_do_not_require_sdk_checkpoint_or_payload(
         await storage.run_store.register_agent_run(AgentRunRecord("run"))
         storage.run_store.stage_model_interaction(staged)
         transient = TransientExecutionHistoryStore(
-            storage.run_store.read_store(RuntimeDomain.TRACE), storage.run_store,
+            storage.run_store.read_store(PersistenceDomain.TRACE), storage.run_store,
         )
         assert await transient.resolve_model_interactions(
             (staged,), include_client_requests=True, include_content=False,

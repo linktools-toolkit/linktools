@@ -10,7 +10,7 @@ import pytest
 
 from linktools.ai.acp import ACPAgent
 from linktools.ai.core import Page, Principal, SessionStatus
-from linktools.ai.runtime import ListSessionRequest, SessionView
+from linktools.ai.execution import ListSessionRequest, SessionView
 
 
 def _schema_object(**values: object) -> dict[str, object]:
@@ -96,7 +96,7 @@ async def test_acp_workspace_uses_explicit_execution_coordination(
     from linktools.ai.acp import ACPApplication
     from linktools.ai.capability import ExecutionCapability
     from linktools.ai.core import ExecutionStatus
-    from linktools.ai.runtime import RuntimeStorage
+    from linktools.ai.persistence import PersistenceStorage
     from linktools.ai.workspace import Workspace
 
     from ._runtime_test_helpers import _Models
@@ -106,12 +106,13 @@ async def test_acp_workspace_uses_explicit_execution_coordination(
     streams = _CountingStreamBackend()
     declaration = (
         None if coordination == "none" else ExecutionCapability(
-            retain_history=retain_history, coordination=streams if coordination == "stream" else cache,
+            retain_history=retain_history,
         )
     )
     application = ACPApplication.for_workspace(
         Workspace.load(tmp_path), features=model_features(_Models(TestModel(call_tools=[]))),
-        storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache),
+        storage=PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache,
+                                          coordination=None if coordination == "none" else streams if coordination == "stream" else cache),
         execution=declaration,
     )
     served = False
@@ -147,8 +148,9 @@ async def test_acp_application_can_serve_again_after_transport_failure(
     from contextlib import asynccontextmanager
 
     import linktools.ai.acp as acp_module
-    from linktools.ai.core import service_principal
-    from linktools.ai.runtime import RuntimeFeatures, RuntimeStorage
+    from linktools.ai.core import AuthorizationPolicy, service_principal
+    from linktools.ai.runtime import RuntimeFeatures
+    from linktools.ai.persistence import PersistenceStorage
     from linktools.ai.workspace import Workspace
 
     from ._runtime_test_helpers import RuntimeUsageModels
@@ -158,7 +160,7 @@ async def test_acp_application_can_serve_again_after_transport_failure(
     features.model("default", binding)
     application = acp_module.ACPApplication.for_workspace(
         Workspace.load(tmp_path), features=features,
-        storage=RuntimeStorage.in_memory(),
+        storage=PersistenceStorage.in_memory(),
     )
     captures = []
     closed = []
@@ -166,10 +168,12 @@ async def test_acp_application_can_serve_again_after_transport_failure(
 
     @asynccontextmanager
     async def open_runtime(
-        namespace: str, *, storage: RuntimeStorage, features: RuntimeFeatures,
+        namespace: str, *, storage: PersistenceStorage, features: RuntimeFeatures,
+        authorization: AuthorizationPolicy | None = None,
     ) -> AsyncIterator[SimpleNamespace]:
         assert namespace == "default"
         assert storage is application.storage
+        assert authorization is application.authorization
         captures.append(await features.capture())
         try:
             yield SimpleNamespace(default_principal=service_principal("default", "acp"))

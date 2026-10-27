@@ -3,8 +3,9 @@
 Caching accelerates reads; the source storage still owns durable facts. The
 storage package separates content, revision discovery, and metadata projection.
 
-`RuntimeStorage` declares reusable resource routes and an optional object store.
-Each Runtime binding acquires and closes its own operational scope; borrowed
+`PersistenceStorage` declares reusable resource routes and an optional object store.
+Each Persistence binding acquires and closes its operational scope. Runtime and
+TaskEngine borrow it and own only their producer-local lifetimes; borrowed
 backends remain host-owned. Stores
 such as `AssetStore`, `ObjectStore`, and `MetricStore` expose their respective
 data contracts; repositories own domain records and state transitions. Backends
@@ -14,7 +15,7 @@ store does not necessarily imply durable retention.
 
 | Interface | Responsibility | Host integration |
 | --- | --- | --- |
-| `CacheBackend` | Store discardable immutable bytes | Supply it to a domain content cache or `RuntimeStorage.sqlite(path, cache=...)` |
+| `CacheBackend` | Store discardable immutable bytes | Supply it to a domain content cache or `PersistenceStorage.sqlite(path, cache=...)` |
 | `ContentCache[KeyT, ValueT, InfoT]` | Bind a borrowed backend to domain keys and value encoding | Supply `StorageOverlay(content_cache=...)` |
 | `RevisionSource` | Observe and publish the source's current revision | Supply `StorageOverlay(revision_source=...)` |
 | `StorageOverlay` | Merge layers, bind values to metadata, share content loads and refresh metadata | Keep reads through the owning store |
@@ -59,11 +60,11 @@ owning domain remains responsible for its retention rules.
 
 ## Read resources and write policies
 
-`StorageRoute(..., cache=...)` and the RuntimeStorage factories borrow a
+`StorageRoute(..., cache=...)` and the PersistenceStorage factories borrow a
 `CacheBackend` for hot reads only. `CommitPolicy.batch(buffer=..., ...)` borrows
 an independent `WriteBufferBackend` for pending writes. The same implementation
 may provide both capabilities, but each use is explicitly configured.
-`ExecutionCapability(coordination=...)` separately supplies turn ownership and
+`PersistenceStorage(..., coordination=...)` separately supplies turn ownership and
 live streams, including the non-authoritative pending-turn view.
 
 ### Owner defaults for batch writes
@@ -109,12 +110,11 @@ flush/close ownership.
 
 ### Runtime archive routes and defaults
 
-`CheckpointCapability(storage=None)` and `TraceCapability(storage=None)` inherit
-Runtime's execution route, including its hot-read cache. Neither `None` disables
-the capability; registration enables it. An explicit archive route must remain
+`PersistencePlan.checkpoint=None` and `trace=None` inherit the execution route,
+including its hot-read cache. Registering CheckpointCapability or TraceCapability
+enables behavior; neither capability accepts a physical storage argument. An explicit archive route must remain
 in the same `StateStorageGroup` as Execution and Recovery, because their safety
-and terminal boundaries require atomic writes. Runtime validates this when it
-opens. Routes share a group when they use the same SQLite path, the same SQL
+and terminal boundaries require atomic writes. Persistence validates this when it opens. Routes share a group when they use the same SQLite path, the same SQL
 engine instance, or the same filesystem transaction root; memory routes share
 one binding-local group. Separate SQL engine instances targeting the same database do not
 establish a shared SQL group.
@@ -126,17 +126,19 @@ cache while disabling Trace's hot cache:
 ```python
 from linktools.ai.capability import CheckpointCapability, TraceCapability
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeStorage
+from dataclasses import replace
+from linktools.ai.runtime import Runtime
+from linktools.ai.core import PersistenceDomain
+from linktools.ai.persistence import PersistenceStorage
 
-storage = RuntimeStorage.from_root("state", cache=hot_cache)
-execution_route = storage.plan.route(RuntimeDomain.EXECUTION)
+storage = PersistenceStorage.from_root("state", cache=hot_cache)
+execution_route = storage.plan.route(PersistenceDomain.EXECUTION)
 features = RuntimeFeatures("app")
 features.capability(CheckpointCapability())
-features.capability(TraceCapability(
-    storage=execution_route.with_cache(None),
-))
-async with Runtime.open(
-    "app", storage=storage, features=features,
+features.capability(TraceCapability())
+storage = PersistenceStorage(replace(storage.plan, trace=execution_route.with_cache(None)))
+async with Runtime.open("app", storage=storage,
+    features=features,
 ) as runtime:
     ...
 ```
@@ -149,7 +151,7 @@ backend to `with_cache` instead.
 
 Missing write buffers make batch policies await source publication without an
 implicit queue. `ExecutionCapability` is optional: when omitted, Runtime uses
-sync commit with no borrowed coordination resource. A terminal preference must
+sync commit; any coordination resource comes from PersistenceStorage. A terminal preference must
 be declared explicitly and remains subject to coordination and safety rules.
 Runtime drains its own work on close, but never closes borrowed hot caches,
 write buffers, coordination resources, SQL engines, or Metrics datasets.
@@ -205,8 +207,9 @@ finally:
     await recorder.close()
 ```
 
-Automatic Agent and Task observations, including evaluation work in a Runtime,
-require `Runtime.open(..., metrics=dataset)`. Runtime owns one isolated recorder;
+`Runtime.open(..., metrics=dataset)` configures Agent observations and its
+bound TaskEngine recorders, including evaluation work. Each producer owns an isolated
+recorder over the borrowed Metrics dataset;
 explicit application recording uses the dataset independently.
 
 All Metrics constructors and factories accept `commit`. Their effective default
@@ -418,11 +421,11 @@ ObjectRef/domain/tenant/source rules, so callers supply the byte backend directl
 there is no separate Runtime content adapter to construct.
 
 ```python
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.storage import InMemoryCacheBackend
 
 cache = InMemoryCacheBackend(max_bytes=16 * 1024 * 1024)
-storage = RuntimeStorage.from_root("./runtime", cache=cache)
+storage = PersistenceStorage.from_root("./runtime", cache=cache)
 ```
 
 The host can retain the cache across successive storage lifetimes. Different
@@ -442,7 +445,7 @@ may finish for its original callers without restarting indefinitely.
 
 Recovery-domain objects always retain current source-membership checks. Other
 strong consumers retain them as well: explicit result/wait,
-RuntimeHistory results, persistent checkpoint reads, model/recovery context loading, and every rebuilt session
+History results, persistent checkpoint reads, model/recovery context loading, and every rebuilt session
 display (including `max_age=0`). They may reuse verified bytes after the existing
 ObjectStore `stat` validation instead of transferring the complete object again.
 This does not claim to detect physical corruption beyond that ObjectStore
@@ -454,7 +457,7 @@ namespace or a separate cache namespace/instance. Store IDs alone do not
 identify physical sources. Keys also isolate tenant, domain, and the complete
 immutable ObjectRef. A host-provided cache is a trusted byte transport, not an
 authorization service.
-`RuntimeState.read_object(domain, reference)` is the composition-level read
+`Persistence.read_object(domain, reference)` is the composition-level read
 operation used by SDK composition; applications normally keep using their
 existing domain/history APIs.
 
@@ -511,7 +514,7 @@ remain in use.
 
 ## Ordered live streams
 
-`ExecutionCapability(coordination=cache)` uses the optional `open_stream`/`read_stream`
+`PersistenceStorage(..., coordination=cache)` uses the optional `open_stream`/`read_stream`
 methods on that same borrowed instance for ordered, disposable live previews.
 `object_store` still owns authoritative payloads; the separately configured
 StorageRoute cache holds reproducible content. A live preview

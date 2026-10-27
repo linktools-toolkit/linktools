@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Terminal metadata observations preserve owner CAS and immutable publication."""
 from ._runtime_test_helpers import model_features
 
@@ -14,9 +16,9 @@ from linktools.ai.capability import CheckpointCapability, TraceCapability
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
-from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
-from linktools.ai.runtime.state._sql import _SqlGroupTransaction
-from linktools.ai.runtime.state._store import active_state_scope
+from linktools.ai.persistence._runtime_commands import StateCommands
+from linktools.ai.persistence._sql import _SqlGroupTransaction
+from linktools.ai.persistence.state import active_state_scope
 
 from ._session_tool_test_helpers import _application, _relevant_kinds, _ToolModels
 from .test_incremental_projection_boundaries import _storage
@@ -32,15 +34,12 @@ async def test_terminal_observations_keep_physical_guards_and_rollback(
     application.capability(CheckpointCapability(), scope="runtime")
     application.capability(TraceCapability(), scope="runtime")
     terminal = ContextVar("terminal_publication_observation", default=False)
-    original_commit = RuntimeStateCommands.commit_terminal_checkpoint
+    original_commit = StateCommands.commit_terminal_checkpoint
     original_get = _SqlGroupTransaction.get_records
     injected = False
     rejected = False
 
-    async with Runtime.open(
-        "terminal-observations", storage=_storage("sqlite", tmp_path),
-        features=model_features(_ToolModels(), application),
-    ) as runtime:
+    async with Persistence.open('terminal-observations', storage=_storage('sqlite', tmp_path)) as persistence_40, Runtime.attach(persistence=persistence_40, features=model_features(_ToolModels(), application)) as runtime:
         async def snapshot():
             async def read(tx):
                 return (
@@ -96,7 +95,7 @@ async def test_terminal_observations_keep_physical_guards_and_rollback(
             return await original_commit(self, value, **kwargs)
 
         monkeypatch.setattr(_SqlGroupTransaction, "get_records", observe)
-        monkeypatch.setattr(RuntimeStateCommands, "commit_terminal_checkpoint", commit)
+        monkeypatch.setattr(StateCommands, "commit_terminal_checkpoint", commit)
         await runtime.agents.get("default").create_session("session")
         session = runtime.agents.get("default").session("session")
         execution = await session.start("inspect", idempotency_key="turn")

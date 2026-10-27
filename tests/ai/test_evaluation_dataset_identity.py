@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """Dataset capture addressing preserves structured case identities."""
+
+from linktools.ai.persistence import Persistence
+from linktools.ai.core import ExecutionContext
 
 from pathlib import Path
 
@@ -10,7 +14,9 @@ from linktools.ai.core import service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import CaseRef, CaseSpec, DatasetRef, DatasetSpec
 
-from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 
 
 @pytest.mark.asyncio
@@ -25,20 +31,21 @@ async def test_dataset_capture_keys_preserve_structured_case_identity(tmp_path: 
             ("group", "one:case", "second prompt"),
         )
     )
-    async with Runtime.open(
-        "dataset-identity", storage=RuntimeStorage.filesystem(tmp_path),
-        context=RuntimeContext(None, tenant_id=principal.tenant_id),
-    ) as runtime:
+    async with (
+        Persistence.open('dataset-identity', storage=PersistenceStorage.filesystem(tmp_path), tenant_id=principal.tenant_id) as persistence_30,
+        TaskEngine.open(persistence=persistence_30, context=ExecutionContext(None)) as task_engine,
+        Evaluations.open(task_engine) as evaluations,
+    ):
         captures = []
         for index, spec in enumerate(specs):
-            ref = await runtime.evaluations.publish_dataset(
+            ref = await evaluations.publish_dataset(
                 spec, principal=principal, idempotency_key=f"dataset-{index}",
             )
             assert ref == spec.ref
-            assert await runtime.evaluations.publish_dataset(
+            assert await evaluations.publish_dataset(
                 spec, principal=principal, idempotency_key=f"dataset-{index}",
             ) == ref
-            cases = await runtime.evaluations.list_cases(ref, principal=principal)
+            cases = await evaluations.list_cases(ref, principal=principal)
             assert tuple(case.ref for case in cases.items) == (spec.cases[0].ref,)
             captures.append(cases.items[0].input)
         assert captures[0] != captures[1]
@@ -46,7 +53,7 @@ async def test_dataset_capture_keys_preserve_structured_case_identity(tmp_path: 
             CaseSpec.agent(specs[0].cases[0].ref, prompt="changed prompt"),
         ))
         with pytest.raises(AIError) as caught:
-            await runtime.evaluations.publish_dataset(
+            await evaluations.publish_dataset(
                 changed, principal=principal, idempotency_key="changed-dataset",
             )
         assert caught.value.code is ErrorCode.IDEMPOTENCY_CONFLICT

@@ -44,7 +44,7 @@ def _load_json(name: str) -> dict[str, object]:
 
 def _compiler(agents: dict[str, AgentSpec]) -> AgentCompiler:
     return AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=(),
         agents=agents,
     )
@@ -78,7 +78,7 @@ def test_v1_skill_wire_and_capability_pin_round_trip() -> None:
 def test_v1_binding_restores_from_explicitly_registered_matching_contract() -> None:
     payload = _load_json("agent_binding_subagent_v1_golden.json")
     binding_contract = AgentBindingContract.from_payload(payload)
-    current_model = create_model(protocol='openai',
+    current_model = create_model(api='openai',
         model="gpt-test", input_types=["mime:text/plain"],
     )
     assert payload["model_contract"] == dict(current_model.contract)

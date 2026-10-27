@@ -12,37 +12,29 @@ from ._root import (
     ToolPermissionPolicy,
     validate_workspace_path,
 )
-from ._local_sandbox import LocalSandbox
-from ._bubblewrap import BubblewrapSandbox
+from ._local_sandbox import LocalWorkspaceBackend
+from ._bubblewrap import BubblewrapWorkspaceBackend
 from ._sandbox import (
-    DisabledSandbox,
-    ReadOnlySandboxPolicy,
-    Sandbox,
-    SandboxOperationRejected,
-    SandboxResource,
-    SandboxResourcePath,
-    SandboxSession,
-    SandboxStdioProcess,
-    StdioSandbox,
-    StdioSandboxSession,
+    WorkspaceReadPolicy,
+    SupportsFileTools, SupportsStdio, SupportsResources, SupportsClose, SupportsCommandJobs,
+    WorkspaceOperationRejected,
+    WorkspaceResource,
+    WorkspaceResourcePath,
+    WorkspaceStdioProcess,
     normalize_workspace_input_path,
 )
 
 __all__ = [
-    "DisabledSandbox",
-    "ReadOnlySandboxPolicy",
-    "BubblewrapSandbox",
+    "SupportsFileTools", "SupportsStdio", "SupportsResources", "SupportsClose", "SupportsCommandJobs",
+    "WorkspaceReadPolicy",
+    "BubblewrapWorkspaceBackend",
     "WorkspaceInstructionResolver",
     "PermissionDecision",
-    "Sandbox",
-    "SandboxOperationRejected",
-    "SandboxResource",
-    "SandboxResourcePath",
-    "SandboxSession",
-    "SandboxStdioProcess",
-    "StdioSandbox",
-    "StdioSandboxSession",
-    "LocalSandbox",
+    "WorkspaceOperationRejected",
+    "WorkspaceResource",
+    "WorkspaceResourcePath",
+    "WorkspaceStdioProcess",
+    "LocalWorkspaceBackend",
     "ToolPermissionRule",
     "Workspace",
     "WorkspaceAccess",

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Cancellation and capability error-boundary behavior."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
@@ -15,7 +15,7 @@ from linktools.ai.asset._sql import SqlAssetBackend
 from linktools.ai.capability import SubagentDelegate
 from linktools.ai.core import ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._agent_executor import (
     _cleanup_agent_run_resources,
@@ -23,7 +23,7 @@ from linktools.ai.runtime._agent_executor import (
 )
 from linktools.ai.core import HandoffGate
 from linktools.ai.runtime._local import LocalExecutionBackend
-from linktools.ai.runtime._event import LiveExecutionEventBroker
+from linktools.ai.execution.events import LiveExecutionEventBroker
 from linktools.ai.runtime._pending_turn import _PendingExecutionTurns
 from linktools.ai.runtime._mcp import (
     _MCPBinding,
@@ -42,13 +42,13 @@ from linktools.ai.task import (
 )
 from linktools.ai.task._local import LocalTaskGraphLauncher
 from linktools.ai.core import Principal, PrincipalKind
-from linktools.ai.workspace import BubblewrapSandbox
+from linktools.ai.workspace import BubblewrapWorkspaceBackend
 
 
 @pytest_asyncio.fixture
-async def execution_storage() -> AsyncIterator[RuntimeState]:
-    storage = RuntimeStorage.in_memory()
-    storage = RuntimeState(storage)
+async def execution_storage() -> AsyncIterator[Persistence]:
+    storage = PersistenceStorage.in_memory()
+    storage = Persistence(storage)
     await storage.initialize(namespace="boundary", tenant_id="tenant")
     try:
         yield storage
@@ -70,8 +70,7 @@ async def test_mcp_materialization_rejects_unselected_server(tmp_path) -> None:
         await materialize_mcp_capabilities(
             (MCPServerSpec("server", "echo"),),
             (),
-            sandbox=None,
-            sandbox_session=None,
+            workspace_backend=None,
             host_cwd=str(tmp_path),
             bindings={},
             projections={},
@@ -83,7 +82,7 @@ async def test_mcp_materialization_rejects_unselected_server(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_mcp_materialization_requires_captured_runtime_cwd() -> None:
+async def test_mcp_materialization_rejects_disabled_workspace() -> None:
     server = MCPServerSpec("server", "echo")
     binding = _MCPBinding(
         None,
@@ -101,8 +100,7 @@ async def test_mcp_materialization_requires_captured_runtime_cwd() -> None:
         await materialize_mcp_capabilities(
             (server,),
             (mcp_server_selector(server.id),),
-            sandbox=None,
-            sandbox_session=None,
+            workspace_backend=None,
             host_cwd=None,
             bindings={server.id: binding},
             projections=projections,
@@ -110,14 +108,13 @@ async def test_mcp_materialization_requires_captured_runtime_cwd() -> None:
             tool_metrics=None,
         )
 
-    assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
-    assert error.value.safe_details == {"reason": "mcp_cwd_unavailable"}
+    assert error.value.code is ErrorCode.SANDBOX_UNAVAILABLE
 
 
 @pytest.mark.asyncio
-async def test_sandboxed_mcp_requires_session_without_workspace(tmp_path) -> None:
-    sandbox = BubblewrapSandbox(
-        runtime_root=tmp_path,
+async def test_mcp_requires_stdio_support_on_the_selected_workspace(tmp_path) -> None:
+    sandbox = BubblewrapWorkspaceBackend(
+        tmp_path, runtime_root=tmp_path,
         bwrap_executable=tmp_path / "bwrap",
     )
     server = MCPServerSpec("server", "echo")
@@ -137,8 +134,7 @@ async def test_sandboxed_mcp_requires_session_without_workspace(tmp_path) -> Non
         await materialize_mcp_capabilities(
             (server,),
             (mcp_server_selector(server.id),),
-            sandbox=sandbox,
-            sandbox_session=None,
+            workspace_backend=object(),
             host_cwd=None,
             bindings={server.id: binding},
             projections=projections,
@@ -174,8 +170,7 @@ async def test_remote_mcp_materialization_does_not_require_sandbox_or_cwd(
     capabilities = await materialize_mcp_capabilities(
         (server,),
         (mcp_server_selector(server.id),),
-        sandbox=None,
-        sandbox_session=None,
+        workspace_backend=None,
         host_cwd=None,
         bindings={server.id: binding},
         projections=projections,
@@ -286,7 +281,7 @@ async def test_handoff_gate_recovers_after_cancelled_cleanup() -> None:
 
 
 @pytest.mark.asyncio
-async def test_immediate_terminal_execution_waits_for_task_dependency_hold(execution_storage: RuntimeState) -> None:
+async def test_immediate_terminal_execution_waits_for_task_dependency_hold(execution_storage: Persistence) -> None:
     from linktools.ai.runtime._execution import _ExecutionRuntimeBridge
 
     service = object.__new__(DefaultExecutionService)
@@ -321,7 +316,8 @@ async def test_immediate_terminal_execution_waits_for_task_dependency_hold(execu
             del execution_id, tenant_id
             return None
 
-    service._state = SimpleNamespace(executions=Executions())
+    service._repositories = SimpleNamespace(executions=Executions())
+    service._port = SimpleNamespace(read_source_execution=service._repositories.executions.get)
     release_started = asyncio.Event()
     release_finished = asyncio.Event()
 

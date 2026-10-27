@@ -12,11 +12,11 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RequestUsage
 
 from linktools.ai.errors import ErrorCode
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime._journal import ModelRequestJournal
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeState
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
+from linktools.ai.observe.journal import ModelRequestJournal
+from linktools.ai.persistence import PersistenceDomain, Persistence
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
 
 
 @pytest.mark.asyncio
@@ -27,12 +27,12 @@ async def test_checkpoint_preserves_live_request_until_terminal(
     backend: str,
     status: str,
 ) -> None:
-    storage = RuntimeState(
-        RuntimeStorage.in_memory()
+    storage = Persistence(
+        PersistenceStorage.in_memory()
         if backend == "memory"
-        else RuntimeStorage.filesystem(tmp_path / "state")
+        else PersistenceStorage.filesystem(tmp_path / "state")
         if backend == "filesystem"
-        else RuntimeStorage.sqlite(tmp_path / "state.db")
+        else PersistenceStorage.sqlite(tmp_path / "state.db")
     )
     await storage.initialize(namespace="live-request", tenant_id="tenant")
     try:
@@ -45,7 +45,7 @@ async def test_checkpoint_preserves_live_request_until_terminal(
             execution_id="execution",
             agent_run_id="run",
         )
-        recovery = store.read_store(RuntimeDomain.CHECKPOINT)
+        recovery = store.read_store(PersistenceDomain.CHECKPOINT)
         for sequence in (1, 2):
             request = ModelRequest(parts=[UserPromptPart(f"request-{sequence}")])
             messages = (*capture.transcript_messages(), request)

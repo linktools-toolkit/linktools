@@ -43,28 +43,28 @@ class _CountingModel(TestModel):
 
 
 def test_openai_operational_settings_do_not_change_model_contract() -> None:
-    first = create_model(protocol="openai",
-        model="gpt-test",
-        base_url="https://first.example/v1",
-        api_key="first-key",
-        timeout=30,
+    first = create_model(
+        api='openai',
+        model='gpt-test',
+        base_url='https://first.example/v1',
+        api_key='first-key',
         max_retries=1,
-        max_tokens=2048,
+        model_settings={'timeout': 30, 'max_tokens': 2048},
     )
-    second = create_model(protocol="openai",
-        model="openai:gpt-test",
-        base_url="https://second.example/v1",
-        api_key="second-key",
-        timeout=60,
+    second = create_model(
+        api='openai',
+        model='openai:gpt-test',
+        base_url='https://second.example/v1',
+        api_key='second-key',
         max_retries=3,
-        max_tokens=2048,
+        model_settings={'timeout': 60, 'max_tokens': 2048},
     )
 
     assert dict(first.contract) == dict(second.contract)
 
 
 def test_openai_custom_endpoint_is_operational_configuration() -> None:
-    binding = create_model(protocol="openai",
+    binding = create_model(api="openai",
         model="gpt-test",
         base_url="https://gateway.example/v1",
     )
@@ -78,7 +78,7 @@ def test_openai_custom_endpoint_is_operational_configuration() -> None:
 
 
 def _input_binding(*, allow_files: bool = False) -> ModelBinding:
-    return create_model(protocol="openai",
+    return create_model(api="openai",
         model="gpt-test", input_types=("mime:image/*", "mime:application/*", "mime:text/*") if allow_files else (),
     )
 
@@ -208,11 +208,8 @@ async def test_openai_allow_files_does_not_guess_opaque_uploaded_file_type() -> 
 
 
 def test_openai_max_tokens_changes_model_contract() -> None:
-    plain = create_model(protocol="openai", model="gpt-test")
-    configured = create_model(protocol="openai",
-        model="gpt-test",
-        max_tokens=2048,
-    )
+    plain = create_model(api="openai", model="gpt-test")
+    configured = create_model(api='openai', model='gpt-test', model_settings={'max_tokens': 2048})
 
     assert dict(plain.contract)["settings"] == {}
     assert dict(configured.contract)["settings"] == {"max_tokens": 2048}
@@ -220,14 +217,8 @@ def test_openai_max_tokens_changes_model_contract() -> None:
 
 
 def test_model_restore_keeps_registered_identity_when_configuration_changes() -> None:
-    historical = create_model(protocol="openai",
-        model="gpt-test",
-        max_tokens=1024,
-    )
-    registry = create_model(protocol="openai",
-        model="gpt-test",
-        max_tokens=2048,
-    )
+    historical = create_model(api='openai', model='gpt-test', model_settings={'max_tokens': 1024})
+    registry = create_model(api='openai', model='gpt-test', model_settings={'max_tokens': 2048})
 
     restored = _ModelResolver({"default": registry}).resolve("default")
     assert restored is registry
@@ -235,12 +226,12 @@ def test_model_restore_keeps_registered_identity_when_configuration_changes() ->
 
 
 def test_openai_route_materializes_settings_and_retries() -> None:
-    binding = create_model(protocol="openai",
-        model="gpt-test",
-        api_key="test-key",
-        timeout=30,
+    binding = create_model(
+        api='openai',
+        model='gpt-test',
+        api_key='test-key',
         max_retries=1,
-        max_tokens=2048,
+        model_settings={'timeout': 30, 'max_tokens': 2048},
     )
 
     model = binding.materialize()
@@ -267,4 +258,6 @@ def test_openai_route_materializes_settings_and_retries() -> None:
 )
 def test_openai_route_rejects_invalid_settings(kwargs: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
-        create_model(protocol="openai", model="gpt-test", **kwargs)
+        create_model(api="openai", model="gpt-test",
+                     model_settings={key: value for key, value in kwargs.items() if key in {"max_tokens", "timeout"}},
+                     **{key: value for key, value in kwargs.items() if key not in {"max_tokens", "timeout"}})

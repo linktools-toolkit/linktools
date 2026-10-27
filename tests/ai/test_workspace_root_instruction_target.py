@@ -66,7 +66,7 @@ def _toolset(repository: _RepositoryBoundary) -> BoundaryToolset:
         (FunctionToolset([tool_with_metadata(_list_directory, descriptor)]),),
         {"_list_directory": descriptor},
         id="workspace",
-        sandbox_session=_Session(),  # type: ignore[arg-type]
+        workspace_backend=_Session(),  # type: ignore[arg-type]
         repository_boundary=repository,
     )
 

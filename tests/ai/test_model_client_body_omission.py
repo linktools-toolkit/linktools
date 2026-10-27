@@ -11,10 +11,10 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models import ModelRequestParameters, StreamedResponse
 
 from linktools.ai.model import ModelClientRequestRecorder
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._codec import decode_domain, encode_domain
-from linktools.ai.runtime.state._contracts import ModelClientRequestRef
-from linktools.ai.runtime.state._model_client import prepare_client_requests, resolve_client_requests
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.codec import decode_domain, encode_domain
+from linktools.ai.persistence.contracts import ModelClientRequestRef
+from linktools.ai.persistence._model_client import prepare_client_requests, resolve_client_requests
 
 from .test_model_client_request_capture import _model, _request, _response
 from .test_model_client_response_capture import _DONE, _EVENT, _JSON, _Stream, _invoke
@@ -68,9 +68,9 @@ async def test_body_omission_covers_sdk_retries_without_changing_transport_obser
         assert "protocol_terminal" not in diagnostics
         assert source.closes == 1
 
-    prepared = await prepare_client_requests(recorder.requests, RuntimeDomain.TRACE)
+    prepared = await prepare_client_requests(recorder.requests, PersistenceDomain.TRACE)
     restored = decode_domain(encode_domain(prepared), tuple[ModelClientRequestRef, ...])
-    assert await resolve_client_requests(restored, RuntimeDomain.TRACE) == recorder.requests
+    assert await resolve_client_requests(restored, PersistenceDomain.TRACE) == recorder.requests
     assert all(attempt.body is attempt.response.body is None for attempt in restored)
 
 

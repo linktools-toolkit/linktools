@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Input capture requires authorized promotion and a fresh source record."""
 
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeState
+from linktools.ai.persistence import Persistence
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from types import SimpleNamespace
@@ -12,16 +12,14 @@ from linktools.ai.core import (
     AuthorizationAction,
     ExecutionStatus,
     Principal,
-    PromptLimits,
     ResourceKind,
     ResourceRef,
     TenantAuthorizationPolicy,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import CaptureInputRequest, RuntimeStorage
-from linktools.ai.runtime._input import ExecutionInputMaterializer
-from linktools.ai.runtime._input_capture import RuntimeInputCaptures
-from linktools.ai.runtime._context_archive import ExecutionContextArchive
+from linktools.ai.inputs import CaptureInputRequest
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.inputs import InputCaptures
 
 from .test_history_projection_conformance import _record
 
@@ -30,8 +28,8 @@ _PRINCIPAL = Principal("principal", "tenant", "service")
 
 @asynccontextmanager
 async def _storage():
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="pending-capture", tenant_id="tenant")
     try:
         yield state
@@ -40,21 +38,9 @@ async def _storage():
 
 
 def _captures(state, *, prepare=None, authorization=None):
-    return RuntimeInputCaptures(
-        "pending-capture", authorization or TenantAuthorizationPolicy("tenant"),
-        SimpleNamespace(), ExecutionInputMaterializer(None, PromptLimits()),
-        tenant_id=state.tenant_id,
-        execution_repositories=state.execution, task_repositories=state.task,
-        object_stores={domain: state.object_store(domain) for domain in RuntimeDomain},
-        execution_retention=state.plan.route(RuntimeDomain.EXECUTION).retention,
-        task_retention=state.plan.route(RuntimeDomain.TASK).retention,
-        context_archive=ExecutionContextArchive(
-            state.execution.executions.state_store,
-            state.archive_object_store(RuntimeDomain.EXECUTION),
-            namespace="pending-capture", tenant_id=state.tenant_id,
-            object_reader=lambda reference: state.read_archive_object(RuntimeDomain.EXECUTION, reference),
-        ),
-        prepare_pending_capture=prepare,
+    return InputCaptures.from_persistence(
+        state, authorization=authorization or TenantAuthorizationPolicy("tenant"),
+        execution=SimpleNamespace(), prepare_pending_capture=prepare,
     )
 
 

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+from linktools.ai.persistence import Persistence
+
 from ._runtime_test_helpers import model_features
 from ._runtime_test_helpers import workspace_features
 
@@ -23,7 +25,8 @@ from linktools.ai.capability import AssetCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.spec import (
     RepositoryInstructionDocument,
     RepositoryInstructions,
@@ -346,11 +349,7 @@ async def test_runtime_reads_rules_from_asset_store_not_workspace_storage(
 
     monkeypatch.setattr(runtime_test_helpers, "_runtime_usage_model", record_model)
     try:
-        async with Runtime.open(
-            "rule-assets",
-            storage=RuntimeStorage.in_memory(),
-            features=model_features(runtime_test_helpers.RuntimeUsageModels(), workspace_features("rules", assets=store, workspace=Workspace.load(tmp_path))),
-        ) as runtime:
+        async with Persistence.open('rule-assets', storage=PersistenceStorage.in_memory()) as persistence_349, Runtime.attach(persistence=persistence_349, features=model_features(runtime_test_helpers.RuntimeUsageModels(), workspace_features('rules', assets=store, workspace=Workspace.load(tmp_path)))) as runtime:
             result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
         assert any("asset-rule" in request for request in observed)

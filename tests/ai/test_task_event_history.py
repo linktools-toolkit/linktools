@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Durable TaskGraph event history contracts."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +12,7 @@ from ._task_test_helpers import admit_graph
 from linktools.ai.core import Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task import (
     DefaultTaskGraphService,
     TaskEventType,
@@ -100,8 +100,8 @@ def test_task_graph_topology_is_lexical_and_input_order_independent() -> None:
 
 @pytest.mark.asyncio
 async def test_task_admission_starts_contiguous_durable_event_history() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-event-admission", tenant_id="tenant")
     try:
         graph = TaskGraph(
@@ -134,8 +134,8 @@ async def test_task_admission_starts_contiguous_durable_event_history() -> None:
 
 @pytest.mark.asyncio
 async def test_task_graph_state_captures_event_high_water_with_state() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-event-graph_state-cutoff", tenant_id="tenant")
     try:
         repository = state.task.tasks
@@ -177,8 +177,8 @@ async def test_task_graph_state_captures_event_high_water_with_state() -> None:
 
 @pytest.mark.asyncio
 async def test_task_expansion_commits_topology_and_events_atomically() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-event-expansion", tenant_id="tenant")
     try:
         repository = state.task.tasks
@@ -268,8 +268,8 @@ async def test_expansion_commit_unknown_preserves_atomic_readback_and_replay(
     monkeypatch: pytest.MonkeyPatch,
     commit_unknown_at: str,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace=f"task-expansion-unknown-{commit_unknown_at}", tenant_id="tenant")
     try:
         repository = state.task.tasks
@@ -366,8 +366,8 @@ async def test_expansion_commit_unknown_preserves_atomic_readback_and_replay(
 async def test_task_expansion_rejects_node_id_collisions(
     expanded_nodes: tuple[TaskNode, ...],
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-expansion-collision", tenant_id="tenant")
     try:
         graph = TaskGraph(
@@ -403,8 +403,8 @@ async def test_task_expansion_rejects_node_id_collisions(
 
 @pytest.mark.asyncio
 async def test_concurrent_task_expansions_retry_graph_header_cas() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-expansion-concurrent", tenant_id="tenant")
     try:
         reference = TaskExpanderRef("application.expand", 1)
@@ -467,8 +467,8 @@ async def test_concurrent_task_expansions_retry_graph_header_cas() -> None:
 
 @pytest.mark.asyncio
 async def test_task_event_page_accepts_maximum_limit() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-event-max-limit", tenant_id="tenant")
     try:
         repository = state.task.tasks
@@ -490,8 +490,8 @@ async def test_task_event_page_accepts_maximum_limit() -> None:
 
 @pytest.mark.asyncio
 async def test_empty_graph_create_is_terminal_from_first_event() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-event-empty", tenant_id="tenant")
     try:
         repository = state.task.tasks
@@ -517,8 +517,8 @@ async def test_empty_graph_create_is_terminal_from_first_event() -> None:
 async def test_node_event_mutations_do_not_read_full_graph_graph_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-event-local-mutations", tenant_id="tenant")
     try:
         repository = state.task.tasks
@@ -563,8 +563,8 @@ async def test_node_event_mutations_do_not_read_full_graph_graph_state(
 
 @pytest.mark.asyncio
 async def test_task_event_history_records_semantic_changes_but_not_heartbeat() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-event-transitions", tenant_id="tenant")
     try:
         repository = state.task.tasks
@@ -658,8 +658,8 @@ async def test_task_event_history_records_semantic_changes_but_not_heartbeat() -
 
 @pytest.mark.asyncio
 async def test_idempotent_admission_projection_repair_emits_graph_change() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-event-admission-repair", tenant_id="tenant")
     try:
         repository = state.task.tasks
@@ -706,8 +706,8 @@ async def test_idempotent_admission_projection_repair_emits_graph_change() -> No
 async def test_task_event_page_reads_latest_only_for_empty_cursor_page(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-event-page-reads", tenant_id="tenant")
     try:
         repository = state.task.tasks
@@ -753,8 +753,8 @@ async def test_task_event_page_reads_latest_only_for_empty_cursor_page(
 async def test_terminal_event_stream_replays_from_durable_seq(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-event-terminal-stream", tenant_id="tenant")
     stream = None
     try:
@@ -850,11 +850,11 @@ async def test_sqlite_task_event_history_survives_reopen(tmp_path: Path) -> None
         await engine.dispose()
 
     graph = TaskGraph("sqlite-task-events", (TaskNode("node"),))
-    state = RuntimeStorage.sqlite(
+    state = PersistenceStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="task-event-sqlite", tenant_id="tenant")
     try:
         repository = state.task.tasks
@@ -882,11 +882,11 @@ async def test_sqlite_task_event_history_survives_reopen(tmp_path: Path) -> None
     finally:
         await state.close()
 
-    reopened = RuntimeStorage.sqlite(
+    reopened = PersistenceStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
-    reopened = RuntimeState(reopened)
+    reopened = Persistence(reopened)
     await reopened.initialize(namespace="task-event-sqlite", tenant_id="tenant")
     try:
         after = await reopened.task.tasks.list_events(

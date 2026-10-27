@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Runtime storage error, concurrency, and schema contracts."""
 from ._runtime_test_helpers import model_features
 
@@ -21,16 +23,16 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import build_sql_schema_metadata, provision_database
-from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
-from linktools.ai.runtime.state._commands import RuntimeStateCommands
-from linktools.ai.runtime.state._filesystem import (
+from linktools.ai.persistence.commands import StateCommands
+from linktools.ai.persistence._filesystem import (
     FilesystemStateStorageGroup,
     FilesystemStateStore,
 )
-from linktools.ai.runtime.state._memory import InMemoryStateStore
-from linktools.ai.runtime.state._sql import SqlStateStore
-from linktools.ai.runtime.state._store import (
+from linktools.ai.persistence._memory import InMemoryStateStore
+from linktools.ai.persistence._sql import SqlStateStore
+from linktools.ai.persistence.state import (
     FactQuery,
     OperationQuery,
     RecordQuery,
@@ -41,13 +43,13 @@ from linktools.ai.runtime.state._store import (
     StoredRecord,
 )
 from linktools.ai.spec import AgentSpec
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.storage import FilesystemObjectStore, PayloadPolicy
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
-from linktools.ai.runtime.state._step_contracts import (
+from linktools.ai.persistence._step_contracts import (
     AgentRunRecord,
 )
 from sqlalchemy import event
@@ -134,7 +136,7 @@ async def test_sql_state_group_maps_programming_failure_to_internal(
     path = tmp_path / "runtime.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(engine)
-    state = RuntimeState(RuntimeStorage.sqlite(
+    state = Persistence(PersistenceStorage.sqlite(
         path,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     ))
@@ -336,11 +338,11 @@ async def test_sql_latest_per_subject_uses_portable_aggregate_query(
 
 
 def _runtime_commands(
-    state: RuntimeState,
+    state: Persistence,
     namespace: str,
     background_tasks: "set[asyncio.Task[object]] | None" = None,
-) -> RuntimeStateCommands:
-    return RuntimeStateCommands(
+) -> StateCommands:
+    return StateCommands(
         state.execution.executions,
         namespace=namespace,
         events=state.execution.events,
@@ -349,9 +351,9 @@ def _runtime_commands(
         recovery=state.recovery.checkpoints,
         conversation_history=state.conversation.histories,
         tools=state.recovery.tools,
-        conversation_run_store=state.run_store.read_store(RuntimeDomain.CONVERSATION),
-        execution_run_store=state.run_store.read_store(RuntimeDomain.TRACE),
-        recovery_run_store=state.run_store.read_store(RuntimeDomain.CHECKPOINT),
+        conversation_run_store=state.run_store.read_store(PersistenceDomain.CONVERSATION),
+        execution_run_store=state.run_store.read_store(PersistenceDomain.TRACE),
+        recovery_run_store=state.run_store.read_store(PersistenceDomain.CHECKPOINT),
         background_tasks=set() if background_tasks is None else background_tasks,
     )
 
@@ -363,7 +365,7 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
     provisioning_engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(provisioning_engine)
     await provisioning_engine.dispose()
-    state = RuntimeState(RuntimeStorage.sqlite(
+    state = Persistence(PersistenceStorage.sqlite(
         path,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     ))
@@ -377,7 +379,7 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
         background_tasks: set[asyncio.Task[object]] = set()
         bridge = RuntimeToolOperationBridge(
             state.recovery.tools,
-            state.object_store(RuntimeDomain.RECOVERY),
+            state.object_store(PersistenceDomain.RECOVERY),
             namespace="parallel-tools",
             tenant_id="tenant",
             execution_id="execution",
@@ -832,7 +834,7 @@ async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
 
 
 async def test_operation_compaction_keeps_one_stream_anchor() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="operation-anchor", tenant_id="tenant")
     now = datetime.now(timezone.utc)
 
@@ -899,24 +901,28 @@ async def test_shared_storage_configuration_binds_independent_runtime_lifetimes(
     from ._runtime_test_helpers import RuntimeUsageModels
 
     storage = (
-        RuntimeStorage.in_memory()
+        PersistenceStorage.in_memory()
         if backend == "memory"
-        else RuntimeStorage.sqlite(tmp_path / "shared.db")
+        else PersistenceStorage.sqlite(tmp_path / "shared.db")
     )
     plan = storage.plan
     objects = storage.object_store
     async with AsyncExitStack() as stack:
-        first, second = await asyncio.gather(*(
-            stack.enter_async_context(Runtime.open(
-                "shared-configuration", features=model_features(RuntimeUsageModels()), storage=storage,
+        async def open_runtime():
+            persistence = await stack.enter_async_context(Persistence.open("shared-configuration", storage=storage))
+            runtime = await stack.enter_async_context(Runtime.attach(
+                persistence=persistence, features=model_features(RuntimeUsageModels()),
             ))
-            for _ in range(2)
-        ))
+            return runtime
+
+        first, second = await asyncio.gather(open_runtime(), open_runtime())
         assert first._state is not second._state
         assert first._state.ready and second._state.ready
         first_result = (await first.agents.get().run("first", timeout_seconds=10)).result
         assert first_result.output == {"text": "done"}
         await first.close()
+        assert first._state.ready
+        await first._state.close()
         assert not first._state.ready
         assert second._state.ready
         second_result = (await second.agents.get().run("second", timeout_seconds=10)).result
@@ -925,9 +931,7 @@ async def test_shared_storage_configuration_binds_independent_runtime_lifetimes(
     assert storage.plan is plan
     assert storage.object_store is objects
 
-    async with Runtime.open(
-        "shared-configuration", features=model_features(RuntimeUsageModels()), storage=storage,
-    ) as reopened:
+    async with Persistence.open('shared-configuration', storage=storage) as persistence_928, Runtime.attach(persistence=persistence_928, features=model_features(RuntimeUsageModels())) as reopened:
         assert reopened._state is not first._state
         assert reopened._state is not second._state
         assert reopened._state.ready

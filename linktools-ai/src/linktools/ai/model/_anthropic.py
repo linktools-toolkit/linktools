@@ -14,16 +14,42 @@ from httpx2 import AsyncClient, Limits
 from pydantic_ai.models import Model, ModelRequestParameters, ModelSettings
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.providers.anthropic import AnthropicProvider
+from pydantic_ai.settings import merge_model_settings
 
 from ._binding import _ProviderModelBinding
 from ._http import HttpClientOwner, capture_request, capture_response
+
+
+# These are ownership names, not a serializer or an extension allowlist. Unified
+# thinking/cache remain SDK fallbacks; only explicit native controls own these objects.
+_REQUEST_SETTING_FIELDS = {
+    "max_tokens": "max_tokens", "temperature": "temperature", "top_p": "top_p",
+    "top_k": "top_k", "stop_sequences": "stop_sequences",
+    "service_tier": "service_tier", "anthropic_service_tier": "service_tier",
+    "anthropic_metadata": "metadata", "anthropic_thinking": "thinking",
+    "anthropic_effort": "output_config", "anthropic_task_budget": "output_config",
+    "anthropic_speed": "speed",
+    "anthropic_cache": "cache_control", "anthropic_cache_diagnostics": "diagnostics",
+}
+_REQUEST_FIELDS = (
+    "model", "messages", "system", "tools", "tool_choice", "mcp_servers", "stream",
+    "container", "context_management",
+)
 
 
 class _OutputOnlyAnthropicModel(AnthropicModel):
     def prepare_request(
         self, model_settings: ModelSettings | None, model_request_parameters: ModelRequestParameters,
     ) -> tuple[ModelSettings | None, ModelRequestParameters]:
+        _ProviderModelBinding.validate_request_owners(
+            merge_model_settings(self.settings, model_settings),
+            wire_fields=_REQUEST_SETTING_FIELDS, request_fields=_REQUEST_FIELDS,
+        )
         settings, parameters = super().prepare_request(model_settings, model_request_parameters)
+        if parameters.output_mode == "native":
+            _ProviderModelBinding.validate_request_owners(
+                settings, wire_fields={}, request_fields=("output_config",),
+            )
         return _ProviderModelBinding.prepare_output_tool_settings(
             settings, parameters, unsupported_settings=getattr(self, "unsupported_settings", ()),
         ), parameters

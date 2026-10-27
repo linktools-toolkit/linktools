@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """End-to-end Session timeline coverage through the public Runtime API."""
 from ._runtime_test_helpers import model_features
 
@@ -12,8 +14,11 @@ import pytest
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.runtime import Page, Runtime, RuntimeHistory, SessionTurn
-from linktools.ai.runtime.state import RuntimeStorage
+from linktools.ai.history import History
+from linktools.ai.core import Page
+from linktools.ai.execution import SessionTurn
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 
 from ._runtime_test_helpers import RuntimeUsageModels
 
@@ -24,11 +29,7 @@ async def test_in_memory_session_run_restores_timeline() -> None:
     application.capability(ExecutionCapability(retain_history=True), scope="runtime")
     application.agent("default", model="default", allow_tools=())
 
-    async with Runtime.open(
-        "default",
-        storage=RuntimeStorage.in_memory(),
-        features=model_features(RuntimeUsageModels(), application),
-    ) as runtime:
+    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_27, Runtime.attach(persistence=persistence_27, features=model_features(RuntimeUsageModels(), application)) as runtime:
         session = await runtime.agents.get("default").create_session("session")
         first = (await session.run("hello", timeout_seconds=10)).result
         second = (await session.run("again", timeout_seconds=10)).result
@@ -64,9 +65,9 @@ async def test_session_timeline_fork_reads_match_live_and_reopened_history(
     application.capability(ExecutionCapability(retain_history=True), scope="runtime")
     application.agent("default", model="default", allow_tools=())
     storage = (
-        RuntimeStorage.in_memory()
+        PersistenceStorage.in_memory()
         if backend == "memory"
-        else RuntimeStorage.filesystem(tmp_path)
+        else PersistenceStorage.filesystem(tmp_path)
     )
 
     async def check_pages(
@@ -83,11 +84,7 @@ async def test_session_timeline_fork_reads_match_live_and_reopened_history(
         assert oldest.items == expected[:1]
         assert oldest.next_cursor is None
 
-    async with Runtime.open(
-        "default",
-        storage=storage,
-        features=model_features(RuntimeUsageModels(), application),
-    ) as runtime:
+    async with Persistence.open('default', storage=storage) as persistence_86, Runtime.attach(persistence=persistence_86, features=model_features(RuntimeUsageModels(), application)) as runtime:
         principal = runtime.default_principal
         parent = await runtime.agents.get("default").create_session("parent")
         assert (await parent.timeline()).items == ()
@@ -120,9 +117,7 @@ async def test_session_timeline_fork_reads_match_live_and_reopened_history(
         )
 
     if backend == "filesystem":
-        async with RuntimeHistory.open(
-            "default", storage=RuntimeStorage.filesystem(tmp_path),
-        ) as history:
+        async with Persistence.open('default', storage=PersistenceStorage.filesystem(tmp_path), tenant_id="default", read_only=True) as history_persistence_118, History.open(persistence=history_persistence_118) as history:
             await check_pages(
                 partial(history.session_timeline, "child", principal=principal),
                 page.items,

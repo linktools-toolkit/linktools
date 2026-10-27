@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Recorded model requests match the prepared input sent to the provider."""
 from ._runtime_test_helpers import model_features
 
@@ -13,7 +15,16 @@ from types import SimpleNamespace
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability, ReinjectSystemPrompt
-from pydantic_ai.messages import InstructionPart, ModelMessage, ModelMessagesTypeAdapter, ModelRequest, ModelResponse, SystemPromptPart, TextPart, UserPromptPart
+from pydantic_ai.messages import (
+    InstructionPart,
+    ModelMessage,
+    ModelMessagesTypeAdapter,
+    ModelRequest,
+    ModelResponse,
+    SystemPromptPart,
+    TextPart,
+    UserPromptPart,
+)
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.settings import ModelSettings
@@ -25,13 +36,15 @@ from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics
 from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.runtime import ExecutionInputContext, Runtime, RuntimeStorage
+from linktools.ai.execution import ExecutionInputContext
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime._message import decode_model_messages
+from linktools.ai.model.messages import decode_model_messages
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
-from linktools.ai.runtime._model_interaction import StagedContextInline, model_identity, request_envelope
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord
-from linktools.ai.runtime.state._steps import StagingAgentRunStore
+from linktools.ai.persistence._model_interaction import StagedContextInline, model_identity, request_envelope
+from linktools.ai.persistence._step_contracts import AgentRunRecord
+from linktools.ai.persistence.runs import StagingAgentRunStore
 from linktools.ai.capability import TraceCapability
 
 from ._runtime_test_helpers import _UsageFunctionModel, _wait_for_committed
@@ -127,8 +140,7 @@ async def test_imported_request_publishes_prepared_provider_input_at_completion(
     metric_store = InMemoryMetricStore()
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
     metrics = Metrics.from_store(metric_store, namespace="prepared-input")
-    async with Runtime.open("prepared-input", metrics=metrics, storage=RuntimeStorage.filesystem(tmp_path),
-                            features=model_features(_TaskTestModels(), group)) as runtime:
+    async with Persistence.open('prepared-input', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_130, Runtime.attach(persistence=persistence_130, metrics=metrics, features=model_features(_TaskTestModels(), group)) as runtime:
         execution = await runtime.agents.get().start("new question", input_context=imported)
         try:
             await asyncio.wait_for(entered.wait(), timeout=5)

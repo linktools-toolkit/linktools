@@ -9,7 +9,7 @@ import pytest
 
 from linktools.ai.capability import TraceCapability
 from linktools.ai.core import CommitPolicy
-from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.persistence import PersistenceDomain
 
 from .test_observation_coalescing import _observe, _setup
 
@@ -25,7 +25,7 @@ async def test_terminal_trace_retains_staging_until_explicit_flush(tmp_path: Pat
     try:
         store = state.run_store
         store.trace_persistence.configure("run", terminal=True)
-        archive = store.read_store(RuntimeDomain.TRACE)
+        archive = store.read_store(PersistenceDomain.TRACE)
         for index in range(1, 4):
             await _observe(store, index)
         assert await archive.list_events(agent_run_id="run") == []
@@ -49,7 +49,7 @@ async def test_terminal_trace_known_rollback_preserves_pending_facts(tmp_path: P
     try:
         store = state.run_store
         store.trace_persistence.configure("run", terminal=True)
-        archive = store.read_store(RuntimeDomain.TRACE)
+        archive = store.read_store(PersistenceDomain.TRACE)
         await _observe(store, 1)
         group = archive.state_store.storage_group
         mutate = group.mutate
@@ -77,7 +77,7 @@ async def test_terminal_trace_ignores_batch_pressure_but_close_drains(tmp_path: 
     try:
         store = state.run_store
         store.trace_persistence.configure("run", terminal=True)
-        archive = store.read_store(RuntimeDomain.TRACE)
+        archive = store.read_store(PersistenceDomain.TRACE)
         for index in range(1, 130):
             await _observe(store, index)
         assert await archive.list_events(agent_run_id="run") == []
@@ -101,7 +101,7 @@ async def test_terminal_trace_settles_confirmed_commit_before_interruption(
     try:
         store = state.run_store
         store.trace_persistence.configure("run", terminal=True)
-        archive = store.read_store(RuntimeDomain.TRACE)
+        archive = store.read_store(PersistenceDomain.TRACE)
         await _observe(store, 1)
         group = archive.state_store.storage_group
         mutate = group.mutate

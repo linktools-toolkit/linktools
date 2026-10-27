@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
+
+from linktools.ai.core import ExecutionContext
 """Built-in sessions keep authority independent of optional context retention."""
 from ._runtime_test_helpers import model_features
 
 import asyncio
 from copy import deepcopy
+from contextlib import asynccontextmanager
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
@@ -13,7 +18,9 @@ from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import Principal, SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ListSessionRequest, Runtime, RuntimeContext, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.execution import ListSessionRequest
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.core import CommitPolicy
@@ -34,18 +41,21 @@ def _features(*, retain=False):
 
 def _storage(path, backend='sqlite', cache=None):
     if backend == 'split_sqlite':
-        return RuntimeStorage.from_plan(RuntimeStoragePlan(
+        return PersistenceStorage.from_plan(PersistencePlan(
             conversation=StorageRoute.sqlite(path / 'conversation.db', cache=cache),
             execution=StorageRoute.sqlite(path / 'execution.db', cache=cache),
-        ))
-    return (RuntimeStorage.sqlite(path / 'state.db', cache=cache) if backend == 'sqlite'
-            else RuntimeStorage.filesystem(path / 'state', cache=cache))
+        ), coordination=cache)
+    return (PersistenceStorage.sqlite(path / 'state.db', cache=cache, coordination=cache) if backend == 'sqlite'
+            else PersistenceStorage.filesystem(path / 'state', cache=cache, coordination=cache))
 
 
-def _open(path, model, *, retain=False, backend='sqlite', cache=None):
-    return Runtime.open('builtin-session', storage=_storage(path, backend, cache),
-                        features=model_features(_Models(_UsageFunctionModel(model)), _features(retain=retain)),
-                        context=RuntimeContext(None, tenant_id='tenant'))
+@asynccontextmanager
+async def _open(path, model, *, retain=False, backend='sqlite', cache=None):
+    async with Persistence.open('builtin-session', storage=_storage(path, backend, cache), tenant_id='tenant') as persistence:
+        async with Runtime.attach(persistence=persistence,
+                                features=model_features(_Models(_UsageFunctionModel(model)), _features(retain=retain)),
+                                context=ExecutionContext(None)) as runtime:
+            yield runtime
 
 
 @pytest.mark.asyncio
@@ -160,7 +170,7 @@ class _ClaimCache(InMemoryCacheBackend):
 async def test_coordination_does_not_opt_default_execution_into_terminal_admission(tmp_path):
     cache = _ClaimCache()
     features = _features()
-    features.capability(ExecutionCapability(retain_history=True, coordination=cache), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     storage = _storage(tmp_path, cache=cache)
     entered, finish = asyncio.Event(), asyncio.Event()
 
@@ -169,9 +179,7 @@ async def test_coordination_does_not_opt_default_execution_into_terminal_admissi
         await finish.wait()
         return ModelResponse(parts=[TextPart('answer')])
 
-    async with Runtime.open('builtin-session', storage=storage,
-                            features=model_features(_Models(_UsageFunctionModel(model)), features),
-                            context=RuntimeContext(None, tenant_id='tenant')) as runtime:
+    async with Persistence.open('builtin-session', storage=storage, tenant_id='tenant') as persistence_174, Runtime.attach(persistence=persistence_174, features=model_features(_Models(_UsageFunctionModel(model)), features), context=ExecutionContext(None)) as runtime:
         session = await runtime.agents.get().create_session('session', principal=_OWNER)
         execution = await session.start('question')
         try:
@@ -239,9 +247,7 @@ async def test_unavailable_guard_does_not_depend_on_retained_execution_header(tm
         await execution.wait(timeout_seconds=5)
 
     storage = _storage(tmp_path)
-    async with Runtime.open('builtin-session', storage=storage,
-                            features=model_features(_Models(_UsageFunctionModel(model)), _features(retain=True)),
-                            context=RuntimeContext(None, tenant_id='tenant')) as runtime:
+    async with Persistence.open('builtin-session', storage=storage, tenant_id='tenant') as persistence_244, Runtime.attach(persistence=persistence_244, features=model_features(_Models(_UsageFunctionModel(model)), _features(retain=True)), context=ExecutionContext(None)) as runtime:
         session = await runtime.sessions.get('session', principal=_OWNER)
 
         async def no_execution_evidence(*args, **kwargs):
@@ -290,9 +296,7 @@ async def test_reconcile_terminal_before_split_session_release_preserves_unavail
         return ModelResponse(parts=[TextPart('unretained answer')])
 
     storage = _storage(tmp_path, 'split_sqlite')
-    async with Runtime.open('builtin-session', storage=storage,
-                            features=model_features(_Models(_UsageFunctionModel(model)), _features()),
-                            context=RuntimeContext(None, tenant_id='tenant')) as runtime:
+    async with Persistence.open('builtin-session', storage=storage, tenant_id='tenant') as persistence_295, Runtime.attach(persistence=persistence_295, features=model_features(_Models(_UsageFunctionModel(model)), _features()), context=ExecutionContext(None)) as runtime:
         session = await runtime.agents.get().create_session('session', principal=_OWNER)
         mutate = runtime._state.conversation.sessions.state_store.mutate
         held = False
@@ -355,16 +359,13 @@ async def test_sync_peer_coordinates_with_terminal_owner_before_pending_publicat
         return ModelResponse(parts=[TextPart('answer')])
 
     terminal = RuntimeFeatures('builtin-session')
-    terminal.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
+    terminal.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
     terminal.agent('default', model='default', allow_tools=())
     sync = _features()
-    sync.capability(ExecutionCapability(retain_history=True, coordination=cache), scope="runtime")
+    sync.capability(ExecutionCapability(retain_history=True), scope="runtime")
     models = _Models(_UsageFunctionModel(model))
     storage = _storage(tmp_path, cache=cache)
-    async with Runtime.open('builtin-session', storage=storage,
-                            features=model_features(models, terminal)) as owner, Runtime.open(
-            'builtin-session', storage=_storage(tmp_path, cache=cache),
-            features=model_features(models, sync)) as peer:
+    async with Persistence.open('builtin-session', storage=storage) as persistence_366, Runtime.attach(persistence=persistence_366, features=model_features(models, terminal)) as owner, Persistence.open('builtin-session', storage=_storage(tmp_path, cache=cache)) as persistence_367, Runtime.attach(persistence=persistence_367, features=model_features(models, sync)) as peer:
         session = await owner.agents.get().create_session('session')
         remote = peer.agents.get().session('session')
         first = asyncio.create_task(session.start('question', idempotency_key='request'))

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.task import Task
 """TaskGraph cancellation closes remote MCP resources without replaying effects."""
 from ._runtime_test_helpers import model_features
 
@@ -10,7 +14,9 @@ import pytest
 from fastmcp import Client
 from linktools.ai.core import ExecutionStatus, TaskStatus, ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
+from linktools.ai.inputs import AgentTaskInput
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task import TaskGraph, TaskNode
 
 from .test_mcp_remote import (
@@ -39,21 +45,17 @@ async def test_graph_cancel_closes_remote_client_and_preserves_unknown_effect_on
     state_path = tmp_path / "runtime"
     async with _serve("sse") as remote:
         remote.block_calls = True
-        storage = RuntimeStorage.filesystem(state_path)
+        storage = PersistenceStorage.filesystem(state_path)
         try:
-            async with Runtime.open(
-                "remote-task-cancellation",
-                storage=storage,
-                features=model_features(_RemoteModels(), _group(_spec(remote))),
-            ) as runtime:
-                task = runtime.tasks.from_agent(
+            async with Persistence.open('remote-task-cancellation', storage=storage) as persistence_44, Runtime.attach(persistence=persistence_44, features=model_features(_RemoteModels(), _group(_spec(remote)))) as runtime, TaskEngine.open(persistence=persistence_44) as engine:
+                task = Task.from_agent(
                     "remote.echo", runtime.agents.get("default")
                 )
                 graph = TaskGraph(
                     "remote-cancellation",
                     (TaskNode("echo", task=task, input=AgentTaskInput("write once")),),
                 )
-                run = await runtime.tasks.bind(task).start(
+                run = await engine.with_definitions(task).start(
                     graph, idempotency_key="start-remote-cancellation"
                 )
                 await asyncio.wait_for(remote.call_started.wait(), timeout=10)
@@ -90,17 +92,13 @@ async def test_graph_cancel_closes_remote_client_and_preserves_unknown_effect_on
             remote.release_call.set()
             await runtime._state.close()
 
-        restored = RuntimeStorage.filesystem(state_path)
+        restored = PersistenceStorage.filesystem(state_path)
         try:
-            async with Runtime.open(
-                "remote-task-cancellation",
-                storage=restored,
-                features=model_features(_RemoteModels(), _group(_spec(remote))),
-            ) as runtime:
-                task = runtime.tasks.from_agent(
+            async with Persistence.open('remote-task-cancellation', storage=restored) as persistence_95, Runtime.attach(persistence=persistence_95, features=model_features(_RemoteModels(), _group(_spec(remote)))) as runtime, TaskEngine.open(persistence=persistence_95) as engine:
+                task = Task.from_agent(
                     "remote.echo", runtime.agents.get("default")
                 )
-                run = await runtime.tasks.bind(task).get(graph.graph_id)
+                run = await engine.with_definitions(task).get(graph.graph_id)
                 recovered = await run.recover(idempotency_key="recover-remote-graph")
                 assert recovered.status is TaskStatus.RECOVERY_REQUIRED
                 state = await run.state(include_content=True)

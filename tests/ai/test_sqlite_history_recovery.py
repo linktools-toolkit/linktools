@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Current SQLite history survives reopening and snapshot restoration."""
 from ._runtime_test_helpers import model_features
 
@@ -17,8 +19,10 @@ from pydantic_ai.models.function import AgentInfo
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, Principal
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.history import History
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import Persistence
 
 from . import _runtime_test_helpers as helpers
 
@@ -27,7 +31,7 @@ _FIXTURE = Path(__file__).parent / "fixtures" / "persistence" / "sqlite_session_
 
 
 async def _execution_evidence(
-    history: RuntimeHistory, execution_id: str, principal: Principal,
+    history: History, execution_id: str, principal: Principal,
 ) -> dict[str, object]:
     interactions = await history.model_interactions(
         execution_id, principal=principal, include_content=True,
@@ -106,10 +110,7 @@ async def test_sqlite_history_retains_prior_turn_when_resumed_and_reopened(
     application = RuntimeFeatures("application")
     application.capability(ExecutionCapability(retain_history=True), scope="runtime")
     application.agent("default", model="default", allow_tools=())
-    async with Runtime.open(
-        "legacy-history", storage=RuntimeStorage.sqlite(path),
-        features=model_features(helpers.RuntimeUsageModels(), application),
-    ) as runtime:
+    async with Persistence.open('legacy-history', storage=PersistenceStorage.sqlite(path)) as persistence_109, Runtime.attach(persistence=persistence_109, features=model_features(helpers.RuntimeUsageModels(), application)) as runtime:
         session = runtime.agents.get("default").session("session")
         old = await session.history()
         old_execution_id = (await session.timeline()).items[0].execution_id
@@ -129,10 +130,7 @@ async def test_sqlite_history_retains_prior_turn_when_resumed_and_reopened(
             ("user", "new question"), ("assistant", "done"),
         ]
 
-    async with Runtime.open(
-        "legacy-history", storage=RuntimeStorage.sqlite(path),
-        features=model_features(helpers.RuntimeUsageModels(), application),
-    ) as reopened:
+    async with Persistence.open('legacy-history', storage=PersistenceStorage.sqlite(path)) as persistence_132, Runtime.attach(persistence=persistence_132, features=model_features(helpers.RuntimeUsageModels(), application)) as reopened:
         restored = await reopened.agents.get("default").session("session").history()
         assert restored.items == appended.items
         assert await _execution_evidence(reopened.history, old_execution_id, reopened.default_principal) == evidence
@@ -142,7 +140,7 @@ async def test_sqlite_history_retains_prior_turn_when_resumed_and_reopened(
 async def test_sqlite_explicit_checkpoint_boundary_excludes_later_observation(tmp_path: Path) -> None:
     from pydantic_ai.messages import TextPart
 
-    from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint
+    from linktools.ai.persistence._step_contracts import AgentRunCheckpoint
 
     from .test_step_archive_read_boundaries import _archive
 
@@ -174,7 +172,7 @@ async def test_sqlite_explicit_checkpoint_boundary_excludes_later_observation(tm
 
 @pytest.mark.asyncio
 async def test_sqlite_history_survives_snapshot_restore(tmp_path: Path) -> None:
-    from linktools.ai.runtime.state import SnapshotLimits
+    from linktools.ai.persistence.snapshots import SnapshotLimits
     from linktools.ai.storage import InMemoryObjectStore
 
     fixture = json.loads(_FIXTURE.read_text(encoding="utf-8"))
@@ -184,11 +182,11 @@ async def test_sqlite_history_survives_snapshot_restore(tmp_path: Path) -> None:
     with sqlite3.connect(path) as connection:
         connection.executescript(sql.decode("utf-8"))
     principal = Principal("runtime", "default", "local_trusted")
-    async with RuntimeHistory.open("legacy-history", storage=RuntimeStorage.sqlite(path)) as history:
+    async with Persistence.open('legacy-history', storage=PersistenceStorage.sqlite(path), tenant_id="default", read_only=True) as history_persistence_184, History.open(persistence=history_persistence_184) as history:
         timeline = await history.session_timeline("session", principal=principal)
         execution_id = timeline.items[0].execution_id
         evidence = await _execution_evidence(history, execution_id, principal)
-    state = RuntimeState(RuntimeStorage.sqlite(path))
+    state = Persistence(PersistenceStorage.sqlite(path))
     await state.initialize(namespace="legacy-history", tenant_id="default", read_only=True)
     objects = InMemoryObjectStore("snapshot")
     limits = SnapshotLimits(max_entries=1000, max_bytes=1024 * 1024)
@@ -197,16 +195,13 @@ async def test_sqlite_history_survives_snapshot_restore(tmp_path: Path) -> None:
     finally:
         await state.close()
     restored_root = tmp_path / "restored"
-    await RuntimeState.restore_snapshot(
+    await Persistence.restore_snapshot(
         snapshot, object_store=objects, root=restored_root, limits=limits,
     )
     application = RuntimeFeatures("application")
     application.capability(ExecutionCapability(retain_history=True), scope="runtime")
     application.agent("default", model="default", allow_tools=())
-    async with Runtime.open(
-        "legacy-history", storage=RuntimeStorage.from_root(restored_root),
-        features=model_features(helpers.RuntimeUsageModels(), application),
-    ) as runtime:
+    async with Persistence.open('legacy-history', storage=PersistenceStorage.from_root(restored_root)) as persistence_206, Runtime.attach(persistence=persistence_206, features=model_features(helpers.RuntimeUsageModels(), application)) as runtime:
         assert await _execution_evidence(runtime.history, execution_id, runtime.default_principal) == evidence
         history = await runtime.agents.get("default").session("session").history()
         assert [(item.item_kind, item.content) for item in history.items if item.item_kind != "system"] == [

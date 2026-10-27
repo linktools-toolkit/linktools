@@ -14,6 +14,7 @@ from ..errors import AIError, ErrorCode
 from ..spec import (
     AgentSpec,
     AgentSpecCodec,
+    CapabilityRef,
     MCPServerSpec,
     MCPServerSpecCodec,
     canonicalize_pydantic_model_schema,
@@ -169,6 +170,17 @@ class CapabilityContribution(Generic[AppT]):
     @property
     def contract(self) -> "dict[str, JsonValue]":
         return _contribution_contract(self.kind, self.id, self.value)
+
+    def materialize_capability(self) -> "AbstractCapability[AgentContext[AppT]]":
+        """Bind one Agent-scoped declaration to the native SDK lifecycle."""
+        from ._run_callbacks import materialize_native_capability
+
+        if self.kind != "capability" or self.scope != "agent":
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        return materialize_native_capability(
+            cast("AbstractCapability[AgentContext[AppT]]", self.value),
+            CapabilityRef(self.kind, self.id, self.revision),
+        )
 
     def materialize_tool(self) -> "Tool[AgentContext[AppT]]":
         """Create an execution-local tool from this contribution's contract."""

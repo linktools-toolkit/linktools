@@ -57,10 +57,8 @@ from linktools.ai.runtime._tool_boundary import (
     managed_tool_descriptor_from_metadata,
     BoundaryToolset,
 )
-from linktools.ai.runtime.state import (
-    RuntimeDomain,
-    runtime_domain_uses_object_store,
-)
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.objects import runtime_domain_uses_object_store
 from linktools.ai.spec import (
     AgentSpec,
     AgentSpecAdapter,
@@ -83,7 +81,7 @@ from linktools.ai.storage import (
     StorageEntryRevision,
     StorageOverlay,
 )
-from linktools.ai.workspace import SandboxResourcePath
+from linktools.ai.workspace import WorkspaceResourcePath
 
 
 def _expected_mcp_tool_name(server_id: str, tool_name: str) -> str:
@@ -365,7 +363,7 @@ def test_mcp_server_token_collision_fails_at_compiler_boundary(
     )
     with pytest.raises(AIError) as error:
         AgentCompiler(
-            models={"default": create_model(protocol='openai', model="gpt-test")},
+            models={"default": create_model(api='openai', model="gpt-test")},
             candidates=candidates,
             agents={"agent": AgentSpec("agent")},
         )
@@ -607,19 +605,19 @@ async def test_business_tool_adapter_preserves_ctx_keyword_for_async_tools() -> 
 
 def test_runtime_domain_object_store_trait_has_one_owner() -> None:
     object_domains = {
-        RuntimeDomain.CONVERSATION,
-        RuntimeDomain.EXECUTION,
-        RuntimeDomain.MEMORY,
-        RuntimeDomain.ARTIFACT,
-        RuntimeDomain.TASK,
-        RuntimeDomain.EVALUATION,
-        RuntimeDomain.RECOVERY,
-        RuntimeDomain.TRACE,
-        RuntimeDomain.CHECKPOINT,
+        PersistenceDomain.CONVERSATION,
+        PersistenceDomain.EXECUTION,
+        PersistenceDomain.MEMORY,
+        PersistenceDomain.ARTIFACT,
+        PersistenceDomain.TASK,
+        PersistenceDomain.EVALUATION,
+        PersistenceDomain.RECOVERY,
+        PersistenceDomain.TRACE,
+        PersistenceDomain.CHECKPOINT,
     }
     assert {
         domain
-        for domain in RuntimeDomain
+        for domain in PersistenceDomain
         if runtime_domain_uses_object_store(domain)
     } == object_domains
 
@@ -1161,7 +1159,7 @@ async def test_mcp_resource_paths_use_original_local_files(tmp_path: Path) -> No
             sandboxed=True,
         )
         assert sandboxed[server.id].args == (
-            SandboxResourcePath(server.id, "script.py"),
+            WorkspaceResourcePath(server.id, "script.py"),
         )
         assert sandboxed[server.id].resources[0].files == {
             "script.py": script.resolve()

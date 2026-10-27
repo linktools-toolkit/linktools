@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Terminal evaluation reconciliation keeps facts while avoiding repeated settlement."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -10,9 +10,18 @@ import pytest
 
 from linktools.ai.core import TaskStatus
 from linktools.ai.evaluation import ScoreAttemptView, TargetTrialRef
-from linktools.ai.runtime._evaluation import RuntimeEvaluations
-from linktools.ai.runtime.state._evaluation_records import EvaluationLaunchIntent
-from linktools.ai.task import TaskGraph, TaskGraphAdmission, TaskGraphRequest, TaskGraphState, TaskGraphSubmission, TaskNode, TaskNodeView, TaskRef
+from linktools.ai.evaluation.engine._service import Evaluations
+from linktools.ai.persistence._evaluation_records import EvaluationLaunchIntent
+from linktools.ai.task import (
+    TaskGraph,
+    TaskGraphAdmission,
+    TaskGraphRequest,
+    TaskGraphState,
+    TaskGraphSubmission,
+    TaskNode,
+    TaskNodeView,
+    TaskRef,
+)
 from .test_evaluation_persistence import experiment
 
 
@@ -21,7 +30,7 @@ from .test_evaluation_persistence import experiment
 async def test_terminal_reconciliation_preserves_score_collection_after_release(
     monkeypatch: pytest.MonkeyPatch, snapshot_released: bool, current_released: bool,
 ) -> None:
-    owner = object.__new__(RuntimeEvaluations)
+    owner = object.__new__(Evaluations)
     record = experiment()
     principal = record.manifest.principal
     trial = TargetTrialRef(record.experiment_id, "trial")
@@ -86,11 +95,11 @@ async def test_terminal_reconciliation_preserves_score_collection_after_release(
 
 @pytest.mark.asyncio
 async def test_repeated_settlement_keeps_release_revision_and_timestamp() -> None:
-    from linktools.ai.runtime import RuntimeStorage
+    from linktools.ai.persistence import PersistenceStorage
     from .test_evaluation_persistence import intent
 
-    storage = RuntimeStorage.in_memory()
-    storage = RuntimeState(storage)
+    storage = PersistenceStorage.in_memory()
+    storage = Persistence(storage)
     await storage.initialize(namespace="evaluation", tenant_id="tenant")
     try:
         repository = storage.evaluation.records

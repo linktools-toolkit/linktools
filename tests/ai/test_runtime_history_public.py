@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Public read-only Runtime history composition coverage."""
 
+from linktools.ai.persistence import Persistence
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -22,22 +23,14 @@ from linktools.ai.core import (
     canonical_sha256,
 )
 from linktools.ai.errors import AIError, ErrorCode, ErrorDiagnostics
-from linktools.ai.runtime import (
-    ArtifactView,
-    Execution,
-    ExecutionEvent,
-    ExecutionHistoryItem,
-    ExecutionTraceItem,
-    Page,
-    TranscriptItem,
-    RuntimeExecutions,
-    RuntimeStorage,
-    TaskGraphRun,
-    UsageSummary,
-)
-from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
-from linktools.ai.runtime._runtime_history import RuntimeHistory
-from linktools.ai.runtime.state._contracts import StoredUserInput
+from linktools.ai.core import Page
+from linktools.ai.execution import ArtifactView, Execution, ExecutionEvent, ExecutionHistoryItem, ExecutionTraceItem, TranscriptItem, UsageSummary
+from linktools.ai.runtime import RuntimeExecutions
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.task.engine import TaskGraphRun
+from linktools.ai.history._service import DefaultExecutionHistoryService
+from linktools.ai.history._history import History
+from linktools.ai.persistence.contracts import StoredUserInput
 from linktools.ai.storage import StoredPayload
 from linktools.ai.task import (
     TaskBindingContract,
@@ -319,7 +312,7 @@ class _Events:
 @pytest.mark.asyncio
 async def test_runtime_history_execution_events_use_fixed_safe_cutoff() -> None:
     principal = Principal("caller", "tenant", "service")
-    history = RuntimeHistory(
+    history = History(
         DefaultExecutionHistoryService(
             _EventExecutions(),  # type: ignore[arg-type]
             TenantAuthorizationPolicy("tenant"),
@@ -367,10 +360,7 @@ async def test_runtime_history_execution_events_use_fixed_safe_cutoff() -> None:
 
 @pytest.mark.asyncio
 async def test_runtime_history_opens_without_model_or_agent_composition() -> None:
-    async with RuntimeHistory.open(
-        "workspace",
-        storage=RuntimeStorage.in_memory(),
-    ) as history:
+    async with Persistence.open('workspace', storage=PersistenceStorage.in_memory(), tenant_id="default", read_only=True) as history_persistence_370, History.open(persistence=history_persistence_370) as history:
         assert history.tenant_id == "default"
         with pytest.raises(AIError) as error:
             await history.history(
@@ -493,7 +483,7 @@ async def test_runtime_history_projects_owned_sessions_without_runtime_open() ->
             status=ExecutionStatus.STARTED,
         )
 
-    history = RuntimeHistory(
+    history = History(
         SimpleNamespace(),
         tenant_id="tenant",
         sessions=sessions,  # type: ignore[arg-type]
@@ -552,6 +542,7 @@ class _ResultExecutions:
         )
         self.record = SimpleNamespace(
             retention_closed=False,
+            event_seq=0,
             conversation=False,
             execution_id="execution",
             tenant_id="tenant",
@@ -641,7 +632,7 @@ async def test_history_result_rejects_invalid_terminal_diagnostics(
         else ErrorDiagnostics.from_exception(RuntimeError("invalid cancellation evidence"))
     )
     executions.result.output = None
-    history = RuntimeHistory(
+    history = History(
         SimpleNamespace(), tenant_id="tenant", executions=executions,
         authorization=TenantAuthorizationPolicy("tenant"),
     )
@@ -655,7 +646,7 @@ async def test_history_result_rejects_invalid_terminal_diagnostics(
 @pytest.mark.asyncio
 async def test_runtime_history_inspection_uses_safe_durable_summaries() -> None:
     executions = _ResultExecutions()
-    history = RuntimeHistory(
+    history = History(
         _InspectionService(),  # type: ignore[arg-type]
         tenant_id="tenant",
         executions=executions,  # type: ignore[arg-type]
@@ -762,7 +753,7 @@ class _Artifacts:
 async def test_runtime_history_reads_execution_task_results_and_artifacts() -> None:
     executions = _ResultExecutions()
     tasks = _TaskResults()
-    history = RuntimeHistory(
+    history = History(
         SimpleNamespace(),
         tenant_id="tenant",
         executions=executions,  # type: ignore[arg-type]
@@ -862,7 +853,7 @@ async def test_task_result_requires_matching_durable_execution(
     executions.get_header = get_header
     executions.get = get
     executions.get_result = get_result
-    history = RuntimeHistory(
+    history = History(
         SimpleNamespace(),
         tenant_id="tenant",
         namespace="workspace",
@@ -891,6 +882,7 @@ async def test_task_result_requires_matching_durable_execution(
         SimpleNamespace(
             namespace="workspace",
             _require_task_node_runtime=lambda: task_runtime,
+            _bind_graph_history=lambda state: None,
         ),
         SimpleNamespace(state=graph_state),
         "graph",
@@ -936,7 +928,7 @@ async def test_task_result_preserves_unready_and_failed_error_details(
         tasks._graph_state,
         node_states=(replace(tasks._graph_state.node_states[0], status=status, error_code="failed"),),
     )
-    history = RuntimeHistory(
+    history = History(
         SimpleNamespace(), tenant_id="tenant", namespace="workspace",
         tasks=tasks, authorization=TenantAuthorizationPolicy("tenant"),
     )
@@ -945,7 +937,7 @@ async def test_task_result_preserves_unready_and_failed_error_details(
         return tasks._graph_state
 
     live = TaskGraphRun(
-        SimpleNamespace(namespace="workspace"), SimpleNamespace(state=graph_state),
+        SimpleNamespace(namespace="workspace", _bind_graph_history=lambda state: None), SimpleNamespace(state=graph_state),
         "graph", principal, None,
     )
     if api.startswith("history"):
@@ -975,7 +967,7 @@ async def test_history_task_result_authorizes_before_reading_records(reference: 
         async def get_results(self, *args: object, **kwargs: object) -> dict[str, TaskResultRecord]:
             raise AssertionError("unauthorized result must not be read")
 
-    history = RuntimeHistory(
+    history = History(
         SimpleNamespace(), tenant_id="tenant", namespace="workspace",
         tasks=DeniedTasks(), authorization=TenantAuthorizationPolicy("tenant"),
     )
@@ -1036,10 +1028,10 @@ async def test_execution_history_and_trace_forward_filters(
     )
     principal = Principal("caller", "tenant", "service")
     executions = RuntimeExecutions(service, None)
-    execution = Execution(SimpleNamespace(executions=executions), "execution", principal, None)
+    execution = Execution(SimpleNamespace(service=executions), "execution", principal, None)
     target = {
         "service": service,
-        "history": RuntimeHistory(service, tenant_id="tenant"),
+        "history": History(service, tenant_id="tenant"),
         "executions": executions,
         "execution": execution,
     }[entrypoint]

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Session-associated execution forks keep the existing continuation CAS boundary."""
 from ._runtime_test_helpers import model_features
 from copy import deepcopy
@@ -10,9 +12,10 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import ExecutionCapability, TraceCapability
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.storage import InMemoryCacheBackend
-from linktools.ai.runtime._message import encode_model_messages
+from linktools.ai.model.messages import encode_model_messages
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
@@ -32,7 +35,7 @@ async def test_session_execution_fork_preserves_committed_cursor_and_rejects_cha
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     if mode == "trace":
         group.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open("session-execution-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if mode == "pending" else None), features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('session-execution-fork', storage=PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if mode == 'pending' else None)) as persistence_35, Runtime.attach(persistence=persistence_35, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session("session")
         first = await session.start("first")
         await first.wait(timeout_seconds=5)

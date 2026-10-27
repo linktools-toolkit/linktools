@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Checkpoint progress captures batch sequence reads without weakening replay proofs."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from dataclasses import replace
 from pathlib import Path
 
@@ -10,10 +10,10 @@ import pytest
 from sqlalchemy import event
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._model_interaction_store import ModelInteractionStateStepArchive
-from linktools.ai.runtime.state._step_archive import StateStepArchive
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
+from linktools.ai.persistence._step_archive import StateStepArchive
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
 
 from .test_incremental_projection_boundaries import _storage
 
@@ -24,10 +24,10 @@ pytestmark = pytest.mark.asyncio
 async def test_checkpoint_progress_keeps_repeated_checkpoint_position_and_fresh_high_water(
     tmp_path: Path, backend: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="progress-io", tenant_id="tenant")
     try:
-        archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
         run = AgentRunRecord("run")
         checkpoint = AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0)
         prepared, = (await archive.prepare_checkpoints(run, (checkpoint,))).checkpoints
@@ -45,10 +45,10 @@ async def test_checkpoint_progress_keeps_repeated_checkpoint_position_and_fresh_
 
 
 async def test_checkpoint_progress_batches_sequence_queries_in_one_snapshot(tmp_path: Path) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="progress-io", tenant_id="tenant")
     try:
-        archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
         prepared, = (await archive.prepare_checkpoints(
             AgentRunRecord("run"), (AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0),),
         )).checkpoints
@@ -71,10 +71,10 @@ async def test_checkpoint_progress_batches_sequence_queries_in_one_snapshot(tmp_
 
 
 async def test_checkpoint_progress_custom_archive_preserves_its_count_and_proof_overrides(tmp_path: Path) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="progress-io", tenant_id="tenant")
     try:
-        original = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        original = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
         prepared, = (await original.prepare_checkpoints(
             AgentRunRecord("run"), (AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0),),
         )).checkpoints
@@ -91,7 +91,7 @@ async def test_checkpoint_progress_custom_archive_preserves_its_count_and_proof_
                 calls.append("interaction")
                 return 11
         custom = CustomArchive(original.state_store, object_store=None, namespace="progress-io",
-                               tenant_id="tenant", runtime_domain=RuntimeDomain.CHECKPOINT)
+                               tenant_id="tenant", runtime_domain=PersistenceDomain.CHECKPOINT)
         assert await custom.capture_checkpoint_progress(agent_run_id="run", checkpoint=prepared) == (7, 11)
         assert calls == ["checkpoint", "proof", "interaction"]
     finally:
@@ -101,12 +101,12 @@ async def test_checkpoint_progress_custom_archive_preserves_its_count_and_proof_
 async def test_checkpoint_progress_rejects_history_lock_before_storage_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from linktools.ai.runtime.state._steps import _AgentRunHistoryLock
-    from linktools.ai.runtime.state._store import StateLockOrderError
-    state = RuntimeState(_storage("memory", tmp_path))
+    from linktools.ai.persistence.runs import _AgentRunHistoryLock
+    from linktools.ai.persistence.state import StateLockOrderError
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="progress-io", tenant_id="tenant")
     try:
-        archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
         prepared, = (await archive.prepare_checkpoints(
             AgentRunRecord("run"), (AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0),),
         )).checkpoints
@@ -123,10 +123,10 @@ async def test_checkpoint_progress_rejects_history_lock_before_storage_read(
 async def test_checkpoint_progress_keeps_checkpoint_proof_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="progress-io", tenant_id="tenant")
     try:
-        archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
         checkpoint = AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0)
         run = AgentRunRecord("run")
         prepared, = (await archive.prepare_checkpoints(run, (checkpoint,))).checkpoints

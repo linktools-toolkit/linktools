@@ -16,15 +16,12 @@ from pydantic_ai.messages import (
 )
 
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime._message import (
-    binary_content_usage,
-    project_transient_binary_content,
-)
-from linktools.ai.runtime.state._step_contracts import (
+from linktools.ai.model.messages import binary_content_usage, project_transient_binary_content
+from linktools.ai.persistence._step_contracts import (
     AgentRunCheckpoint,
     AgentRunRecord,
 )
-from linktools.ai.runtime.state._steps import StagingAgentRunStore
+from linktools.ai.persistence.runs import StagingAgentRunStore
 
 
 def _request(name: str, body: bytes) -> ModelRequest:

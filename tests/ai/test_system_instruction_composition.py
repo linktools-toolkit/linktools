@@ -8,14 +8,14 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from linktools.ai.capability import ToolCallRetry, workspace_capabilities
+from linktools.ai.capability import ToolCallRetry, filesystem_capabilities
 from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai.capabilities import AbstractCapability, Capability
 from linktools.ai.runtime._repository_instructions import _RepositoryInstructionBoundary
 from linktools.ai.runtime._tool_boundary import BoundaryToolset
 from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
 from linktools.ai.workspace import (
-    LocalSandbox,
+    LocalWorkspaceBackend,
     Workspace,
 )
 from pydantic_ai.messages import InstructionPart
@@ -109,13 +109,13 @@ async def test_workspace_guidance_is_static_when_workspace_tools_are_selected(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.load(tmp_path)
-    sandbox = LocalSandbox()
-    session = await sandbox.open(root=workspace.root)
+    sandbox = LocalWorkspaceBackend
+    session = sandbox(root=workspace.root)
     try:
-        capability = workspace_capabilities(
+        capability = filesystem_capabilities(
             workspace,
             ("read_file",),
-            session=session,
+            backend=session,
         )[0]
         instruction = capability.get_instructions()
         toolset_instructions = await capability.get_toolset().get_instructions(_context())

@@ -13,12 +13,12 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime.state._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
-from linktools.ai.runtime.state._memory import InMemoryStateStore
-from linktools.ai.runtime.state._sql import SqlStateStorageGroup, SqlStateStore
-from linktools.ai.runtime.state._schema import build_runtime_sql_metadata
-from linktools.ai.runtime.state._plan import RuntimeDomain
-from linktools.ai.runtime.state._store import StateGroupTransaction, StoredRecord
+from linktools.ai.persistence._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
+from linktools.ai.persistence._memory import InMemoryStateStore
+from linktools.ai.persistence._sql import SqlStateStorageGroup, SqlStateStore
+from linktools.ai.persistence._schema import build_runtime_sql_metadata
+from linktools.ai.persistence._plan import PersistenceDomain
+from linktools.ai.persistence.state import StateGroupTransaction, StoredRecord
 from linktools.ai.storage import create_sql_storage_context
 
 pytestmark = pytest.mark.asyncio
@@ -155,7 +155,7 @@ async def test_group_archive_sql_shared_identity_and_unopened_partition_scan(tmp
         for partition in scanned:
             records.extend(await partition.read(lambda tx: tx.scan_records()))
         assert any(record.data.get("label") == "hidden" for record in records)
-        metadata = build_runtime_sql_metadata(frozenset({RuntimeDomain.CONVERSATION}))
+        metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION}))
         read_only = SqlStateStorageGroup(create_sql_storage_context(engine), metadata, read_only=True)
         assert (await read_only.open_archive())[0] == results[0][0]
         with pytest.raises(AIError) as error:
@@ -169,7 +169,7 @@ async def test_group_archive_sql_shared_identity_and_unopened_partition_scan(tmp
 
 
 async def test_group_archive_filesystem_resource_scope_survives_reduced_routes(tmp_path: Path) -> None:
-    from linktools.ai.runtime.state._resource_scope import StorageResourceRequest, StorageResourceScope
+    from linktools.ai.persistence._resource_scope import StorageResourceRequest, StorageResourceScope
     from linktools.ai.storage import StorageRoute
 
     root = tmp_path / "state"
@@ -204,32 +204,32 @@ async def test_group_archive_filesystem_resource_scope_survives_reduced_routes(t
 
 
 async def test_group_archive_object_resource_survives_route_reduction(tmp_path: Path) -> None:
-    from linktools.ai.runtime.state._object_router import build_runtime_object_router
-    from linktools.ai.runtime.state._plan import RuntimeStoragePlan
+    from linktools.ai.persistence._object_router import build_runtime_object_router
+    from linktools.ai.persistence._plan import PersistencePlan
     from linktools.ai.storage import StorageRoute, read_object
 
     root = tmp_path / "physical"
     first = _filesystem(root)
     hidden = FilesystemStateStore(root / "hidden", namespace="namespace", tenant_id="tenant",
                                   runtime_domain="hidden", group=first.storage_group)
-    plan = RuntimeStoragePlan(conversation=StorageRoute.filesystem(root / "conversation", transaction_root=root),
+    plan = PersistencePlan(conversation=StorageRoute.filesystem(root / "conversation", transaction_root=root),
                               execution=StorageRoute.filesystem(root / "execution", transaction_root=root))
-    router = build_runtime_object_router(plan, None, {RuntimeDomain.CONVERSATION: first, RuntimeDomain.EXECUTION: hidden}, {})
-    source = router.archive_object_store(RuntimeDomain.CONVERSATION)
-    assert source is router.archive_object_store(RuntimeDomain.EXECUTION)
-    assert source is not router.object_store(RuntimeDomain.CONVERSATION)
+    router = build_runtime_object_router(plan, None, {PersistenceDomain.CONVERSATION: first, PersistenceDomain.EXECUTION: hidden}, {})
+    source = router.archive_object_store(PersistenceDomain.CONVERSATION)
+    assert source is router.archive_object_store(PersistenceDomain.EXECUTION)
+    assert source is not router.object_store(PersistenceDomain.CONVERSATION)
 
     async def chunks() -> AsyncIterator[bytes]:
         yield b"archive"
 
     await source.put("probe", chunks(), expected_size=7, expected_digest=hashlib.sha256(b"archive").hexdigest())
     reopened = _filesystem(root, read_only=True)
-    reduced = build_runtime_object_router(plan, None, {RuntimeDomain.EXECUTION: reopened}, {})
-    assert await read_object(reduced.archive_object_store(RuntimeDomain.EXECUTION), "probe", expected_size=7, expected_digest=hashlib.sha256(b"archive").hexdigest()) == b"archive"
+    reduced = build_runtime_object_router(plan, None, {PersistenceDomain.EXECUTION: reopened}, {})
+    assert await read_object(reduced.archive_object_store(PersistenceDomain.EXECUTION), "probe", expected_size=7, expected_digest=hashlib.sha256(b"archive").hexdigest()) == b"archive"
     memory = InMemoryStateStore()
-    one = build_runtime_object_router(RuntimeStoragePlan(), None, {RuntimeDomain.EXECUTION: memory}, {})
-    two = build_runtime_object_router(RuntimeStoragePlan(), None, {RuntimeDomain.EXECUTION: memory}, {})
-    assert one.archive_object_store(RuntimeDomain.EXECUTION) is two.archive_object_store(RuntimeDomain.EXECUTION)
+    one = build_runtime_object_router(PersistencePlan(), None, {PersistenceDomain.EXECUTION: memory}, {})
+    two = build_runtime_object_router(PersistencePlan(), None, {PersistenceDomain.EXECUTION: memory}, {})
+    assert one.archive_object_store(PersistenceDomain.EXECUTION) is two.archive_object_store(PersistenceDomain.EXECUTION)
 
 
 async def test_sql_archive_rejects_missing_identity_with_existing_content(tmp_path: Path) -> None:
@@ -258,7 +258,7 @@ async def test_sql_archive_rejects_missing_identity_with_existing_content(tmp_pa
 
 @pytest.mark.parametrize("suffix", (".state-archive-objects", ".state-archive-objects/nested"))
 async def test_group_rejects_archive_object_directory_as_state_partition(tmp_path: Path, suffix: str) -> None:
-    from linktools.ai.runtime.state._resource_scope import StorageResourceRequest, StorageResourceScope
+    from linktools.ai.persistence._resource_scope import StorageResourceRequest, StorageResourceScope
     from linktools.ai.storage import StorageRoute
 
     route = StorageRoute.filesystem(tmp_path, transaction_root=tmp_path)
@@ -312,7 +312,7 @@ async def test_memory_group_owns_archive_without_borrowed_member_close_cascade()
 
 
 def _sql_archive_owner(engine) -> SqlStateStore:
-    metadata = build_runtime_sql_metadata(frozenset({RuntimeDomain.CONVERSATION}))
+    metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION}))
     context = create_sql_storage_context(engine)
     group = SqlStateStorageGroup(context, metadata, uses_archive=True)
     return SqlStateStore(engine, context=context, metadata=metadata, group=group)
@@ -433,13 +433,13 @@ async def test_sql_first_owner_write_rejects_orphan_archive_without_repair(tmp_p
 async def test_sql_resource_groups_aggregate_archive_owners_without_initialization_io(
     tmp_path: Path, declared: bool, read_only: bool,
 ) -> None:
-    from linktools.ai.runtime.state._resource_scope import StorageResourceRequest, StorageResourceScope
+    from linktools.ai.persistence._resource_scope import StorageResourceRequest, StorageResourceScope
     from linktools.ai.storage import StorageRoute
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'declared-group.db'}")
     await provision_database(engine)
     def configure(metadata):
-        build_runtime_sql_metadata(frozenset({RuntimeDomain.CONVERSATION}), metadata=metadata)
+        build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION}), metadata=metadata)
 
     scope = await StorageResourceScope.open((
         StorageResourceRequest("ordinary", StorageRoute.sql(engine), configure_schema=configure),

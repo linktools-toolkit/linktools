@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Independent readers observe committed model and tool boundaries."""
 from ._runtime_test_helpers import model_features
 
@@ -17,7 +19,9 @@ from pydantic_ai.models.function import AgentInfo
 from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, Principal
-from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
+from linktools.ai.history import History
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 
 from ._runtime_test_helpers import _UsageFunctionModel, _wait_for_committed
 from .test_live_history_readback_integration import _Models
@@ -53,10 +57,7 @@ def _writer_process(root: str, pipe: Connection) -> None:
         group.tool(slow, effect_policy="replay_safe")
         group.agent("default", model="default", allow_tools=("quick", "slow"))
         group.capability(TraceCapability(), scope="runtime")
-        async with Runtime.open(
-            "process-history", storage=RuntimeStorage.filesystem(Path(root)),
-            features=model_features(_Models(_UsageFunctionModel(model)), group),
-        ) as runtime:
+        async with Persistence.open('process-history', storage=PersistenceStorage.filesystem(Path(root))) as persistence_56, Runtime.attach(persistence=persistence_56, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
             execution = await runtime.agents.get("default").start("process prompt")
             principal = runtime.default_principal
             pipe.send(("execution", execution.execution_id, principal))
@@ -121,8 +122,8 @@ async def test_independent_live_readers_keep_frozen_cursor_through_terminal_comm
         assert isinstance(principal, Principal)
         if not provider_entered:
             assert (await _receive(pipe))[0] == "provider-entered"
-        async with RuntimeHistory.open("process-history", storage=RuntimeStorage.filesystem(tmp_path)) as first:
-            async with RuntimeHistory.open("process-history", storage=RuntimeStorage.filesystem(tmp_path)) as second:
+        async with Persistence.open('process-history', storage=PersistenceStorage.filesystem(tmp_path), tenant_id="default", read_only=True) as history_persistence_124, History.open(persistence=history_persistence_124) as first:
+            async with Persistence.open('process-history', storage=PersistenceStorage.filesystem(tmp_path), tenant_id="default", read_only=True) as history_persistence_125, History.open(persistence=history_persistence_125) as second:
                 for reader in (first, second):
                     interactions = await _wait_for_committed(
                         lambda: reader.model_interactions(execution_id, principal=principal, include_content=True),
@@ -162,7 +163,7 @@ async def test_independent_live_readers_keep_frozen_cursor_through_terminal_comm
         pipe.send("close")
         await asyncio.to_thread(process.join, 10)
         assert process.exitcode == 0
-        async with RuntimeHistory.open("process-history", storage=RuntimeStorage.filesystem(tmp_path)) as reopened:
+        async with Persistence.open('process-history', storage=PersistenceStorage.filesystem(tmp_path), tenant_id="default", read_only=True) as history_persistence_165, History.open(persistence=history_persistence_165) as reopened:
             archived = await reopened.history(execution_id, principal=principal, include_content=True)
             assert archived.items == fresh.items
     finally:
@@ -177,7 +178,7 @@ async def test_reader_retains_request_metadata_after_writer_process_dies(tmp_pat
         admission = next(message for message in messages if message[0] == "execution")
         assert any(message[0] == "provider-entered" for message in messages)
         execution_id, principal = admission[1:]
-        async with RuntimeHistory.open("process-history", storage=RuntimeStorage.filesystem(tmp_path)) as observer:
+        async with Persistence.open('process-history', storage=PersistenceStorage.filesystem(tmp_path), tenant_id="default", read_only=True) as history_persistence_180, History.open(persistence=history_persistence_180) as observer:
             committed = await _wait_for_committed(
                 lambda: observer.model_interactions(execution_id, principal=principal, include_content=True),
                 lambda page: bool(page.items),
@@ -185,7 +186,7 @@ async def test_reader_retains_request_metadata_after_writer_process_dies(tmp_pat
             assert committed.items[0].status == "RUNNING"
         process.kill()
         await asyncio.to_thread(process.join, 5)
-        async with RuntimeHistory.open("process-history", storage=RuntimeStorage.filesystem(tmp_path)) as reader:
+        async with Persistence.open('process-history', storage=PersistenceStorage.filesystem(tmp_path), tenant_id="default", read_only=True) as history_persistence_188, History.open(persistence=history_persistence_188) as reader:
             interactions = await reader.model_interactions(execution_id, principal=principal, include_content=True)
             assert len(interactions.items) == 1
             assert interactions.items[0].status == "RUNNING"

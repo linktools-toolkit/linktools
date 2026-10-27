@@ -10,12 +10,12 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import event
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence, PersistenceDomain
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state._execution_repositories import ExecutionRepositoryImpl
-from linktools.ai.runtime.state._retention import RuntimeRetentionController
-from linktools.ai.runtime.state._store import active_state_scope
+from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
+from linktools.ai.persistence._retention import RuntimeRetentionController
+from linktools.ai.persistence.state import active_state_scope
 
 from .test_incremental_projection_boundaries import _storage
 from .test_step_projection import _execution as _projection_execution
@@ -32,21 +32,21 @@ def _controller(repository, calls):
     controller = object.__new__(RuntimeRetentionController)
     controller._execution = SimpleNamespace(executions=repository)
     controller._namespace = _NAMESPACE
-    controller._transient_domains = frozenset()
+    controller._transient_domains = frozenset({PersistenceDomain.TRACE})
     controller._objects = SimpleNamespace()
     async def session_release(session_id, **kwargs):
         assert active_state_scope() is None
         record = await repository.get(kwargs["execution_id"], tenant_id=kwargs["tenant_id"])
         assert record.retention_closed and record.session_id == session_id
         calls.append(("session", session_id))
-    async def staging_release(**kwargs):
+    async def object_release(domain, *, owner_scope):
         assert active_state_scope() is None
-        record = await repository.get(kwargs["execution_id"], tenant_id="tenant")
-        assert record.retention_closed
-        assert len(kwargs["candidate_agent_run_ids"]) == record.agent_run_seq
-        calls.append(("staging", kwargs["execution_id"]))
+        record = await repository.get(owner_scope.removeprefix("execution:"), tenant_id="tenant")
+        if record is not None:
+            assert record.retention_closed
+        calls.append(("objects", owner_scope.removeprefix("execution:")))
     controller._conversation = SimpleNamespace(sessions=SimpleNamespace(release_execution=session_release))
-    controller._run_store = SimpleNamespace(release_staging_many=staging_release)
+    controller._objects = SimpleNamespace(release_object_scope=object_release)
     return controller
 
 
@@ -55,7 +55,7 @@ def _controller(repository, calls):
 async def test_retention_cleanup_observes_committed_closure(
     tmp_path: Path, backend: str, condition: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -69,9 +69,10 @@ async def test_retention_cleanup_observes_committed_closure(
         calls = []
         released = await _controller(repository, calls).release_execution_handoff("execution", tenant_id="tenant")
         assert released == (condition not in ("running", "hold"))
-        assert calls == ([] if condition in ("missing", "running", "hold") else [
-            ("session", "session"), ("staging", "execution"),
-        ])
+        assert calls == ([] if condition in ("running", "hold") else
+            [("objects", "execution")] if condition == "missing" else [
+                ("session", "session"), ("objects", "execution"),
+            ])
     finally:
         await state.close()
 
@@ -80,7 +81,7 @@ async def test_retention_cleanup_observes_committed_closure(
 async def test_retention_failure_does_not_start_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
 ) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -95,7 +96,7 @@ async def test_retention_failure_does_not_start_cleanup(
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             monkeypatch.setattr(repository, "get", fail)
         elif failure == "cas":
-            from linktools.ai.runtime.state._sql import _SqlTransaction
+            from linktools.ai.persistence._sql import _SqlTransaction
             async def fail(*args, **kwargs):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             monkeypatch.setattr(_SqlTransaction, "replace_record", fail)
@@ -110,7 +111,7 @@ async def test_retention_failure_does_not_start_cleanup(
 
 
 async def test_builtin_retention_avoids_owner_reread_and_custom_owner_keeps_fallback(tmp_path: Path) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -128,10 +129,10 @@ async def test_builtin_retention_avoids_owner_reread_and_custom_owner_keeps_fall
                 statements.append(statement.split()[0].upper())
             calls = []
             controller = _controller(owner, calls)
-            async def staging_release(**kwargs):
+            async def object_release(domain, *, owner_scope):
                 assert active_state_scope() is None
-                calls.append(kwargs["execution_id"])
-            controller._run_store = SimpleNamespace(release_staging_many=staging_release)
+                calls.append(owner_scope.removeprefix("execution:"))
+            controller._objects = SimpleNamespace(release_object_scope=object_release)
             event.listen(engine, "before_cursor_execute", capture)
             try:
                 assert await controller.release_execution_handoff("execution", tenant_id="tenant")
@@ -149,7 +150,7 @@ async def test_builtin_retention_avoids_owner_reread_and_custom_owner_keeps_fall
 async def test_retention_unknown_commit_does_not_clean_until_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
 ) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -172,7 +173,7 @@ async def test_retention_unknown_commit_does_not_clean_until_retry(
         assert calls == []
         assert (await repository.get("execution", tenant_id="tenant")).retention_closed
         assert await controller.release_execution_handoff("execution", tenant_id="tenant")
-        assert calls == [("staging", "execution")]
+        assert calls == [("objects", "execution")]
     finally:
         await state.close()
 
@@ -185,7 +186,7 @@ async def test_terminal_policy_hint_still_requires_source_closure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     conversation: bool, closed: bool, held: bool,
 ) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -209,9 +210,71 @@ async def test_terminal_policy_hint_still_requires_source_closure(
         )
         assert released is not held
         assert bool(mutations) is not (conversation and closed)
-        assert calls == ([] if held else [("staging", "execution")])
+        assert calls == ([] if held else [("objects", "execution")])
         current = await repository.get("execution", tenant_id="tenant")
         assert current is not None
         assert current.retention_closed is not held
     finally:
         await state.close()
+
+
+@pytest.mark.parametrize("condition", ("terminal", "closed", "missing", "running", "hold", "unknown", "cancel_after_commit"))
+async def test_runtime_releases_only_producer_staging_after_durable_handoff(
+    monkeypatch: pytest.MonkeyPatch, condition: str,
+) -> None:
+    from linktools.ai.persistence import PersistenceStorage
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+
+    async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.in_memory(), tenant_id="tenant") as state:
+        async with Runtime.attach(features=RuntimeFeatures(), persistence=state, auto_recover=False) as runtime, Runtime.attach(features=RuntimeFeatures(),
+            persistence=state, auto_recover=False,
+        ) as peer:
+            repository = state.execution.executions
+            if condition != "missing":
+                await repository.create_with_history_head(replace(
+                    _execution(),
+                    status=_execution().status if condition == "running" else ExecutionStatus.SUCCEEDED,
+                    retention_closed=condition == "closed",
+                    dependency_hold_ids=("hold",) if condition == "hold" else (),
+                ))
+            own = runtime._run_store
+            own._execution_producers["own-run"] = ("execution", 1)
+            own._execution_producers["unrelated-run"] = ("other-execution", 1)
+            peer._run_store._execution_producers["peer-run"] = ("execution", 2)
+            assert own is not state.run_store and own is not peer._run_store
+            calls = []
+            original_release = own.release_staging_many
+
+            async def release(**kwargs):
+                assert active_state_scope() is None
+                record = await repository.get("execution", tenant_id="tenant")
+                assert record is None if condition == "missing" else record.retention_closed
+                calls.append(kwargs["candidate_agent_run_ids"])
+                await original_release(**kwargs)
+
+            monkeypatch.setattr(own, "release_staging_many", release)
+            original_mutate = repository.state_store.mutate
+
+            async def lose_ack(callback):
+                outer = active_state_scope() is None
+                result = await original_mutate(callback)
+                if outer:
+                    if condition == "cancel_after_commit":
+                        raise asyncio.CancelledError()
+                    raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+                return result
+
+            release_terminal = runtime._execution_service._release_terminal
+            if condition in ("unknown", "cancel_after_commit"):
+                with monkeypatch.context() as patch:
+                    patch.setattr(repository.state_store, "mutate", lose_ack)
+                    with pytest.raises(asyncio.CancelledError if condition == "cancel_after_commit" else AIError):
+                        await release_terminal("execution", tenant_id="tenant")
+                assert calls == []
+                assert "own-run" in own._execution_producers
+            released = await release_terminal("execution", tenant_id="tenant")
+            assert released is (condition not in ("running", "hold"))
+            assert calls == ([("own-run",)] if released else [])
+            assert ("own-run" in own._execution_producers) is not released
+            assert "unrelated-run" in own._execution_producers
+            assert "peer-run" in peer._run_store._execution_producers

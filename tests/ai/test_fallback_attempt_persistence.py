@@ -7,26 +7,16 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-from pydantic_ai import RequestUsage, messages as sdk_messages
-from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai import RequestUsage
+from pydantic_ai.messages import ModelRequestAttempt, ModelResponse, TextPart
 
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import _message as message_codec
-from linktools.ai.runtime._message import (
-    decode_model_messages,
-    encode_model_messages,
-    model_attempts_usage,
-    model_response_usage,
-    project_model_response_attempts,
-)
+from linktools.ai.model.messages import decode_model_messages, encode_model_messages, model_attempts_usage, model_response_usage, project_model_response_attempts
 
 
 def _attempt(*, error: str | None = None, usage: RequestUsage | None = None) -> object:
-    attempt_type = getattr(sdk_messages, "ModelRequestAttempt", None)
-    if attempt_type is None:
-        pytest.skip("installed SDK does not expose fallback attempt observations")
-    return attempt_type(
+    return ModelRequestAttempt(
         model_name="decision-model",
         provider_name="decisions",
         outcome="error" if error is not None else "rejected",
@@ -136,7 +126,6 @@ def test_unavailable_attempts_are_not_invented_by_the_message_writer() -> None:
 
 
 def test_explicit_empty_attempt_observation_is_distinct_from_unavailable() -> None:
-    _attempt()
     response = ModelResponse(parts=[], failed_attempts=[])
     wire = encode_model_messages((response,))
 
@@ -160,13 +149,3 @@ def test_malformed_attempt_fields_fail_closed(field: str, value: object) -> None
     with pytest.raises(AIError) as caught:
         decode_model_messages(canonical_json_bytes(wire))
     assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
-
-def test_nonempty_attempts_cannot_be_restored_by_an_sdk_without_the_contract(monkeypatch: pytest.MonkeyPatch) -> None:
-    response = ModelResponse(parts=[], failed_attempts=[_attempt()])
-    wire = encode_model_messages((response,))
-    monkeypatch.setattr(message_codec, "_MODEL_REQUEST_ATTEMPT", None)
-
-    with pytest.raises(AIError) as caught:
-        decode_model_messages(wire)
-    assert caught.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED

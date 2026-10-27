@@ -29,8 +29,8 @@ from pydantic_ai.settings import ModelSettings
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ..model import ModelClientRequest, ModelStreamAttempt
-from ._transcript_staging import StagedTranscript
-from ._journal import (
+from ..persistence.runs import StagedTranscript
+from ..observe.journal import (
     DURATION_NS_METADATA_KEY,
     MODEL_REQUEST_SEQ_METADATA_KEY,
     REPLAYED_TOOL_CALL_INDICES_METADATA_KEY,
@@ -42,12 +42,12 @@ from ._journal import (
     ModelRequestFact,
     await_request_handoff,
 )
-from ._message import freeze_model_messages, model_response_usage
+from ..model.messages import freeze_model_messages, model_response_usage
 from ._run_context import RunContextProjection
 from ._trace_capture import ModelInteractionCapture, TraceStagingPort
-from .state._contracts import LoadedModelContext
-from .state._steps import RuntimeAgentRunStore, StagingAgentRunStore
-from .state._step_contracts import (
+from ..persistence.contracts import LoadedModelContext
+from ..persistence.runs import RuntimeAgentRunStore, StagingAgentRunStore
+from ..persistence.runs import (
     TOOL_ERROR_CODE_METADATA_KEY,
     AgentRunCheckpoint,
     StepEventType,

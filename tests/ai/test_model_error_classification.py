@@ -135,7 +135,7 @@ async def test_public_binding_distinguishes_quota_from_temporary_rate_limit(
 
     clients = _mock_clients(monkeypatch, handle)
     binding = create_model(
-        protocol="openai", model="fixture", api_key="synthetic",
+        api="openai", model="fixture", api_key="synthetic",
         base_url="https://offline.invalid/v1", max_retries=2, retry_delay=0,
     )
 
@@ -171,7 +171,7 @@ async def test_public_responses_server_error_before_first_event_uses_transport_r
 
     clients = _mock_clients(monkeypatch, handle)
     binding = create_model(
-        protocol="openai-responses", model="fixture", api_key="synthetic",
+        api="openai-responses", model="fixture", api_key="synthetic",
         base_url="https://offline.invalid/v1", max_retries=2, retry_delay=0,
     )
 

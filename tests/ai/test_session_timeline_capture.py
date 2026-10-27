@@ -12,13 +12,13 @@ from sqlalchemy import event
 
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeState
-from linktools.ai.runtime.state._archive import PreparedArchive
-from linktools.ai.runtime.state._contracts import ConversationCursor, ConversationHistoryRecord
-from linktools.ai.runtime.state._conversation_repositories import ConversationHistoryRepositoryImpl
-from linktools.ai.runtime.state._history import TranscriptRepository
-from linktools.ai.runtime.state._store import active_state_scope
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import PersistenceDomain, Persistence
+from linktools.ai.persistence._archive import PreparedArchive
+from linktools.ai.persistence.contracts import ConversationCursor, ConversationHistoryRecord
+from linktools.ai.persistence._conversation_repositories import ConversationHistoryRepositoryImpl
+from linktools.ai.persistence._history import TranscriptRepository
+from linktools.ai.persistence.state import active_state_scope
 
 from .test_session_refresh import _PRINCIPAL, _admit, _service
 from .test_session_timeline import _commit_fields, _materialize_conversation, _session
@@ -27,8 +27,8 @@ pytestmark = pytest.mark.asyncio
 
 
 @pytest_asyncio.fixture
-async def committed_state(tmp_path: Path) -> AsyncIterator[tuple[RuntimeState, str]]:
-    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "capture.db"))
+async def committed_state(tmp_path: Path) -> AsyncIterator[tuple[Persistence, str]]:
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "capture.db"))
     await state.initialize(namespace="session-timeline", tenant_id="tenant")
     try:
         created = await state.conversation.sessions.create(_session())
@@ -114,7 +114,7 @@ async def test_session_page_keeps_captured_prefix_but_reads_current_facts(
 
 @pytest.mark.parametrize("mismatch", ("namespace", "tenant", "owner"))
 async def test_history_capture_rejects_same_identity_from_another_scope(mismatch: str) -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="capture-scope", tenant_id="tenant")
     try:
         histories = state.conversation.histories
@@ -129,7 +129,7 @@ async def test_history_capture_rejects_same_identity_from_another_scope(mismatch
             histories.state_store, object_store=None,
             namespace="other" if mismatch == "namespace" else "capture-scope",
             tenant_id="other" if mismatch == "tenant" else "tenant",
-            runtime_domain=RuntimeDomain.CONVERSATION, history_repository=histories,
+            runtime_domain=PersistenceDomain.CONVERSATION, history_repository=histories,
         )
         with pytest.raises(AIError) as error:
             _ = [message async for message in transcript.iter_session_message_range(

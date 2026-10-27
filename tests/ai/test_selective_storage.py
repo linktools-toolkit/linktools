@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RuntimeStorage route and persistence checks."""
+"""PersistenceStorage route and persistence checks."""
 
 import json
 
 import pytest
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage, PersistencePlan
+from linktools.ai.persistence import Persistence
 from linktools.ai.storage import StorageRoute
 
 
 def test_runtime_storage_plan_routes_each_domain_explicitly(tmp_path) -> None:
     transaction_root = tmp_path / "state"
     conversation_root = transaction_root / "conversation"
-    plan = RuntimeStoragePlan(
+    plan = PersistencePlan(
         conversation=StorageRoute.filesystem(
             conversation_root,
             transaction_root=transaction_root,
@@ -23,16 +23,16 @@ def test_runtime_storage_plan_routes_each_domain_explicitly(tmp_path) -> None:
             transaction_root=transaction_root,
         ),
     )
-    assert plan.route(RuntimeDomain.CONVERSATION).path == conversation_root.resolve()
-    assert plan.route(RuntimeDomain.EXECUTION).retention.value == "durable"
-    assert plan.route(RuntimeDomain.MEMORY).kind == "memory"
+    assert plan.route(PersistenceDomain.CONVERSATION).path == conversation_root.resolve()
+    assert plan.route(PersistenceDomain.EXECUTION).retention.value == "durable"
+    assert plan.route(PersistenceDomain.MEMORY).kind == "memory"
 
 
 @pytest.mark.asyncio
 async def test_filesystem_state_writes_domain_manifest(tmp_path) -> None:
     root = tmp_path / "runtime"
-    state = RuntimeState(RuntimeStorage.from_plan(
-        RuntimeStoragePlan(
+    state = Persistence(PersistenceStorage.from_plan(
+        PersistencePlan(
             conversation=StorageRoute.filesystem(
                 root / "conversation",
                 transaction_root=root,

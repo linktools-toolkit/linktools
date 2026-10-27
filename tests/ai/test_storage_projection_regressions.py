@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Independent regression for accepted-context archival at effect promotion."""
 from ._runtime_test_helpers import model_features
 from pathlib import Path
@@ -10,7 +12,8 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from linktools.ai.capability import AgentContext, ExecutionCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy, ExecutionStatus
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.storage._database import SqlStorageContext
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
@@ -23,7 +26,7 @@ async def test_promotion_archives_accepted_context(
 ) -> None:
     from pydantic_ai.messages import ToolCallPart, ToolReturnPart
     calls = []
-    state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
+    state = PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     owner = {}
     async def lookup(context: AgentContext[None]) -> str:
         record = await runtime._state.execution.executions.get(context.execution_id, tenant_id=context.principal.tenant_id)
@@ -37,10 +40,10 @@ async def test_promotion_archives_accepted_context(
             return ModelResponse(parts=[ToolCallPart('lookup', {}, tool_call_id='lookup-call')])
         return ModelResponse(parts=[TextPart('answer')])
     group = RuntimeFeatures('tool-pending')
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
     group.tool(lookup, effect_policy=effect_policy)
     group.agent('default', model='default', allow_tools=('lookup',))
-    async with Runtime.open('pending-tool', storage=state, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('pending-tool', storage=state) as persistence_43, Runtime.attach(persistence=persistence_43, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
         original = SqlStorageContext.run_mutation
         commits = []
@@ -64,8 +67,8 @@ async def test_promotion_archives_accepted_context(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("terminal", (False, True))
 async def test_session_admission_reuses_verified_history_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal: bool) -> None:
-    from linktools.ai.runtime._context_archive import ExecutionContextArchive
-    from linktools.ai.runtime.state._archive import ContentArchive
+    from linktools.ai.inputs import ExecutionContextArchive
+    from linktools.ai.persistence._archive import ContentArchive
     prepared = []
     active = []
     body_reads = []
@@ -89,11 +92,9 @@ async def test_session_admission_reuses_verified_history_root(tmp_path: Path, mo
         return ModelResponse(parts=[TextPart('answer')])
     features = RuntimeFeatures('review-context')
     features.capability(ExecutionCapability(retain_history=True,
-        commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync(),
-        coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if terminal else None))
+        commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync()))
     features.agent('default', model='default', allow_tools=())
-    async with Runtime.open('review-context', storage=RuntimeStorage.sqlite(tmp_path / 'context.db'),
-                            features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+    async with Persistence.open('review-context', storage=PersistenceStorage.sqlite(tmp_path / 'context.db', coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if terminal else None)) as persistence_95, Runtime.attach(persistence=persistence_95, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
         session = await runtime.agents.get().create_session('session')
         for value in ('first', 'second', 'third'):
             result = await session.run(value, timeout_seconds=5)
@@ -111,9 +112,9 @@ async def test_projection_boundary_read_budget(tmp_path: Path, monkeypatch: pyte
     from contextvars import ContextVar
     from pydantic_ai.messages import ToolCallPart, ToolReturnPart
     from linktools.ai.capability import TraceCapability, CheckpointCapability
-    from linktools.ai.runtime.state._archive import ContentArchive
-    from linktools.ai.runtime.state._history import TranscriptRepository
-    from linktools.ai.runtime.state._step_archive import StateStepArchive
+    from linktools.ai.persistence._archive import ContentArchive
+    from linktools.ai.persistence._history import TranscriptRepository
+    from linktools.ai.persistence._step_archive import StateStepArchive
     phase = ContextVar('review_phase', default='other')
     observed = []
     details = []
@@ -148,8 +149,7 @@ async def test_projection_boundary_read_budget(tmp_path: Path, monkeypatch: pyte
     features.capability(CheckpointCapability())
     features.tool(lookup, effect_policy='none')
     features.agent('default', model='default', allow_tools=('lookup',))
-    async with Runtime.open('review-boundaries', storage=RuntimeStorage.sqlite(tmp_path / 'boundaries.db'),
-                            features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+    async with Persistence.open('review-boundaries', storage=PersistenceStorage.sqlite(tmp_path / 'boundaries.db')) as persistence_151, Runtime.attach(persistence=persistence_151, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
         result = await runtime.agents.get().run('question', timeout_seconds=10)
         assert result.result.status is ExecutionStatus.SUCCEEDED
     summary = {label: {'calls': sum(item[0] == label for item in observed),
@@ -167,16 +167,16 @@ async def test_projection_boundary_read_budget(tmp_path: Path, monkeypatch: pyte
 async def test_pending_large_history_is_process_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import asyncio
     from linktools.ai.storage._object_sql import SqlObjectStore
-    from linktools.ai.runtime._pending_coordination import _PendingTurnCoordination
-    from linktools.ai.runtime._context_archive import ExecutionContextArchive
-    from linktools.ai.core import RuntimeDomain
+    from linktools.ai.persistence.coordination import PendingTurnCoordination
+    from linktools.ai.inputs import ExecutionContextArchive
+    from linktools.ai.core import PersistenceDomain
     entered, finish = asyncio.Event(), asyncio.Event()
     large = 'review-private-history-' * 10000
     calls = 0
     blocked = False
     published = []
     original_put = SqlObjectStore.put
-    original_publish = _PendingTurnCoordination.publish
+    original_publish = PendingTurnCoordination.publish
     async def put(self, *args, **kwargs):
         assert not blocked, 'Pending admission wrote a temporary object'
         return await original_put(self, *args, **kwargs)
@@ -188,7 +188,7 @@ async def test_pending_large_history_is_process_local(tmp_path: Path, monkeypatc
         assert observed is not None and observed.input_context is None
         published.append(record.input_context)
     monkeypatch.setattr(SqlObjectStore, 'put', put)
-    monkeypatch.setattr(_PendingTurnCoordination, 'publish', publish)
+    monkeypatch.setattr(PendingTurnCoordination, 'publish', publish)
     async def model(messages, info):
         nonlocal calls
         calls += 1
@@ -197,11 +197,9 @@ async def test_pending_large_history_is_process_local(tmp_path: Path, monkeypatc
             await finish.wait()
         return ModelResponse(parts=[TextPart(large if calls == 1 else 'done')])
     features = RuntimeFeatures('review-pending-large')
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(),
-        coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)))
+    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()))
     features.agent('default', model='default', allow_tools=())
-    async with Runtime.open('review-pending-large', storage=RuntimeStorage.sqlite(tmp_path / 'pending.db'),
-                            features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+    async with Persistence.open('review-pending-large', storage=PersistenceStorage.sqlite(tmp_path / 'pending.db', coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))) as persistence_203, Runtime.attach(persistence=persistence_203, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
         session = await runtime.agents.get().create_session('session')
         assert (await session.run('first')).result.status is ExecutionStatus.SUCCEEDED
         published.clear()
@@ -217,6 +215,6 @@ async def test_pending_large_history_is_process_local(tmp_path: Path, monkeypatc
         record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert record is not None and record.input_context is not None
         assert record.input_context.payload.decode()['kind'] == 'execution-context'
-        archive = ExecutionContextArchive(runtime._state.execution.executions.state_store, runtime._state.archive_object_store(RuntimeDomain.EXECUTION), namespace='review-pending-large', tenant_id=runtime.tenant_id)
+        archive = ExecutionContextArchive(runtime._state.execution.executions.state_store, runtime._state.archive_object_store(PersistenceDomain.EXECUTION), namespace='review-pending-large', tenant_id=runtime.tenant_id)
         loaded = await archive.load(record.input_context)
         assert large in str(loaded.model_messages())

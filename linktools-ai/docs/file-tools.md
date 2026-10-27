@@ -14,12 +14,14 @@ No runtime enable-tools registry or implicit format converter is introduced.
 
 The professional configuration selects `run_command` and `read_file` as tools,
 plus a nonempty `allow_skills` to materialize `list_skills` and `load_skill`.
-Add discovery/search only when required. `create_directory`, `file_info` and
-the explicit host entry points remain available when deliberately selected.
-An edit-only configuration keeps `edit_file`; it is not upgraded to whole-file
-write permission. Broad `*` selectors and the implicit default Agent
-remain broad (the full 14-tool catalog), not a minimal profile. The minimal writer
-example explicitly selects the four modern file tools.
+Add discovery/search only when required. The public FileSystem tool catalog contains
+only those four entry points; `file:read` selects the three read tools and
+`file:write` selects `write_file`. Backend implementation helpers do not become additional public model tools.
+New writes create necessary parent directories within the authorized workspace;
+exact replacement uses the same `write_file(..., old_text=...)` entry point. An edit-only authorization must
+not be silently migrated to `write_file`, which can also create and overwrite
+files; choose an explicitly restricted host operation or reject that migration.
+The minimal writer example explicitly selects the four file tools.
 
 The OpenAI Chat, OpenAI Responses and Anthropic Messages adapters own their
 protocol-specific input encoding. Declaring a MIME type does not make an adapter
@@ -62,7 +64,7 @@ rejects attachments; ordinary prompt text is unaffected. The names `image`,
 `audio`, `document`, and `video` expand to the corresponding SDK Literal MIME
 sets. Use `mime:` for exact MIME types or `type/*` families. There is no `text`
 category; a text file can use `mime:text/plain`. Unmatched attachments are
-rejected. A match does not bypass SDK encoding, Sandbox authorization, resource
+rejected. A match does not bypass SDK encoding, workspace-provider authorization, resource
 limits, or permissions.
 
 The `vision` API argument and CLI flag are removed. Legacy environment or
@@ -76,7 +78,7 @@ cannot substitute its empty allowlist for that contract.
 ```python
 from linktools.ai.model import create_model
 
-binding = create_model(protocol="openai",
+binding = create_model(api="openai",
     model="your-model",
     input_types=["image", "document", "mime:audio/*", "mime:text/csv"],
 )
@@ -133,10 +135,9 @@ Runtime occurrence ID, while other inputs retain their caller/SDK identifier.
 URL or absolute-host-path identifiers are not echoed. Paths come from authorized
 structured input metadata, never from parsing arbitrary user text.
 
-Workspace `inspect_file` facts and current `read_file`/`attach_files` result
+Workspace `inspect_file` facts and current `read_file` result
 entries use `mime_type`; extension hints use `extension_mime_type`.
-`read_file` retains `input_index` and `sha256` where applicable. `read_file` and
-`attach_files` use behavior revision 2: when files are returned, the native tool
+`read_file` retains `input_index` and `sha256` where applicable. `read_file` uses behavior revision 1: when files are returned, the native tool
 result is `[metadata, *files]`. Text-only results retain their metadata object.
 Old stored tool results remain readable without rewriting their fields. SDK content retains its
 `media_type` field at the adapter boundary.
@@ -292,9 +293,10 @@ chunks and same-filesystem staging, still requiring O(N) IO and temporary disk.
 * `find_files("*.png")` becomes `list_files(include_glob="**/*.png")` for its old
   recursive basename intent. Old search `*.py` recursive intent likewise becomes
   `**/*.py`; directory prefixes must be rebased to the supplied path.
-* Sandbox host `read_file`, `search_files`, `find_files`, `attach_files` tool and
-  `edit_file` remain available under their current contracts. New bounded
-  host APIs are `read_text`, `inspect_file`, `list_files`, and `search_text`.
+* Removed tool names are not aliases and are not automatically remapped in permission
+  selectors. Use `write_file(path, content=new_text, old_text=old_text)` for exact
+  replacement only where the caller already grants the broader write permission.
+  Bounded host APIs include `read_text`, `inspect_file`, `list_files`, and `search_text`.
 * Captured `attach_files` source/IDs and original messages are never rewritten.
 
 ## Extension example

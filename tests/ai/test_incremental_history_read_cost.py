@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Small history pages do not materialize an entire run's event facts."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -13,19 +13,19 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.core import ExecutionStatus, agent_conversation_id, agent_run_id
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime._journal import MESSAGE_SEQ_METADATA_KEY, MODEL_REQUEST_SEQ_METADATA_KEY
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._memory import InMemoryStateStore
-from linktools.ai.runtime.state._memory_transaction import _MemoryOverlay, _MemoryTransaction
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord, StepEvent
-from linktools.ai.runtime.state._store import FactQuery, StoredFact, StoredRecord
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.observe.journal import MESSAGE_SEQ_METADATA_KEY, MODEL_REQUEST_SEQ_METADATA_KEY
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._memory import InMemoryStateStore
+from linktools.ai.persistence._memory_transaction import _MemoryOverlay, _MemoryTransaction
+from linktools.ai.persistence._step_contracts import AgentRunRecord, StepEvent
+from linktools.ai.persistence.state import FactQuery, StoredFact, StoredRecord
 
 from .test_history_request_association import _history
 from .test_history_projection_conformance import _record
 
 
-async def _seed_trace(storage: RuntimeState, count: int):
+async def _seed_trace(storage: Persistence, count: int):
     await storage.initialize(namespace="history", tenant_id="tenant")
     await storage.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
     run_id = agent_run_id(namespace="history", tenant_id="tenant", execution_id="execution", agent_run_seq=1)
@@ -42,10 +42,10 @@ async def _seed_trace(storage: RuntimeState, count: int):
             idempotency_key=f"event-{index}",
         ), execution_id="execution")
     await storage.run_store.flush_execution_projection(run_id, execution_id="execution")
-    return storage.run_store.read_store(RuntimeDomain.TRACE), run_id
+    return storage.run_store.read_store(PersistenceDomain.TRACE), run_id
 
 
-async def _append_backdated_trace(storage: RuntimeState, run_id: str, count: int) -> None:
+async def _append_backdated_trace(storage: Persistence, run_id: str, count: int) -> None:
     timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
     for index in range(count):
         await storage.run_store.append_event(StepEvent(
@@ -195,7 +195,7 @@ async def test_old_trace_cutoff_does_not_rescan_for_each_later_backdated_event(
     monkeypatch.setattr(_MemoryOverlay, "__iter__", iterate)
     costs = []
     for count in (32, 64, 128):
-        storage = RuntimeState(RuntimeStorage.in_memory())
+        storage = Persistence(PersistenceStorage.in_memory())
         try:
             archive, run_id = await _seed_trace(storage, 1)
             await _append_backdated_trace(storage, run_id, count)
@@ -221,7 +221,7 @@ async def test_sql_trace_query_count_is_independent_of_examined_events(tmp_path:
     for count in (32, 64, 128):
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / f'trace-{count}.db'}")
         await provision_database(engine)
-        storage = RuntimeState(RuntimeStorage.sql(engine))
+        storage = Persistence(PersistenceStorage.sql(engine))
         statements = []
 
         def capture(_connection, _cursor, statement, _parameters, _context, _executemany) -> None:
@@ -265,7 +265,7 @@ async def test_run_release_scans_owned_cleanup_data_once_per_batch(monkeypatch: 
     monkeypatch.setattr(_MemoryOverlay, "__iter__", iterate)
     costs = []
     for count in (32, 64, 128):
-        storage = RuntimeState(RuntimeStorage.in_memory())
+        storage = Persistence(PersistenceStorage.in_memory())
         try:
             archive, run_id = await _seed_trace(storage, count)
             examined = 0

@@ -15,11 +15,11 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state._filesystem import (
+from linktools.ai.persistence._filesystem import (
     FilesystemStateStorageGroup,
     FilesystemStateStore,
 )
-from linktools.ai.runtime.state._store import (
+from linktools.ai.persistence.state import (
     FactQuery, OperationQuery, RecordQuery, RecordReplacement, StateTransaction,
     StoredAlias, StoredFact, StoredOperation, StoredRecord,
 )

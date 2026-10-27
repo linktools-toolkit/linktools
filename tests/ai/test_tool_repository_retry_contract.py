@@ -9,8 +9,8 @@ import pytest
 from linktools.ai.core import ToolOperationStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool import ToolOperationRecord
-from linktools.ai.runtime.state._contracts import ToolOperationAdmission
-from linktools.ai.runtime.state._repositories import ToolRepositoryImpl
+from linktools.ai.persistence.contracts import ToolOperationAdmission
+from linktools.ai.persistence.repositories import ToolRepositoryImpl
 from linktools.ai.storage import StoredPayload
 
 

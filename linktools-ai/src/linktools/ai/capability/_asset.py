@@ -35,6 +35,10 @@ class AssetCapability(AbstractCapability[AgentContext[AppT]], Generic[AppT]):
             kind: BuiltinDeclarationLoader(kind) for kind in ("agent", "skill", "mcp", "rule")
         }
 
+    def for_agent(self, agent: object) -> "AssetCapability[AppT]":
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                      safe_details={"reason": "asset_declaration_requires_capture"})
+
     def loader(self, kind: str, loader: CapabilityLoader[AppT]) -> CapabilityLoader[AppT]:
         """Register the sole loader for one Asset kind, replacing its slot."""
         if not isinstance(kind, str) or not kind.strip():

@@ -59,7 +59,7 @@ async def test_executor_uses_saved_fixture_and_never_projects_live_stdio_resourc
             return {}
 
         async def execute(self: AgentExecutor, scope: _AgentRunScope, **kwargs: object) -> str:
-            assert scope.sandbox_session is None
+            assert scope.workspace_backend is None
             assert scope.mcp_projections == {}
             tool = scope.response_fixture.server("server").tools[0]
             assert tool.result({"query": "ready", "options": {"a": 1, "b": 2}}) == {
@@ -71,7 +71,7 @@ async def test_executor_uses_saved_fixture_and_never_projects_live_stdio_resourc
         monkeypatch.setattr("linktools.ai.runtime._mcp.prepare_mcp_projections", project)
         monkeypatch.setattr(AgentExecutor, "_execute", execute)
         executor = AgentExecutor(SkillSourceRegistry(()), tool_responses=configured)
-        result = await executor._execute_with_sandbox(
+        result = await executor._execute_with_workspace(
             _scope(original.ref), run_usage=RunUsage(), usage_limits=UsageLimits(),
         )
         assert result == "model-boundary"
@@ -98,7 +98,7 @@ async def test_executor_rejects_live_fixture_mode_mismatch_before_any_model_or_t
             SkillSourceRegistry(()), tool_responses=None if historical_fixture else fixture,
         )
         with pytest.raises(AIError) as raised:
-            await executor._execute_with_sandbox(
+            await executor._execute_with_workspace(
                 _scope(fixture.ref if historical_fixture else None),
                 run_usage=RunUsage(), usage_limits=UsageLimits(),
             )

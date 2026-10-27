@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Shared SQL startup observes live producers; explicit recovery owns takeover."""
 from ._runtime_test_helpers import model_features
 
@@ -12,17 +14,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExecutionEventType, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import (
-    Execution, ExecutionStreamEvent, ExecutionTreeEvent, Runtime, RuntimeStorage,
-)
-from linktools.ai.runtime.service_api import CancelExecutionRequest
+from linktools.ai.execution import Execution, ExecutionStreamEvent, ExecutionTreeEvent
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.execution import CancelExecutionRequest
 
 from ._runtime_process_test_helpers import _NAMESPACE, _RuntimeProcess, _capabilities
 from ._runtime_test_helpers import _wait_for_committed
@@ -118,16 +120,10 @@ async def test_sql_runtime_session_admission_remains_independent(
         await release.wait()
         yield f"answer-{index}"
 
-    first_state = RuntimeStorage.sqlite(tmp_path / "runtime.db")
-    second_state = RuntimeStorage.sqlite(tmp_path / "runtime.db")
+    first_state = PersistenceStorage.sqlite(tmp_path / "runtime.db")
+    second_state = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     try:
-        async with Runtime.open(
-            _NAMESPACE,
-            storage=first_state, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(conversation=True)),
-        ) as first_runtime, Runtime.open(
-            _NAMESPACE,
-            storage=second_state, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(conversation=True)),
-        ) as second_runtime:
+        async with Persistence.open(_NAMESPACE, storage=first_state) as persistence_124, Runtime.attach(persistence=persistence_124, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(conversation=True))) as first_runtime, Persistence.open(_NAMESPACE, storage=second_state) as persistence_127, Runtime.attach(persistence=persistence_127, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(conversation=True))) as second_runtime:
             await first_runtime.agents.get("default").create_session("first")
             if not same_session:
                 await second_runtime.agents.get("default").create_session("second")
@@ -183,16 +179,10 @@ async def test_explicit_recovery_does_not_adopt_a_newer_contender_revision(
         await release_model.wait()
         yield "recovered"
 
-    first_state = RuntimeStorage.sqlite(tmp_path / "runtime.db")
-    winner_state = RuntimeStorage.sqlite(tmp_path / "runtime.db")
+    first_state = PersistenceStorage.sqlite(tmp_path / "runtime.db")
+    winner_state = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     try:
-        async with Runtime.open(
-            _NAMESPACE,
-            storage=first_state, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities()),
-        ) as first_runtime, Runtime.open(
-            _NAMESPACE,
-            storage=winner_state, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities()),
-        ) as winner_runtime:
+        async with Persistence.open(_NAMESPACE, storage=first_state) as persistence_189, Runtime.attach(persistence=persistence_189, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as first_runtime, Persistence.open(_NAMESPACE, storage=winner_state) as persistence_192, Runtime.attach(persistence=persistence_192, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as winner_runtime:
             backend = first_runtime._execution_service.runtime_backend()
             recover = backend.recover_execution
 
@@ -275,16 +265,10 @@ async def test_superseded_live_producer_hands_wait_and_watch_to_winner(
         await release_winner.wait()
         yield "winner answer"
 
-    owner_state = RuntimeStorage.sqlite(tmp_path / "runtime.db")
-    winner_state = RuntimeStorage.sqlite(tmp_path / "runtime.db")
+    owner_state = PersistenceStorage.sqlite(tmp_path / "runtime.db")
+    winner_state = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     try:
-        async with Runtime.open(
-            _NAMESPACE,
-            storage=owner_state, features=model_features(_Models(FunctionModel(stream_function=original_model)), _capabilities()),
-        ) as owner, Runtime.open(
-            _NAMESPACE,
-            storage=winner_state, features=model_features(_Models(FunctionModel(stream_function=recovered_model)), _capabilities()),
-        ) as winner:
+        async with Persistence.open(_NAMESPACE, storage=owner_state) as persistence_281, Runtime.attach(persistence=persistence_281, features=model_features(_Models(FunctionModel(stream_function=original_model)), _capabilities())) as owner, Persistence.open(_NAMESPACE, storage=winner_state) as persistence_284, Runtime.attach(persistence=persistence_284, features=model_features(_Models(FunctionModel(stream_function=recovered_model)), _capabilities())) as winner:
             execution = await owner.agents.get("default").start("Wait", idempotency_key="start")
             await asyncio.wait_for(owner_entered.wait(), 10)
 
@@ -347,10 +331,10 @@ async def test_superseded_live_producer_hands_wait_and_watch_to_winner(
                 await watched
                 pytest.fail("Watch ended before the winning producer reached its boundary")
             assert not waited.done()
-            assert owner._state.run_store.trace_persistence.dirty == set()
-            assert owner._state.run_store._durability_flights == {}
-            assert owner._state.run_store._execution_producers == {}
-            assert owner._state.run_store._staging._runs == {}
+            assert owner._run_store.trace_persistence.dirty == set()
+            assert owner._run_store._durability_flights == {}
+            assert owner._run_store._execution_producers == {}
+            assert owner._run_store._staging._runs == {}
             release_winner.set()
             result = (await waited).result
             await asyncio.wait_for(watched, 10)
@@ -381,7 +365,7 @@ async def test_superseded_live_producer_hands_wait_and_watch_to_winner(
 async def test_recovery_required_transition_keeps_the_original_producer_fence(
     tmp_path: Path, backend: str,
 ) -> None:
-    state = RuntimeState(RuntimeStorage.in_memory() if backend == "memory" else RuntimeStorage.sqlite(tmp_path / "runtime.db"))
+    state = Persistence(PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "runtime.db"))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         execution = _execution(datetime.now(timezone.utc))
@@ -424,10 +408,8 @@ async def test_concurrent_sql_startup_converges_on_one_deferred_resume(
     )
     application = workspace_features("application", workspace=workspace)
     application.agent("default", model="default", allow_tools=("read_file",))
-    original_state = RuntimeStorage.sqlite(tmp_path / "runtime.db")
-    async with Runtime.open(
-        _NAMESPACE, storage=original_state, features=model_features(_ToolModels(), application),
-    ) as original:
+    original_state = PersistenceStorage.sqlite(tmp_path / "runtime.db")
+    async with Persistence.open(_NAMESPACE, storage=original_state) as persistence_428, Runtime.attach(persistence=persistence_428, features=model_features(_ToolModels(), application)) as original:
         execution = await original.agents.get("default").start("read a file")
         tenant = original.default_principal.tenant_id
         waiting = await _wait_for_committed(
@@ -459,11 +441,15 @@ async def test_concurrent_sql_startup_converges_on_one_deferred_resume(
         return await original_claim(backend, checkpoint, current)
 
     monkeypatch.setattr(LocalExecutionBackend, "claim_deferred_resume", synchronized_claim)
-    states = [RuntimeStorage.sqlite(tmp_path / "runtime.db") for _ in range(2)]
+    states = [PersistenceStorage.sqlite(tmp_path / "runtime.db") for _ in range(2)]
     async with AsyncExitStack() as stack:
-        opened = await asyncio.gather(*(stack.enter_async_context(Runtime.open(
-            _NAMESPACE, storage=state, features=model_features(_ToolModels(), application),
-        )) for state in states), return_exceptions=True)
+        async def open_runtime(storage):
+            persistence = await stack.enter_async_context(Persistence.open(_NAMESPACE, storage=storage))
+            return await stack.enter_async_context(Runtime.attach(
+                persistence=persistence, features=model_features(_ToolModels(), application),
+            ))
+
+        opened = await asyncio.gather(*(open_runtime(state) for state in states), return_exceptions=True)
         assert not any(isinstance(value, BaseException) for value in opened), opened
         assert claims == 2
         runtime = opened[0]
@@ -509,10 +495,7 @@ async def test_observer_attached_before_recovery_receives_resumed_live_deltas(
 
     try:
         await asyncio.to_thread(owner.crash)
-        async with Runtime.open(
-            _NAMESPACE,
-            storage=RuntimeStorage.sqlite(database), features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities()),
-        ) as runtime:
+        async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.sqlite(database)) as persistence_512, Runtime.attach(persistence=persistence_512, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as runtime:
             execution = await runtime.executions.get(execution_id)
             watching = asyncio.create_task(observe(execution))
             try:

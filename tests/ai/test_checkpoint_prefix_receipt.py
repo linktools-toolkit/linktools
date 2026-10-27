@@ -8,10 +8,10 @@ from dataclasses import replace
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeDomain
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime.state._step_archive import StateStepArchive
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence._step_archive import StateStepArchive
+from linktools.ai.persistence._step_contracts import AgentRunRecord
 
 from .test_checkpoint_metadata_snapshot_io import _checkpoint
 from .test_incremental_projection_boundaries import _storage
@@ -19,7 +19,7 @@ from .test_incremental_projection_boundaries import _storage
 
 @pytest.mark.asyncio
 async def test_confirmed_checkpoint_prefix_avoids_old_bodies_but_rejects_mutation(tmp_path, monkeypatch):
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="prefix-receipt", tenant_id="tenant")
     try:
         store = state.run_store
@@ -34,7 +34,7 @@ async def test_confirmed_checkpoint_prefix_avoids_old_bodies_but_rejects_mutatio
 
         monkeypatch.setattr(StateStepArchive, "materialize_checkpoint_in_transaction", mutate_caller_after_prepare)
         await store.save_checkpoint(caller_checkpoint)
-        archive = store.read_store(RuntimeDomain.CHECKPOINT)
+        archive = store.read_store(PersistenceDomain.CHECKPOINT)
         assert "run" in archive._checkpoint_prefix_receipts
 
         async def missing_source(*args, **kwargs):
@@ -63,14 +63,14 @@ async def test_confirmed_checkpoint_prefix_avoids_old_bodies_but_rejects_mutatio
 @pytest.mark.asyncio
 @pytest.mark.parametrize("unknown", [False, True])
 async def test_unconfirmed_checkpoint_cannot_advance_prefix_receipt(tmp_path, monkeypatch, unknown):
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="prefix-rollback", tenant_id="tenant")
     try:
         store = state.run_store
         run = AgentRunRecord("run")
         await store.register_agent_run(run)
         await store.save_checkpoint(_checkpoint(1))
-        archive = store.read_store(RuntimeDomain.CHECKPOINT)
+        archive = store.read_store(PersistenceDomain.CHECKPOINT)
         receipt = archive._checkpoint_prefix_receipts["run"]
         original = StateStepArchive.materialize_checkpoint_in_transaction
 
@@ -119,14 +119,14 @@ async def test_unconfirmed_checkpoint_cannot_advance_prefix_receipt(tmp_path, mo
 @pytest.mark.asyncio
 async def test_prefix_receipt_never_hides_deleted_recovery_body_from_fresh_reader(tmp_path):
     from pydantic_ai.messages import ModelRequest, UserPromptPart
-    from linktools.ai.runtime import RuntimeStorage
-    from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint
+    from linktools.ai.persistence import PersistenceStorage
+    from linktools.ai.persistence._step_contracts import AgentRunCheckpoint
     from linktools.ai.storage import InMemoryObjectStore
 
     objects = InMemoryObjectStore()
     path = tmp_path / "deleted-prefix.db"
-    state = RuntimeState(RuntimeStorage.sqlite(path, object_store=objects))
-    fresh = RuntimeState(RuntimeStorage.sqlite(path, object_store=objects))
+    state = Persistence(PersistenceStorage.sqlite(path, object_store=objects))
+    fresh = Persistence(PersistenceStorage.sqlite(path, object_store=objects))
     await state.initialize(namespace="deleted-prefix", tenant_id="tenant")
     await fresh.initialize(namespace="deleted-prefix", tenant_id="tenant")
     try:
@@ -134,8 +134,8 @@ async def test_prefix_receipt_never_hides_deleted_recovery_body_from_fresh_reade
         await state.run_store.register_agent_run(run)
         checkpoint = AgentRunCheckpoint("run", 1, [ModelRequest(parts=[UserPromptPart("body " * 10000)])])
         await state.run_store.save_checkpoint(checkpoint)
-        warm = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
-        cold = fresh.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        warm = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+        cold = fresh.run_store.read_store(PersistenceDomain.CHECKPOINT)
         assert "run" in warm._checkpoint_prefix_receipts
         assert not cold._checkpoint_prefix_receipts
         refs = [ref async for ref in objects.list_objects()]

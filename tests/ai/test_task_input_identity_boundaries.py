@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.task import Task
 """Task input identity follows the resolved owner, never business JSON shape."""
 from ._runtime_test_helpers import model_features
 
@@ -11,7 +15,7 @@ import pytest
 
 from linktools.ai.core import AuthorizationAction, JsonValue, Principal, ResourceRef
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeState, RuntimeStorage
+from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.task import (
     DefaultTaskGraphService, TaskGraph, TaskGraphAdmission, TaskGraphHandle,
     TaskGraphLaunch, TaskGraphRequest, TaskGraphTemplate, TaskNode, TaskRef,
@@ -50,7 +54,7 @@ def _request(body: Mapping[str, JsonValue]) -> TaskGraphRequest:
 
 @pytest.mark.asyncio
 async def test_generic_submission_rejects_changed_agent_shaped_business_input() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="identity", tenant_id="tenant")
     try:
         service = DefaultTaskGraphService(state.task, _Authorization(), _Launcher())
@@ -79,9 +83,9 @@ def test_business_input_projection_preserves_normalized_and_template_semantics(r
     assert first.to_mapping()["input"] == first.input
     assert first.to_mapping() != second.to_mapping()
     assert TaskGraphTemplate((first,)).to_mapping() != TaskGraphTemplate((second,)).to_mapping()
-    from linktools.ai.runtime.state import RuntimeDomain
-    from linktools.ai.runtime.state._codec import encode_domain, iter_runtime_object_refs
-    assert tuple(iter_runtime_object_refs(encode_domain(first), default_domain=RuntimeDomain.TASK)) == ()
+    from linktools.ai.persistence import PersistenceDomain
+    from linktools.ai.persistence.codec import encode_domain, iter_runtime_object_refs
+    assert tuple(iter_runtime_object_refs(encode_domain(first), default_domain=PersistenceDomain.TASK)) == ()
     admissions = [TaskGraphAdmission.from_request(TaskGraphRequest(
         TaskGraph("business", (current,)), Principal("user", "tenant"), "submit",
     )) for current in (first, second)]
@@ -91,7 +95,6 @@ def test_business_input_projection_preserves_normalized_and_template_semantics(r
 @pytest.mark.asyncio
 async def test_function_normalization_cannot_hide_changed_business_input() -> None:
 
-    from linktools.ai.runtime import Runtime
     from linktools.ai.task import Task, TaskNodeContext
 
     async def echo(context: TaskNodeContext[None]) -> JsonValue:
@@ -99,8 +102,8 @@ async def test_function_normalization_cannot_hide_changed_business_input() -> No
 
     body = _business_input("first")
     task = Task("business.normalized", echo, effect_policy="none", normalize=lambda _: body)
-    async with Runtime.open("normalized", storage=RuntimeStorage.in_memory()) as runtime:
-        engine = runtime.tasks.bind(task)
+    async with Persistence.open('normalized', storage=PersistenceStorage.in_memory()) as persistence_102, TaskEngine.open(persistence=persistence_102) as engine:
+        engine = engine.with_definitions(task)
         graph = TaskGraph("normalized", (TaskNode("worker", task=task, input={"request": "unchanged"}),))
         first = await engine.prepare_submission(graph, idempotency_key="submit")
         body = _business_input("second")
@@ -116,7 +119,7 @@ async def test_function_normalization_cannot_hide_changed_business_input() -> No
 @pytest.mark.parametrize("kind", ("function", "runner"))
 async def test_graph_capture_keeps_agent_shaped_function_and_runner_inputs(kind: str) -> None:
 
-    from linktools.ai.runtime import CaptureGraphRequest, Runtime
+    from linktools.ai.inputs import CaptureGraphRequest
     from linktools.ai.task import Task, TaskNodeContext
     from .test_task_mixed_node_reliability import _ExecutionBackedContractRunner
     from .test_evaluation_consumers import CONTEXT, PRINCIPAL
@@ -124,20 +127,20 @@ async def test_graph_capture_keeps_agent_shaped_function_and_runner_inputs(kind:
     async def echo(context: TaskNodeContext[None]) -> JsonValue:
         return dict(context.input)
 
-    async with Runtime.open("capture-json", storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
+    async with Persistence.open('capture-json', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_127, TaskEngine.open(persistence=persistence_127, context=CONTEXT) as engine:
         task = Task("business.worker", echo, effect_policy="none") if kind == "function" else Task.from_runner(
-            "business.worker", _ExecutionBackedContractRunner(runtime._execution_service),
+            "business.worker", _ExecutionBackedContractRunner(engine._execution_service),
             contract={"version": 1, "type": "runner", "effect_policy": "none",
                       "output_contract": {"kind": "json"}, "reconcile": False, "config": {}},
         )
-        engine = runtime.tasks.bind(task)
+        engine = engine.with_definitions(task)
         body = _business_input("business")
         run = await engine.start(TaskGraph("captured", (TaskNode("worker", task=task, input=body),)),
                                  principal=PRINCIPAL, idempotency_key="submit")
         await run.wait(timeout_seconds=10)
         principal = PRINCIPAL
-        reference = await runtime.tasks.capture_graph("captured", CaptureGraphRequest(principal, "capture"))
-        template = await runtime._input_captures.read_graph(reference, principal=principal)
+        reference = await engine.inputs.capture_graph("captured", CaptureGraphRequest(principal, "capture"))
+        template = await engine.inputs.read_graph(reference, principal=principal)
         assert template.nodes[0].input == body
         assert template.to_mapping()["nodes"][0]["input"] == body
 
@@ -145,20 +148,21 @@ async def test_graph_capture_keeps_agent_shaped_function_and_runner_inputs(kind:
 @pytest.mark.asyncio
 async def test_agent_submission_identity_survives_materialization_and_reopen(tmp_path: Path) -> None:
     from pydantic_ai.messages import BinaryContent
-    from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeFeatures
-    from linktools.ai.runtime.state._codec import decode_domain, encode_domain
-    from linktools.ai.runtime.state._contracts import StoredUserInput
+    from linktools.ai.inputs import AgentTaskInput
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+    from linktools.ai.persistence.codec import decode_domain, encode_domain
+    from linktools.ai.persistence.contracts import StoredUserInput
     from linktools.ai.storage import StoredPayload
     from .test_evaluation_consumers import FixtureModels
 
     features = RuntimeFeatures("identity")
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     input = AgentTaskInput(("inspect", BinaryContent(b"accepted bytes", media_type="text/plain")))
-    storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("agent-identity", storage=storage, features=model_features(FixtureModels(), features)) as runtime:
-        task = runtime.tasks.from_agent("user.named.worker", runtime.agents.get())
+    storage = PersistenceStorage.filesystem(tmp_path)
+    async with Persistence.open('agent-identity', storage=storage) as persistence_158, Runtime.attach(persistence=persistence_158, features=model_features(FixtureModels(), features)) as runtime, TaskEngine.open(persistence=persistence_158) as engine:
+        task = Task.from_agent("user.named.worker", runtime.agents.get())
         graph = TaskGraph("agent", (TaskNode("worker", task=task, input=input),))
-        engine = runtime.tasks.bind(task)
+        engine = engine.with_definitions(task)
         described = await engine.describe_submission(graph, idempotency_key="submit")
         prepared = await engine.prepare_submission(graph, idempotency_key="submit")
         assert described.ref == prepared.ref
@@ -185,11 +189,10 @@ async def test_agent_submission_identity_survives_materialization_and_reopen(tmp
         prepared.admission.validate_graph(TaskGraph("agent", (relocated_node,)))
         identity = prepared.ref
 
-    async with Runtime.open("agent-identity",
-                            storage=RuntimeStorage.filesystem(tmp_path), features=model_features(FixtureModels(), features)) as runtime:
-        task = runtime.tasks.from_agent("user.named.worker", runtime.agents.get())
+    async with Persistence.open('agent-identity', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_188, Runtime.attach(persistence=persistence_188, features=model_features(FixtureModels(), features)) as runtime, TaskEngine.open(persistence=persistence_188) as engine:
+        task = Task.from_agent("user.named.worker", runtime.agents.get())
         graph = TaskGraph("agent", (TaskNode("worker", task=task, input=input),))
-        reopened = await runtime.tasks.bind(task).prepare_submission(graph, idempotency_key="submit")
+        reopened = await engine.with_definitions(task).prepare_submission(graph, idempotency_key="submit")
         assert reopened.ref == identity
         assert reopened.graph == prepared.graph
         reopened.admission.validate_graph(reopened.graph)
@@ -197,7 +200,7 @@ async def test_agent_submission_identity_survives_materialization_and_reopen(tmp
 
 @pytest.mark.parametrize("semantics", (None, "unknown-input-v1", "agent-task-input-v1", [], {}, True, 1))
 def test_task_wire_requires_supported_and_valid_explicit_input_semantics(semantics: JsonValue) -> None:
-    from linktools.ai.runtime.state._codec import decode_domain, encode_domain
+    from linktools.ai.persistence.codec import decode_domain, encode_domain
 
     wire = encode_domain(TaskNode("worker", task=TaskRef("business.worker", 1), input=_business_input("text")))
     if semantics is None:
@@ -214,8 +217,8 @@ def test_task_wire_requires_supported_and_valid_explicit_input_semantics(semanti
 @pytest.mark.parametrize("boundary", ("describe", "prepared"))
 async def test_explicit_agent_node_cannot_override_a_function_input_owner(boundary: str) -> None:
 
-    from linktools.ai.runtime import AgentTaskInput, Runtime
-    from linktools.ai.runtime.state._codec import decode_domain, encode_domain
+    from linktools.ai.inputs import AgentTaskInput
+    from linktools.ai.persistence.codec import decode_domain, encode_domain
     from linktools.ai.task import Task, TaskGraphSubmission, TaskNodeContext
 
     async def echo(context: TaskNodeContext[None]) -> JsonValue:
@@ -229,11 +232,11 @@ async def test_explicit_agent_node_cannot_override_a_function_input_owner(bounda
     with pytest.raises(AIError) as wrong_type:
         decode_domain(encode_domain(TaskNode("worker", task=task, input=input)), type(node))
     assert wrong_type.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    async with Runtime.open("owner-check", storage=RuntimeStorage.in_memory()) as runtime:
-        engine = runtime.tasks.bind(task)
+    async with Persistence.open('owner-check', storage=PersistenceStorage.in_memory()) as persistence_232, TaskEngine.open(persistence=persistence_232) as engine:
+        engine = engine.with_definitions(task)
         graph = TaskGraph("owner", (node,))
-        principal = runtime._resolve_principal(None)
-        submission = TaskGraphSubmission(runtime.namespace, TaskGraphAdmission.from_request(
+        principal = Principal("owner", "default")
+        submission = TaskGraphSubmission(engine.namespace, TaskGraphAdmission.from_request(
             TaskGraphRequest(graph, principal, "submit")), graph)
         with pytest.raises(AIError) as caught:
             if boundary == "describe":
@@ -241,28 +244,28 @@ async def test_explicit_agent_node_cannot_override_a_function_input_owner(bounda
             else:
                 await engine.start_prepared(submission)
         assert caught.value.code is ErrorCode.REQUEST_FIELD_INVALID
-        assert await runtime._state.task.admissions.submission_status(submission.ref) is None
+        assert await engine.persistence.task.admissions.submission_status(submission.ref) is None
 
 
 @pytest.mark.asyncio
 async def test_agent_capture_identity_is_bound_to_the_retained_input_digest() -> None:
-    from linktools.ai.runtime import AgentTaskInput, CaptureInputRequest, Runtime, RuntimeFeatures
-    from linktools.ai.runtime.state._codec import decode_domain, encode_domain
+    from linktools.ai.inputs import AgentTaskInput, CaptureInputRequest
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+    from linktools.ai.persistence.codec import decode_domain, encode_domain
     from .test_evaluation_consumers import CONTEXT, PRINCIPAL, FixtureModels
 
     features = RuntimeFeatures("capture-identity")
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     models = FixtureModels()
-    async with Runtime.open("capture-identity", context=CONTEXT,
-                            storage=RuntimeStorage.in_memory(), features=model_features(models, features)) as runtime:
-        task = runtime.tasks.from_agent("user.named.worker", runtime.agents.get())
-        engine = runtime.tasks.bind(task)
+    async with Persistence.open('capture-identity', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_256, Runtime.attach(persistence=persistence_256, context=CONTEXT, features=model_features(models, features)) as runtime, TaskEngine.open(persistence=persistence_256) as engine:
+        task = Task.from_agent("user.named.worker", runtime.agents.get())
+        engine = engine.with_definitions(task)
         source = await engine.start(TaskGraph("source", (TaskNode("worker", task=task, input=AgentTaskInput("accepted")),)),
                                     principal=PRINCIPAL, idempotency_key="source")
         await source.wait(timeout_seconds=10)
         execution = await source.execution("worker")
-        reference = await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(PRINCIPAL, "capture"))
-        capture = await runtime._input_captures.task_input(reference, principal=PRINCIPAL)
+        reference = await engine.inputs.capture_input(execution.execution_id, CaptureInputRequest(PRINCIPAL, "capture"))
+        capture = await engine.inputs.task_input(reference, principal=PRINCIPAL)
         graph = TaskGraph("captured", (TaskNode("worker", task=task, input_capture=capture),))
         described = await engine.describe_submission(graph, principal=PRINCIPAL, idempotency_key="captured")
         node = described.graph.nodes[0]

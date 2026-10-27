@@ -10,22 +10,19 @@ from typing import get_type_hints
 import pytest
 
 from linktools.ai.workspace import (
-    BubblewrapSandbox,
-    LocalSandbox,
-    StdioSandbox,
-    StdioSandboxSession,
+    BubblewrapWorkspaceBackend,
+    LocalWorkspaceBackend,
+    SupportsStdio,
 )
 
 
-@pytest.mark.parametrize("backend", (StdioSandbox, LocalSandbox, BubblewrapSandbox))
-def test_stdio_sandbox_open_declares_stdio_session_capability(
-    backend: type[StdioSandbox],
-) -> None:
-    assert get_type_hints(backend.open)["return"] is StdioSandboxSession
+@pytest.mark.parametrize("backend", (LocalWorkspaceBackend, BubblewrapWorkspaceBackend))
+def test_workspace_backend_declares_stdio_process_capability(backend) -> None:
+    from linktools.ai.workspace import WorkspaceStdioProcess
+    assert get_type_hints(backend.open_stdio_process)["return"] is WorkspaceStdioProcess
 
 
-async def _exchange(sandbox: StdioSandbox, root: Path) -> bytes:
-    session: StdioSandboxSession = await sandbox.open(root=root)
+async def _exchange(session: SupportsStdio) -> bytes:
     try:
         process = await session.open_stdio_process(
             sys.executable,
@@ -48,5 +45,6 @@ async def _exchange(sandbox: StdioSandbox, root: Path) -> bytes:
 async def test_stdio_sandbox_caller_can_use_process_without_session_narrowing(
     tmp_path: Path,
 ) -> None:
-    sandbox: StdioSandbox = LocalSandbox()
-    assert await _exchange(sandbox, tmp_path) == b"stdio capability"
+    backend = LocalWorkspaceBackend(tmp_path)
+    await backend.working_dir()
+    assert await _exchange(backend) == b"stdio capability"

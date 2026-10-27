@@ -18,19 +18,19 @@ from linktools.ai.core import (
     agent_run_id,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
-from linktools.ai.runtime._model_interaction import (
+from linktools.ai.history._projection import StepExecutionHistoryReader
+from linktools.ai.persistence._model_interaction import (
     StagedContextProjection,
     StagedModelInteraction,
 )
-from linktools.ai.runtime.service_api import UsageReadCutoff
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.execution import UsageReadCutoff
+from linktools.ai.persistence.contracts import (
     ContextProjection,
     ModelInteractionRecord,
     RuntimePayloadRef,
 )
-from linktools.ai.runtime.state._plan import RuntimeDomain
-from linktools.ai.runtime.state._step_contracts import AgentRunHistoryCapture, AgentRunRecord, StepEvent
+from linktools.ai.persistence._plan import PersistenceDomain
+from linktools.ai.persistence._step_contracts import AgentRunHistoryCapture, AgentRunRecord, StepEvent
 from linktools.ai.storage import StoredPayload
 
 
@@ -161,7 +161,7 @@ def _interaction(agent_id: str, sequence: int) -> ModelInteractionRecord:
         request_context=ContextProjection(()),
         request_envelope=RuntimePayloadRef(
             StoredPayload.inline_text("{}"),
-            RuntimeDomain.EXECUTION,
+            PersistenceDomain.EXECUTION,
         ),
         response_context=None,
         status="CANCELLED",

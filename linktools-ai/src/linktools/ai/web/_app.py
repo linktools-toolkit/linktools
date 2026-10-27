@@ -22,12 +22,10 @@ from linktools.core import environ
 from ..core import Principal, PrincipalKind
 from ..errors import AIError, ErrorCode, ErrorDiagnostics, ObservationError
 from ..model import ModelClientRequest, ModelClientResponse
-from ..observe import MetricAggregation, MetricQuery, Metrics, MetricWindow
-from ..runtime import (
-    CreateSessionRequest, ExecutionStreamEvent,
-    ListExecutionRequest, ListSessionRequest, Runtime, RuntimeHistory,
-    TaskModelProjection, ToolEffectApplied, ToolEffectFailed, ToolEffectNotApplied,
-)
+from ..observe import MetricAggregation, MetricQuery, Metrics, MetricWindow, RuntimeMetricsStatus
+from ..history import History
+from ..execution import CreateSessionRequest, ExecutionStreamEvent, ListExecutionRequest, ListSessionRequest, TaskModelProjection, ToolEffectApplied, ToolEffectFailed, ToolEffectNotApplied
+from ..runtime import Runtime
 
 if TYPE_CHECKING:
     from starlette.types import ASGIApp, Receive, Scope, Send
@@ -50,6 +48,21 @@ _HEADERS = {
 
 
 def _wire(value: object, *, diagnostic: bool = False) -> object:
+    if isinstance(value, RuntimeMetricsStatus):
+        return {
+            "recorders": _wire(value.recorders),
+            "enabled": value.enabled,
+            "accepting": value.accepting,
+            "accepted": value.accepted,
+            "persisted": value.persisted,
+            "pending": value.pending,
+            "rejected": value.rejected,
+            "unconfirmed": value.unconfirmed,
+            "write_failures": value.write_failures,
+            "queue_size": value.queue_size,
+            "queue_capacity": value.queue_capacity,
+            "failure_codes": _wire(value.failure_codes),
+        }
     if isinstance(value, ErrorDiagnostics):
         return _wire(value.to_payload(), diagnostic=True)
     if isinstance(value, (ModelClientRequest, ModelClientResponse)):
@@ -170,7 +183,7 @@ class _LocalBoundary:
 
 class _Console:
     def __init__(
-        self, runtime: Runtime | None, history: RuntimeHistory | None, metrics: Metrics | None,
+        self, runtime: Runtime | None, history: History | None, metrics: Metrics | None,
         status: Mapping[str, object], capabilities: Sequence[Mapping[str, object]], memory_scope: str,
     ) -> None:
         self.runtime = runtime
@@ -188,7 +201,7 @@ class _Console:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, safe_details={"read_only": True})
         return self.runtime
 
-    def require_history(self) -> RuntimeHistory:
+    def require_history(self) -> History:
         if self.history is None:
             raise AIError(ErrorCode.EXECUTION_NOT_FOUND)
         return self.history
@@ -216,7 +229,7 @@ class _Console:
             )), 201)
         if self.runtime is not None:
             return _json(await self.runtime.sessions.list(ListSessionRequest(self.principal, **_paging(request))))
-        # RuntimeHistory currently offers recent sessions, not a read-only paged session index.
+        # History currently offers recent sessions, not a read-only paged session index.
         if request.query_params.get("cursor"):
             raise ValueError("read-only recent sessions have no cursor")
         items = () if self.history is None else await self.history.recent_sessions(
@@ -464,7 +477,7 @@ async def _asset(request: Request) -> Response:
 
 
 def create_app(
-    *, runtime: Runtime | None = None, history: RuntimeHistory | None = None,
+    *, runtime: Runtime | None = None, history: History | None = None,
     metrics: Metrics | None = None, status: Mapping[str, object] | None = None,
     capabilities: Sequence[Mapping[str, object]] = (), memory_scope: str = "default",
 ) -> "ASGIApp":

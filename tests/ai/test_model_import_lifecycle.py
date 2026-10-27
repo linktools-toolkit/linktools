@@ -39,7 +39,7 @@ def test_custom_model_startup_defers_openai_until_provider_operations(tmp_path: 
         assert not any(name == "openai" or name.startswith("openai.") for name in sys.modules)
 
         assert model_binding_error(RuntimeError("unclassified")) is None
-        selected = create_model(protocol="openai", model="gpt-test", api_key="unused")
+        selected = create_model(api="openai", model="gpt-test", api_key="unused")
         assert selected.model_identity == "openai:gpt-test"
         assert dict(selected.contract) == {
             "provider": "openai",

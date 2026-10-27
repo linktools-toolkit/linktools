@@ -4,7 +4,7 @@
 from enum import Enum
 
 
-class RuntimeDomain(str, Enum):
+class PersistenceDomain(str, Enum):
     __str__ = str.__str__
     __format__ = str.__format__
     CONVERSATION = "conversation"
@@ -18,4 +18,4 @@ class RuntimeDomain(str, Enum):
     CHECKPOINT = "checkpoint"
 
 
-__all__ = ["RuntimeDomain"]
+__all__ = ["PersistenceDomain"]

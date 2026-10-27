@@ -9,7 +9,7 @@ import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_run import _WorkerFailure
 from linktools.ai.runtime._local import LocalExecutionBackend
-from linktools.ai.runtime._event import LiveExecutionEventBroker
+from linktools.ai.execution.events import LiveExecutionEventBroker
 from linktools.ai.runtime._pending_turn import _PendingExecutionTurns
 
 

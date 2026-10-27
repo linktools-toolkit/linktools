@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Recoverable input bytes are transient while their accepted references endure."""
 
 import asyncio
@@ -12,7 +14,15 @@ from dataclasses import dataclass
 
 import pytest
 from pydantic_ai.capabilities import CombinedCapability, WrapperCapability
-from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, TextContent, TextPart, ToolReturn, UserPromptPart
+from pydantic_ai.messages import (
+    BinaryContent,
+    ModelRequest,
+    ModelResponse,
+    TextContent,
+    TextPart,
+    ToolReturn,
+    UserPromptPart,
+)
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.exceptions import ModelHTTPError
@@ -22,15 +32,18 @@ from linktools.ai.capability import AgentContext, ReferencedInputsCapability, Tr
 from linktools.ai.core import ExecutionStatus, service_principal
 from linktools.ai.errors import AIError, ErrorCode, ErrorDiagnostics
 from linktools.ai.model import ModelClientRequestRecorder, ReferencedContent
-from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._harness import SummaryProviderModel
-from linktools.ai.runtime._input import decode_task_prompt_draft, task_prompt_draft
-from linktools.ai.runtime._message import (
-    binary_content_usage, decode_model_messages, encode_model_messages,
+from linktools.ai.inputs import decode_task_prompt_draft, task_prompt_draft
+from linktools.ai.model.messages import (
+    binary_content_usage,
+    decode_model_messages,
+    encode_model_messages,
     project_transient_binary_content,
 )
-from linktools.ai.runtime.state._views import project_session_history_message
-from linktools.ai.runtime._tool_return_codec import decode_tool_return_content, encode_tool_return_content
+from linktools.ai.persistence._views import project_session_history_message
+from linktools.ai.model._tool_return_codec import decode_tool_return_content, encode_tool_return_content
 from linktools.ai.runtime._metric_capability import model_request_error
 from linktools.ai.storage import StorageEntryRevision
 from linktools.ai.spec import CapabilityRef
@@ -187,15 +200,24 @@ def test_ordinary_binary_keeps_existing_durable_bytes_contract() -> None:
     assert decode_model_messages(raw)[0].parts[0].content[0].data == _BODY
 
 
-def test_result_object_snapshot_is_plain_data_not_a_reference_input_carrier() -> None:
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_result_object_snapshot_is_plain_data_not_a_reference_input_carrier(wrapped: bool) -> None:
     @dataclass
     class Result:
         attachment: ReferencedContent
 
-    payload = encode_tool_return_content(ToolReturn(return_value=Result(_content())))
+    result = Result(_content())
+    payload = encode_tool_return_content(ToolReturn(return_value=result) if wrapped else result)
     restored = decode_tool_return_content(payload)
+    node = payload["value"]
+    if wrapped:
+        assert isinstance(restored, ToolReturn)
+        assert restored.content is None
+        restored = restored.return_value
+        node = node["return_value"]
+    assert node["type"] == "json-snapshot"
     assert isinstance(restored, dict)
-    attachment = restored["return_value"]["attachment"]
+    attachment = restored["attachment"]
     assert isinstance(attachment, dict)
     assert not isinstance(attachment, ReferencedContent)
     serialized = json.dumps(payload).encode()
@@ -301,8 +323,7 @@ async def test_runtime_retains_refs_and_safe_failure_structure_never_original_by
     group.capability(source, id="files", revision=1, scope="agent")
     group.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     group.agent("default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open("references", storage=RuntimeStorage.filesystem(tmp_path),
-                            features=model_features(Binding(), group)) as runtime:
+    async with Persistence.open('references', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_304, Runtime.attach(persistence=persistence_304, features=model_features(Binding(), group)) as runtime:
         execution = await runtime.agents.get().start(["inspect", _content()])
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is (ExecutionStatus.SUCCEEDED if boundary in {"success", "wrapped"}

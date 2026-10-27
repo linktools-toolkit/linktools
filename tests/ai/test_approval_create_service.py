@@ -12,7 +12,7 @@ from linktools.ai.core import (
     ResourceRef,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ApprovalDecisionRequest
+from linktools.ai.execution import ApprovalDecisionRequest
 from linktools.ai.runtime._approval import DefaultApprovalService
 
 

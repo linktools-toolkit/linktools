@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Regression coverage for TaskGraph activity notifications."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from types import SimpleNamespace
 
@@ -11,7 +11,7 @@ from ._task_test_helpers import admit_graph
 import linktools.ai.task._local as task_local
 from linktools.ai.core import TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task import (
     DefaultTaskGraphService,
     LocalTaskGraphLauncher,
@@ -206,8 +206,8 @@ class _FenceRaceRunner:
 async def test_queued_heartbeat_does_not_renew_after_execution_handoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-handoff-heartbeat", tenant_id="tenant")
     launcher: LocalTaskGraphLauncher | None = None
     heartbeat_queued = asyncio.Event()
@@ -273,8 +273,8 @@ async def test_queued_heartbeat_does_not_renew_after_execution_handoff(
 async def test_handoff_conflict_preserves_recovery_without_false_waiting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-handoff-conflict-readback", tenant_id="tenant")
     launcher: LocalTaskGraphLauncher | None = None
 
@@ -405,8 +405,8 @@ async def test_handoff_conflict_preserves_recovery_without_false_waiting(
 async def test_handoff_commit_unknown_reads_back_waiting_state_before_acknowledging(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-handoff-commit-unknown", tenant_id="tenant")
     launcher: LocalTaskGraphLauncher | None = None
 
@@ -523,8 +523,8 @@ async def test_handoff_commit_unknown_reads_back_waiting_state_before_acknowledg
 async def test_recover_waits_for_closing_graph_run_to_drain_before_rearming(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-recover-drain-race", tenant_id="tenant")
     launcher: LocalTaskGraphLauncher | None = None
     release_drain = asyncio.Event()
@@ -644,8 +644,8 @@ async def test_recover_waits_for_closing_graph_run_to_drain_before_rearming(
 
 @pytest.mark.asyncio
 async def test_quiesce_keeps_inflight_owned_through_caller_cancellation() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-quiesce-drain", tenant_id="tenant")
     launcher: LocalTaskGraphLauncher | None = None
     try:
@@ -705,8 +705,8 @@ async def test_quiesce_keeps_inflight_owned_through_caller_cancellation() -> Non
 
 @pytest.mark.asyncio
 async def test_execution_result_conflict_reads_cancel_fact_instead_of_failing_node() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-execution-conflict", tenant_id="tenant")
     launcher: LocalTaskGraphLauncher | None = None
     runner = _ExecutionConflictRunner()
@@ -752,8 +752,8 @@ async def test_execution_result_conflict_reads_cancel_fact_instead_of_failing_no
 
 @pytest.mark.asyncio
 async def test_old_handoff_result_cannot_commit_after_new_fence_handoff() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-handoff-fence-race", tenant_id="tenant")
     launcher: LocalTaskGraphLauncher | None = None
     runner = _FenceRaceRunner()
@@ -840,8 +840,8 @@ async def test_old_handoff_result_cannot_commit_after_new_fence_handoff() -> Non
 async def test_scheduler_retries_transient_reconcile_conflict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-reconcile-retry", tenant_id="tenant")
     launcher: LocalTaskGraphLauncher | None = None
     try:
@@ -884,8 +884,8 @@ async def test_scheduler_retries_transient_reconcile_conflict(
 async def test_scheduler_timeout_boundary_does_not_lose_completion_activity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-boundary-activity", tenant_id="tenant")
     launcher: LocalTaskGraphLauncher | None = None
     try:
@@ -978,8 +978,8 @@ async def test_scheduler_timeout_boundary_does_not_lose_completion_activity(
 async def test_local_event_stream_observers_do_not_poll_durable_snapshots_when_idle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-observer-idle", tenant_id="tenant")
     launcher: LocalTaskGraphLauncher | None = None
     streams = []
@@ -1057,8 +1057,8 @@ async def test_local_event_stream_observers_do_not_poll_durable_snapshots_when_i
 async def test_local_event_stream_observes_foreign_update_via_scheduler_notification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(
         namespace="task-observer-scheduler-notify", tenant_id="tenant"
     )

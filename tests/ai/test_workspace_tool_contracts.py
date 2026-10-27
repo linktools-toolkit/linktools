@@ -10,11 +10,12 @@ from pathlib import Path
 import pytest
 from linktools.ai.capability import (
     ToolCallRetry,
-    workspace_capabilities,
+    filesystem_capabilities,
 )
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.workspace import LocalSandbox, Workspace
+from linktools.ai.workspace import LocalWorkspaceBackend, Workspace
+from linktools.ai.capability import ShellCapability
 
 
 def _workspace_tool_contributions(workspace: Workspace):
@@ -66,12 +67,13 @@ def test_local_semantic_validation_is_not_limited_by_ipc_frame() -> None:
 @pytest.mark.asyncio
 async def test_workspace_missing_read_is_model_retry(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
-    session = await LocalSandbox().open(root=workspace.root)
+    session = LocalWorkspaceBackend(workspace.root)
+    await session.working_dir()
     try:
-        capability = workspace_capabilities(
+        capability = filesystem_capabilities(
             workspace,
             ("read_file",),
-            session=session,
+            backend=session,
         )[0]
         toolset = capability.get_toolset()
         with pytest.raises(ToolCallRetry, match="does not exist"):
@@ -84,12 +86,13 @@ async def test_workspace_missing_read_is_model_retry(tmp_path: Path) -> None:
 async def test_workspace_invalid_read_window_explains_correction(tmp_path: Path) -> None:
     (tmp_path / "note.txt").write_text("line\n", encoding="utf-8")
     workspace = Workspace.load(tmp_path)
-    session = await LocalSandbox().open(root=workspace.root)
+    session = LocalWorkspaceBackend(workspace.root)
+    await session.working_dir()
     try:
-        capability = workspace_capabilities(
+        capability = filesystem_capabilities(
             workspace,
             ("read_file",),
-            session=session,
+            backend=session,
         )[0]
         toolset = capability.get_toolset()
         with pytest.raises(ToolCallRetry, match="non-negative offset"):
@@ -105,19 +108,20 @@ async def test_workspace_invalid_read_window_explains_correction(tmp_path: Path)
 async def test_workspace_invalid_utf8_edit_explains_text_boundary(tmp_path: Path) -> None:
     (tmp_path / "binary.txt").write_bytes(b"\xff")
     workspace = Workspace.load(tmp_path)
-    session = await LocalSandbox().open(root=workspace.root)
+    session = LocalWorkspaceBackend(workspace.root)
+    await session.working_dir()
     try:
-        capability = workspace_capabilities(
+        capability = filesystem_capabilities(
             workspace,
-            ("edit_file",),
-            session=session,
+            ("write_file",),
+            backend=session,
         )[0]
         toolset = capability.get_toolset()
         with pytest.raises(ToolCallRetry, match="valid UTF-8 text"):
-            await toolset.tools["edit_file"].function(  # type: ignore[attr-defined]
+            await toolset.tools["write_file"].function(  # type: ignore[attr-defined]
                 "binary.txt",
-                "old",
                 "new",
+                old_text="old",
             )
     finally:
         await session.close()
@@ -127,38 +131,43 @@ async def test_workspace_invalid_utf8_edit_explains_text_boundary(tmp_path: Path
 async def test_workspace_edit_miss_explains_unique_match_requirement(tmp_path: Path) -> None:
     (tmp_path / "note.txt").write_text("before\n", encoding="utf-8")
     workspace = Workspace.load(tmp_path)
-    session = await LocalSandbox().open(root=workspace.root)
+    session = LocalWorkspaceBackend(workspace.root)
+    await session.working_dir()
     try:
-        capability = workspace_capabilities(
+        capability = filesystem_capabilities(
             workspace,
-            ("edit_file",),
-            session=session,
+            ("write_file",),
+            backend=session,
         )[0]
         toolset = capability.get_toolset()
         with pytest.raises(ToolCallRetry, match="matches exactly once"):
-            await toolset.tools["edit_file"].function(  # type: ignore[attr-defined]
+            await toolset.tools["write_file"].function(  # type: ignore[attr-defined]
                 "note.txt",
-                "missing",
                 "after",
+                old_text="missing",
             )
     finally:
         await session.close()
 
 
 @pytest.mark.asyncio
-async def test_workspace_unknown_attachment_type_explains_alternative(tmp_path: Path) -> None:
+async def test_workspace_unknown_attachment_type_requires_model_support(tmp_path: Path) -> None:
+    from linktools.ai.model import create_model
+    (tmp_path / "evidence.unknown").write_bytes(b"\x00\x01")
     workspace = Workspace.load(tmp_path)
-    session = await LocalSandbox().open(root=workspace.root)
+    session = LocalWorkspaceBackend(workspace.root)
+    await session.working_dir()
     try:
-        capability = workspace_capabilities(
+        capability = filesystem_capabilities(
             workspace,
-            ("attach_files",),
-            session=session,
+            ("read_file",),
+            backend=session,
+            model_binding=create_model(api="openai", model="test", input_types=("image",)),
         )[0]
         toolset = capability.get_toolset()
-        with pytest.raises(ToolCallRetry, match="recognized media type"):
-            await toolset.tools["attach_files"].function(  # type: ignore[attr-defined]
-                ["evidence.unknown"]
+        with pytest.raises(ToolCallRetry, match="does not support this file type"):
+            await toolset.tools["read_file"].function(  # type: ignore[attr-defined]
+                ["evidence.unknown"], as_file=True
             )
     finally:
         await session.close()
@@ -167,39 +176,35 @@ async def test_workspace_unknown_attachment_type_explains_alternative(tmp_path: 
 @pytest.mark.asyncio
 async def test_workspace_unknown_command_id_explains_source(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
-    session = await LocalSandbox().open(root=workspace.root)
+    session = LocalWorkspaceBackend(workspace.root)
+    await session.working_dir()
     try:
-        capability = workspace_capabilities(
-            workspace,
-            ("check_command",),
-            session=session,
-        )[0]
-        toolset = capability.get_toolset()
-        with pytest.raises(ToolCallRetry, match="active command id"):
-            await toolset.tools["check_command"].function(  # type: ignore[attr-defined]
-                "missing-command"
-            )
+        toolset = ShellCapability().bind(("check_command",), backend=session).get_toolset()
+        with pytest.raises(ToolCallRetry, match="command id"):
+            await toolset.tools["check_command"].function("missing-command")
     finally:
         await session.close()
 
 
 @pytest.mark.asyncio
 async def test_workspace_pre_effect_write_failure_is_model_retry(tmp_path: Path) -> None:
+    (tmp_path / "blocked").write_text("not a directory")
     workspace = Workspace.load(tmp_path)
-    session = await LocalSandbox().open(root=workspace.root)
+    session = LocalWorkspaceBackend(workspace.root)
+    await session.working_dir()
     try:
-        capability = workspace_capabilities(
+        capability = filesystem_capabilities(
             workspace,
             ("write_file",),
-            session=session,
+            backend=session,
         )[0]
         toolset = capability.get_toolset()
-        with pytest.raises(ToolCallRetry, match="parent directory"):
+        with pytest.raises(ToolCallRetry, match="invalid|directory"):
             await toolset.tools["write_file"].function(  # type: ignore[attr-defined]
-                "missing/report.txt",
+                "blocked/report.txt",
                 "report",
             )
-        assert not (tmp_path / "missing").exists()
+        assert (tmp_path / "blocked").read_text() == "not a directory"
     finally:
         await session.close()
 
@@ -207,15 +212,11 @@ async def test_workspace_pre_effect_write_failure_is_model_retry(tmp_path: Path)
 @pytest.mark.asyncio
 async def test_workspace_denied_shell_command_is_model_retry(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
-    session = await LocalSandbox().open(root=workspace.root)
+    session = LocalWorkspaceBackend(workspace.root)
+    await session.working_dir()
     try:
-        capability = workspace_capabilities(
-            workspace,
-            ("run_command",),
-            session=session,
-        )[0]
-        toolset = capability.get_toolset()
+        toolset = ShellCapability().bind(("run_command",), backend=session).get_toolset()
         with pytest.raises(ToolCallRetry, match="not allowed"):
-            await toolset.tools["run_command"].function("ssh example.invalid")  # type: ignore[attr-defined]
+            await toolset.tools["run_command"].function("ssh example.invalid")
     finally:
         await session.close()

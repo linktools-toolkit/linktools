@@ -15,6 +15,12 @@ from typing import TYPE_CHECKING, Protocol
 
 from linktools.core import environ
 
+from ..execution import (TaskExecutionService, ExecutionReleaseCallback as _ExecutionReleaseCallback,
+    LocalExecutionWaiter as _LocalExecutionWaiter, overlay_execution_correlation as _overlay_execution_correlation,
+    consumed_terminal_query, observed_query as _observed_query)
+from ..persistence.commands import StoredExecutionManagementAdapter
+
+
 from ..execution import (ExecutionManager, ExecutionDriver, CancelEffectOutcome,
     terminal_error as _terminal_error,
     execution_recovery_error as _execution_recovery_error,
@@ -81,23 +87,19 @@ from ..storage import (
     payload_fits_inline,
 )
 from ._conversation_service import ConversationService
-from ._context_archive import ExecutionContextArchive, PreparedExecutionContext
+from ..inputs import ExecutionContextArchive, PreparedExecutionContext
 from ..capability import ToolResponseFixture
 from ._tool_response_fixture import _load_tool_response_fixture
 from ..core import HandoffGate, HandoffState
-from ._input import (
+from ..inputs import (
     ExecutionInputMaterializer,
     decode_user_content_payload,
     input_intent,
     validate_user_input,
 )
-from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
-from .recovery import (
-    ExecutionRecoveryEffect,
-    ResolveToolEffectRequest,
-    ToolEffectResolutionResult,
-)
-from .service_api import (
+from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
+from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
+from ..execution import (
     CancelExecutionRequest,
     CancelExecutionResult,
     ExecutionHandle,
@@ -115,94 +117,35 @@ from .service_api import (
     TranscriptItem,
     UsageReadCutoff,
 )
-from .service_api import (
-    project_execution_view as _project_execution_view,
-)
-from .state import RuntimeDomain
+from ..execution import project_execution_view as _project_execution_view
+from ..persistence import PersistenceDomain
 from ._pending_turn import _PendingExecutionTurns
-from ._pending_coordination import _PendingTurnCoordination
-from .state._execution_repositories import ExecutionRepositoryImpl
-from .state._object_router import runtime_object_source_reads
-from .state._contracts import (
+from ..persistence.coordination import PendingTurnCoordination
+from ..persistence.repositories import ExecutionRepositoryImpl
+from ..persistence.objects import runtime_object_source_reads
+from ..execution import (
     ExecutionCancelRequestCommit,
     ExecutionRecord,
     ExecutionStartClaim,
     ExecutionStartReservation,
     ExecutionStartUnknownCommit,
-    ExecutionRepositories,
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
     IdempotencyRecord,
     IdempotencyTerminalUpdate,
     OperationTerminalUpdate,
     ResultRecord,
-    SessionRepository,
     StoredUserInput,
-    TaskAdmissionRepository,
 )
+from ..persistence.contracts import ExecutionRepositories, SessionRepository, TaskAdmissionRepository
 
 if TYPE_CHECKING:
-    from .state._store import StateTransaction
-    from .recovery import (
-        ExecutionRecoveryEffect,
-        ResolveToolEffectRequest,
-        ToolEffectResolutionResult,
-    )
-    from .state._contracts import RuntimePayloadRef, SessionRecord
+    from ..persistence.state import StateTransaction
+    from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
+    from ..execution import RuntimePayloadRef
+    from ..session import SessionRecord
 
 _logger = environ.get_logger("ai.runtime.execution")
-
-
-def _overlay_execution_correlation(
-    base: Mapping[str, object],
-    overlay: Mapping[str, object],
-) -> CorrelationData:
-    try:
-        return overlay_correlation(base, overlay)
-    except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
-
-
-def consumed_terminal_query(method: "Callable[..., object]") -> "Callable[..., object]":
-    @wraps(method)
-    async def wrapped(
-        self: "DefaultExecutionService",
-        execution_id: str,
-        *args: object,
-        principal: Principal,
-        **kwargs: object,
-    ) -> object:
-        async with self._execution_consumer(execution_id, principal.tenant_id):
-            with runtime_object_source_reads():
-                result = await method(
-                    self, execution_id, *args, principal=principal, **kwargs
-                )
-            return result
-
-    return wrapped
-
-
-def _observed_query(method: "Callable[..., object]") -> "Callable[..., object]":
-    @wraps(method)
-    async def wrapped(
-        self: "DefaultExecutionService",
-        execution_id: str,
-        *args: object,
-        principal: Principal,
-        **kwargs: object,
-    ) -> object:
-        async with self._execution_consumer(execution_id, principal.tenant_id):
-            return await method(
-                self, execution_id, *args, principal=principal, **kwargs
-            )
-
-    return wrapped
-
-
-class _ExecutionReleaseCallback(Protocol):
-    async def __call__(
-        self, execution_id: str, *, tenant_id: str, terminal_commit: bool = False,
-    ) -> bool: ...
 
 
 class _ExecutionTerminalVerifier(Protocol):
@@ -220,25 +163,12 @@ class _SubagentCancellation(Protocol):
     ) -> None: ...
 
 
-class _LocalExecutionWaiter(Protocol):
-    def owns_execution(self, execution_id: str, *, tenant_id: str) -> bool: ...
-
-    async def wait_terminal(self, execution_id: str, *, tenant_id: str) -> None: ...
-
-
 class _RepositoryInstructionBundle(Protocol):
     def to_payload(self) -> JsonValue: ...
 
 
 class _RepositoryInstructionResolver(Protocol):
     async def resolve(self, path: str) -> _RepositoryInstructionBundle: ...
-
-
-async def _no_release_terminal(
-    execution_id: str, *, tenant_id: str, terminal_commit: bool = False,
-) -> bool:
-    del execution_id, tenant_id, terminal_commit
-    return True
 
 
 async def _missing_terminal_verifier(
@@ -369,11 +299,16 @@ class _ExecutionRuntimeBridge:
         return self._port
 
 
-class _ExecutionManagementAdapter:
-    """Bind execution management to Runtime's coordinated stores and driver."""
+class _ExecutionManagementAdapter(StoredExecutionManagementAdapter):
+    """Add Agent pending-turn coordination and live execution control."""
 
     def __init__(self, service: "DefaultExecutionService") -> None:
         self._service = service
+        super().__init__(service._state, service._object_store,
+            object_key_factory=service._object_key_factory, object_reader=service._object_reader)
+
+    async def read_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
+        return await self._service.load_execution(execution_id, tenant_id=tenant_id)
 
     @property
     def driver(self) -> ExecutionDriver | None:
@@ -388,9 +323,6 @@ class _ExecutionManagementAdapter:
         if promote is not None:
             await promote(execution_id)
 
-    async def read_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
-        return await self._service._load_execution(execution_id, tenant_id=tenant_id)
-
     async def read_header(self, execution_id: str, *, tenant_id: str) -> ResourceRef | None:
         service = self._service
         pending = service._runtime_bridge.pending_turns.get(execution_id, tenant_id=tenant_id)
@@ -402,17 +334,11 @@ class _ExecutionManagementAdapter:
             if record is not None:
                 header = ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id, record.principal_id)
             else:
-                header = await service._load_source_header(execution_id, tenant_id=tenant_id)
+                header = await service.load_source_header(execution_id, tenant_id=tenant_id)
         return header
-
-    async def read_source_header(self, execution_id: str, *, tenant_id: str) -> ResourceRef | None:
-        return await self._service._load_source_header(execution_id, tenant_id=tenant_id)
 
     def has_local_pending(self, execution_id: str, *, tenant_id: str) -> bool:
         return self._service._runtime_bridge.pending_turns.get(execution_id, tenant_id=tenant_id) is not None
-
-    async def read_source_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
-        return await self._service._load_source_execution(execution_id, tenant_id=tenant_id)
 
     async def read_remote_pending(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
         return await self._service._runtime_bridge.pending_turns.read_remote_execution(execution_id, tenant_id=tenant_id)
@@ -420,42 +346,8 @@ class _ExecutionManagementAdapter:
     async def signal_remote_cancel(self, execution_id: str, *, tenant_id: str) -> None:
         await self._service._runtime_bridge.pending_turns.cancel_remote(execution_id, tenant_id=tenant_id)
 
-    async def get_operation(self, operation_id: str, *, tenant_id: str) -> OperationLedgerRecord | None:
-        return await self._service._state.operations.get(operation_id, tenant_id=tenant_id)
 
-    async def append_operation(self, operation: OperationLedgerInput) -> OperationLedgerRecord:
-        return await self._service._state.operations.append(operation)
-
-    async def compare_and_swap_operation(self, operation_id: str, *, tenant_id: str,
-        expected_status: OperationStatus, next_record: OperationLedgerRecord) -> OperationLedgerRecord:
-        return await self._service._state.operations.compare_and_swap(operation_id, tenant_id=tenant_id,
-            expected_status=expected_status, next_record=next_record)
-
-    async def list_idempotency(self, resource_kind: ResourceKind, resource_id: str,
-                              *, tenant_id: str) -> tuple[IdempotencyRecord, ...]:
-        return await self._service._state.idempotency.list_by_resource(resource_kind, resource_id, tenant_id=tenant_id)
-
-    async def get_idempotency(self, scope: str, key_digest: str, *, tenant_id: str) -> IdempotencyRecord | None:
-        return await self._service._state.idempotency.get(scope, key_digest, tenant_id=tenant_id)
-
-    async def get_result(self, execution_id: str, *, tenant_id: str) -> ResultRecord | None:
-        return await self._service._state.executions.get_result(execution_id, tenant_id=tenant_id)
-
-    async def result_record(self, execution: ExecutionRecord, *, tenant_id: str) -> ResultRecord | None:
-        repository = self._service._state.executions
-        return (execution.result if type(repository) is ExecutionRepositoryImpl else
-                await repository.get_result(execution.execution_id, tenant_id=tenant_id))
-
-    async def read_output(self, reference: ObjectRef) -> bytes:
-        service = self._service
-        if service._object_reader is None:
-            return await read_runtime_object(service._object_store, reference)
-        if reference.store_id != RUNTIME_OBJECT_STORE_ID:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        return await service._object_reader(RuntimeDomain.EXECUTION, reference)
-
-
-class DefaultExecutionService:
+class DefaultExecutionService(TaskExecutionService):
     """Apply execution authorization and state transitions before launching work."""
 
     def __init__(
@@ -474,13 +366,13 @@ class DefaultExecutionService:
         history_service: "ExecutionHistoryService | None" = None,
         release_terminal: _ExecutionReleaseCallback | None = None,
         instruction_resolver: "_RepositoryInstructionResolver | None" = None,
-        object_key_factory: "RuntimeObjectKeyFactory | None" = None,
+        object_key_factory: "ObjectKeyFactory | None" = None,
         payload_policy: "PayloadPolicy | None" = None,
         input_materializer: "ExecutionInputMaterializer | None" = None,
         session_execution_ready: bool = True,
         task_admissions: TaskAdmissionRepository | None = None,
         tool_responses: ToolResponseFixture | None = None,
-        object_reader: "Callable[[RuntimeDomain, ObjectRef], Awaitable[bytes]] | None" = None,
+        object_reader: "Callable[[PersistenceDomain, ObjectRef], Awaitable[bytes]] | None" = None,
         restart_checkpoints: bool = False,
         durable_trace: bool = False,
         conversation: bool = False,
@@ -491,26 +383,32 @@ class DefaultExecutionService:
             restart_checkpoints, durable_trace, conversation, terminal_commit,
         )):
             raise TypeError("execution persistence guarantees must be bool")
+        self._state = state
+        self._object_store = object_store
+        self._authorization = authorization
+        self._object_key_factory = object_key_factory
+        self._object_reader = object_reader
+        self._sessions = sessions
+        self._task_admissions = task_admissions
+        self._operation_ids = operation_ids or (lambda: uuid.uuid4().hex)
+        self._payload_policy = payload_policy
+        super().__init__(
+            state, authorization, port=_ExecutionManagementAdapter(self), sessions=sessions,
+            task_admissions=task_admissions, operation_ids=operation_ids,
+            release_terminal=release_terminal, payload_policy=payload_policy,
+        )
         self._restart_checkpoints = restart_checkpoints
         self._durable_trace = durable_trace
         self._conversation = conversation
         self._terminal_commit = terminal_commit
-        self._state = state
         self._context_archive = context_archive
-        self._object_store = object_store
-        self._object_reader = object_reader
-        self._sessions = sessions
-        self._task_admissions = task_admissions
         self._tool_responses = tool_responses
         self._catalog = catalog
         self._compiler = compiler
-        self._authorization = authorization
         self._runtime_bridge = runtime_bridge
         self._live_broker = live_broker
-        self._operation_ids = operation_ids or (lambda: uuid.uuid4().hex)
         self._history_reader = history_reader
         self._history_service = history_service
-        self._release_terminal = release_terminal or _no_release_terminal
         if not isinstance(session_execution_ready, bool):
             raise TypeError("session_execution_ready must be bool")
         if instruction_resolver is not None and (
@@ -520,13 +418,10 @@ class DefaultExecutionService:
                 "repository instruction resolver requires object key factory and payload policy"
             )
         self._instruction_resolver = instruction_resolver
-        self._object_key_factory = object_key_factory
-        self._payload_policy = payload_policy
         self._input_materializer = input_materializer
         self._session_execution_ready = session_execution_ready
         self._session_locks: dict[tuple[str, str], _SessionLockEntry] = {}
         self._session_locks_guard = asyncio.Lock()
-        self._handoff = HandoffGate[tuple[str, str], bool]()
         self._accepting = True
         self._admission_tasks: set[asyncio.Task[ExecutionHandle] | asyncio.Future[None]] = set()
         self._cancel_tasks: set[asyncio.Task[CancelExecutionResult]] = set()
@@ -534,7 +429,7 @@ class DefaultExecutionService:
             set()
         )
         self._detached_cancel_failure: AIError | None = None
-        self._management = ExecutionManager(_ExecutionManagementAdapter(self), authorization)
+        self._management = self.manager
 
     @property
     def _backend(self) -> _ExecutionRuntimePort | None:
@@ -552,7 +447,7 @@ class DefaultExecutionService:
         return runtime_port.verify_terminal_projection
 
     @property
-    def _local_waiter(self) -> _LocalExecutionWaiter | None:
+    def local_waiter(self) -> _LocalExecutionWaiter | None:
         return self._runtime_bridge.port
 
     @property
@@ -574,7 +469,7 @@ class DefaultExecutionService:
         *,
         tenant_id: str,
     ) -> "RuntimePayloadRef":
-        from .state._contracts import RuntimePayloadRef
+        from ..execution import RuntimePayloadRef
 
         if self._object_key_factory is None or self._payload_policy is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -586,12 +481,12 @@ class DefaultExecutionService:
             reference = await put_runtime_object(
                 self._object_store,
                 self._object_key_factory,
-                RuntimeDomain.EXECUTION,
+                PersistenceDomain.EXECUTION,
                 tenant_id,
                 canonical_json_bytes(payload),
             )
             stored = StoredPayload.object(reference)
-        return RuntimePayloadRef(stored, RuntimeDomain.EXECUTION)
+        return RuntimePayloadRef(stored, PersistenceDomain.EXECUTION)
 
     def _validate_tool_response_mode(
         self, reference: AssetVersionRef | None, *, session_id: str | None,
@@ -749,1017 +644,6 @@ class DefaultExecutionService:
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-    async def acquire_dependency_hold(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-        hold_id: str,
-    ) -> bool:
-        if self._runtime_bridge.pending_promote is not None:
-            await self._runtime_bridge.pending_promote(execution_id)
-        created = await self._state.executions.acquire_dependency_hold(
-            execution_id,
-            tenant_id=tenant_id,
-            hold_id=hold_id,
-        )
-        try:
-            await self._handoff.acquire_hold(
-                (tenant_id, execution_id),
-                hold_id,
-            )
-        except BaseException:
-            if created:
-                await self._state.executions.release_dependency_hold(
-                    execution_id,
-                    tenant_id=tenant_id,
-                    hold_id=hold_id,
-                )
-            raise
-        return created
-
-    async def release_dependency_hold(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-        hold_id: str,
-    ) -> None:
-        key = tenant_id, execution_id
-        state, owner = await self._handoff.release_hold(key, hold_id)
-        if owner and state is not None:
-            await self._run_handoff_cleanup(execution_id, tenant_id, state)
-        await self._state.executions.release_dependency_hold(
-            execution_id,
-            tenant_id=tenant_id,
-            hold_id=hold_id,
-        )
-        await self._request_handoff_if_terminal(execution_id, tenant_id)
-
-    async def request_terminal_handoff(
-        self, execution_id: str, *, tenant_id: str, terminal_commit: bool = False,
-    ) -> None:
-        key = tenant_id, execution_id
-        state, owner = await self._handoff.request_release(key, value=terminal_commit)
-        if owner:
-            await self._run_handoff_cleanup(execution_id, tenant_id, state)
-
-    async def resume_terminal_handoff(
-        self, execution_id: str, *, tenant_id: str,
-    ) -> None:
-        state = await self._handoff.claim_requested_release((tenant_id, execution_id))
-        if state is not None:
-            await self._run_handoff_cleanup(execution_id, tenant_id, state)
-
-    async def _request_handoff_if_terminal(
-        self, execution_id: str, tenant_id: str
-    ) -> None:
-        current = await self._load_execution(execution_id, tenant_id=tenant_id)
-        if current is not None and current.status in {
-            ExecutionStatus.SUCCEEDED,
-            ExecutionStatus.FAILED,
-            ExecutionStatus.CANCELLED,
-        }:
-            await self.request_terminal_handoff(
-                execution_id, tenant_id=tenant_id, terminal_commit=current.conversation,
-            )
-
-    async def _run_handoff_cleanup(
-        self,
-        execution_id: str,
-        tenant_id: str,
-        state: HandoffState[bool],
-    ) -> None:
-        key = tenant_id, execution_id
-        waiter = self._local_waiter
-        if waiter is not None and waiter.owns_execution(execution_id, tenant_id=tenant_id):
-            await self._handoff.finish_release(key, state, succeeded=False)
-            if not waiter.owns_execution(execution_id, tenant_id=tenant_id):
-                await self.resume_terminal_handoff(execution_id, tenant_id=tenant_id)
-            return
-        try:
-            if state.release_value:
-                released = await self._release_terminal(
-                    execution_id, tenant_id=tenant_id, terminal_commit=True,
-                )
-            else:
-                released = await self._release_terminal(execution_id, tenant_id=tenant_id)
-        except BaseException as error:
-            await self._handoff.finish_release(key, state, succeeded=False)
-            if not isinstance(error, Exception):
-                raise
-            _logger.error(
-                "execution handoff cleanup failed: execution=%s",
-                execution_id,
-                exc_info=environ.debug,
-            )
-            return
-        await self._handoff.finish_release(
-            key,
-            state,
-            succeeded=released,
-        )
-
-    @asynccontextmanager
-    async def _execution_consumer(self, execution_id: str, tenant_id: str):
-        key = tenant_id, execution_id
-        state = await self._handoff.enter(key)
-        try:
-            yield
-        finally:
-            owner = await self._handoff.leave(key, state)
-            if owner:
-                await self._run_handoff_cleanup(execution_id, tenant_id, state)
-
-    async def start_task(
-        self,
-        binding: TaskBindingContract,
-        *,
-        principal: Principal,
-        input: Mapping[str, JsonValue],
-        idempotency_key: str,
-        correlation: Mapping[str, str | int],
-        requires_task_invocation_capture: bool = False,
-        budget_scope_id: str | None = None,
-    ) -> ExecutionHandle:
-        if not isinstance(requires_task_invocation_capture, bool):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if not isinstance(binding, TaskBindingContract):
-            raise TypeError("binding must be TaskBindingContract")
-        if budget_scope_id is not None and (
-            not isinstance(budget_scope_id, str) or not budget_scope_id.strip()
-        ):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        normalized_input = normalize_json_value(dict(input))
-        if not isinstance(normalized_input, dict):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        normalized_correlation = _overlay_execution_correlation({}, correlation)
-        execution_id = self._operation_ids()
-        await self._authorization.authorize(
-            principal,
-            AuthorizationAction.EXECUTION_RUN,
-            ResourceRef(ResourceKind.EXECUTION, execution_id, principal.tenant_id),
-        )
-        if budget_scope_id is not None:
-            await self._authorize_budget_scope(budget_scope_id, principal)
-        stored_input = StoredUserInput(
-            "task-input-v1",
-            StoredPayload.inline_json(normalized_input),
-            {
-                "version": 1,
-                "kind": "task",
-                "task_id": binding.id,
-                "task_revision": binding.revision,
-            },
-        )
-        scope = "execution.task"
-        key_digest = compute_idempotency_key_digest(idempotency_key)
-        request_digest = canonical_sha256(
-            {
-                "contract": "task-execution-request-v1",
-                "principal": principal_identity_payload(principal),
-                "binding_digest": binding.binding_digest,
-                "input_digest": stored_input.digest,
-                **({"budget_scope_id": budget_scope_id} if budget_scope_id is not None else {}),
-                **({"requires_task_invocation_capture": True} if requires_task_invocation_capture else {}),
-            }
-        )
-        now = datetime.now(timezone.utc)
-        execution = ExecutionRecord(
-            execution_id=execution_id,
-            session_id=None,
-            parent_execution_id=None,
-            root_execution_id=execution_id,
-            previous_execution_id=None,
-            fork_base_execution_id=None,
-            lineage_kind=ExecutionLineageKind.RUN,
-            status=ExecutionStatus.PENDING_START,
-            revision=0,
-            event_seq=0,
-            agent_run_seq=0,
-            error_code=None,
-            safe_error_details={},
-            created_at=now,
-            updated_at=now,
-            mode=None,
-            planning=None,
-            thinking=None,
-            binding=binding,
-            principal_id=principal.principal_id,
-            principal_kind=principal.kind,
-            stored_user_input=stored_input,
-            correlation=normalized_correlation,
-            requires_task_invocation_capture=requires_task_invocation_capture,
-            budget_scope_id=budget_scope_id,
-            restart_checkpoints=True,
-            durable_trace=True,
-            conversation=False,
-        )
-        reservation = await self._state.executions.reserve_start(
-            ExecutionStartReservation(
-                execution,
-                IdempotencyRecord(
-                    scope=scope,
-                    idempotency_key_digest=key_digest,
-                    request_digest=request_digest,
-                    resource_kind=ResourceKind.EXECUTION,
-                    resource_id=execution_id,
-                    status=IdempotencyStatus.RESERVED,
-                    result_digest=None,
-                    error_code=None,
-                    created_at=now,
-                    updated_at=now,
-                ),
-            )
-        )
-        current = reservation.execution
-        if (
-            current.requires_task_invocation_capture is not requires_task_invocation_capture
-            or current.budget_scope_id != budget_scope_id
-            or current.binding_digest != binding.binding_digest
-            or current.binding != binding
-            or current.stored_user_input.digest != stored_input.digest
-            or current.principal_id != principal.principal_id
-            or current.principal_kind != principal.kind
-        ):
-            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-        if reservation.idempotency.request_digest != request_digest:
-            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-        if current.status is ExecutionStatus.PENDING_START:
-            current = await self._state.executions.claim_start(
-                ExecutionStartClaim(
-                    current.execution_id,
-                    current.revision,
-                    current.event_seq,
-                    scope,
-                    key_digest,
-                    request_digest,
-                    now,
-                )
-            )
-        elif current.status is ExecutionStatus.START_UNKNOWN:
-            raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
-        elif current.status not in {
-            ExecutionStatus.STARTED,
-            ExecutionStatus.WAITING_RETRY,
-            ExecutionStatus.WAITING_DEFERRED,
-            ExecutionStatus.RECOVERY_REQUIRED,
-            ExecutionStatus.SUCCEEDED,
-            ExecutionStatus.FAILED,
-            ExecutionStatus.CANCELLED,
-        }:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return ExecutionHandle(current.execution_id)
-
-    async def claim_task_attempt(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-    ) -> ExecutionView:
-        current = await self._load_authorized(
-            execution_id,
-            principal,
-            AuthorizationAction.EXECUTION_RUN,
-        )
-        if not isinstance(current.binding, TaskBindingContract):
-            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
-        if current.status in {
-            ExecutionStatus.SUCCEEDED,
-            ExecutionStatus.FAILED,
-            ExecutionStatus.CANCELLED,
-            ExecutionStatus.RECOVERY_REQUIRED,
-        }:
-            return _execution_view(current)
-        now = datetime.now(timezone.utc)
-        if current.status is ExecutionStatus.WAITING_RETRY:
-            if current.task_next_attempt_at is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if current.task_next_attempt_at > now:
-                return _execution_view(current)
-        elif current.status is not ExecutionStatus.STARTED:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if current.task_deadline_at is not None and current.task_deadline_at <= now:
-            await self.fail_task(
-                execution_id,
-                principal=principal,
-                error=AIError(
-                    ErrorCode.EXECUTION_WAIT_TIMEOUT,
-                    safe_details={"reason": "deadline_exceeded"},
-                ),
-                attempt=_execution_view(current),
-            )
-            current = await self._load_authorized(
-                execution_id,
-                principal,
-                AuthorizationAction.EXECUTION_RUN,
-            )
-            return _execution_view(current)
-        if current.task_attempt >= current.binding.max_attempts:
-            await self.fail_task(
-                execution_id,
-                principal=principal,
-                error=AIError(
-                    ErrorCode.TASK_NODE_FAILED,
-                    safe_details={"reason": "attempts_exhausted"},
-                ),
-                attempt=_execution_view(current),
-            )
-            current = await self._load_authorized(
-                execution_id,
-                principal,
-                AuthorizationAction.EXECUTION_RUN,
-            )
-            return _execution_view(current)
-        deadline = current.task_deadline_at
-        if deadline is None and current.binding.timeout_seconds is not None:
-            deadline = now + timedelta(seconds=current.binding.timeout_seconds)
-        updated = await self._state.executions.transition_task_execution(
-            execution_id,
-            tenant_id=self._state.executions.tenant_id,
-            expected_revision=current.revision,
-            expected_event_seq=current.event_seq,
-            expected_status=current.status,
-            next_status=ExecutionStatus.STARTED,
-            task_attempt=current.task_attempt + 1,
-            task_deadline_at=deadline,
-            task_next_attempt_at=None,
-            error_code=None,
-            safe_error_details={},
-            event_type=ExecutionEventType.EXECUTION_RESUMED.value,
-            payload={"attempt": current.task_attempt + 1},
-            occurred_at=now,
-        )
-        return _execution_view(updated)
-
-    async def schedule_task_retry(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-        error_code: str,
-        attempt: ExecutionView | None = None,
-    ) -> ExecutionView:
-        current = await self._load_authorized(
-            execution_id,
-            principal,
-            AuthorizationAction.EXECUTION_RUN,
-        )
-        if (
-            not isinstance(current.binding, TaskBindingContract)
-            or current.status is not ExecutionStatus.STARTED
-        ):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        _require_task_attempt(current, attempt)
-        if current.task_attempt >= current.binding.max_attempts:
-            await self.fail_task(
-                execution_id,
-                principal=principal,
-                error=AIError(
-                    ErrorCode.TASK_NODE_FAILED,
-                    safe_details={"reason": "attempts_exhausted"},
-                ),
-                attempt=attempt,
-            )
-            return await self.inspect(execution_id, principal=principal)
-        now = datetime.now(timezone.utc)
-        retry_at = now + timedelta(seconds=current.binding.retry_delay_seconds)
-        if current.task_deadline_at is not None and retry_at >= current.task_deadline_at:
-            await self.fail_task(
-                execution_id,
-                principal=principal,
-                error=AIError(
-                    ErrorCode.EXECUTION_WAIT_TIMEOUT,
-                    safe_details={"reason": "deadline_exceeded"},
-                ),
-                attempt=attempt,
-            )
-            return await self.inspect(execution_id, principal=principal)
-        updated = await self._state.executions.transition_task_execution(
-            execution_id,
-            tenant_id=self._state.executions.tenant_id,
-            expected_revision=current.revision,
-            expected_event_seq=current.event_seq,
-            expected_status=ExecutionStatus.STARTED,
-            next_status=ExecutionStatus.WAITING_RETRY,
-            task_attempt=current.task_attempt,
-            task_deadline_at=current.task_deadline_at,
-            task_next_attempt_at=retry_at,
-            error_code=error_code,
-            safe_error_details={},
-            event_type=ExecutionEventType.EXECUTION_RETRY_SCHEDULED.value,
-            payload={"attempt": current.task_attempt, "retry_at": retry_at.isoformat()},
-            occurred_at=now,
-        )
-        return _execution_view(updated)
-
-    async def require_task_recovery(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-        error_code: str,
-        attempt: ExecutionView | None = None,
-    ) -> ExecutionView:
-        current = await self._load_authorized(
-            execution_id,
-            principal,
-            AuthorizationAction.EXECUTION_RUN,
-        )
-        if not isinstance(current.binding, TaskBindingContract):
-            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
-        _require_task_attempt(current, attempt)
-        if current.status is ExecutionStatus.RECOVERY_REQUIRED:
-            return _execution_view(current)
-        if current.status is not ExecutionStatus.STARTED:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        now = datetime.now(timezone.utc)
-        updated = await self._state.executions.transition_task_execution(
-            execution_id,
-            tenant_id=self._state.executions.tenant_id,
-            expected_revision=current.revision,
-            expected_event_seq=current.event_seq,
-            expected_status=ExecutionStatus.STARTED,
-            next_status=ExecutionStatus.RECOVERY_REQUIRED,
-            task_attempt=current.task_attempt,
-            task_deadline_at=current.task_deadline_at,
-            task_next_attempt_at=None,
-            error_code=error_code,
-            safe_error_details={"effect": "unknown"},
-            event_type=ExecutionEventType.EXECUTION_RECOVERY_REQUIRED.value,
-            payload={"error_code": error_code, "safe_error_details": {"effect": "unknown"}},
-            occurred_at=now,
-        )
-        return _execution_view(updated)
-
-    async def defer_task_input(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-        wait_id: str,
-    ) -> ExecutionView:
-        current = await self._load_authorized(
-            execution_id,
-            principal,
-            AuthorizationAction.EXECUTION_RUN,
-        )
-        if (
-            not isinstance(current.binding, TaskBindingContract)
-            or not isinstance(wait_id, str)
-            or not wait_id.strip()
-        ):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if current.status is ExecutionStatus.WAITING_DEFERRED:
-            return _execution_view(current)
-        if current.status is not ExecutionStatus.STARTED:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        now = datetime.now(timezone.utc)
-        updated = await self._state.executions.transition_task_execution(
-            execution_id,
-            tenant_id=self._state.executions.tenant_id,
-            expected_revision=current.revision,
-            expected_event_seq=current.event_seq,
-            expected_status=ExecutionStatus.STARTED,
-            next_status=ExecutionStatus.WAITING_DEFERRED,
-            task_attempt=current.task_attempt,
-            task_deadline_at=current.task_deadline_at,
-            task_next_attempt_at=None,
-            error_code=None,
-            safe_error_details={},
-            event_type=ExecutionEventType.EXTERNAL_REQUESTED.value,
-            payload={"wait_id": wait_id},
-            occurred_at=now,
-        )
-        return _execution_view(updated)
-
-    async def supply_task_input(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-        value: JsonValue,
-    ) -> ExecutionView:
-        current = await self._load_authorized(
-            execution_id,
-            principal,
-            AuthorizationAction.EXECUTION_RUN,
-        )
-        if not isinstance(current.binding, TaskBindingContract):
-            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
-        normalized = normalize_json_value(value)
-        try:
-            _validate_task_binding_output(current.binding, normalized)
-        except AIError as error:
-            if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
-                raise
-            raise AIError(
-                ErrorCode.OUTPUT_CONTRACT_INVALID,
-                retryable=False,
-            ) from error
-        value_digest = canonical_sha256(normalized)
-        if current.status is ExecutionStatus.SUCCEEDED:
-            result = await self.result(execution_id, principal=principal)
-            if canonical_sha256(result.output) != value_digest:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            return _execution_view(current)
-        if current.status is not ExecutionStatus.WAITING_DEFERRED:
-            raise AIError(ErrorCode.TASK_NOT_READY)
-        try:
-            await self._complete_task_output(
-                current,
-                principal=principal,
-                output=normalized,
-                terminal_event_payload={
-                    "task_input": "supplied",
-                    "task_input_value_digest": value_digest,
-                },
-            )
-        except AIError as error:
-            if error.code not in {ErrorCode.EXECUTION_RESULT_CONFLICT, ErrorCode.STORAGE_CONFLICT}:
-                raise
-            latest = await self.inspect(execution_id, principal=principal)
-            if latest.status is not ExecutionStatus.SUCCEEDED:
-                raise
-            result = await self.result(execution_id, principal=principal)
-            if canonical_sha256(result.output) != value_digest:
-                raise
-            return latest
-        return await self.inspect(execution_id, principal=principal)
-
-    async def resume_task_not_applied(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-    ) -> ExecutionView:
-        current = await self._load_authorized(
-            execution_id,
-            principal,
-            AuthorizationAction.EXECUTION_RUN,
-        )
-        if (
-            not isinstance(current.binding, TaskBindingContract)
-            or current.status is not ExecutionStatus.RECOVERY_REQUIRED
-        ):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        now = datetime.now(timezone.utc)
-        if (
-            current.task_deadline_at is not None
-            and current.task_deadline_at <= now
-        ):
-            await self.fail_task(
-                execution_id,
-                principal=principal,
-                error=AIError(
-                    ErrorCode.EXECUTION_WAIT_TIMEOUT,
-                    safe_details={
-                        "task_effect": "not_applied",
-                        "reason": "deadline_exceeded",
-                    },
-                ),
-            )
-            return await self.inspect(execution_id, principal=principal)
-        if current.task_attempt >= current.binding.max_attempts:
-            await self.fail_task(
-                execution_id,
-                principal=principal,
-                error=AIError(
-                    ErrorCode.TASK_NODE_FAILED,
-                    safe_details={
-                        "task_effect": "not_applied",
-                        "reason": "attempts_exhausted",
-                    },
-                ),
-            )
-            return await self.inspect(execution_id, principal=principal)
-        updated = await self._state.executions.transition_task_execution(
-            execution_id,
-            tenant_id=self._state.executions.tenant_id,
-            expected_revision=current.revision,
-            expected_event_seq=current.event_seq,
-            expected_status=ExecutionStatus.RECOVERY_REQUIRED,
-            next_status=ExecutionStatus.WAITING_RETRY,
-            task_attempt=current.task_attempt,
-            task_deadline_at=current.task_deadline_at,
-            task_next_attempt_at=now,
-            error_code=None,
-            safe_error_details={},
-            event_type=ExecutionEventType.EXECUTION_RESUMED.value,
-            payload={"reason": "task_effect_not_applied"},
-            occurred_at=now,
-        )
-        return _execution_view(updated)
-
-    async def resolve_task_effect(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-        resolution: TaskEffectResolution,
-    ) -> ExecutionView:
-        if not isinstance(resolution, TaskEffectResolution):
-            raise TypeError("resolution must be TaskEffectResolution")
-        current = await self._load_authorized(
-            execution_id,
-            principal,
-            AuthorizationAction.EXECUTION_RUN,
-        )
-        binding = current.binding
-        if (
-            not isinstance(binding, TaskBindingContract)
-            or binding.effect_policy != "non_replay_safe"
-        ):
-            raise AIError(ErrorCode.TASK_NOT_READY)
-
-        applied_output = (
-            None
-            if resolution.kind != "applied"
-            else normalize_json_value(resolution.value)
-        )
-        applied_digest = (
-            None
-            if resolution.kind != "applied"
-            else canonical_sha256(applied_output)
-        )
-
-        if current.status is ExecutionStatus.WAITING_RETRY:
-            if resolution.kind != "not_applied":
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            return _execution_view(current)
-        if current.status is ExecutionStatus.SUCCEEDED:
-            if resolution.kind != "applied" or applied_digest is None:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            result = await self.result(execution_id, principal=principal)
-            if canonical_sha256(result.output) != applied_digest:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            return _execution_view(current)
-        if current.status is ExecutionStatus.FAILED:
-            if (
-                resolution.kind != "applied"
-                or applied_digest is None
-                or current.error_code != ErrorCode.OUTPUT_CONTRACT_INVALID.value
-                or current.safe_error_details.get("task_effect") != "applied"
-                or current.safe_error_details.get("task_effect_value_digest")
-                != applied_digest
-            ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            return _execution_view(current)
-        if current.status is ExecutionStatus.CANCELLED:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if current.status is not ExecutionStatus.RECOVERY_REQUIRED:
-            raise AIError(ErrorCode.TASK_NOT_READY)
-        if resolution.kind == "unknown":
-            return _execution_view(current)
-
-        if resolution.kind == "not_applied":
-            now = datetime.now(timezone.utc)
-            if (
-                current.task_deadline_at is not None
-                and current.task_deadline_at <= now
-            ):
-                await self.fail_task(
-                    execution_id,
-                    principal=principal,
-                    error=AIError(
-                        ErrorCode.EXECUTION_WAIT_TIMEOUT,
-                        retryable=False,
-                        safe_details={
-                            "task_effect": "not_applied",
-                            "reason": "deadline_exceeded",
-                        },
-                    ),
-                )
-                return await self.inspect(execution_id, principal=principal)
-            if current.task_attempt >= binding.max_attempts:
-                await self.fail_task(
-                    execution_id,
-                    principal=principal,
-                    error=AIError(
-                        ErrorCode.TASK_NODE_FAILED,
-                        retryable=False,
-                        safe_details={
-                            "task_effect": "not_applied",
-                            "reason": "attempts_exhausted",
-                        },
-                    ),
-                )
-                return await self.inspect(execution_id, principal=principal)
-            return await self.resume_task_not_applied(
-                execution_id,
-                principal=principal,
-            )
-
-        if applied_digest is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            _validate_task_binding_output(binding, applied_output)
-        except AIError as error:
-            if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
-                raise
-            await self.fail_task(
-                execution_id,
-                principal=principal,
-                error=AIError(
-                    ErrorCode.OUTPUT_CONTRACT_INVALID,
-                    retryable=False,
-                    safe_details={
-                        "task_effect": "applied",
-                        "task_effect_value_digest": applied_digest,
-                    },
-                ),
-            )
-            return await self.inspect(execution_id, principal=principal)
-
-        await self._complete_task_output(
-            current,
-            principal=principal,
-            output=applied_output,
-            terminal_event_payload={
-                "task_effect": "applied",
-                "task_effect_value_digest": applied_digest,
-            },
-        )
-        return await self.inspect(execution_id, principal=principal)
-
-    async def cancel_task(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-    ) -> CancelExecutionResult:
-        current = await self._load_authorized(
-            execution_id,
-            principal,
-            AuthorizationAction.EXECUTION_RUN,
-        )
-        if not isinstance(current.binding, TaskBindingContract):
-            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
-        if current.status is ExecutionStatus.CANCELLED:
-            return CancelExecutionResult(execution_id, True)
-        if current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED}:
-            return CancelExecutionResult(execution_id, False)
-        if current.status is ExecutionStatus.RECOVERY_REQUIRED:
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-        if (
-            current.binding.effect_policy == "non_replay_safe"
-            and current.task_attempt > 0
-            and current.status is ExecutionStatus.STARTED
-        ):
-            await self.require_task_recovery(
-                execution_id,
-                principal=principal,
-                error_code=ErrorCode.TASK_EFFECT_UNKNOWN.value,
-            )
-            raise AIError(ErrorCode.TASK_EFFECT_UNKNOWN)
-        now = datetime.now(timezone.utc)
-        result = ResultRecord(
-            None,
-            StopReason.CANCELLED,
-            UsageMetrics(),
-            now,
-        )
-        terminal = replace(
-            current,
-            status=ExecutionStatus.CANCELLED,
-            error_code=ErrorCode.EXECUTION_CANCELLED.value,
-            safe_error_details={},
-            error_diagnostics=None,
-            task_next_attempt_at=None,
-            updated_at=now,
-        )
-        idempotency = await self._task_terminal_idempotency(
-            current,
-            result,
-            next_status=IdempotencyStatus.CANCELLED,
-            error_code=ErrorCode.EXECUTION_CANCELLED.value,
-        )
-        await self._state.executions.commit_terminal(
-            ExecutionTerminalCommit(
-                current.revision,
-                current.event_seq,
-                terminal,
-                result,
-                ExecutionEventType.EXECUTION_CANCELLED,
-                {},
-                idempotency,
-            )
-        )
-        return CancelExecutionResult(execution_id, True)
-
-    async def complete_task(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-        output: JsonValue,
-        attempt: ExecutionView | None = None,
-    ) -> ExecutionResult:
-        current = await self._load_authorized(
-            execution_id,
-            principal,
-            AuthorizationAction.EXECUTION_RUN,
-        )
-        return await self._complete_task_output(
-            current,
-            principal=principal,
-            output=output,
-            attempt=attempt,
-        )
-
-    async def _complete_task_output(
-        self,
-        current: ExecutionRecord,
-        *,
-        principal: Principal,
-        output: JsonValue,
-        terminal_event_payload: "Mapping[str, JsonValue] | None" = None,
-        attempt: ExecutionView | None = None,
-    ) -> ExecutionResult:
-        if not isinstance(current.binding, TaskBindingContract):
-            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
-        if attempt is not None and current.task_attempt != attempt.task_attempt:
-            raise AIError(ErrorCode.TASK_FENCE_STALE)
-        execution_id = current.execution_id
-        if current.status is ExecutionStatus.SUCCEEDED:
-            result = await self.result(execution_id, principal=principal)
-            if canonical_sha256(result.output) != canonical_sha256(output):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            return result
-        if attempt is not None:
-            _require_task_attempt(current, attempt)
-            if current.status is not ExecutionStatus.STARTED:
-                raise AIError(ErrorCode.TASK_FENCE_STALE)
-        if current.status not in {
-            ExecutionStatus.STARTED,
-            ExecutionStatus.WAITING_DEFERRED,
-            ExecutionStatus.RECOVERY_REQUIRED,
-        }:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        normalized = normalize_json_value(output)
-        payload = await self._store_task_output(
-            normalized,
-            tenant_id=self._state.executions.tenant_id,
-        )
-        now = datetime.now(timezone.utc)
-        result = ResultRecord(
-            payload,
-            StopReason.END_TURN,
-            UsageMetrics(),
-            now,
-        )
-        terminal = replace(
-            current,
-            status=ExecutionStatus.SUCCEEDED,
-            error_code=None,
-            safe_error_details={},
-            error_diagnostics=None,
-            task_next_attempt_at=None,
-            updated_at=now,
-        )
-        idempotency = await self._task_terminal_idempotency(
-            current,
-            result,
-            next_status=IdempotencyStatus.COMPLETED,
-        )
-        await self._state.executions.commit_terminal(
-            ExecutionTerminalCommit(
-                current.revision,
-                current.event_seq,
-                terminal,
-                result,
-                ExecutionEventType.EXECUTION_SUCCEEDED,
-                {}
-                if terminal_event_payload is None
-                else dict(terminal_event_payload),
-                idempotency,
-            )
-        )
-        return await self.result(execution_id, principal=principal)
-
-    async def fail_task(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-        error: AIError,
-        attempt: ExecutionView | None = None,
-    ) -> ExecutionResult:
-        current = await self._load_authorized(
-            execution_id,
-            principal,
-            AuthorizationAction.EXECUTION_RUN,
-        )
-        if not isinstance(current.binding, TaskBindingContract):
-            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
-        if attempt is not None and current.task_attempt != attempt.task_attempt:
-            raise AIError(ErrorCode.TASK_FENCE_STALE)
-        if current.status is ExecutionStatus.FAILED:
-            result = await self.result(execution_id, principal=principal)
-            if (
-                current.error_code != error.code.value
-                or dict(current.safe_error_details) != dict(error.safe_details)
-            ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            return result
-        if attempt is not None:
-            _require_task_attempt(current, attempt)
-        if current.status not in {
-            ExecutionStatus.STARTED,
-            ExecutionStatus.WAITING_RETRY,
-            ExecutionStatus.WAITING_DEFERRED,
-            ExecutionStatus.RECOVERY_REQUIRED,
-        }:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        now = datetime.now(timezone.utc)
-        details = dict(error.safe_details)
-        result = ResultRecord(
-            None,
-            StopReason.ERROR,
-            UsageMetrics(),
-            now,
-        )
-        terminal = replace(
-            current,
-            status=ExecutionStatus.FAILED,
-            error_code=error.code.value,
-            safe_error_details=details,
-            error_diagnostics=error.diagnostics,
-            task_next_attempt_at=None,
-            updated_at=now,
-        )
-        idempotency = await self._task_terminal_idempotency(
-            current,
-            result,
-            next_status=IdempotencyStatus.FAILED,
-            error_code=error.code.value,
-        )
-        payload = {
-            "error_code": error.code.value,
-            "safe_error_details": details,
-        }
-        if error.diagnostics is not None:
-            payload["error_diagnostics"] = error.diagnostics.to_payload()
-        await self._state.executions.commit_terminal(
-            ExecutionTerminalCommit(
-                current.revision,
-                current.event_seq,
-                terminal,
-                result,
-                ExecutionEventType.EXECUTION_FAILED,
-                payload,
-                idempotency,
-            )
-        )
-        return await self.result(execution_id, principal=principal)
-
-    async def _store_task_output(
-        self,
-        output: JsonValue,
-        *,
-        tenant_id: str,
-    ) -> StoredPayload:
-        inline = StoredPayload.inline_json(output)
-        if self._payload_policy is None or payload_fits_inline(inline, self._payload_policy):
-            return inline
-        if self._object_key_factory is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        reference = await put_runtime_object(
-            self._object_store,
-            self._object_key_factory,
-            RuntimeDomain.EXECUTION,
-            tenant_id,
-            canonical_json_bytes(output),
-        )
-        return StoredPayload.object(reference)
-
-    async def _task_terminal_idempotency(
-        self,
-        execution: ExecutionRecord,
-        result: ResultRecord,
-        *,
-        next_status: IdempotencyStatus,
-        error_code: str | None = None,
-    ) -> IdempotencyTerminalUpdate:
-        records = await self._state.idempotency.list_by_resource(
-            ResourceKind.EXECUTION,
-            execution.execution_id,
-            tenant_id=self._state.executions.tenant_id,
-        )
-        if len(records) != 1:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        record = records[0]
-        if record.status is not IdempotencyStatus.STARTED:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        return IdempotencyTerminalUpdate(
-            record.scope,
-            record.idempotency_key_digest,
-            IdempotencyStatus.STARTED,
-            next_status,
-            record.request_digest,
-            None if result.output is None else result.output.digest,
-            error_code,
-        )
 
     async def start(
         self,
@@ -1810,7 +694,7 @@ class DefaultExecutionService:
         context = await self._canonicalize_request(request)
         request = context.request
         if budget_scope_id is not None:
-            await self._authorize_budget_scope(budget_scope_id, request.principal)
+            await self.authorize_budget_scope(budget_scope_id, request.principal)
         scope = "execution.run"
         idempotency_key_digest = compute_idempotency_key_digest(request.idempotency_key)
         request_digest = _request_digest(
@@ -1950,7 +834,7 @@ class DefaultExecutionService:
         )
         if existing is None:
             return None
-        execution = await self._load_execution(
+        execution = await self.load_execution(
             existing.resource_id,
             tenant_id=principal.tenant_id,
         )
@@ -1990,10 +874,10 @@ class DefaultExecutionService:
     async def list_children(
         self, execution_id: str, *, principal: Principal
     ) -> tuple[ExecutionView, ...]:
-        async with self._execution_consumer(execution_id, principal.tenant_id):
+        async with self.execution_consumer(execution_id, principal.tenant_id):
             pending = self._runtime_bridge.pending_turns.get(execution_id, tenant_id=principal.tenant_id)
             if pending is not None:
-                await self._authorize_execution(execution_id, principal, AuthorizationAction.EXECUTION_READ)
+                await self.authorize_execution(execution_id, principal, AuthorizationAction.EXECUTION_READ)
                 if self._runtime_bridge.pending_turns.get(execution_id, tenant_id=principal.tenant_id) is pending:
                     # Child admission first promotes this parent to source authority.
                     return ()
@@ -2004,14 +888,14 @@ class DefaultExecutionService:
                 )
                 remote_pending = None
                 if header is None:
-                    header = await self._authorize_execution(
+                    header = await self.authorize_execution(
                         execution_id, principal, AuthorizationAction.EXECUTION_READ,
                     )
                     remote_pending = await self._runtime_bridge.pending_turns.read_remote_execution(
                         execution_id, tenant_id=principal.tenant_id,
                     )
                     if remote_pending is not None:
-                        await self._authorize_loaded_execution(
+                        await self.authorize_loaded_execution(
                             remote_pending, principal, AuthorizationAction.EXECUTION_READ,
                             owner_principal_id=header.owner_principal_id,
                         )
@@ -2040,12 +924,12 @@ class DefaultExecutionService:
                 # known metadata owner shares the post-authorization snapshot.
                 current, children = await repository.state_store.read(read)
                 if current is not None:
-                    await self._authorize_loaded_execution(
+                    await self.authorize_loaded_execution(
                         current, principal, AuthorizationAction.EXECUTION_READ,
                         owner_principal_id=header.owner_principal_id,
                     )
                 return children
-            await self._load_authorized(
+            await self.load_authorized(
                 execution_id, principal, AuthorizationAction.EXECUTION_READ
             )
             children = await self._state.executions.list_children(
@@ -2236,7 +1120,7 @@ class DefaultExecutionService:
         )
         self._validate_tool_response_mode(request.tool_response_ref, session_id=session_id)
         if budget_scope_id is not None:
-            await self._authorize_budget_scope(
+            await self.authorize_budget_scope(
                 budget_scope_id,
                 request.principal,
                 source_execution_id=(
@@ -2280,7 +1164,7 @@ class DefaultExecutionService:
             if existing.status is IdempotencyStatus.START_UNKNOWN:
                 raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
             if existing.status is IdempotencyStatus.RESERVED:
-                pending = await self._load_execution(
+                pending = await self.load_execution(
                     existing.resource_id, tenant_id=request.principal.tenant_id
                 )
                 if pending is not None:
@@ -2321,7 +1205,7 @@ class DefaultExecutionService:
                 IdempotencyStatus.FAILED,
                 IdempotencyStatus.CANCELLED,
             }:
-                terminal = await self._load_execution(
+                terminal = await self.load_execution(
                     existing.resource_id,
                     tenant_id=request.principal.tenant_id,
                 )
@@ -2348,7 +1232,7 @@ class DefaultExecutionService:
                     else ErrorCode.EXECUTION_CANCELLED
                 )
                 raise _stable_idempotency_error(existing.error_code, fallback)
-            started = await self._load_execution(
+            started = await self.load_execution(
                 existing.resource_id, tenant_id=request.principal.tenant_id
             )
             if started is None:
@@ -2648,7 +1532,7 @@ class DefaultExecutionService:
 
     async def _join_coordinated_start(
         self,
-        coordinator: _PendingTurnCoordination,
+        coordinator: PendingTurnCoordination,
         coordination: TurnCoordination,
         request: ExecutionRequest,
         binding: AgentBinding,
@@ -2659,7 +1543,7 @@ class DefaultExecutionService:
         pause = 0.05
         publication_deadline = asyncio.get_running_loop().time() + 3.0
         while True:
-            record = await self._load_execution(
+            record = await self.load_execution(
                 coordination.execution_id, tenant_id=request.principal.tenant_id,
             )
             if record is not None:
@@ -2673,7 +1557,7 @@ class DefaultExecutionService:
                 coordination.execution_id, tenant_id=request.principal.tenant_id,
             )
             if owner is None or owner.owner_id != coordination.owner_id:
-                record = await self._load_source_execution(
+                record = await self.load_source_execution(
                     coordination.execution_id, tenant_id=request.principal.tenant_id,
                 )
                 if record is not None:
@@ -2887,7 +1771,7 @@ class DefaultExecutionService:
     ) -> ExecutionRecord:
         if error.code not in {ErrorCode.SESSION_BUSY, ErrorCode.SESSION_CONFLICT}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        current = await self._load_execution(
+        current = await self.load_execution(
             execution.execution_id,
             tenant_id=self._state.executions.tenant_id,
         )
@@ -2984,7 +1868,7 @@ class DefaultExecutionService:
             except asyncio.CancelledError as cancelled:
                 cancellation = cancelled
                 try:
-                    observed = await self._load_execution(
+                    observed = await self.load_execution(
                         current.execution_id,
                         tenant_id=self._state.executions.tenant_id,
                     )
@@ -3010,7 +1894,7 @@ class DefaultExecutionService:
                     ErrorCode.EXECUTION_RESULT_CONFLICT,
                 }:
                     raise
-                latest = await self._load_execution(
+                latest = await self.load_execution(
                     current.execution_id,
                     tenant_id=self._state.executions.tenant_id,
                 )
@@ -3086,7 +1970,7 @@ class DefaultExecutionService:
     ) -> None:
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        launch_record = await self._load_execution(
+        launch_record = await self.load_execution(
             execution.execution_id,
             tenant_id=self._state.executions.tenant_id,
         )
@@ -3150,7 +2034,7 @@ class DefaultExecutionService:
                 self._live_broker.abandon_prepared_local_producer(
                     launch_record.execution_id
                 )
-            current = await self._load_execution(
+            current = await self.load_execution(
                 execution.execution_id,
                 tenant_id=self._state.executions.tenant_id,
             )
@@ -3178,21 +2062,12 @@ class DefaultExecutionService:
             )
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN) from error
 
-    async def budget_usage(
-        self, execution_id: str, *, principal: Principal,
-    ) -> BudgetUsage | None:
-        execution = await self._load_observed_authorized(
-            execution_id, principal, AuthorizationAction.EXECUTION_READ,
-        )
-        if execution.budget_scope_id is None:
-            return None
-        return await self._state.budgets.read(execution.budget_scope_id)
 
     @_observed_query
     async def inspect(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionView:
-        execution = await self._load_observed_authorized(
+        execution = await self.load_observed_authorized(
             execution_id, principal, AuthorizationAction.EXECUTION_READ
         )
         if (
@@ -3217,72 +2092,6 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return await self._history_service.list(request)
 
-    @consumed_terminal_query
-    async def result(
-        self, execution_id: str, *, principal: Principal
-    ) -> ExecutionResult:
-        execution = await self._load_authorized(
-            execution_id, principal, AuthorizationAction.EXECUTION_READ
-        )
-        return await self._consume_result_from_execution(execution, tenant_id=principal.tenant_id)
-
-    async def _consume_result_from_execution(
-        self, execution: ExecutionRecord, *, tenant_id: str
-    ) -> ExecutionResult:
-        result = await self._result_from_execution(execution, tenant_id=tenant_id)
-        await self._require_retained_turn(execution)
-        stored = execution.result
-        if type(self._state.executions) is not ExecutionRepositoryImpl or (
-            stored is not None and stored.output is not None and stored.output.kind != "inline"
-        ):
-            # Body and custom-owner reads may yield after the terminal snapshot.
-            await self._request_handoff_if_terminal(execution.execution_id, tenant_id=tenant_id)
-        else:
-            await self.request_terminal_handoff(
-                execution.execution_id, tenant_id=tenant_id, terminal_commit=execution.conversation,
-            )
-        return result
-
-    async def _require_retained_turn(self, execution: ExecutionRecord) -> None:
-        if (not execution.retention_closed and execution.conversation
-                and execution.session_id is not None and self._sessions is not None):
-            await self._sessions.state_store.read(
-                lambda transaction: self._sessions.pending_turn_commit_in_transaction(
-                    transaction, session_id=execution.session_id,
-                    execution_id=execution.execution_id,
-                    allow_unadmitted=execution.started_at is None,
-                )
-            )
-
-    async def _result_from_execution(self, execution: ExecutionRecord, *, tenant_id: str) -> ExecutionResult:
-        return await self._management.result_from_execution(execution, tenant_id=tenant_id)
-
-    @consumed_terminal_query
-    async def result_payload_size(
-        self, execution_id: str, *, principal: Principal
-    ) -> int:
-        execution = await self._load_authorized(
-            execution_id,
-            principal,
-            AuthorizationAction.EXECUTION_READ,
-        )
-        if execution.status is ExecutionStatus.RECOVERY_REQUIRED:
-            raise _execution_recovery_error(execution)
-        if execution.status is not ExecutionStatus.SUCCEEDED:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        repository = self._state.executions
-        result = (execution.result if type(repository) is ExecutionRepositoryImpl else
-                  await repository.get_result(execution_id, tenant_id=principal.tenant_id))
-        if result is None or result.output is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        await self._require_retained_turn(execution)
-        if type(repository) is ExecutionRepositoryImpl:
-            await self.request_terminal_handoff(
-                execution_id, tenant_id=principal.tenant_id, terminal_commit=execution.conversation,
-            )
-        else:
-            await self._request_handoff_if_terminal(execution_id, tenant_id=principal.tenant_id)
-        return result.output.size
 
     @consumed_terminal_query
     async def wait(
@@ -3296,7 +2105,7 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
         async def wait_once() -> ExecutionResult:
-            execution = await self._load_authorized(
+            execution = await self.load_authorized(
                 execution_id,
                 principal,
                 AuthorizationAction.EXECUTION_READ,
@@ -3307,7 +2116,7 @@ class DefaultExecutionService:
             while True:
                 if status is ExecutionStatus.RECOVERY_REQUIRED:
                     raise _execution_recovery_error(execution)
-                waiter = self._local_waiter
+                waiter = self.local_waiter
                 owns_execution = waiter is not None and waiter.owns_execution(
                     execution_id,
                     tenant_id=principal.tenant_id,
@@ -3326,7 +2135,7 @@ class DefaultExecutionService:
                             execution_id,
                             tenant_id=principal.tenant_id,
                         )
-                        execution = await self._load_authorized(
+                        execution = await self.load_authorized(
                             execution_id,
                             principal,
                             AuthorizationAction.EXECUTION_READ,
@@ -3340,7 +2149,7 @@ class DefaultExecutionService:
                         )
                         if failure is not None:
                             raise failure
-                    return await self._consume_result_from_execution(
+                    return await self.consume_result_from_execution(
                         execution, tenant_id=principal.tenant_id,
                     )
                 if self._backend is not None:
@@ -3359,7 +2168,7 @@ class DefaultExecutionService:
                 else:
                     await asyncio.sleep(poll_backoff)
                     poll_backoff = min(30.0, poll_backoff * 2)
-                execution = await self._load_authorized(
+                execution = await self.load_authorized(
                     execution_id,
                     principal,
                     AuthorizationAction.EXECUTION_READ,
@@ -3395,7 +2204,7 @@ class DefaultExecutionService:
     async def retry(
         self, execution_id: str, request: RetryExecutionRequest
     ) -> ExecutionHandle:
-        previous = await self._load_authorized(
+        previous = await self.load_authorized(
             execution_id, request.principal, AuthorizationAction.EXECUTION_READ
         )
         if (
@@ -3445,7 +2254,7 @@ class DefaultExecutionService:
     async def fork(
         self, execution_id: str, request: ForkExecutionRequest
     ) -> ExecutionHandle:
-        previous = await self._load_authorized(
+        previous = await self.load_authorized(
             execution_id, request.principal, AuthorizationAction.EXECUTION_READ
         )
         if (
@@ -3523,14 +2332,14 @@ class DefaultExecutionService:
         *,
         capture_metric: Callable[[_TerminalMetricDelivery], None],
     ) -> CancelExecutionResult:
-        async with self._execution_consumer(
+        async with self.execution_consumer(
             execution_id,
             request.principal.tenant_id,
         ):
             result = await self.cancel_authorized(
                 execution_id, request, capture_metric=capture_metric,
             )
-            await self._request_handoff_if_terminal(
+            await self.request_handoff_if_terminal(
                 execution_id,
                 request.principal.tenant_id,
             )
@@ -3627,7 +2436,7 @@ class DefaultExecutionService:
         *,
         principal: Principal,
     ) -> tuple[ExecutionRecoveryEffect, ...]:
-        execution = await self._load_authorized(
+        execution = await self.load_authorized(
             execution_id,
             principal,
             AuthorizationAction.EXECUTION_RECOVER,
@@ -3644,7 +2453,7 @@ class DefaultExecutionService:
         execution_id: str,
         request: ResolveToolEffectRequest,
     ) -> ToolEffectResolutionResult:
-        execution = await self._load_authorized(
+        execution = await self.load_authorized(
             execution_id,
             request.principal,
             AuthorizationAction.EXECUTION_RECOVER,
@@ -3663,7 +2472,7 @@ class DefaultExecutionService:
         principal: Principal,
         idempotency_key: str | None = None,
     ) -> ExecutionHandle:
-        execution = await self._load_authorized(
+        execution = await self.load_authorized(
             execution_id,
             principal,
             AuthorizationAction.EXECUTION_RECOVER,
@@ -3819,80 +2628,18 @@ class DefaultExecutionService:
             cutoffs=cutoffs,
         )
 
-    async def _authorize_budget_scope(
-        self,
-        scope_id: str,
-        principal: Principal,
-        *,
-        source_execution_id: str | None = None,
-    ) -> None:
-        if source_execution_id is not None or scope_id.startswith("execution:"):
-            source = await self._load_authorized(
-                source_execution_id or scope_id[len("execution:"):],
-                principal,
-                AuthorizationAction.EXECUTION_RUN,
-            )
-            await self._authorization.authorize(
-                principal,
-                AuthorizationAction.EXECUTION_RUN,
-                ResourceRef(
-                    ResourceKind.EXECUTION,
-                    source.execution_id,
-                    principal.tenant_id,
-                    source.principal_id,
-                ),
-            )
-            if source.budget_scope_id != scope_id:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await self._state.budgets.read(scope_id)
-            return
-        if scope_id.startswith("graph:"):
-            if self._task_admissions is None:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            graph_id = scope_id[len("graph:"):]
-            admission = await self._task_admissions.get(
-                graph_id, tenant_id=principal.tenant_id,
-            )
-            if admission is None:
-                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            await self._authorization.authorize(
-                principal,
-                AuthorizationAction.TASK_RUN,
-                ResourceRef(
-                    ResourceKind.TASK_GRAPH,
-                    admission.graph_id,
-                    admission.principal.tenant_id,
-                    admission.principal.principal_id,
-                ),
-            )
-            if admission.graph_id != graph_id or admission.budget_scope_id != scope_id:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            usage = await self._state.budgets.read(scope_id)
-            if usage.limits != admission.budget:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return
-        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
     async def _load_session(self, session_id: str, *, tenant_id: str) -> "SessionRecord | None":
         return await self._sessions.state_store.read(
             lambda _transaction: self._sessions.get(session_id, tenant_id=tenant_id)
         )
 
-    async def _load_source_execution(
-        self, execution_id: str, *, tenant_id: str,
-    ) -> ExecutionRecord | None:
-        repository = self._state.executions
-        if type(repository) is ExecutionRepositoryImpl:
-            return await repository.get_fresh(execution_id, tenant_id=tenant_id)
-        return await repository.state_store.read(
-            lambda _transaction: repository.get(execution_id, tenant_id=tenant_id)
-        )
 
-    async def _load_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
+    async def load_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
         pending = await self._runtime_bridge.pending_turns.read_execution(execution_id, tenant_id=tenant_id)
         if pending is not None:
             return pending
-        record = await self._load_source_execution(execution_id, tenant_id=tenant_id)
+        record = await self.load_source_execution(execution_id, tenant_id=tenant_id)
         if record is not None:
             return record
         pending = await self._runtime_bridge.pending_turns.read_remote_execution(
@@ -3901,16 +2648,13 @@ class DefaultExecutionService:
         if pending is not None:
             return pending
         # Publication can disappear after the source read when its owner commits.
-        return await self._load_source_execution(execution_id, tenant_id=tenant_id)
+        return await self.load_source_execution(execution_id, tenant_id=tenant_id)
 
-    async def _load_authorized(self, execution_id: str, principal: Principal,
-                               action: AuthorizationAction) -> ExecutionRecord:
-        return await self._management.load_authorized(execution_id, principal, action)
 
-    async def _load_observed_authorized(
+    async def load_observed_authorized(
         self, execution_id: str, principal: Principal, action: AuthorizationAction
     ) -> ExecutionRecord:
-        header = await self._authorize_execution(execution_id, principal, action)
+        header = await self.authorize_execution(execution_id, principal, action)
         record = await self._runtime_bridge.pending_turns.read_execution(
             execution_id, tenant_id=principal.tenant_id,
         )
@@ -3924,89 +2668,27 @@ class DefaultExecutionService:
             )
         if record is None:
             # Ordinary reads may retain a pre-commit miss after the owner releases.
-            record = await self._load_source_execution(
+            record = await self.load_source_execution(
                 execution_id, tenant_id=principal.tenant_id,
             )
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorize_loaded_execution(
+        await self.authorize_loaded_execution(
             record, principal, action, owner_principal_id=header.owner_principal_id,
         )
         return record
 
-    async def _authorize_execution(
-        self, execution_id: str, principal: Principal, action: AuthorizationAction
-    ) -> ResourceRef:
-        return await self._management.authorize_execution(execution_id, principal, action)
 
-
-    async def _authorize_loaded_execution(self, execution: ExecutionRecord, principal: Principal,
-        action: AuthorizationAction, *, owner_principal_id: str | None) -> None:
-        await self._management.authorize_loaded_execution(execution, principal, action,
-                                                         owner_principal_id=owner_principal_id)
-
-    async def _load_source_header(
-        self, execution_id: str, *, tenant_id: str,
-    ) -> ResourceRef | None:
-        repository = self._state.executions
-        if type(repository) is ExecutionRepositoryImpl:
-            return await repository.get_header_fresh(execution_id, tenant_id=tenant_id)
-        return await repository.state_store.read(
-            lambda _transaction: repository.get_header(execution_id, tenant_id=tenant_id)
-        )
-
-    async def load_authorized(
-        self,
-        execution_id: str,
-        principal: Principal,
-        action: AuthorizationAction,
-    ) -> ExecutionRecord:
-        return await self._load_authorized(execution_id, principal, action)
-
-
-def _require_task_attempt(
-    execution: ExecutionRecord,
-    attempt: ExecutionView | None,
-) -> None:
-    if attempt is None:
-        return
-    if (
-        attempt.execution_id != execution.execution_id
-        or attempt.event_seq != execution.event_seq
-        or attempt.task_attempt != execution.task_attempt
-        or attempt.status is not execution.status
-        or attempt.task_deadline_at != execution.task_deadline_at
-        or attempt.task_next_attempt_at != execution.task_next_attempt_at
-    ):
-        raise AIError(ErrorCode.TASK_FENCE_STALE)
+    async def acquire_dependency_hold(
+        self, execution_id: str, *, tenant_id: str, hold_id: str,
+    ) -> bool:
+        if self._runtime_bridge.pending_promote is not None:
+            await self._runtime_bridge.pending_promote(execution_id)
+        return await super().acquire_dependency_hold(execution_id, tenant_id=tenant_id, hold_id=hold_id)
 
 
 def _execution_view(execution: ExecutionRecord) -> ExecutionView:
     return _project_execution_view(execution)
-
-
-def _validate_task_binding_output(
-    binding: TaskBindingContract,
-    output: JsonValue,
-) -> None:
-    contract = dict(binding.output_contract)
-    if contract == {"kind": "json"}:
-        return
-    if set(contract) != {"mode", "schema"}:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    try:
-        restored = restore_output(contract["mode"], contract["schema"])
-    except AIError as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    try:
-        restored.validate_payload(output)
-    except AIError as error:
-        if error.code is ErrorCode.OUTPUT_VALIDATION_FAILED:
-            raise AIError(
-                ErrorCode.OUTPUT_CONTRACT_INVALID,
-                retryable=False,
-            ) from error
-        raise
 
 
 def _failed_event_payload(

@@ -11,21 +11,26 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import InMemoryCacheBackend
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._checkpoint_persistence import CheckpointPersistence
-from linktools.ai.runtime.state._conversation_persistence import ConversationPersistence
-from linktools.ai.runtime.state._execution_repositories import ExecutionRepositoryImpl
-from linktools.ai.runtime.state._memory import InMemoryStateStorageGroup, InMemoryStateStore
-from linktools.ai.runtime.state._model_interaction_store import ModelInteractionStateStepArchive
-from linktools.ai.runtime.state._step_archive import InMemoryStepArchive, StagingAgentRunStore, StateStepArchive, _AgentRunHistoryLock
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent
-from linktools.ai.runtime.state._store import StateTransactionNestingError
-from linktools.ai.runtime.state._steps import RuntimeAgentRunStore
-from linktools.ai.runtime.state import _trace_persistence
-from linktools.ai.runtime.state._trace_persistence import TracePersistence
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._checkpoint_persistence import CheckpointPersistence
+from linktools.ai.persistence._conversation_persistence import ConversationPersistence
+from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
+from linktools.ai.persistence._memory import InMemoryStateStorageGroup, InMemoryStateStore
+from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
+from linktools.ai.persistence._step_archive import (
+    InMemoryStepArchive,
+    StagingAgentRunStore,
+    StateStepArchive,
+    _AgentRunHistoryLock,
+)
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent
+from linktools.ai.persistence.state import StateTransactionNestingError
+from linktools.ai.persistence.runs import RuntimeAgentRunStore
+from linktools.ai.persistence import _trace_persistence
+from linktools.ai.persistence._trace_persistence import TracePersistence
 
 from .test_pending_turn_commit import _commit, _pending_turn, _turn_state
 from .test_incremental_projection_boundaries import _storage
@@ -35,7 +40,7 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_conversation_owners_isolate_identical_run_ids_and_preserve_context() -> None:
-    archives = [InMemoryStepArchive(RuntimeDomain.CONVERSATION) for _ in range(2)]
+    archives = [InMemoryStepArchive(PersistenceDomain.CONVERSATION) for _ in range(2)]
     for archive in archives:
         await archive.initialize()
     try:
@@ -67,7 +72,7 @@ async def test_conversation_owner_reads_committed_state_without_changing_cursor(
     async with _turn_state(backend, tmp_path) as state:
         turn = _pending_turn(state)
         await _commit(state, turn)
-        owner = ConversationPersistence(state.storage.run_store.read_store(RuntimeDomain.CONVERSATION))
+        owner = ConversationPersistence(state.storage.run_store.read_store(PersistenceDomain.CONVERSATION))
         request = dict(history_id="history", agent_run_id=turn.run.agent_run_id, tenant_id="tenant")
         before = await state.storage.conversation.sessions.get("session", tenant_id="tenant")
         assert [message async for message in owner.iter_conversation_messages(**request)] == turn.checkpoint.messages
@@ -83,7 +88,7 @@ async def test_conversation_owner_reads_committed_state_without_changing_cursor(
 
 async def test_state_conversation_reads_require_history_identity(tmp_path: Path) -> None:
     async with _turn_state("memory", tmp_path) as state:
-        owner = ConversationPersistence(state.storage.run_store.read_store(RuntimeDomain.CONVERSATION))
+        owner = ConversationPersistence(state.storage.run_store.read_store(PersistenceDomain.CONVERSATION))
         request = dict(history_id=None, agent_run_id="run", tenant_id="tenant")
         with pytest.raises(AIError) as missing:
             await owner.load_conversation_model_context(**request)
@@ -99,7 +104,7 @@ async def test_state_conversation_reads_require_history_identity(tmp_path: Path)
 @pytest.mark.parametrize("complete", (False, True))
 async def test_checkpoint_owner_requires_complete_recovery_before_materializing(complete: bool) -> None:
     staging = StagingAgentRunStore()
-    archive = InMemoryStepArchive(RuntimeDomain.CHECKPOINT)
+    archive = InMemoryStepArchive(PersistenceDomain.CHECKPOINT)
     await staging.initialize()
     await archive.initialize()
     try:
@@ -181,7 +186,7 @@ async def _separate_trace_stores() -> AsyncIterator[tuple[ExecutionRepositoryImp
     repository = ExecutionRepositoryImpl(core, namespace="trace-owner", tenant_id="tenant")
     archive = ModelInteractionStateStepArchive(
         evidence, object_store=None, namespace="trace-owner", tenant_id="tenant",
-        runtime_domain=RuntimeDomain.TRACE, execution_repository=repository,
+        runtime_domain=PersistenceDomain.TRACE, execution_repository=repository,
     )
     await archive.initialize()
     try:
@@ -272,11 +277,11 @@ async def test_core_producer_fencing_does_not_require_trace_archive(checkpoint_e
     async with _separate_trace_stores() as (repository, unused_trace):
         recovery = ModelInteractionStateStepArchive(
             unused_trace.state_store, object_store=None, namespace="trace-owner", tenant_id="tenant",
-            runtime_domain=RuntimeDomain.CHECKPOINT,
+            runtime_domain=PersistenceDomain.CHECKPOINT,
         )
         store = RuntimeAgentRunStore(
             StagingAgentRunStore(),
-            conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
+            conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
             execution_archive=None, recovery_archive=recovery if checkpoint_enabled else None,
             execution_repository=repository, tenant_id="tenant",
         )
@@ -306,11 +311,11 @@ async def test_core_producer_fencing_does_not_require_trace_archive(checkpoint_e
 async def test_materialized_trace_partition_is_atomic_with_core_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    storage = RuntimeState(_storage(backend, tmp_path))
+    storage = Persistence(_storage(backend, tmp_path))
     await storage.initialize(namespace="trace-partition", tenant_id="tenant")
     try:
         repository = storage.execution.executions
-        archive = storage.run_store.read_store(RuntimeDomain.TRACE)
+        archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         assert isinstance(archive, StateStepArchive)
         assert archive.state_store is not repository.state_store
         assert archive.state_store.storage_group is repository.state_store.storage_group

@@ -10,15 +10,15 @@ from pydantic_ai.messages import BinaryContent, ImageUrl, TextContent, UploadedF
 
 from linktools.ai.core import Principal, PromptLimits, WorkspaceFileInput
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ExecutionRequest
-from linktools.ai.runtime._input import (
+from linktools.ai.execution import ExecutionRequest
+from linktools.ai.inputs import (
     ExecutionInputMaterializer,
     decode_task_prompt_draft,
     decode_user_content_payload,
     task_prompt_draft,
 )
 from linktools.ai.model import validate_user_content
-from linktools.ai.workspace import SandboxResource, SandboxSession, WorkspaceAccess
+from linktools.ai.workspace import WorkspaceAccess
 
 
 class _CountingSession:
@@ -40,23 +40,12 @@ class _CountingSession:
         return None
 
 
-class _CountingSandbox:
-    def __init__(self, session: _CountingSession) -> None:
-        self.session = session
 
-    async def open(
-        self,
-        *,
-        root: Path,
-        resources: tuple[SandboxResource, ...] = (),
-    ) -> SandboxSession:
-        del root, resources
-        return self.session  # type: ignore[return-value]
 
 
 def _materializer(values: dict[str, bytes]) -> tuple[ExecutionInputMaterializer, _CountingSession]:
     session = _CountingSession(values)
-    access = WorkspaceAccess(_CountingSandbox(session), root=Path(".").resolve())
+    access = WorkspaceAccess(session)
     return ExecutionInputMaterializer(access, PromptLimits()), session
 
 

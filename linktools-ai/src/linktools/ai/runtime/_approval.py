@@ -22,13 +22,9 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, StoredPayload
-from ._object import read_runtime_object
-from .service_api import (
-    ApprovalDecisionRequest,
-    ApprovalDecisionResult,
-    ApprovalView,
-)
-from .state._contracts import (
+from ..persistence.objects import read_runtime_object
+from ..execution import ApprovalDecisionRequest, ApprovalDecisionResult, ApprovalView
+from ..persistence.contracts import (
     deferred_resource_id,
     ApprovalRecord,
     ApprovalRepository,

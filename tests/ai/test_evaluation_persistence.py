@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Evaluation facts share backend transactions and preserve every planned slot."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -18,14 +18,14 @@ from linktools.ai.evaluation import (
     ScoreAttemptView, SlotDispositionView, TargetTrialRef, TaskCaseInput, TrialPlan, TrialView,
     evaluation_completion,
 )
-from linktools.ai.runtime._evaluation import RuntimeEvaluations
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.evaluation.engine._service import Evaluations
+from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
-from linktools.ai.runtime.state._contracts import IdempotencyRecord
-from linktools.ai.runtime.state._codec import (
+from linktools.ai.persistence.contracts import IdempotencyRecord
+from linktools.ai.persistence.codec import (
     _decode_enveloped_domain, _encode_persisted_domain, decode_domain, encode_domain,
 )
-from linktools.ai.runtime.state._evaluation_records import (
+from linktools.ai.persistence._evaluation_records import (
     EvaluationCleanupRecord, EvaluationLaunchIntent, EvaluationRecord, EvaluationSlotDisposition,
     EvaluationTombstone,
 )
@@ -36,14 +36,14 @@ NOW = datetime(2026, 10, 3, tzinfo=timezone.utc)
 PRINCIPAL = service_principal("tenant", "owner")
 
 
-def storage_for(kind: str, path: Path) -> RuntimeStorage:
+def storage_for(kind: str, path: Path) -> PersistenceStorage:
     if kind == "memory":
-        return RuntimeStorage.in_memory()
+        return PersistenceStorage.in_memory()
     if kind == "filesystem":
-        return RuntimeStorage.filesystem(path)
+        return PersistenceStorage.filesystem(path)
     if kind == "sqlite":
-        return RuntimeStorage.sqlite(path / "state.sqlite")
-    return RuntimeStorage.from_plan(RuntimeStoragePlan(
+        return PersistenceStorage.sqlite(path / "state.sqlite")
+    return PersistenceStorage.from_plan(PersistencePlan(
         execution=StorageRoute.sqlite(path / "execution.sqlite"),
         task=StorageRoute.filesystem(path / "task"),
         evaluation=StorageRoute.sqlite(path / "evaluation.sqlite"),
@@ -77,7 +77,7 @@ def intent() -> EvaluationLaunchIntent:
 async def test_score_collection_reads_fresh_record_only_for_terminal_node(
     status: TaskStatus, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = object.__new__(RuntimeEvaluations)
+    service = object.__new__(Evaluations)
     record = experiment()
     graph = TaskGraph("score-graph", (TaskNode("score", task=TaskRef("score", 1)),))
     admission = TaskGraphAdmission.from_request(TaskGraphRequest(graph, PRINCIPAL, "score-start"))
@@ -137,7 +137,7 @@ def test_evaluation_identity_round_trips_through_record_and_retention_wire() -> 
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "mixed"))
 async def test_dataset_publication_and_slot_arbitration_are_backend_atomic(backend: str, tmp_path: Path) -> None:
     storage = storage_for(backend, tmp_path)
-    storage = RuntimeState(storage)
+    storage = Persistence(storage)
     await storage.initialize(namespace="evaluation", tenant_id="tenant")
     try:
         repository = storage.evaluation.records
@@ -265,7 +265,7 @@ def test_disposition_wire_preserves_validated_derived_flags(kind: str, persisted
 async def test_disposition_recovery_and_terminal_arbitration_persist(
     backend: str, kind: str, tmp_path: Path,
 ) -> None:
-    storage = RuntimeState(storage_for(backend, tmp_path))
+    storage = Persistence(storage_for(backend, tmp_path))
     await storage.initialize(namespace="evaluation", tenant_id="tenant")
     try:
         repository = storage.evaluation.records
@@ -297,7 +297,7 @@ async def test_disposition_recovery_and_terminal_arbitration_persist(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "mixed"))
 async def test_content_purge_persists_terminal_disposition_projections(backend: str, tmp_path: Path) -> None:
-    storage = RuntimeState(storage_for(backend, tmp_path))
+    storage = Persistence(storage_for(backend, tmp_path))
     await storage.initialize(namespace="evaluation", tenant_id="tenant")
     try:
         repository = storage.evaluation.records

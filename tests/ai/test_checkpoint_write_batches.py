@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Checkpoint batches preserve scalar persistence and owner override semantics."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import sqlite3
 
 from collections import Counter
@@ -17,19 +17,19 @@ from sqlalchemy.exc import OperationalError
 
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, StopReason, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.contracts import (
     ContextProjection, ExecutionEventAppend, ExecutionHistoryHeadRecord,
     ExecutionHistorySealRecord, ExecutionTerminalCommit, ExecutionTerminalCommitResult,
     HistoryQuality, ResultRecord, TranscriptChunk,
 )
-from linktools.ai.runtime.state._execution_repositories import ExecutionRepositoryImpl
-from linktools.ai.runtime.state._history import TranscriptRepository
-from linktools.ai.runtime.state._archive_closure import rekey_archive_roots
-from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
-from linktools.ai.runtime.state._sql import _SqlTransaction
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
-from linktools.ai.runtime.state._store import StateTransaction, StoredRecord
+from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
+from linktools.ai.persistence._history import TranscriptRepository
+from linktools.ai.persistence._archive_closure import rekey_archive_roots
+from linktools.ai.persistence._runtime_commands import StateCommands
+from linktools.ai.persistence._sql import _SqlTransaction
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
+from linktools.ai.persistence.state import StateTransaction, StoredRecord
 
 from .test_history_projection_conformance import _record
 from .test_incremental_projection_boundaries import _storage
@@ -79,17 +79,17 @@ async def test_checkpoint_batch_preserves_records_facts_sequences_and_revisions(
         for name in ("batch", "scalar"):
             path = tmp_path / name
             path.mkdir()
-            state = RuntimeState(_storage(backend, path))
+            state = Persistence(_storage(backend, path))
             await state.initialize(namespace="checkpoint-batch", tenant_id="tenant")
             states.append(state)
-            archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+            archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
             if name == "scalar":
                 archive._history = ScalarTranscript(
                     archive.state_store, object_store=archive.transcript_repository._object_store, namespace="checkpoint-batch",
-                    tenant_id="tenant", runtime_domain=RuntimeDomain.CHECKPOINT,
-                    archive_object_store=state.archive_object_store(RuntimeDomain.CHECKPOINT),
+                    tenant_id="tenant", runtime_domain=PersistenceDomain.CHECKPOINT,
+                    archive_object_store=state.archive_object_store(PersistenceDomain.CHECKPOINT),
                     archive_object_reader=lambda reference, owner=state: owner.read_archive_object(
-                        RuntimeDomain.CHECKPOINT, reference,
+                        PersistenceDomain.CHECKPOINT, reference,
                     ),
                 )
             archives.append(archive)
@@ -137,9 +137,9 @@ async def test_checkpoint_batch_preserves_records_facts_sequences_and_revisions(
 async def test_checkpoint_lost_member_cas_rolls_back_entire_write_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str,
 ) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="checkpoint-cas", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     first = ModelRequest(parts=[UserPromptPart("first")])
     second = ModelRequest(parts=[UserPromptPart("second")])
@@ -215,7 +215,7 @@ async def test_terminal_batch_preserves_custom_repository_path_and_durable_value
         for name in ("batch", "scalar"):
             path = tmp_path / name
             path.mkdir()
-            state = RuntimeState(_storage(backend, path))
+            state = Persistence(_storage(backend, path))
             await state.initialize(namespace="terminal-batch", tenant_id="tenant")
             states.append(state)
             original = state.execution.executions
@@ -223,7 +223,7 @@ async def test_terminal_batch_preserves_custom_repository_path_and_durable_value
                 original.state_store, namespace="terminal-batch", tenant_id="tenant",
             )
             await repository.create_with_history_head(current)
-            commands = RuntimeStateCommands(
+            commands = StateCommands(
                 repository, namespace="terminal-batch", events=state.execution.events,
                 background_tasks=set(),
             )
@@ -245,9 +245,9 @@ async def test_terminal_batch_preserves_custom_repository_path_and_durable_value
 
 
 async def test_checkpoint_prefetch_is_bounded_and_mixed_owners_fail_closed(tmp_path: Path) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="checkpoint-owner", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     repository = archive.transcript_repository
     run = AgentRunRecord("run")
     try:
@@ -287,7 +287,7 @@ async def test_checkpoint_prefetch_is_bounded_and_mixed_owners_fail_closed(tmp_p
 async def test_terminal_lost_member_cas_rolls_back_closed_head_and_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str,
 ) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="terminal-cas", tenant_id="tenant")
     repository = state.execution.executions
     current = replace(_record(ExecutionStatus.STARTED, 0), durable_trace=False)
@@ -299,7 +299,7 @@ async def test_terminal_lost_member_cas_rolls_back_closed_head_and_result(
         result, ExecutionEventType.EXECUTION_FAILED,
         {"error_code": ErrorCode.EXECUTION_FAILED.value, "safe_error_details": {}},
     )
-    commands = RuntimeStateCommands(
+    commands = StateCommands(
         repository, namespace="terminal-cas", events=state.execution.events,
         background_tasks=set(),
     )
@@ -335,9 +335,9 @@ async def test_terminal_lost_member_cas_rolls_back_closed_head_and_result(
 async def test_new_checkpoint_fact_batch_rolls_back_or_retries_without_sequence_gaps(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str, retry: bool,
 ) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="checkpoint-batch-rollback", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     checkpoint = AgentRunCheckpoint(
         "run", 1, [ModelRequest(parts=[UserPromptPart("owned")])],

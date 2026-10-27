@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Provider stream failures retain their cause across SDK task cancellation."""
 from ._runtime_test_helpers import model_features
 
@@ -18,7 +20,8 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.model import ModelClientRequestRecorder
 from linktools.ai.model._http import capture_request
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._metric_capability import PreparedRequestModel
 from linktools.ai.capability import TraceCapability
 
@@ -64,10 +67,7 @@ async def test_provider_stream_failure_is_not_wrapper_cancellation(boundary: str
     group = RuntimeFeatures("provider-stream-failure")
     group.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     group.agent("default", model="default", allow_tools=())
-    async with Runtime.open(
-        "provider-stream-failure",
-        storage=RuntimeStorage.in_memory(), features=model_features(_Models(ExitModel(stream_function=stream)), group),
-    ) as runtime:
+    async with Persistence.open('provider-stream-failure', storage=PersistenceStorage.in_memory()) as persistence_67, Runtime.attach(persistence=persistence_67, features=model_features(_Models(ExitModel(stream_function=stream)), group)) as runtime:
         execution = await runtime.agents.get("default").start("respond")
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is ExecutionStatus.FAILED

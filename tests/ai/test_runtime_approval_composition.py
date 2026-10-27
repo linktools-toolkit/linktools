@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Composed Runtime approval-wait regression."""
 from ._runtime_test_helpers import model_features
 
@@ -13,8 +15,9 @@ import pytest
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ApprovalStatus, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime.state._contracts import RecoveryCheckpointState
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.contracts import RecoveryCheckpointState
 from linktools.ai.workspace import (
     Workspace,
     WorkspacePolicy,
@@ -51,9 +54,9 @@ async def test_composed_runtime_ask_enters_approval_wait(
         ),
     )
     state = (
-        RuntimeStorage.in_memory()
+        PersistenceStorage.in_memory()
         if backend == "memory"
-        else RuntimeStorage.filesystem(tmp_path / "runtime-state")
+        else PersistenceStorage.filesystem(tmp_path / "runtime-state")
     )
     application = workspace_features("application", workspace=workspace)
     application.agent(
@@ -62,11 +65,7 @@ async def test_composed_runtime_ask_enters_approval_wait(
         allow_tools=("read_file",),
     )
 
-    async with Runtime.open(
-        "default",
-        storage=state,
-        features=model_features(_ToolModels(), application),
-    ) as runtime:
+    async with Persistence.open('default', storage=state) as persistence_65, Runtime.attach(persistence=persistence_65, features=model_features(_ToolModels(), application)) as runtime:
         execution = await runtime.agents.get("default").start("read a file")
         record = None
         for _ in range(200):

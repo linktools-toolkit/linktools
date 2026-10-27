@@ -8,9 +8,16 @@ from collections.abc import AsyncIterator
 import pytest
 from linktools.ai.asset import AssetContentCache, AssetInfo, AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
-from linktools.ai.storage import ContentCache, InMemoryCacheBackend, InMemoryObjectStore, ObjectRef, StorageOverlay, InMemoryStreamBackend
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.storage import (
+    ContentCache,
+    InMemoryCacheBackend,
+    InMemoryObjectStore,
+    ObjectRef,
+    StorageOverlay,
+    InMemoryStreamBackend,
+)
 
 
 class CountingObjects(InMemoryObjectStore):
@@ -39,16 +46,16 @@ async def test_shared_cache_reuses_body_across_storage_lifetimes(tmp_path) -> No
     objects = CountingObjects()
     ref = await _put(objects, b"persisted body")
     for _ in range(2):
-        storage = RuntimeState(RuntimeStorage.sqlite(
+        storage = Persistence(PersistenceStorage.sqlite(
             tmp_path / "runtime.db", object_store=objects, cache=cache,
         ))
         await storage.initialize(namespace="runtime", tenant_id="tenant")
         try:
-            assert await storage.read_object(RuntimeDomain.EXECUTION, ref) == b"persisted body"
+            assert await storage.read_object(PersistenceDomain.EXECUTION, ref) == b"persisted body"
         finally:
             await storage.close()
         with pytest.raises(AIError) as error:
-            await storage.read_object(RuntimeDomain.EXECUTION, ref)
+            await storage.read_object(PersistenceDomain.EXECUTION, ref)
         assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
     assert objects.reads == 1
 
@@ -60,16 +67,16 @@ async def test_distinct_source_namespaces_do_not_share_membership(tmp_path) -> N
     absent = CountingObjects()
     ref = await _put(present, b"persisted body")
     for source in (present, absent):
-        storage = RuntimeState(RuntimeStorage.sqlite(
+        storage = Persistence(PersistenceStorage.sqlite(
             tmp_path / "runtime.db", object_store=source, cache=cache,
         ))
         await storage.initialize(namespace="present" if source is present else "absent", tenant_id="tenant")
         try:
             if source is present:
-                assert await storage.read_object(RuntimeDomain.EXECUTION, ref) == b"persisted body"
+                assert await storage.read_object(PersistenceDomain.EXECUTION, ref) == b"persisted body"
             else:
                 with pytest.raises(AIError) as error:
-                    await storage.read_object(RuntimeDomain.EXECUTION, ref)
+                    await storage.read_object(PersistenceDomain.EXECUTION, ref)
                 assert error.value.code is ErrorCode.STORAGE_NOT_FOUND
         finally:
             await storage.close()
@@ -94,7 +101,7 @@ async def test_domain_content_cache_and_runtime_borrow_same_backend(tmp_path) ->
     ))
     objects = CountingObjects()
     ref = await _put(objects, b"runtime body")
-    storage = RuntimeState(RuntimeStorage.sqlite(
+    storage = Persistence(PersistenceStorage.sqlite(
         tmp_path / "runtime.db", object_store=objects, cache=cache_backend,
     ))
     await asset_store.initialize()
@@ -103,9 +110,9 @@ async def test_domain_content_cache_and_runtime_borrow_same_backend(tmp_path) ->
         key = AssetKey("text", "asset")
         info = await asset_store.put(key, b"asset body")
         assert await asset_store.get(key) == b"asset body"
-        assert await storage.read_object(RuntimeDomain.EXECUTION, ref) == b"runtime body"
+        assert await storage.read_object(PersistenceDomain.EXECUTION, ref) == b"runtime body"
         await asset_store.close()
-        assert await storage.read_object(RuntimeDomain.EXECUTION, ref) == b"runtime body"
+        assert await storage.read_object(PersistenceDomain.EXECUTION, ref) == b"runtime body"
         assert objects.reads == 1
         cached = await cache_backend.get(content_cache.cache_key(key, info))
         assert cached is not None and content_cache.from_cache(cached) == b"asset body"
@@ -133,12 +140,12 @@ async def test_cache_without_key_value_capabilities_reads_objects_from_source(tm
     objects = CountingObjects()
     reference = await _put(objects, b"source body")
     with pytest.raises(TypeError, match="cache must provide get, put and delete"):
-        RuntimeStorage.sqlite(tmp_path / "state.db", object_store=objects, cache=cache)
-    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "state.db", object_store=objects))
+        PersistenceStorage.sqlite(tmp_path / "state.db", object_store=objects, cache=cache)
+    storage = Persistence(PersistenceStorage.sqlite(tmp_path / "state.db", object_store=objects))
     await storage.initialize(namespace="runtime", tenant_id="tenant")
     try:
         for _ in range(2):
-            assert await storage.read_object(RuntimeDomain.EXECUTION, reference) == b"source body"
+            assert await storage.read_object(PersistenceDomain.EXECUTION, reference) == b"source body"
         assert objects.reads == 2
     finally:
         await storage.close()

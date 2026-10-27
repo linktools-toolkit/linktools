@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Bounded History metadata reads and recorder-local invalidations."""
 from ._runtime_test_helpers import model_features
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -19,14 +21,15 @@ from linktools.ai.core import (
     TenantAuthorizationPolicy, agent_conversation_id,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
-from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
-from linktools.ai.runtime._runtime_history import RuntimeHistory
-from linktools.ai.runtime._watch_cursor import decode_execution_watch_cursor
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime.service_api import UsageReadCutoff
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord
+from linktools.ai.history._projection import StepExecutionHistoryReader
+from linktools.ai.history._service import DefaultExecutionHistoryService
+from linktools.ai.history._history import History
+from linktools.ai.observe.cursors import decode_execution_watch_cursor
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.execution import UsageReadCutoff
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._step_contracts import AgentRunRecord
 from linktools.ai.core import CommitPolicy
 from linktools.ai.capability import TraceCapability
 from linktools.ai.storage import InMemoryCacheBackend
@@ -159,9 +162,9 @@ async def test_model_metadata_disabled_archive_does_not_certify_empty_remote_his
 
 @pytest.mark.asyncio
 async def test_model_metadata_subscription_preserves_capture_races_and_isolates_executions() -> None:
-    from linktools.ai.runtime.state._contracts import ExecutionHistoryHeadRecord, ExecutionHistoryState
+    from linktools.ai.persistence.contracts import ExecutionHistoryHeadRecord, ExecutionHistoryState
 
-    storage = RuntimeState(RuntimeStorage.in_memory())
+    storage = Persistence(PersistenceStorage.in_memory())
     await storage.initialize(namespace="history", tenant_id="tenant")
     repository = storage.execution.executions
     await repository.state_store.mutate(lambda transaction: repository.insert_history_head_in_transaction(
@@ -217,12 +220,12 @@ async def test_model_metadata_subscription_preserves_capture_races_and_isolates_
 
 @pytest.mark.asyncio
 async def test_model_metadata_excludes_uncommitted_staging() -> None:
-    storage = RuntimeState(RuntimeStorage.in_memory())
+    storage = Persistence(PersistenceStorage.in_memory())
     await storage.initialize(namespace="history", tenant_id="tenant")
     execution = _record("root")
     reader = StepExecutionHistoryReader(
         namespace="history", executions=_Executions(execution),
-        store=storage.run_store.read_store(RuntimeDomain.TRACE), notifications=storage.run_store,
+        store=storage.run_store.read_store(PersistenceDomain.TRACE), notifications=storage.run_store,
         cursor_signer=HmacCursorSigner("metadata", b"metadata"),
     )
     try:
@@ -255,7 +258,7 @@ async def test_model_metadata_public_history_authorizes_every_port() -> None:
     service = DefaultExecutionHistoryService(
         _AuthorizedExecutions(executions.root), TenantAuthorizationPolicy("tenant"), reader,
     )
-    history = RuntimeHistory(service, tenant_id="tenant")
+    history = History(service, tenant_id="tenant")
     owner = Principal("caller", "tenant", "service")
     boundary = await history.capture_model_interaction_cutoffs("root", principal=owner)
     assert boundary.cutoffs == (UsageReadCutoff("root", 1, 2),)
@@ -291,20 +294,17 @@ async def test_model_metadata_live_and_archived_backend_contract(backend: str, t
         await release.wait()
         return ModelResponse(parts=[TextPart("private response")])
 
-    def storage() -> RuntimeStorage:
+    def storage() -> PersistenceStorage:
         if backend == "memory":
-            return RuntimeStorage.in_memory()
+            return PersistenceStorage.in_memory()
         if backend == "filesystem":
-            return RuntimeStorage.filesystem(tmp_path / "state")
-        return RuntimeStorage.sqlite(tmp_path / "state.db")
+            return PersistenceStorage.filesystem(tmp_path / "state")
+        return PersistenceStorage.sqlite(tmp_path / "state.db")
 
     group = RuntimeFeatures[None]("metadata")
     group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
-    async with Runtime.open(
-        "metadata-live",
-        storage=storage(), features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as runtime:
+    async with Persistence.open('metadata-live', storage=storage()) as persistence_304, Runtime.attach(persistence=persistence_304, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get("default").start("private prompt")
         principal = runtime.default_principal
         await asyncio.wait_for(entered.wait(), 5)
@@ -341,7 +341,7 @@ async def test_model_metadata_live_and_archived_backend_contract(backend: str, t
             release.set()
             await subscription.close()
     if backend != "memory":
-        async with RuntimeHistory.open("metadata-live", storage=storage()) as history:
+        async with Persistence.open('metadata-live', storage=storage(), tenant_id="default", read_only=True) as history_persistence_343, History.open(persistence=history_persistence_343) as history:
             boundary = await history.capture_model_interaction_cutoffs(execution.execution_id, principal=principal)
             assert not boundary.local_staging_available and boundary.durable_history_available
             assert boundary.durable_cutoffs == final.durable_cutoffs
@@ -358,7 +358,7 @@ async def test_live_request_progress_precedes_scheduled_canonical_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from linktools.ai.core import ExecutionEventType
-    from linktools.ai.runtime.state._step_archive import StateStepArchive
+    from linktools.ai.persistence._step_archive import StateStepArchive
 
     provider_entered = asyncio.Event()
     release_provider = asyncio.Event()
@@ -367,7 +367,7 @@ async def test_live_request_progress_precedes_scheduled_canonical_publication(
     prepare_interactions = StateStepArchive.prepare_interactions
 
     async def block_publication(self, run, interactions, payload, **kwargs):
-        if self.runtime_domain is RuntimeDomain.TRACE and any(
+        if self.runtime_domain is PersistenceDomain.TRACE and any(
             item.request_context is not None for item in interactions
         ):
             publication_started.set()
@@ -383,16 +383,13 @@ async def test_live_request_progress_precedes_scheduled_canonical_publication(
         return ModelResponse(parts=[TextPart("published answer")])
 
     storage_path = tmp_path / "scheduled"
-    storage = RuntimeStorage.filesystem(storage_path)
+    storage = PersistenceStorage.filesystem(storage_path)
     group = RuntimeFeatures("scheduled-history")
-    group.capability(TraceCapability(storage=storage.plan.route(RuntimeDomain.TRACE), commit=CommitPolicy.batch(
+    group.capability(TraceCapability(commit=CommitPolicy.batch(
         buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=0.1,
     )), scope="runtime")
     group.agent("default", model="default", allow_tools=())
-    async with Runtime.open(
-        "scheduled-history",
-        storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as runtime:
+    async with Persistence.open('scheduled-history', storage=storage) as persistence_392, Runtime.attach(persistence=persistence_392, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get("default").start("scheduled prompt")
         principal = runtime.default_principal
         stream = execution.watch()
@@ -419,9 +416,7 @@ async def test_live_request_progress_precedes_scheduled_canonical_publication(
             assert progress.payload["agent_run_seq"] == progress.payload["model_request_seq"] == 1
             assert "scheduled prompt" not in str(progress.payload)
             await asyncio.wait_for(publication_started.wait(), 5)
-            async with RuntimeHistory.open(
-                "scheduled-history", storage=RuntimeStorage.filesystem(storage_path),
-            ) as independent:
+            async with Persistence.open('scheduled-history', storage=PersistenceStorage.filesystem(storage_path), tenant_id="default", read_only=True) as history_persistence_418, History.open(persistence=history_persistence_418) as independent:
                 admitted = await independent.model_interactions(
                     execution.execution_id, principal=principal, include_content=True,
                 )

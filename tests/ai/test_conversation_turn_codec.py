@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Current conversation envelopes and portable snapshots preserve terminal meaning."""
 from ._runtime_test_helpers import model_features
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import json
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -15,15 +17,18 @@ from pydantic_ai.messages import BinaryContent
 from linktools.ai.core import ExecutionStatus, PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import StoredUserInput
-from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
-from linktools.ai.runtime._input import ExecutionInputMaterializer
-from linktools.ai.runtime.state import RuntimeDomain, SnapshotLimits
-from linktools.ai.runtime.state._codec import (
+from linktools.ai.history import History
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.inputs import ExecutionInputMaterializer
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.snapshots import SnapshotLimits
+from linktools.ai.persistence.codec import (
     decode_session_turn_commit, encode_domain, encode_session_turn_commit,
     iter_runtime_object_refs,
 )
-from linktools.ai.runtime.state._contracts import SessionTurnCommit
-from linktools.ai.runtime.state._snapshot_validation import canonical_snapshot_indexes
+from linktools.ai.persistence.contracts import SessionTurnCommit
+from linktools.ai.persistence._snapshot_validation import canonical_snapshot_indexes
 from linktools.ai.storage import InMemoryObjectStore, StoredPayload, read_object
 
 from .test_session_timeline import _session
@@ -81,8 +86,8 @@ def test_current_turn_codec_preserves_forward_compatible_extra_fields() -> None:
 async def test_repository_and_snapshot_reject_same_corrupt_turn_metadata(
     tmp_path: Path, field: str, value: object,
 ) -> None:
-    storage = RuntimeStorage.sqlite(tmp_path / "state.db")
-    storage = RuntimeState(storage)
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db")
+    storage = Persistence(storage)
     await storage.initialize(namespace="turn-codec", tenant_id="tenant")
     try:
         repository = storage.conversation.sessions
@@ -95,7 +100,7 @@ async def test_repository_and_snapshot_reject_same_corrupt_turn_metadata(
         records = (*await repository.state_store.read(lambda tx: tx.scan_records()), row)
         with pytest.raises(AIError) as raised:
             canonical_snapshot_indexes(namespace="turn-codec", tenant_id="tenant",
-                domain=RuntimeDomain.CONVERSATION, records=records, facts=(), operations=())
+                domain=PersistenceDomain.CONVERSATION, records=records, facts=(), operations=())
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await storage.close()
@@ -110,20 +115,20 @@ async def test_snapshot_roundtrips_retained_turn_payloads_after_execution_prune(
     attachment = b"input attachment" * 8192
     _canonical_output(monkeypatch, output)
     storage = _storage(tmp_path, backend)
-    async with Runtime.open(_NAMESPACE, storage=storage, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_113, Runtime.attach(persistence=persistence_113, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         await session.run(("original input", BinaryContent(attachment, media_type="text/plain")), timeout_seconds=5)
         expected = (await session.timeline()).items
     storage = _storage(tmp_path, backend)
-    storage = RuntimeState(storage)
+    storage = Persistence(storage)
     await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
     try:
         await _erase_execution_owners(storage)
     finally:
         await storage.close()
     reader = _storage(tmp_path, backend)
-    reader = RuntimeState(reader)
+    reader = Persistence(reader)
     await reader.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id, read_only=True)
     archive = InMemoryObjectStore("turn-snapshot")
     limits = SnapshotLimits(max_entries=1000, max_bytes=4 * 1024 * 1024)
@@ -132,11 +137,11 @@ async def test_snapshot_roundtrips_retained_turn_payloads_after_execution_prune(
     finally:
         await reader.close()
     root = tmp_path / "restored"
-    await RuntimeState.restore_snapshot(snapshot, object_store=archive, root=root, limits=limits)
-    async with RuntimeHistory.open(_NAMESPACE, storage=RuntimeStorage.from_root(root)) as history:
+    await Persistence.restore_snapshot(snapshot, object_store=archive, root=root, limits=limits)
+    async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_root(root), tenant_id="default", read_only=True) as history_persistence_139, History.open(persistence=history_persistence_139) as history:
         assert (await history.session_timeline("session", principal=principal)).items == expected
-    restored = RuntimeStorage.from_root(root)
-    restored = RuntimeState(restored)
+    restored = PersistenceStorage.from_root(root)
+    restored = Persistence(restored)
     await restored.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
     try:
         commits = await restored.conversation.sessions.list_timeline_commits(
@@ -144,9 +149,9 @@ async def test_snapshot_roundtrips_retained_turn_payloads_after_execution_prune(
         )
         assert len(commits) == 1
         commit = commits[0]
-        refs = tuple(iter_runtime_object_refs(encode_session_turn_commit(commit), default_domain=RuntimeDomain.CONVERSATION))
-        assert len(refs) >= 2 and all(domain is RuntimeDomain.CONVERSATION for domain, _ in refs)
-        objects = restored.object_store(RuntimeDomain.CONVERSATION)
+        refs = tuple(iter_runtime_object_refs(encode_session_turn_commit(commit), default_domain=PersistenceDomain.CONVERSATION))
+        assert len(refs) >= 2 and all(domain is PersistenceDomain.CONVERSATION for domain, _ in refs)
+        objects = restored.object_store(PersistenceDomain.CONVERSATION)
         ref = commit.output.ref
         assert json.loads(await read_object(objects, ref.key, expected_digest=ref.digest, expected_size=ref.size)) == output
         prompt = await ExecutionInputMaterializer(None, PromptLimits(), object_store=objects).restore(commit.stored_user_input)

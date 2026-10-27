@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
+from linktools.ai.task.engine import TaskEngine
 """Authorized execution metadata exposes bound identities without loading content."""
 from ._runtime_test_helpers import model_features
 
@@ -12,10 +15,21 @@ import pytest
 from linktools.ai.agent import AgentBindingContract
 from linktools.ai.capability import CapabilityContribution, SkillDefinition
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import AuthorizationAction, ExecutionLineageKind, ExecutionStatus, Principal, ResourceKind, ResourceRef
+from linktools.ai.core import (
+    AuthorizationAction,
+    ExecutionLineageKind,
+    ExecutionStatus,
+    Principal,
+    ResourceKind,
+    ResourceRef,
+)
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import AgentTaskInput, ExecutionInfo, Runtime, RuntimeHistory, RuntimeStorage, UsageSummary
-from linktools.ai.runtime.state._contracts import ExecutionCandidate, ExecutionCandidatePage
+from linktools.ai.history import ExecutionInfo, History
+from linktools.ai.inputs import AgentTaskInput
+from linktools.ai.runtime import Runtime
+from linktools.ai.execution import UsageSummary
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.contracts import ExecutionCandidate, ExecutionCandidatePage
 from linktools.ai.spec import AgentSpec, CapabilityRef, SkillSpec, capability_ref_payload
 from linktools.ai.task import Task, TaskGraph, TaskNode
 
@@ -69,7 +83,7 @@ class _Service:
 
 def _history(record, *, allowed=True):
     calls = []
-    return RuntimeHistory(
+    return History(
         _Service(calls), tenant_id="tenant", executions=_Repository(record, calls),
         authorization=_Authorization(calls, allowed),
     ), calls
@@ -203,11 +217,10 @@ async def test_graph_agent_refs_preserve_derived_binding_after_catalog_change_an
         return {"prepared": True}
 
     application_task = Task("bound-ref-prepare", prepare, effect_policy="none")
-    async with Runtime.open("bound-refs",
-                            storage=RuntimeStorage.sqlite(path), features=capture) as runtime:
+    async with Persistence.open('bound-refs', storage=PersistenceStorage.sqlite(path)) as persistence_206, Runtime.attach(persistence=persistence_206, features=capture) as runtime, TaskEngine.open(persistence=persistence_206) as engine:
         derived = runtime.agents.get("root").derive(allow_tools=())
-        task = runtime.tasks.from_agent("bound-ref-agent", derived)
-        run = await runtime.tasks.bind(application_task, task).start(
+        task = Task.from_agent("bound-ref-agent", derived)
+        run = await engine.with_definitions(application_task, task).start(
             TaskGraph("bound-ref-graph", (TaskNode("prepare", (), task=application_task.ref),
                 TaskNode("agent", ("prepare",), task=task, input=AgentTaskInput("hello")))),
             idempotency_key="bound-ref-graph",
@@ -226,11 +239,10 @@ async def test_graph_agent_refs_preserve_derived_binding_after_catalog_change_an
 
     changed = RuntimeFeatures("bound-ref-test")
     changed.agent("root", revision=2, allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open("bound-refs",
-                            storage=RuntimeStorage.sqlite(path), features=model_features(RuntimeUsageModels(), changed)) as current:
+    async with Persistence.open('bound-refs', storage=PersistenceStorage.sqlite(path)) as persistence_229, Runtime.attach(persistence=persistence_229, features=model_features(RuntimeUsageModels(), changed)) as current, TaskEngine.open(persistence=persistence_229) as engine:
         assert current.agents.get("root").derive(model="default").compiled.skill_definitions == ()
         assert (await current.history.inspect_execution(execution_id, principal=principal)).capability_refs == info.capability_refs
-    async with RuntimeHistory.open("bound-refs", storage=RuntimeStorage.sqlite(path)) as history:
+    async with Persistence.open('bound-refs', storage=PersistenceStorage.sqlite(path), tenant_id="default", read_only=True) as history_persistence_234, History.open(persistence=history_persistence_234) as history:
         reopened = await history.inspect_execution(execution_id, principal=principal)
         assert reopened.capability_refs == info.capability_refs
         assert (await history.recent_executions(principal=principal))[0].capability_refs == info.capability_refs

@@ -15,14 +15,15 @@ from urllib.parse import urlsplit, urlunsplit
 from linktools.core import environ
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UserError
 from pydantic_ai import exceptions as sdk_errors
-from pydantic_ai.models import Model, ModelMessage, ModelRequestParameters, ModelResponse, ModelSettings, StreamedResponse, RunContext as PydanticRunContext
+from pydantic_ai.models import Model, ModelMessage, ModelRequestContext, ModelRequestParameters, ModelResponse, ModelSettings, StreamedResponse, RunContext as PydanticRunContext
 from pydantic_ai.models.wrapper import WrapperModel
+from pydantic_ai.usage import RequestUsage
 
 from ..core import ImmutableJsonMapping, JsonValue
 from ..errors import AIError, ErrorCode
 from ._contract import ModelBinding
 from ._errors import _is_context_window_error, _is_quota_error
-from ._input import expand_input_types, validate_model_inputs
+from ._input import expand_input_types, validate_model_inputs, validate_provider_inputs
 from ._stream import _RetryingStreamedResponse
 from ._client_request import ModelClientRequestRecorder
 
@@ -38,12 +39,10 @@ class _ProviderModelBinding:
     model: str
     base_url: "str | None" = None
     api_key: "str | None" = field(default=None, repr=False, compare=False)
-    timeout: "int | float | None" = None
     max_retries: int = 2
     retry_delay: "int | float" = 1.0
     retry_max_delay: "int | float" = 60.0
     retry_backoff_factor: "int | float" = 2.0
-    max_tokens: "int | None" = None
 
     context_window: int | None = None
     model_settings: Mapping[str, JsonValue] = field(default_factory=dict, repr=False)
@@ -54,17 +53,9 @@ class _ProviderModelBinding:
         _validate_positive_integer("context_window", self.context_window)
         if not isinstance(self.model_settings, Mapping):
             raise TypeError("model_settings must be a JSON mapping")
-        settings: dict[str, JsonValue] = {}
-        if self.max_tokens is not None:
-            settings["max_tokens"] = self.max_tokens
-        if self.timeout is not None:
-            settings["timeout"] = self.timeout
-        settings.update(self.model_settings)
-        object.__setattr__(self, "model_settings", ImmutableJsonMapping(settings))
-        object.__setattr__(self, "max_tokens", settings.get("max_tokens"))
-        object.__setattr__(self, "timeout", settings.get("timeout"))
-        if settings.get("max_retries") is not None:
-            _validate_non_negative_integer("model_settings.max_retries", settings["max_retries"])
+        settings = ImmutableJsonMapping(self.model_settings)
+        object.__setattr__(self, "model_settings", settings)
+        _validate_sdk_retry_settings(settings)
         _validate_positive_number("model_settings.request_timeout", settings.get("request_timeout"))
         model = self.model.strip().removeprefix(f"{self.provider}:")
         if not model:
@@ -74,12 +65,12 @@ class _ProviderModelBinding:
         object.__setattr__(self, "base_url", _normalize_base_url(self.base_url))
         if self.api_key is not None and not self.api_key.strip():
             object.__setattr__(self, "api_key", None)
-        _validate_positive_number("timeout", self.timeout)
+        _validate_positive_number("model_settings.timeout", settings.get("timeout"))
         _validate_non_negative_integer("max_retries", self.max_retries)
         _validate_non_negative_number("retry_delay", self.retry_delay)
         _validate_finite_number_at_least("retry_max_delay", self.retry_max_delay, 0)
         _validate_finite_number_at_least("retry_backoff_factor", self.retry_backoff_factor, 1)
-        _validate_positive_integer("max_tokens", self.max_tokens)
+        _validate_positive_integer("model_settings.max_tokens", settings.get("max_tokens"))
 
     @property
     def provider(self) -> str:
@@ -141,6 +132,37 @@ class _ProviderModelBinding:
         raise NotImplementedError
 
     @classmethod
+    def validate_request_owners(
+        cls,
+        settings: ModelSettings | None,
+        *,
+        wire_fields: Mapping[str, str | tuple[str, ...]],
+        request_fields: Collection[str],
+    ) -> None:
+        """Reject competing owners without interpreting or rewriting extension values."""
+        _validate_sdk_retry_settings(settings)
+        if not settings or not isinstance(extra_body := settings.get("extra_body"), Mapping):
+            return
+        for wire_field in request_fields:
+            if wire_field in extra_body:
+                raise AIError(
+                    ErrorCode.MODEL_CONFIG_INVALID,
+                    f"extra_body.{wire_field} is owned by the model request",
+                    retryable=False, safe_details={"field": wire_field, "owner": "model_request"},
+                )
+        for setting, fields in wire_fields.items():
+            if setting not in settings:
+                continue
+            for wire_field in (fields,) if isinstance(fields, str) else fields:
+                if wire_field in extra_body:
+                    raise AIError(
+                        ErrorCode.MODEL_CONFIG_INVALID,
+                        f"{setting} and extra_body.{wire_field} configure the same request object; "
+                        "use the model setting or the complete extra_body object, not both",
+                        retryable=False, safe_details={"field": wire_field, "owner": setting},
+                    )
+
+    @classmethod
     def prepare_output_tool_settings(
         cls,
         settings: ModelSettings | None,
@@ -160,6 +182,18 @@ class _ProviderModelBinding:
         ):
             return settings
         return {**(settings or {}), "parallel_tool_calls": False}
+
+def _validate_sdk_retry_settings(settings: Mapping[str, object] | None) -> None:
+    if settings is not None and "max_retries" in settings:
+        value = settings["max_retries"]
+        if type(value) is not int or value != 0:
+            raise AIError(
+                ErrorCode.MODEL_CONFIG_INVALID,
+                "model_settings.max_retries must be 0 or omitted; "
+                "configure transport retries with create_model(max_retries=...)",
+                retryable=False, safe_details={"field": "max_retries", "owner": "model_binding"},
+            )
+
 
 def _validate_positive_number(name: str, value: "int | float | None") -> None:
     if value is None:
@@ -235,10 +269,32 @@ class _RetryingModel(WrapperModel):
         self._retry_backoff_factor = retry_backoff_factor
         self._input_binding = input_binding
 
+    def validate_inputs(self, value: object) -> None:
+        """Validate against the immutable contract that built this provider."""
+        if self._input_binding is None:
+            raise AIError(ErrorCode.MODEL_CONFIG_INVALID, retryable=False,
+                          safe_details={"reason": "model_input_contract_unknown"})
+        validate_model_inputs(self._input_binding, value)
+
+    async def count_tokens(
+        self, messages: list[ModelMessage], model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+    ) -> RequestUsage:
+        if self._input_binding is not None:
+            validate_provider_inputs(self._input_binding, messages)
+        return await self.wrapped.count_tokens(messages, model_settings, model_request_parameters)
+
+    async def compact_messages(
+        self, request_context: ModelRequestContext, *, instructions: str | None = None,
+    ) -> ModelResponse:
+        if self._input_binding is not None:
+            validate_provider_inputs(self._input_binding, request_context.messages)
+        return await self.wrapped.compact_messages(request_context, instructions=instructions)
+
     def _request_retries(self, settings: ModelSettings | None) -> int:
-        # A per-request SDK retry override owns retries; never multiply it by this loop.
-        sdk_retries = (settings or {}).get("max_retries", (self.settings or {}).get("max_retries"))
-        return 0 if sdk_retries is not None else self._max_retries
+        _validate_sdk_retry_settings(self.settings)
+        _validate_sdk_retry_settings(settings)
+        return self._max_retries
 
     async def _wait_for_retry(
         self, error: ModelAPIError, backoff: float,
@@ -269,7 +325,7 @@ class _RetryingModel(WrapperModel):
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
         if self._input_binding is not None:
-            validate_model_inputs(self._input_binding, messages)
+            validate_provider_inputs(self._input_binding, messages)
         attempt = 0
         max_retries = self._request_retries(model_settings)
         backoff = self._retry_delay
@@ -300,7 +356,7 @@ class _RetryingModel(WrapperModel):
         run_context: "PydanticRunContext[object] | None" = None,
     ) -> AsyncGenerator[StreamedResponse, None]:
         if self._input_binding is not None:
-            validate_model_inputs(self._input_binding, messages)
+            validate_provider_inputs(self._input_binding, messages)
         response = _RetryingStreamedResponse(
             self.wrapped, messages, model_settings, model_request_parameters, run_context,
             max_retries=self._request_retries(model_settings), initial_backoff=self._retry_delay,

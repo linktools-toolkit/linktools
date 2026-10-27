@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Unfinished model bodies stay local until a controlled completion boundary."""
 from ._runtime_test_helpers import model_features
 
@@ -14,18 +16,24 @@ from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from pydantic_ai.models.test import TestModel
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.runtime import Runtime, RuntimeHistory
+from linktools.ai.history import History
+from linktools.ai.runtime import Runtime
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime._journal import ModelRequestJournal
-from linktools.ai.runtime._model_interaction import StagedContextInline, StagedContextProjection, StagedContextSpan, StagedModelInteraction
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._archive import PreparedArchive
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord
-from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
+from linktools.ai.observe.journal import ModelRequestJournal
+from linktools.ai.persistence._model_interaction import (
+    StagedContextInline,
+    StagedContextProjection,
+    StagedContextSpan,
+    StagedModelInteraction,
+)
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._archive import PreparedArchive
+from linktools.ai.persistence._step_contracts import AgentRunRecord
+from linktools.ai.persistence._step_archive import StagingAgentRunStore
 from linktools.ai.capability import TraceCapability
 
 from ._runtime_test_helpers import _wait_for_committed
@@ -35,7 +43,7 @@ from .test_live_history_readback_integration import _Models
 
 @pytest.mark.asyncio
 async def test_running_public_metadata_does_not_read_prepared_request_payloads(tmp_path: Path) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="metadata-only", tenant_id="tenant")
     try:
         prepared = StagedModelInteraction(
@@ -48,7 +56,7 @@ async def test_running_public_metadata_does_not_read_prepared_request_payloads(t
         def read_payload(digest: str) -> bytes:
             raise AssertionError(f"running observation read a prepared body: {digest}")
 
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         values = await archive.prepare_interactions(
             AgentRunRecord("run"), (prepared,), read_payload, prepared=PreparedArchive(),
         )
@@ -128,10 +136,7 @@ async def test_partial_response_is_published_only_at_request_or_shutdown_complet
     execution_id = None
     principal = None
     try:
-        async with Runtime.open(
-            "completed-call-persistence",
-            storage=state, features=model_features(_Models(FunctionModel(stream_function=stream)), group),
-        ) as runtime:
+        async with Persistence.open('completed-call-persistence', storage=state) as persistence_131, Runtime.attach(persistence=persistence_131, features=model_features(_Models(FunctionModel(stream_function=stream)), group)) as runtime:
             execution = await runtime.agents.get("default").start("Respond slowly")
             execution_id = execution.execution_id
             principal = runtime.default_principal
@@ -145,9 +150,7 @@ async def test_partial_response_is_published_only_at_request_or_shutdown_complet
             assert not any(item.item_kind == "assistant" for item in (
                 await execution.history(include_content=True)
             ).items)
-            async with RuntimeHistory.open(
-                "completed-call-persistence", storage=_storage(backend, tmp_path),
-            ) as reader:
+            async with Persistence.open('completed-call-persistence', storage=_storage(backend, tmp_path), tenant_id="default", read_only=True) as history_persistence_148, History.open(persistence=history_persistence_148) as reader:
                 observed = await reader.model_interactions(
                     execution_id, principal=principal, include_content=True,
                 )
@@ -172,9 +175,7 @@ async def test_partial_response_is_published_only_at_request_or_shutdown_complet
         release.set()
 
     assert execution_id is not None and principal is not None
-    async with RuntimeHistory.open(
-        "completed-call-persistence", storage=_storage(backend, tmp_path),
-    ) as reader:
+    async with Persistence.open('completed-call-persistence', storage=_storage(backend, tmp_path), tenant_id="default", read_only=True) as history_persistence_175, History.open(persistence=history_persistence_175) as reader:
         interactions = (await reader.model_interactions(
             execution_id, principal=principal, include_content=True,
         )).items
@@ -234,10 +235,7 @@ async def test_interrupted_tool_arguments_remain_raw_without_tool_execution(
     group.tool(work, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("work",))
     try:
-        async with Runtime.open(
-            "partial-tool-arguments",
-            storage=_storage(backend, tmp_path), features=model_features(_Models(FunctionModel(stream_function=stream)), group),
-        ) as runtime:
+        async with Persistence.open('partial-tool-arguments', storage=_storage(backend, tmp_path)) as persistence_237, Runtime.attach(persistence=persistence_237, features=model_features(_Models(FunctionModel(stream_function=stream)), group)) as runtime:
             execution = await runtime.agents.get("default").start("Call work")
             execution_id = execution.execution_id
             principal = runtime.default_principal
@@ -261,9 +259,7 @@ async def test_interrupted_tool_arguments_remain_raw_without_tool_execution(
     finally:
         release.set()
     assert not executed
-    async with RuntimeHistory.open(
-        "partial-tool-arguments", storage=_storage(backend, tmp_path),
-    ) as reader:
+    async with Persistence.open('partial-tool-arguments', storage=_storage(backend, tmp_path), tenant_id="default", read_only=True) as history_persistence_261, History.open(persistence=history_persistence_261) as reader:
         interactions = (await reader.model_interactions(
             execution_id, principal=principal, include_content=True,
         )).items

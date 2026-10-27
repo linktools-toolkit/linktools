@@ -13,8 +13,8 @@ from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._run_hooks import AgentRunCapture
 from linktools.ai.runtime._conversation_service import ConversationService
 from linktools.ai.runtime._persistence_services import CheckpointService, TraceService
-from linktools.ai.runtime._journal import DURATION_NS_METADATA_KEY
-from linktools.ai.runtime.state._steps import StagingAgentRunStore
+from linktools.ai.observe.journal import DURATION_NS_METADATA_KEY
+from linktools.ai.persistence.runs import StagingAgentRunStore
 
 
 @pytest.mark.asyncio

@@ -12,10 +12,10 @@ from pydantic_ai.messages import ModelMessage
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
 from ..errors import AIError, ErrorCode
-from ._message import encode_model_messages, freeze_model_messages, project_transient_binary_content
-from .state._contracts import LoadedModelContext, TranscriptMessageRef
-from .state._plan import RuntimeDomain
-from .state._step_contracts import AgentRunCheckpoint, CheckpointState
+from ..model.messages import encode_model_messages, freeze_model_messages, project_transient_binary_content
+from ..persistence.contracts import LoadedModelContext, TranscriptMessageRef
+from ..persistence import PersistenceDomain
+from ..persistence.runs import AgentRunCheckpoint, CheckpointState
 
 if TYPE_CHECKING:
     from ._agent_run_recorder import AgentRunRecorder
@@ -101,11 +101,11 @@ class RunContextProjection:
             baseline_refs = tuple(
                 value.source.message_index
                 if value.source is not None
-                and value.source.source_domain is RuntimeDomain.CHECKPOINT
+                and value.source.source_domain is PersistenceDomain.CHECKPOINT
                 and value.source.owner_id == agent_run_id
                 else value.source
                 if value.source is not None
-                and value.source.source_domain is RuntimeDomain.CONVERSATION
+                and value.source.source_domain is PersistenceDomain.CONVERSATION
                 else None
                 for value in baseline.messages
             )

@@ -7,8 +7,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
+from copy import copy
 from dataclasses import dataclass, replace
-from types import MappingProxyType
 from typing import Any, Literal, Protocol, TYPE_CHECKING
 
 from pydantic_ai.exceptions import (
@@ -28,6 +28,7 @@ from ..capability import (
     is_tool_effect_policy,
     ToolCallFailed,
     ToolCallRetry,
+    ToolResultsCapability,
     tool_class_from_metadata,
     tool_effect_policy_from_metadata,
     tool_path_fields_from_metadata,
@@ -35,10 +36,10 @@ from ..capability import (
 from ..core import canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..observe import Observation
-from ..workspace import SandboxSession, ToolPermissionPolicy
+from ..workspace import SupportsFileTools, ToolPermissionPolicy
 from ._handoff import ToolEntryStopped, execution_handoff_scope
 from ._budget import RunBudgetContext
-from ._attachment import bind_tool_return_attachments
+from ..model.messages import bind_tool_return_attachments
 from ._tool import TOOL_OPERATION_LEASE_SECONDS, ToolOperationBridge
 from ._tool_metrics import (
     TOOL_METRICS_MANAGED_METADATA_KEY,
@@ -47,7 +48,7 @@ from ._tool_metrics import (
 
 
 if TYPE_CHECKING:
-    from ._run_callbacks import RunCallbacks
+    from ..capability import RunCallbacks
 
 
 class RepositoryInstructionBoundary(Protocol):
@@ -122,7 +123,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         id: str,
         descriptor: ManagedToolDescriptor | None = None,
         permission_policy: ToolPermissionPolicy | None = None,
-        sandbox_session: SandboxSession | None = None,
+        workspace_backend: SupportsFileTools | None = None,
         tool_operations: ToolOperationBridge | None = None,
         tool_metrics: ToolMetricContext | None = None,
         budget: RunBudgetContext | None = None,
@@ -136,7 +137,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         self._descriptor = descriptor
         self._id = id
         self._permission_policy = permission_policy
-        self._sandbox_session = sandbox_session
+        self._workspace_backend = workspace_backend
         self._tool_operations = tool_operations
         self._tool_metrics = tool_metrics
         self._budget = budget
@@ -154,6 +155,19 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
     @property
     def id(self) -> str:
         return self._id
+
+    async def for_run(self, ctx: PydanticRunContext[AgentContext[object]]) -> "BoundaryToolset":
+        bound = copy(self)
+        bound._toolsets = tuple([await toolset.for_run(ctx) for toolset in self._toolsets])
+        bound._descriptors = dict(self._descriptors)
+        bound._raw_tools = {}
+        bound._exit_stack = None
+        return bound
+
+    async def for_run_step(self, ctx: PydanticRunContext[AgentContext[object]]) -> "BoundaryToolset":
+        self._toolsets = tuple([await toolset.for_run_step(ctx) for toolset in self._toolsets])
+        self._raw_tools.clear()
+        return self
 
     async def __aenter__(self) -> "BoundaryToolset":
         async with AsyncExitStack() as stack:
@@ -321,18 +335,9 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                     # Give projections the existing file occurrence to preserve;
                     # equal bytes alone do not identify a particular occurrence.
                     result = bind_tool_return_attachments(name, call_id, result)
-                try:
-                    # Preserve validated Python values; projection is not another
-                    # argument codec or authorization boundary.
-                    arguments = MappingProxyType(dict(args))
-                    for capability in processors:
-                        result = await capability.process_tool_result(
-                            ctx.deps, tool.tool_def, arguments, result,
-                        )
-                except Exception as error:
-                    # The tool already returned; projection signals cannot
-                    # establish that an external effect is safe to repeat.
-                    raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+                result = await ToolResultsCapability.process_results(
+                    processors, ctx.deps, tool.tool_def, args, result,
+                )
             return result
 
         if descriptor.effect_owner == "none":
@@ -579,7 +584,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
     ) -> dict[str, Any]:
         if not path_fields:
             return dict(args)
-        session = self._sandbox_session
+        session = self._workspace_backend
         if session is None:
             raise AIError(ErrorCode.SANDBOX_SESSION_CLOSED)
         result = dict(args)

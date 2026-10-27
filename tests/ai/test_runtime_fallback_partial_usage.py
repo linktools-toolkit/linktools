@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """A failed continuation adds attempt usage without rebilling its partial response."""
 
 from collections.abc import AsyncIterator
@@ -24,7 +26,8 @@ from linktools.ai.capability import AgentContext, TraceCapability
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError
 from linktools.ai.model import FallbackBinding
-from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
 from linktools.ai.spec import AgentUsageLimits
 
@@ -156,9 +159,7 @@ async def test_partial_response_and_exhausted_attempts_are_counted_once_and_chec
             group.capability(_CostLimitCapability(), id="partial-cost-limit", scope="runtime")
         return group
 
-    async with Runtime.open(
-        "partial-fallback", features=features(), storage=RuntimeStorage.filesystem(tmp_path),
-    ) as runtime:
+    async with Persistence.open('partial-fallback', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_159, Runtime.attach(persistence=persistence_159, features=features()) as runtime:
         execution = await runtime.agents.get().start("respond")
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is ExecutionStatus.FAILED
@@ -185,9 +186,7 @@ async def test_partial_response_and_exhausted_attempts_are_counted_once_and_chec
         assert interactions[0].usage.model_requests == 1
         execution_id, principal = execution.execution_id, runtime.default_principal
 
-    async with Runtime.open(
-        "partial-fallback", features=features(), storage=RuntimeStorage.filesystem(tmp_path),
-    ) as runtime:
+    async with Persistence.open('partial-fallback', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_188, Runtime.attach(persistence=persistence_188, features=features()) as runtime:
         restored = await runtime.executions.result(execution_id, principal=principal)
         assert restored.usage == result.usage
         assert restored.error_code == result.error_code

@@ -7,22 +7,22 @@ import hashlib
 import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
-from linktools.ai.runtime._context_archive import ExecutionContextArchive
-from linktools.ai.runtime._execution_context import ExecutionInputContext
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeState
-from linktools.ai.runtime.state._archive import ArchiveRoot
+from linktools.ai.inputs import ExecutionContextArchive
+from linktools.ai.execution import ExecutionInputContext
+from linktools.ai.persistence import PersistenceDomain, Persistence
+from linktools.ai.persistence._archive import ArchiveRoot
 from .test_incremental_projection_boundaries import _storage
 
 pytestmark = pytest.mark.asyncio
 
 
 async def test_accepted_context_reuses_verified_same_group_history_without_prefix_io(tmp_path, monkeypatch):
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="context-root", tenant_id="tenant")
     try:
         service = ExecutionContextArchive(
             state.execution.executions.state_store,
-            state.archive_object_store(RuntimeDomain.EXECUTION),
+            state.archive_object_store(PersistenceDomain.EXECUTION),
             namespace="context-root", tenant_id="tenant",
         )
         context = ExecutionInputContext.from_messages(tuple(
@@ -60,11 +60,11 @@ async def test_accepted_context_reuses_verified_same_group_history_without_prefi
 async def test_context_archive_handle_is_bound_and_failed_open_is_retryable(tmp_path, monkeypatch, backend):
     from linktools.ai.errors import AIError
 
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="context-root", tenant_id="tenant")
     store = state.execution.executions.state_store
     group = store.storage_group
-    objects = state.archive_object_store(RuntimeDomain.EXECUTION)
+    objects = state.archive_object_store(PersistenceDomain.EXECUTION)
     service = ExecutionContextArchive(store, objects, namespace="context-root", tenant_id="tenant")
     calls = []
     original = group.open_archive

@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 """Completion during a scheduler read must not delay ready dependents."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 
 import pytest
 
 from linktools.ai.core import Principal, PrincipalKind, TaskStatus, canonical_sha256
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task import (
     LocalTaskGraphLauncher, TaskGraph, TaskGraphAdmission, TaskGraphLaunch,
     TaskGraphLimits, TaskGraphRequest, TaskGraphState, TaskNode, TaskNodeInvocation, TaskNodeView,
@@ -21,8 +21,8 @@ from linktools.ai.task import _local as task_local
 async def test_completed_dependency_during_state_read_starts_consumer_before_idle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="completion-race", tenant_id="tenant")
     release = asyncio.Event()
     consumer_started = asyncio.Event()

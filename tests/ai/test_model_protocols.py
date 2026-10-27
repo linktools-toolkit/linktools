@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Native SDK protocols retain their own request and recovery semantics."""
 
 import json
@@ -7,7 +9,14 @@ from collections.abc import Callable
 
 import httpx2
 import pytest
-from pydantic_ai.messages import BinaryContent, ModelRequest, ThinkingPart, ToolCallPart, ToolReturnPart, UserPromptPart
+from pydantic_ai.messages import (
+    BinaryContent,
+    ModelRequest,
+    ThinkingPart,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.tools import ToolDefinition
 
@@ -15,7 +24,7 @@ from linktools.ai.errors import AIError
 from linktools.ai.agent._model_resolver import _ModelResolver
 from linktools.ai.model import ModelClientRequestRecorder, ModelBinding, create_model, validate_model_input
 from linktools.ai.model import _anthropic, _openai
-from linktools.ai.runtime._message import decode_model_messages, encode_model_messages
+from linktools.ai.model.messages import decode_model_messages, encode_model_messages
 
 
 PROTOCOLS = [('openai', 'openai', 'gpt-4o'),
@@ -40,9 +49,16 @@ def model_binding(monkeypatch: pytest.MonkeyPatch, kind: str, model: str, handle
         return result
 
     monkeypatch.setattr(module, 'DefaultAsyncHttpxClient', client)
-    return create_model(protocol=kind.replace('_', '-'), model=model, api_key='fixture-secret',
-        base_url='https://model.invalid/v1', max_retries=options.pop('max_retries', 0),
-        retry_delay=0, max_tokens=128, **options), clients
+    return create_model(
+        api=kind.replace('_', '-'),
+        model=model,
+        api_key='fixture-secret',
+        base_url='https://model.invalid/v1',
+        max_retries=options.pop('max_retries', 0),
+        retry_delay=0,
+        model_settings={'max_tokens': 128, **options.pop('model_settings', {})},
+        **options,
+    ), clients
 
 
 def response(api: str, *, tool: bool = False) -> dict:
@@ -116,7 +132,7 @@ async def test_native_tool_turn_survives_durable_restore_and_client_reentry(monk
 @pytest.mark.parametrize('kind,api,model_name', PROTOCOLS)
 async def test_public_registration_matches_model_type_and_restores(kind, api, model_name):
     from linktools.ai.runtime import RuntimeFeatures
-    binding = create_model(protocol=api, model=model_name)
+    binding = create_model(api=api, model=model_name)
     features = RuntimeFeatures()
     features.model("selected", binding)
     sources = (await features.capture()).models
@@ -133,19 +149,19 @@ async def test_public_registration_matches_model_type_and_restores(kind, api, mo
 
 def test_extension_body_is_explicit_frozen_and_contract_owned():
     expected = {'provider': 'openai', 'model_identity': 'openai:same', 'settings': {}, 'input_mime_types': []}
-    assert create_model(protocol="openai", model='same').contract == expected
+    assert create_model(api="openai", model='same').contract == expected
     declaration = {'thinking': {'type': 'enabled', 'budget_tokens': 2048}}
-    binding = create_model(protocol="openai", model='same', model_settings={"extra_body": declaration})
+    binding = create_model(api="openai", model='same', model_settings={"extra_body": declaration})
     declaration['thinking']['budget_tokens'] = 4096
     assert binding.contract['settings']['extra_body']['thinking']['budget_tokens'] == 2048
     exposed = binding.contract
     exposed['settings']['extra_body']['thinking']['budget_tokens'] = 8192
     assert binding.contract['settings']['extra_body']['thinking']['budget_tokens'] == 2048
-    assert create_model(protocol="openai-responses", model='same').contract != expected
+    assert create_model(api="openai-responses", model='same').contract != expected
     assert _ModelResolver({'default': binding}).resolve('default') is binding
     for invalid in ({'value': object()}, {'value': float('nan')}):
         with pytest.raises((TypeError, ValueError)):
-            create_model(protocol="openai", model='same', model_settings={"extra_body": invalid})
+            create_model(api="openai", model='same', model_settings={"extra_body": invalid})
 
 
 @pytest.mark.parametrize('kind,accepted,rejected', [
@@ -154,13 +170,13 @@ def test_extension_body_is_explicit_frozen_and_contract_owned():
     ('anthropic', 'text/plain', 'audio/wav'),
 ])
 def test_native_protocol_input_encoding_is_distinct(monkeypatch, kind, accepted, rejected):
-    binding = create_model(protocol=kind.replace('_', '-'), model='unknown', input_types=['audio', 'video', 'document'])
+    binding = create_model(api=kind.replace('_', '-'), model='unknown', input_types=['audio', 'video', 'document'])
     validate_model_input(binding, accepted)
     with pytest.raises(AIError):
         validate_model_input(binding, rejected)
     monkeypatch.setattr(_openai.OpenAIProvider, "model_profile", staticmethod(
         lambda model: {"openai_chat_supports_document_input": False}))
-    chat = create_model(protocol="openai", model='unknown', input_types=['document'])
+    chat = create_model(api="openai", model='unknown', input_types=['document'])
     with pytest.raises(AIError):
         validate_model_input(chat, 'application/pdf')
 
@@ -313,7 +329,7 @@ async def test_native_cancelled_stream_preserves_partial_observation(monkeypatch
 
 
 def test_model_declaration_inspection_does_not_open_connections(monkeypatch):
-    binding = create_model(protocol="openai", model="gpt-5", api_key="secret", model_settings={"extra_body": {"custom": True}})
+    binding = create_model(api="openai", model="gpt-5", api_key="secret", model_settings={"extra_body": {"custom": True}})
     monkeypatch.setattr(_openai, "DefaultAsyncHttpxClient", lambda **kwargs: pytest.fail("declaration read created client"))
     resolver = _ModelResolver({"default": binding, "alias": binding})
     assert resolver.resolve("alias").contract == binding.contract
@@ -323,7 +339,8 @@ def test_model_declaration_inspection_does_not_open_connections(monkeypatch):
 @pytest.mark.parametrize("factory,api,name", PROTOCOLS)
 async def test_runtime_web_session_and_durable_model_content(monkeypatch, tmp_path, factory, api, name):
     from linktools.ai.capability import TraceCapability, ExecutionCapability
-    from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeFeatures
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+    from linktools.ai.persistence import PersistenceStorage
     from linktools.ai.web import create_app
     from .test_web_console_viewers import _client
     from .test_model_client_response_capture import _Stream
@@ -337,8 +354,8 @@ async def test_runtime_web_session_and_durable_model_content(monkeypatch, tmp_pa
     features.agent("old", model="default", allow_tools=())
     features.capability(TraceCapability(), scope="runtime")
     features.capability(ExecutionCapability(), scope="runtime")
-    storage = RuntimeStorage.filesystem(tmp_path / "state")
-    async with Runtime.open("default", features=features, storage=storage) as runtime:
+    storage = PersistenceStorage.filesystem(tmp_path / "state")
+    async with Persistence.open('default', storage=storage) as persistence_341, Runtime.attach(persistence=persistence_341, features=features) as runtime:
         session = await runtime.agents.get("old").create_session("session")
         async with _client(create_app(runtime=runtime)) as http:
             meta = await http.get("/api/session", params={"session_id":"session","include_timeline":"false"})
@@ -359,7 +376,7 @@ async def test_runtime_web_session_and_durable_model_content(monkeypatch, tmp_pa
     replacement.agent("replacement", model="default", allow_tools=())
     replacement.capability(TraceCapability(), scope="runtime")
     replacement.capability(ExecutionCapability(), scope="runtime")
-    async with Runtime.open("default", features=replacement, storage=storage) as runtime:
+    async with Persistence.open('default', storage=storage) as persistence_362, Runtime.attach(persistence=persistence_362, features=replacement) as runtime:
         async with _client(create_app(runtime=runtime)) as http:
             meta = await http.get("/api/session", params={"session_id":"session","include_timeline":"false"})
             assert meta.status_code == 200, meta.text
@@ -376,19 +393,19 @@ def test_generic_factory_forwards_all_options(monkeypatch, kind, api, model_name
         received.update(kwargs)
         return sentinel
     monkeypatch.setattr(module, name, construct)
-    options = dict(model=model_name, input_types=("image",), model_settings={"extra_body": {"custom": True}},
-                   base_url="https://model.invalid/v1", api_key="fixture-secret", timeout=9,
-                   max_retries=3, retry_delay=0.2, retry_max_delay=120, retry_backoff_factor=4, max_tokens=99, context_window=131072)
-    assert create_model(protocol=api, **options) is sentinel
+    options = dict(model=model_name, input_types=("image",), model_settings={"extra_body": {"custom": True}, "timeout": 9, "max_tokens": 99},
+                   base_url="https://model.invalid/v1", api_key="fixture-secret",
+                   max_retries=3, retry_delay=0.2, retry_max_delay=120, retry_backoff_factor=4, context_window=131072)
+    assert create_model(api=api, **options) is sentinel
     assert received == options
 
 
-@pytest.mark.parametrize('protocol', ['', 'openai-chat', 'anthropic-messages', 'unknown-secret', None, {}])
-def test_generic_factory_rejects_invalid_protocol_without_echoing_values(protocol):
+@pytest.mark.parametrize('api', ['', 'openai-chat', 'anthropic-messages', 'unknown-secret', None, {}])
+def test_generic_factory_rejects_invalid_api_without_echoing_values(api):
     from linktools.ai.errors import ErrorCode
     with pytest.raises(AIError) as caught:
-        create_model(protocol=protocol, model='fixture-model', api_key='fixture-secret')
+        create_model(api=api, model='fixture-model', api_key='fixture-secret')
     assert caught.value.code == ErrorCode.MODEL_CONFIG_INVALID
-    assert caught.value.safe_details == {"reason": "unsupported_model_protocol"}
+    assert caught.value.safe_details == {"reason": "unsupported_model_api"}
     assert 'fixture-secret' not in str(caught.value)
     assert 'unknown-secret' not in str(caught.value)

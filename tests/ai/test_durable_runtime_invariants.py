@@ -3,7 +3,7 @@
 """Focused regressions for durable composition and close ownership."""
 from linktools.ai.model import create_model
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -25,24 +25,24 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._factory import _RuntimeCloseCoordinator
 from linktools.ai.runtime._execution import (
     _ExecutionRuntimeBridge,
 )
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._pending_turn import _PendingExecutionTurns
-from linktools.ai.runtime._event import LiveExecutionEventBroker
-from linktools.ai.runtime.state._durability import (
+from linktools.ai.execution.events import LiveExecutionEventBroker
+from linktools.ai.persistence.durability import (
     CommitObservation,
     DurableCommitState,
     run_durable_commit,
 )
-from linktools.ai.runtime.state._materializer import _RuntimeObjectRouter
-from linktools.ai.runtime.state._plan import RuntimeDomain
-from linktools.ai.runtime.state._step_archive import InMemoryStepArchive, StagingAgentRunStore
-from linktools.ai.runtime.state._retention import RuntimeRetentionController
-from linktools.ai.runtime.state._steps import RuntimeAgentRunStore
+from linktools.ai.persistence._materializer import _RuntimeObjectRouter
+from linktools.ai.persistence._plan import PersistenceDomain
+from linktools.ai.persistence._step_archive import InMemoryStepArchive, StagingAgentRunStore
+from linktools.ai.persistence._retention import RuntimeRetentionController
+from linktools.ai.persistence.runs import RuntimeAgentRunStore
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore, StoredPayload
 from linktools.ai.task import (
@@ -81,7 +81,7 @@ def _compiler(
     candidates: tuple[CapabilityContribution[object], ...] = (),
 ) -> AgentCompiler:
     return AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=candidates,
         agents={"durable-contract": _spec()},
     )
@@ -249,7 +249,7 @@ async def test_durable_commit_cancellation_accepts_committed_readback() -> None:
 def _run_store_for_preflight() -> RuntimeAgentRunStore:
     return RuntimeAgentRunStore(
         StagingAgentRunStore(),
-        conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
+        conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
         execution_archive=None,
         recovery_archive=None,
     )
@@ -291,7 +291,7 @@ async def test_runtime_object_preflight_rejects_pending_filesystem_work(
 ) -> None:
     store = FilesystemObjectStore(tmp_path / "objects")
     router = _RuntimeObjectRouter(
-        {RuntimeDomain.EXECUTION: store},
+        {PersistenceDomain.EXECUTION: store},
         close_guard_stores=(store,),
     )
     release = asyncio.Event()
@@ -311,7 +311,7 @@ async def test_runtime_object_preflight_ignores_external_filesystem_work(
 ) -> None:
     store = FilesystemObjectStore(tmp_path / "objects")
     router = _RuntimeObjectRouter(
-        {RuntimeDomain.EXECUTION: store},
+        {PersistenceDomain.EXECUTION: store},
         close_guard_stores=(),
     )
     release = asyncio.Event()
@@ -325,7 +325,7 @@ async def test_runtime_object_preflight_ignores_external_filesystem_work(
 
 
 @pytest.mark.asyncio
-async def test_execution_retention_releases_staging_after_execution_lookup() -> None:
+async def test_execution_retention_releases_objects_after_execution_lookup() -> None:
     calls: list[str] = []
 
     async def close_retention(execution_id: str, *, tenant_id: str) -> bool:
@@ -336,12 +336,8 @@ async def test_execution_retention_releases_staging_after_execution_lookup() -> 
         calls.append(f"execution:{execution_id}:{tenant_id}")
         return SimpleNamespace(session_id=None, agent_run_seq=0, retention_closed=True)
 
-    async def release_staging_many(
-        *,
-        candidate_agent_run_ids: tuple[str, ...],
-        execution_id: str,
-    ) -> None:
-        calls.append(f"staging:{execution_id}:{candidate_agent_run_ids}")
+    async def release_object_scope(domain, *, owner_scope: str) -> None:
+        calls.append(f"objects:{owner_scope}")
 
     controller = object.__new__(RuntimeRetentionController)
     controller._execution = SimpleNamespace(
@@ -352,11 +348,8 @@ async def test_execution_retention_releases_staging_after_execution_lookup() -> 
     )
     controller._conversation = SimpleNamespace()
     controller._namespace = "runtime"
-    controller._run_store = SimpleNamespace(
-        release_staging_many=release_staging_many
-    )
-    controller._objects = SimpleNamespace()
-    controller._transient_domains = frozenset()
+    controller._objects = SimpleNamespace(release_object_scope=release_object_scope)
+    controller._transient_domains = frozenset({PersistenceDomain.TRACE})
 
     await controller.release_execution_handoff("execution", tenant_id="tenant")
 
@@ -364,7 +357,7 @@ async def test_execution_retention_releases_staging_after_execution_lookup() -> 
         "execution:execution:tenant",
         "retention:execution:tenant",
         "execution:execution:tenant",
-        "staging:execution:()",
+        "objects:execution:execution",
     ]
 
 
@@ -373,7 +366,7 @@ async def test_runtime_object_preflight_rejects_pending_sql_work(tmp_path) -> No
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'objects.db'}")
     store = SqlObjectStore(engine)
     router = _RuntimeObjectRouter(
-        {RuntimeDomain.EXECUTION: store},
+        {PersistenceDomain.EXECUTION: store},
         close_guard_stores=(store,),
     )
     release = asyncio.Event()
@@ -525,8 +518,8 @@ async def test_execution_wait_rechecks_after_local_worker_quiescence(after_wait:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             await super().authorize(principal, action, resource)
 
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="result-read", tenant_id="tenant")
     record = await _seed_result(state)
     authorization = Authorization()

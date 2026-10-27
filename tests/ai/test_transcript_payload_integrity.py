@@ -9,8 +9,8 @@ from collections.abc import AsyncIterator
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._history import TranscriptRepository
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._history import TranscriptRepository
 from linktools.ai.storage import ObjectRef, StoredPayload
 
 
@@ -76,7 +76,7 @@ def _reader(stream: _Stream) -> TranscriptRepository:
         object_store=_Store(stream),  # type: ignore[arg-type]
         namespace="history",
         tenant_id="tenant",
-        runtime_domain=RuntimeDomain.TRACE,
+        runtime_domain=PersistenceDomain.TRACE,
     )
 
 

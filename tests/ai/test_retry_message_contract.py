@@ -15,8 +15,8 @@ except ImportError:
 
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._message import decode_model_messages, encode_model_messages, freeze_model_messages
-from linktools.ai.runtime.state._views import project_session_history_message
+from linktools.ai.model.messages import decode_model_messages, encode_model_messages, freeze_model_messages
+from linktools.ai.persistence._views import project_session_history_message
 
 _STAMP = datetime(2026, 10, 23, tzinfo=timezone.utc)
 _RETRY = {"cause": "model_retry", "attempt": 1, "max_retries": 2}

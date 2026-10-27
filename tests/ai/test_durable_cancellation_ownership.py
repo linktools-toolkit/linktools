@@ -7,8 +7,8 @@ import asyncio
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state._durability import CommitObservation, DurableCommitState
-from linktools.ai.runtime.state._steps import (
+from linktools.ai.persistence.durability import CommitObservation, DurableCommitState
+from linktools.ai.persistence.runs import (
     RuntimeAgentRunStore,
     _AgentRunDurabilityFlight,
     _AgentRunDurabilityKind,

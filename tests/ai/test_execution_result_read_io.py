@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Result reads reuse authorized inline metadata without weakening handoff fences."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 import hashlib
 from dataclasses import replace
@@ -14,10 +14,11 @@ from sqlalchemy import event
 
 from linktools.ai.core import ExecutionStatus, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeDomain, RuntimeHistory, RuntimeStorage
+from linktools.ai.history import History
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
 from linktools.ai.runtime._execution import DefaultExecutionService, _ExecutionRuntimeBridge
-from linktools.ai.runtime._event import LiveExecutionEventBroker
-from linktools.ai.runtime.state._execution_repositories import ExecutionRepositoryImpl
+from linktools.ai.execution.events import LiveExecutionEventBroker
+from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
 from linktools.ai.storage import ObjectRef, StoredPayload
 
 from .test_incremental_projection_boundaries import _storage
@@ -29,15 +30,15 @@ _PRINCIPAL = Principal("principal", "tenant", "service")
 
 def _service(state, *, repository=None, authorization=None, objects=None, release=None, history=False):
     if history:
-        return RuntimeHistory(
+        return History(
             SimpleNamespace(), tenant_id="tenant",
             executions=repository or state.execution.executions,
             authorization=authorization or TenantAuthorizationPolicy(),
-            execution_objects=objects or state.object_store(RuntimeDomain.EXECUTION),
+            execution_objects=objects or state.object_store(PersistenceDomain.EXECUTION),
         )
     return DefaultExecutionService(
         replace(state.execution, executions=repository or state.execution.executions),
-        objects or state.object_store(RuntimeDomain.EXECUTION),
+        objects or state.object_store(PersistenceDomain.EXECUTION),
         authorization or TenantAuthorizationPolicy(), sessions=state.conversation.sessions,
         catalog=None, compiler=None, runtime_bridge=_ExecutionRuntimeBridge(),
         live_broker=LiveExecutionEventBroker(), history_reader=None, release_terminal=release,
@@ -62,7 +63,7 @@ async def test_terminal_result_queries_use_one_authorized_result_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, history: bool, method: str,
 ) -> None:
     state = _storage(backend, tmp_path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="result-read", tenant_id="tenant")
     try:
         record = await _seed(state)
@@ -102,8 +103,8 @@ async def test_terminal_result_queries_use_one_authorized_result_record(
     (False, "result"), (False, "result_payload_size"), (False, "wait"), (True, "result"),
 ))
 async def test_result_metadata_is_read_after_awaited_authorization(history: bool, method: str) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="result-read", tenant_id="tenant")
     try:
         record = await _seed(state)
@@ -131,8 +132,8 @@ async def test_result_metadata_is_read_after_awaited_authorization(history: bool
     (False, "result"), (False, "result_payload_size"), (False, "wait"), (True, "result"),
 ))
 async def test_custom_result_repository_remains_authoritative(adapter: str, history: bool, method: str) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="result-read", tenant_id="tenant")
     try:
         record = await _seed(state)
@@ -167,8 +168,8 @@ async def test_custom_result_repository_remains_authoritative(adapter: str, hist
 async def test_result_body_wait_preserves_fresh_handoff_and_consumer_cleanup(
     monkeypatch: pytest.MonkeyPatch, change: str, method: str,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="result-read", tenant_id="tenant")
     entered, release = asyncio.Event(), asyncio.Event()
     body = b'{"answer":"canonical"}'
@@ -219,8 +220,8 @@ async def test_result_body_wait_preserves_fresh_handoff_and_consumer_cleanup(
 async def test_custom_result_wait_preserves_fresh_handoff_and_consumer_cleanup(
     monkeypatch: pytest.MonkeyPatch, change: str, method: str,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="result-read", tenant_id="tenant")
     entered, release = asyncio.Event(), asyncio.Event()
     callbacks = []
@@ -268,8 +269,8 @@ async def test_custom_result_wait_preserves_fresh_handoff_and_consumer_cleanup(
 
 @pytest.mark.parametrize("history,method", ((False, "result"), (False, "wait"), (True, "result")))
 async def test_denied_result_read_does_not_resolve_payload(history: bool, method: str) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="result-read", tenant_id="tenant")
     try:
         await _seed(state)
@@ -294,8 +295,8 @@ async def test_denied_result_read_does_not_resolve_payload(history: bool, method
 async def test_history_result_uses_fresh_terminal_state_after_authorization(
     monkeypatch: pytest.MonkeyPatch, status: ExecutionStatus, missing_result: bool,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="result-read", tenant_id="tenant")
     try:
         record = await _seed(state)

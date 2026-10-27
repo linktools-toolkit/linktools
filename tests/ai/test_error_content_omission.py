@@ -169,7 +169,7 @@ def test_ordinary_diagnostics_keep_original_messages_notes_and_digest_semantics(
 
 
 def test_content_omission_reason_round_trips_without_becoming_required_on_older_records() -> None:
-    from linktools.ai.runtime.state._codec import decode_domain, encode_domain
+    from linktools.ai.persistence.codec import decode_domain, encode_domain
 
     diagnostics = ErrorDiagnostics.from_exception(_raised_error(_BODY), content_omission_reason=_REASON)
     encoded = encode_domain(diagnostics)

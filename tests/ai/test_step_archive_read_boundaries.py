@@ -10,11 +10,11 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeState, _step_archive
-from linktools.ai.runtime.state._codec import decode_envelope, encode_envelope
-from linktools.ai.runtime.state._memory_transaction import _MemoryTransaction
-from linktools.ai.runtime.state._step_archive import PreparedExecutionProjection
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent
+from linktools.ai.persistence import PersistenceDomain, Persistence, _step_archive
+from linktools.ai.persistence.codec import decode_envelope, encode_envelope
+from linktools.ai.persistence._memory_transaction import _MemoryTransaction
+from linktools.ai.persistence._step_archive import PreparedExecutionProjection
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent
 
 from .test_incremental_projection_boundaries import _storage
 from .test_step_projection import _execution
@@ -22,7 +22,7 @@ from .test_step_projection import _execution
 
 @asynccontextmanager
 async def _archive(tmp_path: Path, backend: str = "memory"):
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="archive-boundaries", tenant_id="tenant")
     try:
         execution = replace(_execution(), revision=1)
@@ -31,7 +31,7 @@ async def _archive(tmp_path: Path, backend: str = "memory"):
         await repository.state_store.mutate(
             lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
         )
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         yield state, archive, AgentRunRecord("run", metadata={"context": "x" * 16_384})
     finally:
         await state.close()
@@ -321,7 +321,7 @@ async def test_concurrent_empty_projection_admissions_advance_history_once(tmp_p
 
 @pytest.mark.asyncio
 async def test_projection_keeps_custom_private_override_and_public_none_result(tmp_path: Path) -> None:
-    from linktools.ai.runtime.state._model_interaction_store import ModelInteractionStateStepArchive
+    from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
 
     async with _archive(tmp_path) as (_state, archive, run):
         calls = []
@@ -331,10 +331,10 @@ async def test_projection_keeps_custom_private_override_and_public_none_result(t
                 await super()._sync_projection_in_transaction(*args, **kwargs)
                 # Existing overrides may discard the private implementation result.
                 return None
-        recovery = _state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        recovery = _state.run_store.read_store(PersistenceDomain.CHECKPOINT)
         custom = CustomArchive(
             recovery.state_store, object_store=None, namespace="archive-boundaries",
-            tenant_id="tenant", runtime_domain=RuntimeDomain.CHECKPOINT,
+            tenant_id="tenant", runtime_domain=PersistenceDomain.CHECKPOINT,
         )
         assert await custom.sync_prepared_projection(run, events=(), checkpoints=()) is None
         assert calls == [True]
@@ -346,8 +346,8 @@ async def test_projection_keeps_custom_private_override_and_public_none_result(t
 async def test_checkpoint_null_boundary_rejects_reads_instead_of_using_current_head(
     tmp_path: Path, backend: str,
 ) -> None:
-    from linktools.ai.runtime.state._codec import _encode_step_envelope
-    from linktools.ai.runtime.state._store import FactQuery
+    from linktools.ai.persistence.codec import _encode_step_envelope
+    from linktools.ai.persistence.state import FactQuery
 
     async with _archive(tmp_path, backend) as (_state, archive, run):
         message = ModelResponse(parts=[TextPart("checkpoint")])

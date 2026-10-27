@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from ..agent import AgentBindingContract
 from ..asset import AssetVersionRef
-from ..core import (RuntimeDomain, RunBudget, ExecutionEventType, ExecutionLineageKind,
+from ..core import (PersistenceDomain, RunBudget, ExecutionEventType, ExecutionLineageKind,
     ExecutionMode, ExecutionStatus, IdempotencyStatus, JsonValue, OperationStatus,
     ResourceKind, StopReason, ThinkingValue, UsageMetrics, canonical_sha256,
     normalize_correlation, normalize_execution_mode, normalize_thinking)
@@ -21,7 +21,7 @@ from ..task import TaskBindingContract
 @dataclass(frozen=True, slots=True)
 class RuntimePayloadRef:
     payload: StoredPayload
-    source_domain: RuntimeDomain | None
+    source_domain: PersistenceDomain | None
 
 
 @dataclass(frozen=True, slots=True)

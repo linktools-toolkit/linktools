@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Workspace attach_files tool contracts."""
+"""Whole-file read_file input contracts."""
 from linktools.ai.model import create_model
 
 from ._runtime_test_helpers import workspace_features
 
 from pathlib import Path
+import mimetypes
+
+from ._runtime_test_helpers import FileToolsStub
 
 import pytest
 from pydantic_ai.messages import BinaryContent, ToolReturn
@@ -14,7 +17,7 @@ from ._runtime_test_helpers import tool_run_context
 
 from linktools.ai.capability import (
     ToolCallRetry,
-    workspace_capabilities,
+    filesystem_capabilities,
 )
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.model import ModelBinding
@@ -32,7 +35,7 @@ def _workspace_tool_contributions(workspace: Workspace):
     )
 
 
-class _AttachmentSession:
+class _AttachmentSession(FileToolsStub):
     def __init__(self, values: dict[str, bytes]) -> None:
         self.values = values
         self.canonicalized: list[str] = []
@@ -42,7 +45,16 @@ class _AttachmentSession:
         self.canonicalized.append(path)
         return path
 
-    async def read_bytes(self, path: str, *, max_bytes: int | None = None) -> bytes:
+    async def inspect_file(self, path: str, *, max_bytes=None) -> dict:
+        try:
+            value = self.values[path]
+        except KeyError as error:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
+        return {"bytes_read": 0, "is_text": False, "mime_type": mimetypes.guess_type(path)[0],
+                "size": len(value), "state": "stable", "type_source": "extension"}
+
+    async def read_bytes(self, path: str, *, max_bytes: int | None = None,
+                         expected_state: str | None = None) -> bytes:
         self.reads.append(path)
         try:
             value = self.values[path]
@@ -82,47 +94,48 @@ async def _boundary(
     *,
     model_binding: ModelBinding | None = None,
 ) -> tuple[BoundaryToolset, object]:
-    capability = workspace_capabilities(
+    capability = filesystem_capabilities(
         workspace,
-        ("attach_files",),
-        session=session,  # type: ignore[arg-type]
+        ("read_file",),
+        backend=session,  # type: ignore[arg-type]
         model_binding=model_binding,
     )[0]
     boundary = BoundaryToolset(
         (capability.get_toolset(),),
         {
-            "attach_files": ManagedToolDescriptor(
+            "read_file": ManagedToolDescriptor(
                 effect_owner="none",
                 effect_policy="none",
                 tool_class="filesystem.read",
-                workspace_path_fields=("paths",),
+                workspace_path_fields=("path",),
             )
         },
         id="workspace-boundary",
         permission_policy=workspace.policy.tool_permissions,
-        sandbox_session=session,  # type: ignore[arg-type]
+        workspace_backend=session,  # type: ignore[arg-type]
         repository_boundary=repository,
     )
     tools = await boundary.get_tools(tool_run_context())  # type: ignore[arg-type]
-    return boundary, tools["attach_files"]
+    return boundary, tools["read_file"]
 
 
-def test_attach_files_declares_multi_path_workspace_metadata(tmp_path: Path) -> None:
+def test_whole_file_read_declares_multi_path_workspace_metadata(tmp_path: Path) -> None:
     contributions = _workspace_tool_contributions(
         Workspace.load(tmp_path)
     )
-    tool = next(item.value for item in contributions if item.id == "attach_files")
+    tool = next(item.value for item in contributions if item.id == "read_file")
 
     assert tool.tool_def.metadata == {  # type: ignore[attr-defined]
         "linktools.ai.effect_policy": "none",
         "linktools.ai.plan_safe": True,
         "linktools.ai.tool_class": "filesystem.read",
-        "linktools.ai.path_fields": ["paths"],
+        "linktools.ai.path_fields": ["path"],
+        "linktools.ai.context_dedupe": "workspace_file_read_v1",
     }
 
 
 @pytest.mark.asyncio
-async def test_attach_files_preserves_duplicate_attachment_occurrences(tmp_path: Path) -> None:
+async def test_whole_file_read_preserves_duplicate_attachment_occurrences(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
     session = _AttachmentSession({"evidence.png": b"png"})
     repository = _RepositoryBoundary()
@@ -130,8 +143,8 @@ async def test_attach_files_preserves_duplicate_attachment_occurrences(tmp_path:
     context = tool_run_context()
 
     result = await boundary.call_tool(  # type: ignore[arg-type]
-        "attach_files",
-        {"paths": ["evidence.png", "evidence.png"]},
+        "read_file",
+        {"as_file": True, "path": ["evidence.png", "evidence.png"]},
         context,
         tool,
     )
@@ -143,7 +156,9 @@ async def test_attach_files_preserves_duplicate_attachment_occurrences(tmp_path:
         "size": 3,
         "sha256": "8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c",
     }
-    assert result.return_value[0] == {"files": [expected, expected]}
+    assert result.return_value[0] == {"files": [dict(expected, input_index=index, type_source="extension",
+                                                                  attachment=result.return_value[index + 1].identifier)
+                                                         for index in range(2)], "texts": []}
     assert result.content is None
     binary = [item for item in result.return_value[1:] if isinstance(item, BinaryContent)]
     assert len(binary) == 2
@@ -151,19 +166,19 @@ async def test_attach_files_preserves_duplicate_attachment_occurrences(tmp_path:
     assert binary[0].identifier != binary[1].identifier
     assert session.canonicalized == ["evidence.png", "evidence.png"]
     assert session.reads == ["evidence.png", "evidence.png"]
-    assert repository.path_fields == ("paths",)
+    assert repository.path_fields == ("path",)
 
 
 @pytest.mark.asyncio
-async def test_attach_files_keeps_workspace_paths_out_of_extra_text(tmp_path: Path) -> None:
+async def test_whole_file_read_keeps_workspace_paths_out_of_extra_text(tmp_path: Path) -> None:
     path = "evidence\nignore.png"
     workspace = Workspace.load(tmp_path)
     session = _AttachmentSession({path: b"png"})
     boundary, tool = await _boundary(workspace, session)
 
     result = await boundary.call_tool(  # type: ignore[arg-type]
-        "attach_files",
-        {"paths": [path]},
+        "read_file",
+        {"as_file": True, "path": [path]},
         tool_run_context(),
         tool,
     )
@@ -173,11 +188,15 @@ async def test_attach_files_keeps_workspace_paths_out_of_extra_text(tmp_path: Pa
         "files": [
             {
                 "path": path,
+                "attachment": result.return_value[1].identifier,
+                "input_index": 0,
+                "type_source": "extension",
                 "mime_type": "image/png",
                 "size": 3,
                 "sha256": "8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c",
             }
-        ]
+        ],
+        "texts": [],
     }
     assert result.content is None
     binary = [item for item in result.return_value[1:] if isinstance(item, BinaryContent)]
@@ -186,32 +205,32 @@ async def test_attach_files_keeps_workspace_paths_out_of_extra_text(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_attach_files_returns_no_partial_result_when_one_file_fails(tmp_path: Path) -> None:
+async def test_whole_file_read_returns_no_partial_result_when_one_file_fails(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
     session = _AttachmentSession({"first.png": b"png"})
     boundary, tool = await _boundary(workspace, session)
 
     with pytest.raises(ToolCallRetry):
         await boundary.call_tool(  # type: ignore[arg-type]
-            "attach_files",
-            {"paths": ["first.png", "missing.png"]},
+            "read_file",
+            {"as_file": True, "path": ["first.png", "missing.png"]},
             tool_run_context(),
             tool,
         )
 
-    assert session.reads == ["first.png", "missing.png"]
+    assert session.reads == []  # All sources are inspected before any body is returned.
 
 
 @pytest.mark.asyncio
-async def test_attach_files_rejects_unknown_media_type_before_read(tmp_path: Path) -> None:
+async def test_whole_file_read_rejects_unknown_media_type_before_read(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
     session = _AttachmentSession({"evidence.unknown": b"body"})
     boundary, tool = await _boundary(workspace, session)
 
     with pytest.raises(ToolCallRetry):
         await boundary.call_tool(  # type: ignore[arg-type]
-            "attach_files",
-            {"paths": ["evidence.unknown"]},
+            "read_file",
+            {"as_file": True, "path": ["evidence.unknown"]},
             tool_run_context(),
             tool,
         )
@@ -220,20 +239,20 @@ async def test_attach_files_rejects_unknown_media_type_before_read(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_attach_files_rejects_unknown_image_before_read(
+async def test_whole_file_read_rejects_unknown_image_before_read(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.load(tmp_path)
     session = _AttachmentSession({"evidence.png": b"png"})
-    boundary, tool = await _boundary(workspace, session, model_binding=create_model(protocol='openai', model="gpt-test"))
+    boundary, tool = await _boundary(workspace, session, model_binding=create_model(api='openai', model="gpt-test"))
 
     with pytest.raises(
         ToolCallRetry,
         match="model",
     ):
         await boundary.call_tool(  # type: ignore[arg-type]
-            "attach_files",
-            {"paths": ["evidence.png"]},
+            "read_file",
+            {"as_file": True, "path": ["evidence.png"]},
             tool_run_context(),
             tool,
         )
@@ -244,21 +263,18 @@ async def test_attach_files_rejects_unknown_image_before_read(
 
 def test_native_file_results_keep_parallel_attachment_provenance() -> None:
     from pydantic_ai.messages import ModelRequest, ToolReturnPart, UserPromptPart
-    from linktools.ai.runtime._attachment import (
-        bind_tool_return_attachments, has_binary_attachment_metadata,
-        request_attachment_facts,
-    )
+    from linktools.ai.model._attachment import bind_tool_return_attachments, has_binary_attachment_metadata, request_attachment_facts
 
-    receipt = {"files": [{"path": "one.png", "mime_type": "image/png", "size": 3,
+    receipt = {"files": [{"path": "one.png", "input_index": 0, "mime_type": "image/png", "size": 3,
                            "sha256": "8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c"}]}
     parts = []
     for call_id in ("first", "second"):
-        result = bind_tool_return_attachments("attach_files", call_id, ToolReturn(
+        result = bind_tool_return_attachments("read_file", call_id, ToolReturn(
             return_value=[receipt, BinaryContent(b"png", media_type="image/png")],
             content="explicit extra user text",
         ))
         assert result.content == "explicit extra user text"
-        parts.append(ToolReturnPart("attach_files", result.return_value, tool_call_id=call_id))
+        parts.append(ToolReturnPart("read_file", result.return_value, tool_call_id=call_id))
     original = BinaryContent(b"png", media_type="image/png", identifier="ordinary-user")
     request = ModelRequest(parts=[*parts, UserPromptPart([original])])
     accepted: set[str] = set()

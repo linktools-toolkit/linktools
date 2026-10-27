@@ -107,37 +107,38 @@ async def test_hot_only_cache_supports_read_cache_without_buffer_methods() -> No
 
 
 def test_runtime_storage_factories_assign_cache_to_each_route() -> None:
-    from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
+    from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
 
     cache = _HotOnly()
-    storage = RuntimeStorage.in_memory(cache=cache)
-    assert all(storage.plan.route(domain).cache is cache for domain in RuntimeDomain)
+    storage = PersistenceStorage.in_memory(cache=cache)
+    assert all(storage.plan.route(domain).cache is cache for domain in PersistenceDomain)
 
 
 @pytest.mark.asyncio
 async def test_explicit_module_resource_clears_cache_while_omission_inherits() -> None:
-    from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
+    from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
 
     cache = _HotOnly()
-    from linktools.ai.runtime.state import RuntimeState
+    from linktools.ai.persistence import Persistence
 
-    storage = RuntimeState(RuntimeStorage.in_memory(cache=cache))
-    execution = storage.plan.route(RuntimeDomain.EXECUTION)
+    from dataclasses import replace
+    config = PersistenceStorage.in_memory(cache=cache)
+    execution = config.plan.route(PersistenceDomain.EXECUTION)
+    storage = Persistence(PersistenceStorage(replace(config.plan, trace=execution.with_cache(None))))
     await storage.initialize(
         namespace="resources", tenant_id="tenant",
-        module_routes={RuntimeDomain.TRACE: execution.with_cache(None)},
     )
     try:
-        assert storage.plan.route(RuntimeDomain.TRACE).cache is None
-        assert storage.plan.route(RuntimeDomain.CHECKPOINT).cache is cache
-        assert storage.plan.route(RuntimeDomain.EXECUTION).cache is cache
+        assert storage.plan.route(PersistenceDomain.TRACE).cache is None
+        assert storage.plan.route(PersistenceDomain.CHECKPOINT).cache is cache
+        assert storage.plan.route(PersistenceDomain.EXECUTION).cache is cache
     finally:
         await storage.close()
 
 
 @pytest.mark.asyncio
 async def test_resource_scope_groups_physical_routes_and_owns_local_context(tmp_path: Path) -> None:
-    from linktools.ai.runtime.state._resource_scope import (
+    from linktools.ai.persistence._resource_scope import (
         StorageResourceRequest,
         StorageResourceScope,
     )
@@ -162,7 +163,7 @@ async def test_resource_scope_groups_physical_routes_and_owns_local_context(tmp_
 async def test_resource_scope_does_not_dispose_borrowed_engine(tmp_path: Path) -> None:
     from sqlalchemy import text
     from sqlalchemy.ext.asyncio import create_async_engine
-    from linktools.ai.runtime.state._resource_scope import (
+    from linktools.ai.persistence._resource_scope import (
         StorageResourceRequest,
         StorageResourceScope,
     )
@@ -190,7 +191,7 @@ async def test_resource_scope_does_not_dispose_borrowed_engine(tmp_path: Path) -
 async def test_resource_scope_closes_owned_context_after_later_open_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from sqlalchemy import MetaData
     from sqlalchemy.ext.asyncio import AsyncEngine
-    from linktools.ai.runtime.state import _resource_scope as resources
+    from linktools.ai.persistence import _resource_scope as resources
 
     contexts: list[SqlStorageContext] = []
     create_context = resources.create_sql_storage_context
@@ -222,7 +223,7 @@ async def test_resource_scope_closes_owned_context_after_later_open_failure(tmp_
 @pytest.mark.asyncio
 async def test_resource_scope_retries_failed_owned_context_close(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from sqlalchemy.ext.asyncio import AsyncEngine
-    from linktools.ai.runtime.state._resource_scope import (
+    from linktools.ai.persistence._resource_scope import (
         StorageResourceRequest,
         StorageResourceScope,
     )

@@ -2,7 +2,10 @@
 # -*- coding: utf-8 -*-
 """Current evaluation reads select manifest members before native hydration."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
+
 from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
 from dataclasses import replace
@@ -12,7 +15,6 @@ from pathlib import Path
 import pytest
 from sqlalchemy import event
 
-from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import (
     AuthorizationAction, ExecutionStatus, Principal, ResourceRef, TaskStatus, service_principal,
 )
@@ -22,12 +24,13 @@ from linktools.ai.evaluation import (
     EvidenceAttachmentRef, EvidenceBundle, EvidenceRef, RescoreRequest, StartEvaluationRequest,
 )
 
-from linktools.ai.runtime import ExecutionView, Runtime, RuntimeStorage
-from linktools.ai.runtime import _evaluation as evaluation_module
-from linktools.ai.runtime._object import RuntimeObjectKeyFactory, put_runtime_object
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state import _evaluation_repository as repository_module
-from linktools.ai.runtime.state._evaluation_records import EvaluationCaseRecord
+from linktools.ai.history import ExecutionInfo
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.evaluation.engine import _service as evaluation_module
+from linktools.ai.persistence.objects import ObjectKeyFactory, put_runtime_object
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence import _evaluation_repository as repository_module
+from linktools.ai.persistence._evaluation_records import EvaluationCaseRecord
 from linktools.ai.storage import ObjectRef, ObjectStat
 from linktools.ai.task import Task, TaskGraphState
 
@@ -39,7 +42,7 @@ from .test_evaluation_retention import Offline
 
 
 @contextmanager
-def _sql_writes(storage: RuntimeState) -> Iterator[list[str]]:
+def _sql_writes(storage: Persistence) -> Iterator[list[str]]:
     statements: list[str] = []
 
     def capture(_connection, _cursor, sql, _parameters, _context, _many) -> None:
@@ -54,14 +57,14 @@ def _sql_writes(storage: RuntimeState) -> Iterator[list[str]]:
         event.remove(engine, "before_cursor_execute", capture)
 
 
-async def _add_attachment(storage: RuntimeState, experiment_id: str, index: int) -> ObjectRef:
+async def _add_attachment(storage: Persistence, experiment_id: str, index: int) -> ObjectRef:
     repository = storage.evaluation.records
     record = await repository.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
     trial_id = record.manifest.trials[index].trial_id
     link = next(item for item in record.evidence if item.trial.trial_id == trial_id)
     bundle = await repository.read_evidence(link.evidence_ref)
-    reference = await put_runtime_object(storage.object_store(RuntimeDomain.EVALUATION),
-        RuntimeObjectKeyFactory("evidence-read"), RuntimeDomain.EVALUATION,
+    reference = await put_runtime_object(storage.object_store(PersistenceDomain.EVALUATION),
+        ObjectKeyFactory("evidence-read"), PersistenceDomain.EVALUATION,
         PRINCIPAL.tenant_id, b"retained current-read attachment")
     bundle = replace(bundle, ref=replace(bundle.ref, evidence_id=f"attachment-{index}"),
         attachments=(EvidenceAttachmentRef("raw", "text/plain", reference),))
@@ -78,11 +81,11 @@ async def _add_attachment(storage: RuntimeState, experiment_id: str, index: int)
 async def test_current_pages_hydrate_only_the_manifest_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, count: int,
 ) -> None:
-    async with completed(tmp_path, count=count) as (runtime, storage, run, _scorer, _policy):
-        await runtime.evaluations.close()
-        owner = runtime.evaluations
+    async with completed(tmp_path, count=count) as (evaluations, storage, run, _scorer, _policy):
+        await evaluations.close()
+        owner = evaluations
         record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
-        state, inspect = owner._graph.state, owner._execution.inspect
+        state, inspect = owner._read_graph, owner._history.inspect_execution
         graph_reads: list[str] = []
         execution_reads: list[str] = []
 
@@ -90,17 +93,17 @@ async def test_current_pages_hydrate_only_the_manifest_window(
             graph_reads.append(graph_id)
             return await state(graph_id, principal=principal)
 
-        async def read_execution(execution_id: str, *, principal: Principal) -> ExecutionView:
+        async def read_execution(execution_id: str, *, principal: Principal, include_usage: bool = True) -> ExecutionInfo:
             execution_reads.append(execution_id)
-            return await inspect(execution_id, principal=principal)
+            return await inspect(execution_id, principal=principal, include_usage=include_usage)
 
         async def no_object_write(
             key: str, chunks: AsyncIterator[bytes], *, expected_size: int, expected_digest: str,
         ) -> ObjectStat:
             pytest.fail("current pages must not write an object or snapshot")
 
-        monkeypatch.setattr(owner._graph, "state", read_graph)
-        monkeypatch.setattr(owner._execution, "inspect", read_execution)
+        monkeypatch.setattr(owner, "_read_graph", read_graph)
+        monkeypatch.setattr(owner._history, "inspect_execution", read_execution)
         monkeypatch.setattr(owner._objects, "put", no_object_write)
         cursor = None
         seen = []
@@ -127,24 +130,24 @@ async def test_current_pages_hydrate_only_the_manifest_window(
 async def test_current_reads_reload_native_recovery_state_without_updating_evaluation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with completed(tmp_path) as (runtime, storage, run, _scorer, _policy):
-        await runtime.evaluations.close()
-        owner = runtime.evaluations
+    async with completed(tmp_path) as (evaluations, storage, run, _scorer, _policy):
+        await evaluations.close()
+        owner = evaluations
         record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         first = await run.current_trials(limit=1)
         original = first.items[0]
-        state, inspect = owner._graph.state, owner._execution.inspect
+        state, inspect = owner._read_graph, owner._history.inspect_execution
 
         async def recovering_graph(graph_id: str, *, principal: Principal) -> TaskGraphState:
             value = await state(graph_id, principal=principal)
             return replace(value, status=TaskStatus.RECOVERY_REQUIRED, event_seq=value.event_seq + 1)
 
-        async def recovering_execution(execution_id: str, *, principal: Principal) -> ExecutionView:
-            value = await inspect(execution_id, principal=principal)
+        async def recovering_execution(execution_id: str, *, principal: Principal, include_usage: bool = True) -> ExecutionInfo:
+            value = await inspect(execution_id, principal=principal, include_usage=include_usage)
             return replace(value, status=ExecutionStatus.RECOVERY_REQUIRED, event_seq=value.event_seq + 1)
 
-        monkeypatch.setattr(owner._graph, "state", recovering_graph)
-        monkeypatch.setattr(owner._execution, "inspect", recovering_execution)
+        monkeypatch.setattr(owner, "_read_graph", recovering_graph)
+        monkeypatch.setattr(owner._history, "inspect_execution", recovering_execution)
         refreshed = (await run.current_trials(limit=1)).items[0]
         direct = await run.read_trial(original.trial.trial_id)
         assert refreshed == direct
@@ -160,19 +163,19 @@ async def test_current_reads_reload_native_recovery_state_without_updating_evalu
 async def test_current_cursor_survives_mutable_revision_and_reads_new_native_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with completed(tmp_path) as (runtime, storage, run, _scorer, _policy):
-        await runtime.evaluations.close()
+    async with completed(tmp_path) as (evaluations, storage, run, _scorer, _policy):
+        await evaluations.close()
         repository = storage.evaluation.records
         before = await repository.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         first = await run.current_trials(limit=1)
         after = await repository.close_reservation_gate(run.experiment_id, budget=True)
         assert after.revision > before.revision and after.manifest_digest == before.manifest_digest
-        state = runtime.evaluations._graph.state
+        state = evaluations._read_graph
 
         async def recovering(graph_id: str, *, principal: Principal) -> TaskGraphState:
             return replace(await state(graph_id, principal=principal), status=TaskStatus.RECOVERY_REQUIRED)
 
-        monkeypatch.setattr(runtime.evaluations._graph, "state", recovering)
+        monkeypatch.setattr(evaluations, "_read_graph", recovering)
         following = await run.current_trials(cursor=first.next_cursor, limit=1)
         assert following.items[0].trial.trial_id == before.manifest.trials[1].trial_id
         assert following.items[0].graph_status is TaskStatus.RECOVERY_REQUIRED
@@ -183,12 +186,11 @@ async def test_current_cursor_survives_mutable_revision_and_reads_new_native_sta
 async def test_current_cursor_rejects_wrong_scope_manifest_and_position(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with completed(tmp_path) as (runtime, storage, run, scorer, policy):
-        other = await run.rescore(RescoreRequest((rule_scorer(scorer),), "cursor-other"),
-                                 engine=runtime.tasks.bind(scorer))
+    async with completed(tmp_path) as (evaluations, storage, run, scorer, policy):
+        other = await run.rescore(RescoreRequest((rule_scorer(scorer),), "cursor-other"))
         assert (await other.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
-        await runtime.evaluations.close()
-        owner = runtime.evaluations
+        await evaluations.close()
+        owner = evaluations
         first = await run.current_trials(limit=1)
         signer = owner._cursor_signer
         payload = signer.decode(first.next_cursor)
@@ -228,23 +230,23 @@ async def test_current_cursor_rejects_wrong_scope_manifest_and_position(
 async def test_rescore_current_pages_use_only_selected_source_trials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with completed(tmp_path, count=3) as (runtime, storage, source, scorer, policy):
+    async with completed(tmp_path, count=3) as (evaluations, storage, source, scorer, policy):
         repository = storage.evaluation.records
         record = await repository.get(source.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         plans = record.manifest.trials
         run = await source.rescore(RescoreRequest((rule_scorer(scorer),), "selected-rescore",
-            trial_ids=(plans[2].trial_id, plans[0].trial_id)), engine=runtime.tasks.bind(scorer))
+            trial_ids=(plans[2].trial_id, plans[0].trial_id)))
         assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
-        await runtime.evaluations.close()
+        await evaluations.close()
         selected = await repository.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
-        state = runtime.evaluations._graph.state
+        state = evaluations._read_graph
         reads: list[str] = []
 
         async def read_graph(graph_id: str, *, principal: Principal) -> TaskGraphState:
             reads.append(graph_id)
             return await state(graph_id, principal=principal)
 
-        monkeypatch.setattr(runtime.evaluations._graph, "state", read_graph)
+        monkeypatch.setattr(evaluations, "_read_graph", read_graph)
         policy.calls.clear()
         first = await run.current_trials(limit=1)
         assert reads == [first.items[0].graph_ref.graph_id]
@@ -271,9 +273,9 @@ async def test_rescore_current_pages_use_only_selected_source_trials(
 async def test_direct_trial_and_case_reads_do_not_scan_pages_or_case_content(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with completed(tmp_path) as (runtime, storage, run, _scorer, _policy):
-        await runtime.evaluations.close()
-        owner = runtime.evaluations
+    async with completed(tmp_path) as (evaluations, storage, run, _scorer, _policy):
+        await evaluations.close()
+        owner = evaluations
         record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         plan = record.manifest.trials[1]
 
@@ -283,14 +285,14 @@ async def test_direct_trial_and_case_reads_do_not_scan_pages_or_case_content(
         for name in ("current_trials", "list_cases", "_build_snapshot"):
             monkeypatch.setattr(owner, name, no_scan)
         monkeypatch.setattr(storage.evaluation.records, "get_cases", no_scan)
-        state = owner._graph.state
+        state = owner._read_graph
         reads: list[str] = []
 
         async def selected_graph(graph_id: str, *, principal: Principal) -> TaskGraphState:
             reads.append(graph_id)
             return await state(graph_id, principal=principal)
 
-        monkeypatch.setattr(owner._graph, "state", selected_graph)
+        monkeypatch.setattr(owner, "_read_graph", selected_graph)
         with _sql_writes(storage) as writes:
             trial = await run.read_trial(plan.trial_id)
             assert trial == await owner.read_trial(run.experiment_id, plan.trial_id, principal=PRINCIPAL)
@@ -310,18 +312,18 @@ async def test_direct_trial_and_case_reads_do_not_scan_pages_or_case_content(
 async def test_current_reads_preserve_frozen_trial_and_score_pages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with completed(tmp_path) as (runtime, storage, run, _scorer, _policy):
-        await runtime.evaluations.close()
+    async with completed(tmp_path) as (evaluations, storage, run, _scorer, _policy):
+        await evaluations.close()
         frozen_trials = await run.trials(limit=1)
         frozen_scores = await run.scores(limit=1)
         assert await report_count(storage) == 2
         current = await run.current_trials(limit=1)
-        state = runtime.evaluations._graph.state
+        state = evaluations._read_graph
 
         async def recovering(graph_id: str, *, principal: Principal) -> TaskGraphState:
             return replace(await state(graph_id, principal=principal), status=TaskStatus.RECOVERY_REQUIRED)
 
-        monkeypatch.setattr(runtime.evaluations._graph, "state", recovering)
+        monkeypatch.setattr(evaluations, "_read_graph", recovering)
         live = await run.current_trials(cursor=current.next_cursor, limit=1)
         frozen = await run.trials(cursor=frozen_trials.next_cursor, limit=2)
         scores = await run.scores(cursor=frozen_scores.next_cursor, limit=2)
@@ -339,8 +341,8 @@ async def test_current_reads_preserve_frozen_trial_and_score_pages(
 async def test_current_reads_enforce_selected_evidence_authorization(
     tmp_path: Path, boundary: str,
 ) -> None:
-    async with completed(tmp_path) as (runtime, storage, run, _scorer, policy):
-        await runtime.evaluations.close()
+    async with completed(tmp_path) as (evaluations, storage, run, _scorer, policy):
+        await evaluations.close()
         record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         first = next(item for item in record.evidence
                      if item.trial.trial_id == record.manifest.trials[0].trial_id)
@@ -358,8 +360,8 @@ async def test_current_reads_enforce_selected_evidence_authorization(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("field", ("metadata_expires_at", "content_expires_at"))
 async def test_current_reads_reject_expired_evidence_sources(tmp_path: Path, field: str) -> None:
-    async with completed(tmp_path) as (runtime, storage, run, _scorer, _policy):
-        await runtime.evaluations.close()
+    async with completed(tmp_path) as (evaluations, storage, run, _scorer, _policy):
+        await evaluations.close()
         record = await storage.evaluation.records.update(run.experiment_id, lambda value: replace(
             value, **{field: datetime.now(timezone.utc) - timedelta(seconds=1)}))
         for read in (lambda: run.current_trials(limit=1),
@@ -375,8 +377,8 @@ async def test_current_reads_reject_expired_evidence_sources(tmp_path: Path, fie
 async def test_current_reads_validate_selected_evidence_and_attachment_integrity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
 ) -> None:
-    async with completed(tmp_path) as (runtime, storage, run, _scorer, _policy):
-        await runtime.evaluations.close()
+    async with completed(tmp_path) as (evaluations, storage, run, _scorer, _policy):
+        await evaluations.close()
         repository = storage.evaluation.records
         if fault == "digest":
             read = repository.read_evidence
@@ -388,7 +390,7 @@ async def test_current_reads_validate_selected_evidence_and_attachment_integrity
             monkeypatch.setattr(repository, "read_evidence", corrupt)
         else:
             reference = await _add_attachment(storage, run.experiment_id, 0)
-            objects = storage.object_store(RuntimeDomain.EVALUATION)
+            objects = storage.object_store(PersistenceDomain.EVALUATION)
             stat = objects.stat
 
             async def changed(key: str) -> ObjectStat | None:
@@ -409,10 +411,10 @@ async def test_current_reads_validate_selected_evidence_and_attachment_integrity
 async def test_unselected_bad_attachment_does_not_block_current_window_or_direct_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with completed(tmp_path) as (runtime, storage, run, _scorer, _policy):
-        await runtime.evaluations.close()
+    async with completed(tmp_path) as (evaluations, storage, run, _scorer, _policy):
+        await evaluations.close()
         reference = await _add_attachment(storage, run.experiment_id, 1)
-        objects = storage.object_store(RuntimeDomain.EVALUATION)
+        objects = storage.object_store(PersistenceDomain.EVALUATION)
         stat = objects.stat
         inspected: list[str] = []
 
@@ -435,10 +437,10 @@ async def test_unselected_bad_attachment_does_not_block_current_window_or_direct
 async def test_current_window_rechecks_sources_before_returning_after_concurrent_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str,
 ) -> None:
-    async with completed(tmp_path) as (runtime, storage, run, _scorer, policy):
-        await runtime.evaluations.close()
+    async with completed(tmp_path) as (evaluations, storage, run, _scorer, policy):
+        await evaluations.close()
         reference = await _add_attachment(storage, run.experiment_id, 0)
-        objects = storage.object_store(RuntimeDomain.EVALUATION)
+        objects = storage.object_store(PersistenceDomain.EVALUATION)
         stat = objects.stat
         changed = False
 
@@ -469,17 +471,20 @@ async def test_current_window_rechecks_sources_before_returning_after_concurrent
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fault", ("owner", "expired", "missing", "anonymous_input"))
 async def test_get_case_preserves_owner_expiry_and_missing_boundaries(tmp_path: Path, fault: str) -> None:
-    storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
+    storage = PersistenceStorage.sqlite(tmp_path / "state.sqlite")
     policy = Policy()
-    async with Runtime.open("case-read", storage=storage,
-                            context=CONTEXT, features=RuntimeFeatures("authorization", authorization=policy)) as runtime:
+    async with (
+        Persistence.open('case-read', storage=storage, tenant_id='evaluation-consumers') as persistence_474,
+        TaskEngine.open(persistence=persistence_474, context=CONTEXT, authorization=policy) as engine,
+        Evaluations.open(engine) as evaluations,
+    ):
         ref = CaseRef("dataset", "case", 1)
-        await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("dataset", 1), (
+        await evaluations.publish_dataset(DatasetSpec(DatasetRef("dataset", 1), (
             CaseSpec.task(ref, input={"answer": "yes"}, expected="yes"),)),
             principal=PRINCIPAL, idempotency_key="dataset")
-        await runtime.evaluations.close()
+        await evaluations.close()
         policy.calls.clear()
-        repository = runtime._state.evaluation.records
+        repository = persistence_474.evaluation.records
         principal = PRINCIPAL
         if fault == "owner":
             principal = service_principal(PRINCIPAL.tenant_id, "another-owner")
@@ -500,22 +505,22 @@ async def test_get_case_preserves_owner_expiry_and_missing_boundaries(tmp_path: 
                               storage_revision=row.storage_revision + 1)
             assert await repository.state_store.mutate(lambda tx: tx.replace_record(
                 expired, expected_storage_revision=row.storage_revision))
-        with _sql_writes(runtime._state) as writes:
+        with _sql_writes(persistence_474) as writes:
             with pytest.raises(AIError) as caught:
-                await runtime.evaluations.get_case(ref, principal=principal)
+                await evaluations.get_case(ref, principal=principal)
         expected = {"owner": ErrorCode.AUTHORIZATION_DENIED, "anonymous_input": ErrorCode.AUTHORIZATION_DENIED,
                     "expired": ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE, "missing": ErrorCode.STORAGE_NOT_FOUND}
         assert caught.value.code is expected[fault]
         if fault == "anonymous_input":
             assert any(action is AuthorizationAction.EVALUATION_DATASET_READ for action, _ in policy.calls)
-        assert not writes and await report_count(runtime._state) == 0
+        assert not writes and await report_count(persistence_474) == 0
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("boundary", ("dataset", "owner"))
 async def test_current_reads_preserve_dataset_authorization(tmp_path: Path, boundary: str) -> None:
-    async with completed(tmp_path) as (runtime, storage, run, _scorer, policy):
-        await runtime.evaluations.close()
+    async with completed(tmp_path) as (evaluations, storage, run, _scorer, policy):
+        await evaluations.close()
         record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         policy.reject = lambda action, resource: action is AuthorizationAction.EVALUATION_DATASET_READ and (
             boundary == "dataset" and resource.owner_principal_id is None
@@ -533,9 +538,15 @@ async def test_current_reads_preserve_dataset_authorization(tmp_path: Path, boun
 async def test_reused_case_keeps_earlier_expiry_in_current_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    storage = RuntimeStorage.sqlite(tmp_path / "case-expiry.sqlite")
-    async with Runtime.open("case-expiry", storage=storage, context=CONTEXT) as runtime:
-        owner = runtime.evaluations
+    storage = PersistenceStorage.sqlite(tmp_path / "case-expiry.sqlite")
+    target = Task("case-expiry.target", echo, effect_policy="none")
+    scorer = Task("case-expiry.score", exact, effect_policy="none")
+    async with (
+        Persistence.open('case-expiry', storage=storage, tenant_id='evaluation-consumers') as persistence_537,
+        TaskEngine.open(target, scorer, persistence=persistence_537, context=CONTEXT, authorization=None) as engine,
+        Evaluations.open(engine) as evaluations,
+    ):
+        owner = evaluations
         early = datetime.now(timezone.utc) + timedelta(hours=1)
         late = early + timedelta(hours=1)
         case = CaseSpec.task(CaseRef("dataset", "reused", 1), input={"answer": "yes"}, expected="yes")
@@ -543,14 +554,11 @@ async def test_reused_case_keeps_earlier_expiry_in_current_reads(
             principal=PRINCIPAL, idempotency_key="original", content_expires_at=early)
         dataset = await owner.publish_dataset(DatasetSpec(DatasetRef("dataset", 2), (case.ref,)),
             principal=PRINCIPAL, idempotency_key="reused", content_expires_at=late)
-        target = Task("case-expiry.target", echo, effect_policy="none")
-        scorer = Task("case-expiry.score", exact, effect_policy="none")
         run = await owner.start(StartEvaluationRequest(EvaluationSpec(dataset,
-            (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),)), PRINCIPAL, "run"),
-            engine=runtime.tasks.bind(target, scorer))
+            (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),)), PRINCIPAL, "run"))
         assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         await owner.close()
-        record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        record = await persistence_537.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         assert record.content_expires_at == early
         assert (await owner.get_case(case.ref, principal=PRINCIPAL)).ref == case.ref
         assert len((await run.current_trials()).items) == 1
@@ -568,14 +576,20 @@ async def test_reused_case_keeps_earlier_expiry_in_current_reads(
             with pytest.raises(AIError) as caught:
                 await read()
             assert caught.value.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE
-        assert await report_count(runtime._state) == 0
+        assert await report_count(persistence_537) == 0
 
 
 @pytest.mark.asyncio
 async def test_current_state_survives_bounded_purge_of_shared_case_content(tmp_path: Path) -> None:
-    storage = RuntimeStorage.sqlite(tmp_path / "bounded-purge.sqlite")
-    async with Runtime.open("bounded-purge", storage=storage, context=CONTEXT) as runtime:
-        owner = runtime.evaluations
+    storage = PersistenceStorage.sqlite(tmp_path / "bounded-purge.sqlite")
+    target = Task("bounded-purge.target", echo, effect_policy="none")
+    scorer = Task("bounded-purge.score", exact, effect_policy="none")
+    async with (
+        Persistence.open('bounded-purge', storage=storage, tenant_id='evaluation-consumers') as persistence_577,
+        TaskEngine.open(target, scorer, persistence=persistence_577, context=CONTEXT, authorization=None) as engine,
+        Evaluations.open(engine) as evaluations,
+    ):
+        owner = evaluations
         early = datetime.now(timezone.utc) + timedelta(hours=1)
         late = early + timedelta(hours=1)
         ref = CaseRef("dataset", "reused", 1)
@@ -584,13 +598,11 @@ async def test_current_state_survives_bounded_purge_of_shared_case_content(tmp_p
             principal=PRINCIPAL, idempotency_key="early", content_expires_at=early)
         dataset = await owner.publish_dataset(DatasetSpec(DatasetRef("dataset", 2), (ref,)),
             principal=PRINCIPAL, idempotency_key="later", content_expires_at=late)
-        target = Task("bounded-purge.target", echo, effect_policy="none")
-        scorer = Task("bounded-purge.score", exact, effect_policy="none")
         runs = []
         for index in range(3):
             run = await owner.start(StartEvaluationRequest(EvaluationSpec(dataset,
                 (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),)),
-                PRINCIPAL, f"run-{index}"), engine=runtime.tasks.bind(target, scorer))
+                PRINCIPAL, f"run-{index}"))
             assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
             runs.append(run)
         await owner.close()
@@ -602,13 +614,13 @@ async def test_current_state_survives_bounded_purge_of_shared_case_content(tmp_p
         assert len(purged) == 2
         remaining = []
         for run in runs:
-            record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+            record = await persistence_577.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
             if record.content_deleted_at is None:
                 remaining.append(run)
         assert len(remaining) == 1 and remaining[0].experiment_id not in purged
         run = remaining[0]
-        assert await report_count(runtime._state) == 0
-        with _sql_writes(runtime._state) as writes:
+        assert await report_count(persistence_577) == 0
+        with _sql_writes(persistence_577) as writes:
             page = await run.current_trials(limit=1)
             assert len(page.items) == 1 and page.next_cursor is None
             trial = page.items[0]
@@ -618,4 +630,4 @@ async def test_current_state_survives_bounded_purge_of_shared_case_content(tmp_p
                 with pytest.raises(AIError) as caught:
                     await read()
                 assert caught.value.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE
-        assert not writes and await report_count(runtime._state) == 0
+        assert not writes and await report_count(persistence_577) == 0

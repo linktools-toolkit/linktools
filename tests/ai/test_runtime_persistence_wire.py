@@ -8,21 +8,21 @@ from datetime import datetime, timezone
 import pytest
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state._codec import (
+from linktools.ai.persistence.codec import (
     _decode_enveloped_domain,
     _decode_step_envelope,
     _encode_persisted_domain,
     wire_type_id,
 )
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.contracts import (
     ContextProjection,
     ModelInteractionRecord,
     RuntimePayloadRef,
     SessionRecord,
 )
 from linktools.ai.storage import StoredPayload
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord
+from linktools.ai.persistence._step_contracts import AgentRunRecord
 from linktools.ai.task import TaskNode
 
 
@@ -210,7 +210,7 @@ def test_persisted_model_interaction_requires_attachment_identifier_field() -> N
         request_context=ContextProjection(()),
         request_envelope=RuntimePayloadRef(
             StoredPayload.inline_bytes(b"{}"),
-            RuntimeDomain.EXECUTION,
+            PersistenceDomain.EXECUTION,
         ),
         response_context=None,
         status="CANCELLED",
@@ -261,7 +261,7 @@ def test_persisted_model_interaction_requires_current_fields(field_name: str) ->
         request_context=ContextProjection(()),
         request_envelope=RuntimePayloadRef(
             StoredPayload.inline_bytes(b"{}"),
-            RuntimeDomain.EXECUTION,
+            PersistenceDomain.EXECUTION,
         ),
         response_context=None,
         status="CANCELLED",

@@ -11,8 +11,8 @@ from linktools.ai.evaluation import (
     EvidenceAttachmentRef, EvidenceBundle, EvidenceRef,
     ExecutionSubjectRef, ExecutionTargetEvidence, TargetTrialRef,
 )
-from linktools.ai.runtime.state._codec import _CURRENT_CODEC, _decode_domain, _encode_domain
-from linktools.ai.runtime.state._contracts import ArtifactRecord
+from linktools.ai.persistence.codec import _CURRENT_CODEC, _decode_domain, _encode_domain
+from linktools.ai.persistence.contracts import ArtifactRecord
 from linktools.ai.storage import ObjectRef
 
 
@@ -76,7 +76,7 @@ def test_evidence_public_mapping_defines_digest() -> None:
 
 
 def test_public_attachment_fact_uses_mime_type() -> None:
-    from linktools.ai.runtime import AttachmentFact
+    from linktools.ai.execution import AttachmentFact
 
     value = AttachmentFact(
         execution_id="execution", attachment_id="a" * 64, fact="accepted",

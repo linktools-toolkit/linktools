@@ -185,7 +185,7 @@ async def test_mcp_schema_feedback_precedes_dispatch_and_obeys_retry_budget(
     from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
     from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-    from linktools.ai.runtime._pydantic_tool_control import PydanticToolControlCapability
+    from linktools.ai.capability import PydanticToolControlCapability
 
     toolset = _MCPDiscoveryToolset(
         StdioTransport(command="unused-in-memory-client", args=[]),

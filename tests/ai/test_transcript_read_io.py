@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Bounded transcript reads retain their captured range and integrity checks."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from contextlib import aclosing
 from dataclasses import replace
@@ -14,10 +14,10 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state import _archive, _history
-from linktools.ai.runtime.state._store import FactQuery, active_state_scope
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence import _archive, _history
+from linktools.ai.persistence.state import FactQuery, active_state_scope
 
 from .test_incremental_projection_boundaries import _storage
 from .test_runtime_storage_io_session import _listen_sql, _record_selects
@@ -32,13 +32,13 @@ async def test_bounded_transcript_read_has_a_metadata_io_budget(
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'transcript.db'}")
     await provision_database(engine)
-    state = RuntimeState(RuntimeStorage.sql(engine))
+    state = Persistence(PersistenceStorage.sql(engine))
     await state.initialize(namespace="transcript-read-io", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
         assert session.history_id is not None
         await _materialize(state, "run", ("one", "two"))
-        archive = state.run_store.read_store(RuntimeDomain.CONVERSATION)
+        archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         repository = archive.transcript_repository
         contents = await repository.content_archive()
         domain_partition = archive.state_store.store_digest.hex()
@@ -124,13 +124,13 @@ async def test_transcript_range_excludes_appends_after_reading_starts(
     backend: str, reader: str, page_size: int,
 ) -> None:
     monkeypatch.setattr(_history, "_TRANSCRIPT_PAGE_SIZE", page_size)
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="transcript-read-cut", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
         assert session.history_id is not None
         await _materialize(state, "first", ("one", "two"))
-        repository = state.run_store.read_store(RuntimeDomain.CONVERSATION).transcript_repository
+        repository = state.run_store.read_store(PersistenceDomain.CONVERSATION).transcript_repository
         stream = (
             repository.iter_message_range(session.history_id, start=1, end=4)
             if reader == "owner"
@@ -165,13 +165,13 @@ async def test_transcript_range_checks_all_returned_facts_before_finishing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     backend: str, corruption: str, page_size: int,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="transcript-range-integrity", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
         await _materialize(state, "first", ("one",))
         await _materialize(state, "second", ("two",))
-        repository = state.run_store.read_store(RuntimeDomain.CONVERSATION).transcript_repository
+        repository = state.run_store.read_store(PersistenceDomain.CONVERSATION).transcript_repository
         store = repository._store
         assert session.history_id is not None
         stream = repository.transcript_stream(session.history_id)
@@ -208,14 +208,14 @@ async def test_transcript_payload_and_yield_release_state_scope(
     backend: str, reader: str, finish: str,
 ) -> None:
     monkeypatch.setattr(_archive, "PAYLOAD_COMPRESS_MINIMUM", 0)
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="transcript-payload-scope", tenant_id="tenant")
     task = None
     try:
         session = await state.conversation.sessions.create(_session())
         assert session.history_id is not None
         await _materialize(state, "first", ("x" * 17000,))
-        archive = state.run_store.read_store(RuntimeDomain.CONVERSATION)
+        archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         repository = archive.transcript_repository
         latest = await repository.latest_chunk(session.history_id)
         assert latest is not None
@@ -286,13 +286,13 @@ async def test_empty_transcript_range_validates_head_without_loading_facts(
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'empty-range.db'}")
     await provision_database(engine)
-    state = RuntimeState(RuntimeStorage.sql(engine))
+    state = Persistence(PersistenceStorage.sql(engine))
     await state.initialize(namespace="transcript-empty-range", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
         assert session.history_id is not None
         await _materialize(state, "first", ("one",))
-        repository = state.run_store.read_store(RuntimeDomain.CONVERSATION).transcript_repository
+        repository = state.run_store.read_store(PersistenceDomain.CONVERSATION).transcript_repository
 
         async def read(start: int, end: int):
             if reader == "spans":
@@ -329,16 +329,16 @@ async def test_empty_transcript_range_validates_head_without_loading_facts(
 async def test_transcript_first_yield_prefetches_only_one_bounded_fact_page(
     monkeypatch: pytest.MonkeyPatch, reader: str,
 ) -> None:
-    from linktools.ai.runtime.state._memory_transaction import _MemoryTransaction
+    from linktools.ai.persistence._memory_transaction import _MemoryTransaction
 
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="transcript-lazy-page", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
         assert session.history_id is not None
         monkeypatch.setattr(_history, "_TRANSCRIPT_CHUNK_MAX_MESSAGES", 1)
         await _materialize(state, "first", tuple(f"prompt:{index}" for index in range(35)))
-        repository = state.run_store.read_store(RuntimeDomain.CONVERSATION).transcript_repository
+        repository = state.run_store.read_store(PersistenceDomain.CONVERSATION).transcript_repository
         stream_digest = repository.transcript_stream(session.history_id)
         original = _MemoryTransaction.list_facts
         rows = []
@@ -372,9 +372,9 @@ async def test_transcript_first_yield_prefetches_only_one_bounded_fact_page(
 async def test_session_transcript_store_fallback_does_not_overlap_history_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from linktools.ai.runtime.state._memory import InMemoryStateStore
+    from linktools.ai.persistence._memory import InMemoryStateStore
 
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="transcript-separate-store", tenant_id="tenant")
     other = InMemoryStateStore(state.conversation.histories.state_store.storage_group)
     await other.initialize()
@@ -382,7 +382,7 @@ async def test_session_transcript_store_fallback_does_not_overlap_history_scope(
         session = await state.conversation.sessions.create(_session())
         assert session.history_id is not None
         await _materialize(state, "first", ("one",))
-        archive = state.run_store.read_store(RuntimeDomain.CONVERSATION)
+        archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         records = await archive.state_store.read(lambda tx: tx.scan_records())
         facts = await archive.state_store.read(lambda tx: tx.scan_facts())
 
@@ -393,7 +393,7 @@ async def test_session_transcript_store_fallback_does_not_overlap_history_scope(
         await other.mutate(copy)
         repository = _history.TranscriptRepository(
             other, object_store=None, namespace="transcript-separate-store",
-            tenant_id="tenant", runtime_domain=RuntimeDomain.CONVERSATION,
+            tenant_id="tenant", runtime_domain=PersistenceDomain.CONVERSATION,
             history_repository=state.conversation.histories,
         )
         original = other.read
@@ -422,9 +422,9 @@ async def test_session_transcript_store_fallback_does_not_overlap_history_scope(
 async def test_session_range_retains_custom_history_scalar_contract(
     adapter: str, result: str,
 ) -> None:
-    from linktools.ai.runtime.state._conversation_repositories import ConversationHistoryRepositoryImpl
+    from linktools.ai.persistence._conversation_repositories import ConversationHistoryRepositoryImpl
 
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     namespace = "transcript-custom-history"
     await state.initialize(namespace=namespace, tenant_id="tenant")
     try:
@@ -462,7 +462,7 @@ async def test_session_range_retains_custom_history_scalar_contract(
         )
         repository = _history.TranscriptRepository(
             original.state_store, object_store=None, namespace=namespace,
-            tenant_id="tenant", runtime_domain=RuntimeDomain.CONVERSATION,
+            tenant_id="tenant", runtime_domain=PersistenceDomain.CONVERSATION,
             history_repository=custom,
         )
         stream = repository.iter_session_message_range(
@@ -489,16 +489,16 @@ async def test_session_range_retains_custom_history_scalar_contract(
 async def test_batched_history_range_validates_descriptor_and_head(
     corruption: str, end: int,
 ) -> None:
-    from linktools.ai.runtime.state._contracts import TranscriptOwnerDomain
+    from linktools.ai.persistence.contracts import TranscriptOwnerDomain
 
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="transcript-batch-integrity", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
         assert session.history_id is not None
         await _materialize(state, "first", ("one",))
         histories = state.conversation.histories
-        repository = state.run_store.read_store(RuntimeDomain.CONVERSATION).transcript_repository
+        repository = state.run_store.read_store(PersistenceDomain.CONVERSATION).transcript_repository
         history_id = session.history_id
 
         async def corrupt(transaction):
@@ -537,13 +537,13 @@ async def test_batched_history_range_validates_descriptor_and_head(
 
 @pytest.mark.parametrize("start", (0, 1))
 async def test_invalid_seek_hint_falls_back_to_validated_facts(start: int) -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="transcript-seek-hint", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
         assert session.history_id is not None
         await _materialize(state, "first", ("one",))
-        repository = state.run_store.read_store(RuntimeDomain.CONVERSATION).transcript_repository
+        repository = state.run_store.read_store(PersistenceDomain.CONVERSATION).transcript_repository
 
         async def corrupt_hint(transaction):
             key = repository._seek_key(session.history_id, 0)
@@ -565,7 +565,7 @@ async def test_invalid_seek_hint_falls_back_to_validated_facts(start: int) -> No
 
 @pytest.mark.parametrize("mismatch", ("namespace", "tenant"))
 async def test_history_batch_does_not_bypass_transcript_scope(mismatch: str) -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="transcript-original", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
@@ -575,7 +575,7 @@ async def test_history_batch_does_not_bypass_transcript_scope(mismatch: str) -> 
             histories.state_store, object_store=None,
             namespace="transcript-other" if mismatch == "namespace" else "transcript-original",
             tenant_id="tenant-other" if mismatch == "tenant" else "tenant",
-            runtime_domain=RuntimeDomain.CONVERSATION, history_repository=histories,
+            runtime_domain=PersistenceDomain.CONVERSATION, history_repository=histories,
         )
         with pytest.raises(AIError) as error:
             _ = [message async for message in repository.iter_session_message_range(
@@ -587,13 +587,13 @@ async def test_history_batch_does_not_bypass_transcript_scope(mismatch: str) -> 
 
 
 async def test_history_batch_preserves_head_decode_error_priority() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="transcript-error-priority", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
         assert session.history_id is not None
         histories = state.conversation.histories
-        repository = state.run_store.read_store(RuntimeDomain.CONVERSATION).transcript_repository
+        repository = state.run_store.read_store(PersistenceDomain.CONVERSATION).transcript_repository
 
         async def corrupt(transaction):
             stored = await transaction.get_record(histories._key("transcript_head", session.history_id))

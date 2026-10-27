@@ -6,8 +6,8 @@ import pytest
 
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state._store import StoredFact
-from linktools.ai.runtime.state._task_repository import _decode_task_event
+from linktools.ai.persistence.state import StoredFact
+from linktools.ai.persistence._task_repository import _decode_task_event
 
 
 def _fact(kind: str, data: dict[str, JsonValue]) -> StoredFact:

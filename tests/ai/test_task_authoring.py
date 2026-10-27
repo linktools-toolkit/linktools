@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Typed JSON result references and submission-time graph diagnostics."""
 
 from collections.abc import Mapping
@@ -14,8 +16,9 @@ from typing_extensions import assert_type
 from linktools.ai.core import JsonValue, Principal, TaskStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime.state._codec import decode_domain, encode_domain
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.persistence.codec import decode_domain, encode_domain
 from linktools.ai.task import (
     Task, TaskDependency, TaskDependencyState, TaskExpander, TaskExpansionContext,
     TaskGraph, TaskGraphTemplate, TaskNode, TaskNodeContext,
@@ -73,9 +76,8 @@ async def test_typed_result_references_keep_json_and_alias_reads() -> None:
         TaskNode("finish", (node.node_id,), task=finishing,
                  input_refs={"text": reference}),
     ))
-    async with Runtime.open("typed-results",
-                            storage=RuntimeStorage.in_memory()) as runtime:
-        run = await runtime.tasks.bind(preparation, finishing).start(
+    async with Persistence.open('typed-results', storage=PersistenceStorage.in_memory()) as persistence_76, TaskEngine.open(preparation, finishing, persistence=persistence_76) as engine:
+        run = await engine.start(
             graph, idempotency_key="typed-results",
         )
         assert (await run.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED
@@ -141,9 +143,8 @@ async def test_collection_result_types_survive_expansion_and_json_round_trip() -
     )))
     assert decode_domain(encode_domain(template), TaskGraphTemplate) == template
     graph = TaskGraph("typed-collections", template.nodes)
-    async with Runtime.open("typed-collections",
-                            storage=RuntimeStorage.in_memory()) as runtime:
-        engine = runtime.tasks.bind(word_task, count_task, expander).with_definitions(
+    async with Persistence.open('typed-collections', storage=PersistenceStorage.in_memory()) as persistence_144, TaskEngine.open(word_task, count_task, expander, persistence=persistence_144) as engine:
+        engine = engine.with_definitions(
             collect_task, dispatch_task,
         )
         assert_type(engine.definition(word_task.ref), Task[None, list[str]])
@@ -247,9 +248,7 @@ async def test_describe_submission_locates_invalid_node_without_execution(invali
     elif invalid == "unsupported_output":
         node = TaskNode("invalid", task=definition, output_type=int)
     graph = TaskGraph("planning", (node,))
-    async with Runtime.open("authoring-errors",
-                            storage=RuntimeStorage.in_memory()) as runtime:
-        engine = runtime.tasks.bind(definition)
+    async with Persistence.open('authoring-errors', storage=PersistenceStorage.in_memory()) as persistence_250, TaskEngine.open(definition, persistence=persistence_250) as engine:
         with pytest.raises(AIError) as caught:
             await engine.describe_submission(graph, idempotency_key="plan")
         assert caught.value.code is (
@@ -276,9 +275,8 @@ async def test_result_type_annotations_do_not_bypass_json_validation(model_outpu
                       output_type=_Answer if model_output else None)
     node = TaskNode("invalid", task=definition)
     reference = TaskNodeResultRef(node)
-    async with Runtime.open("invalid-json-result",
-                            storage=RuntimeStorage.in_memory()) as runtime:
-        run = await runtime.tasks.bind(definition).start(
+    async with Persistence.open('invalid-json-result', storage=PersistenceStorage.in_memory()) as persistence_279, TaskEngine.open(definition, persistence=persistence_279) as engine:
+        run = await engine.start(
             TaskGraph("invalid-json-result", (node,)), idempotency_key="invalid-json-result",
         )
         assert (await run.wait(timeout_seconds=10)).result.status is TaskStatus.FAILED

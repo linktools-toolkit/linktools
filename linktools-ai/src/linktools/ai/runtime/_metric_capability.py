@@ -41,16 +41,17 @@ from ..capability import AgentContext
 from ._trace_capture import record_http_bodies_enabled
 from ..core import ExecutionEventType, JsonValue
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..model import ModelClientRequest, ModelClientRequestRecorder, ModelStreamAttempt, model_binding_error
+from ..model import (
+    ModelClientRequest, ModelClientRequestRecorder, ModelStreamAttempt, model_binding_error,
+    model_request_error as project_model_request_error,
+)
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ._budget import RunBudgetContext
-from ._journal import ModelRequestFact, ModelRequestJournal, await_request_handoff
-from ._message import (
-    project_model_response_attempts, model_response_usage, model_attempts_usage, model_attempts_details,
-)
-from ._metrics_service import (
-    _bind_metric_execution_context,
-    _metric_correlation,
+from ..observe.journal import ModelRequestFact, ModelRequestJournal, await_request_handoff
+from ..model.messages import project_model_response_attempts, model_response_usage, model_attempts_usage, model_attempts_details
+from ..observe.service import (
+    bind_metric_execution_context,
+    metric_correlation,
 )
 
 _logger = environ.get_logger("ai.runtime.model_metrics")
@@ -434,7 +435,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
     ) -> None:
         if self._recorder is None:
             return
-        _bind_metric_execution_context(
+        bind_metric_execution_context(
             self._recorder,
             self._execution_id,
             ctx.deps.correlation,
@@ -1186,7 +1187,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 tenant_id=self._tenant_id,
                 status=status,
                 error_code=error_code,
-                correlation=_metric_correlation(
+                correlation=metric_correlation(
                     None if run_context is None else run_context.correlation,
                     execution_id=self._execution_id,
                     session_id=self._session_id,
@@ -1288,17 +1289,7 @@ def model_request_error(
     group = _fallback_error(error)
     if content_omission_reason is None and group is None and not stream_attempts:
         return error
-    diagnostics = (
-        error.diagnostics
-        if isinstance(error, AIError) and error.diagnostics is not None
-        and error.diagnostics.content_omission_reason == content_omission_reason
-        else ErrorDiagnostics.from_exception(error, content_omission_reason=content_omission_reason)
-    )
-    provider = model_binding_error(error, diagnostics=diagnostics)
-    classified = provider if provider is not None else error
     details: dict[str, JsonValue] = {}
-    if content_omission_reason is not None:
-        details["content_omission_reason"] = content_omission_reason
     attempts = getattr(group, "attempts", None)
     if attempts is not None:
         details["failed_attempts"] = model_attempts_details(
@@ -1307,19 +1298,14 @@ def model_request_error(
         if fact is not None:
             details["model_request_seq"] = fact.model_request_seq
             details["purpose"] = fact.purpose
-    if isinstance(classified, AIError):
-        for key in ("model_name", "phase", "reason", "status_code", "retry_after"):
-            if key in classified.safe_details:
-                details[key] = classified.safe_details[key]
     if stream_attempts:
         details["stream_attempt_seq"] = stream_attempts[-1].stream_attempt_seq
         details["stream_attempt_count"] = len(stream_attempts)
         if fact is not None:
             details["model_request_seq"] = fact.model_request_seq
-    return AIError(
-        ErrorCode(_model_error_code(classified)),
-        retryable=classified.retryable if isinstance(classified, AIError) else False,
-        safe_details=details, diagnostics=diagnostics,
+    return project_model_request_error(
+        error, content_omission_reason=content_omission_reason,
+        code=ErrorCode(_model_error_code(error)), safe_details=details,
     )
 
 

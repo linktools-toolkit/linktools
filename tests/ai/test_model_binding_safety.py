@@ -20,7 +20,7 @@ from linktools.ai.model._binding import _RetryingModel
 
 
 def test_model_binding_contract_excludes_secret_material() -> None:
-    registry = create_model(protocol="openai", model="gpt-test", api_key="secret")
+    registry = create_model(api="openai", model="gpt-test", api_key="secret")
     binding = registry
 
     assert "secret" not in repr(binding)
@@ -29,7 +29,7 @@ def test_model_binding_contract_excludes_secret_material() -> None:
 
 
 def test_static_connection_values_are_normalized() -> None:
-    binding = create_model(protocol="openai", model="gpt-test",
+    binding = create_model(api="openai", model="gpt-test",
                            base_url="  https://EXAMPLE.com/v1/  ", api_key="   ")
     assert binding.base_url == "https://example.com/v1"
     assert binding.api_key is None
@@ -39,14 +39,15 @@ def test_static_connection_values_are_normalized() -> None:
                                          ("retry_delay", -1), ("max_tokens", 0)])
 def test_static_connection_and_request_settings_are_validated(field, value) -> None:
     with pytest.raises(ValueError):
-        create_model(protocol="openai", model="gpt-test", **{field: value})
+        create_model(api="openai", model="gpt-test",
+                     **({"model_settings": {field: value}} if field in {"max_tokens", "timeout"} else {field: value}))
 
 
 def test_model_route_capture_keeps_shared_binding_when_source_map_changes() -> None:
-    original = create_model(protocol="openai", model="gpt-old")
+    original = create_model(api="openai", model="gpt-old")
     source = {"target": original, "alias": original, "alias-2": original}
     snapshot = _ModelResolver(source)
-    source["target"] = create_model(protocol="openai", model="gpt-new")
+    source["target"] = create_model(api="openai", model="gpt-new")
     assert snapshot.resolve("target") is original
     assert snapshot.resolve("alias") is original
     assert snapshot.resolve("alias-2") is original

@@ -17,11 +17,11 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._execution import DefaultExecutionService
-from linktools.ai.runtime._execution_tree import (
+from linktools.ai.execution.tree import (
     ExecutionTreeBroker,
     ExecutionTreeStreamer,
 )
-from linktools.ai.runtime.service_api import (
+from linktools.ai.execution import (
     ExecutionEvent,
     ExecutionStreamEvent,
     ExecutionTreeEvent,
@@ -29,7 +29,7 @@ from linktools.ai.runtime.service_api import (
     ForkExecutionRequest,
     RetryExecutionRequest,
 )
-from linktools.ai.runtime.state._contracts import ExecutionRecord
+from linktools.ai.persistence.contracts import ExecutionRecord
 from linktools.ai.spec import AgentSpec
 from ._runtime_test_helpers import execution_owner_fields
 
@@ -437,11 +437,11 @@ async def test_tree_stream_discovers_persisted_child_without_local_notification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "linktools.ai.runtime._execution_tree._DISCOVERY_BACKOFF_INITIAL",
+        "linktools.ai.execution.tree._DISCOVERY_BACKOFF_INITIAL",
         0.01,
     )
     monkeypatch.setattr(
-        "linktools.ai.runtime._execution_tree._DISCOVERY_BACKOFF_MAX",
+        "linktools.ai.execution.tree._DISCOVERY_BACKOFF_MAX",
         0.01,
     )
 
@@ -660,7 +660,7 @@ async def test_subagent_execution_cannot_be_retried_or_forked(
     child = _record(subagent=True, parent_invocation_id="delegate-call")
     monkeypatch.setattr(
         service,
-        "_load_authorized",
+        "load_authorized",
         AsyncMock(return_value=child),
     )
     principal = Principal("owner", "tenant", "service")
@@ -720,7 +720,7 @@ async def test_tree_broker_wraps_only_untyped_optional_failures(
     operation: str,
     typed: bool,
 ) -> None:
-    from linktools.ai.runtime.service_api import _ExecutionStreamFailure
+    from linktools.ai.observe.stream import ExecutionStreamFailure
 
     cause = AIError(ErrorCode.STORAGE_UNAVAILABLE) if typed else OSError("broker failed")
 
@@ -746,7 +746,7 @@ async def test_tree_broker_wraps_only_untyped_optional_failures(
             return Subscription()
 
     streamer = ExecutionTreeStreamer(_RootOnlyExecutionReader(), _EventStreamer(), Broker())
-    with pytest.raises(AIError if typed else _ExecutionStreamFailure) as raised:
+    with pytest.raises(AIError if typed else ExecutionStreamFailure) as raised:
         async for _event in streamer.stream("root", principal=Principal("owner", "tenant")):
             pass
 
@@ -820,7 +820,7 @@ async def test_tree_stream_preserves_authoritative_failure_during_cleanup() -> N
 @pytest.mark.asyncio
 async def test_tree_close_keeps_child_live_cleanup_authoritative_failure():
     from linktools.ai.core import ExecutionDeltaType
-    from linktools.ai.runtime._event import DefaultEventService, ExecutionDelta, LiveExecutionEventBroker
+    from linktools.ai.execution.events import DefaultEventService, ExecutionDelta, LiveExecutionEventBroker
     cause = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     class Subscription:
         def __init__(self, key):
@@ -1002,8 +1002,8 @@ async def test_tree_subscribes_each_parent_before_listing_its_children() -> None
 async def test_tree_discovers_cross_process_descendants_below_existing_child(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("linktools.ai.runtime._execution_tree._DISCOVERY_BACKOFF_INITIAL", 0.01)
-    monkeypatch.setattr("linktools.ai.runtime._execution_tree._DISCOVERY_BACKOFF_MAX", 0.01)
+    monkeypatch.setattr("linktools.ai.execution.tree._DISCOVERY_BACKOFF_INITIAL", 0.01)
+    monkeypatch.setattr("linktools.ai.execution.tree._DISCOVERY_BACKOFF_MAX", 0.01)
     reader = _RecursiveExecutionReader()
     reader.visible = {"root", "child"}
     release = asyncio.Event()
@@ -1151,7 +1151,7 @@ async def test_tree_broker_discovers_descendants_after_parent_stream_ends() -> N
 async def test_existing_tree_events_continue_during_child_discovery(
     discovery_source: str, outcome: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from linktools.ai.runtime import _execution_tree
+    import linktools.ai.execution.tree as _execution_tree
 
     monkeypatch.setattr(_execution_tree, "_DISCOVERY_BACKOFF_INITIAL", 0.01)
     entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()

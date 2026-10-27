@@ -10,11 +10,11 @@ from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime.state._filesystem import FilesystemStateStore
-from linktools.ai.runtime.state._plan import RuntimeDomain
-from linktools.ai.runtime.state._schema import build_runtime_sql_metadata
-from linktools.ai.runtime.state._sql import SqlStateStore
-from linktools.ai.runtime.state._store import RecordQuery, StoredRecord
+from linktools.ai.persistence._filesystem import FilesystemStateStore
+from linktools.ai.persistence._plan import PersistenceDomain
+from linktools.ai.persistence._schema import build_runtime_sql_metadata
+from linktools.ai.persistence._sql import SqlStateStore
+from linktools.ai.persistence.state import RecordQuery, StoredRecord
 
 pytestmark = pytest.mark.asyncio
 _SCOPE = b"s" * 32
@@ -62,7 +62,7 @@ async def test_filesystem_range_index_is_generic_and_does_not_enumerate_index(
         root,
         namespace="generic-range",
         tenant_id="tenant",
-        runtime_domain=RuntimeDomain.EXECUTION.value,
+        runtime_domain=PersistenceDomain.EXECUTION.value,
         _range_index=True,
     )
     await store.initialize()
@@ -76,7 +76,7 @@ async def test_filesystem_range_index_is_generic_and_does_not_enumerate_index(
         root,
         namespace="generic-range",
         tenant_id="tenant",
-        runtime_domain=RuntimeDomain.EXECUTION.value,
+        runtime_domain=PersistenceDomain.EXECUTION.value,
         _range_index=True,
     )
     await reopened.initialize()
@@ -101,7 +101,7 @@ async def test_filesystem_range_index_is_opt_in(tmp_path: Path) -> None:
         root,
         namespace="range-opt-in",
         tenant_id="tenant",
-        runtime_domain=RuntimeDomain.EXECUTION.value,
+        runtime_domain=PersistenceDomain.EXECUTION.value,
     )
     await store.initialize()
     await _seed(store, (_record("probe"),))
@@ -117,7 +117,7 @@ async def test_filesystem_range_index_does_not_write_one_node_per_character(
         tmp_path / "compressed-range",
         namespace="compressed-range",
         tenant_id="tenant",
-        runtime_domain=RuntimeDomain.EXECUTION.value,
+        runtime_domain=PersistenceDomain.EXECUTION.value,
         _range_index=True,
     )
     await store.initialize()
@@ -157,7 +157,7 @@ async def test_sql_prefix_is_case_sensitive_and_matches_filesystem(
 
 
 async def test_sql_sort_key_collation_is_explicit_for_supported_backends() -> None:
-    metadata = build_runtime_sql_metadata(frozenset({RuntimeDomain.EXECUTION}))
+    metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.EXECUTION}))
     column_type = metadata.tables["ai_state_records"].c.sort_key.type
     assert column_type.dialect_impl(postgresql.dialect()).collation == "C"
     assert column_type.dialect_impl(sqlite.dialect()).collation == "BINARY"

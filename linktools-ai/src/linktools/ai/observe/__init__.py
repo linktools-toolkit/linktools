@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Metrics observation contracts and persistence boundary."""
 
+from ._control import MetricsControl, RuntimeMetricsControl, RuntimeMetricsStatus, RuntimeMetricsFlushResult
 from ._metrics import Metrics
 from ._model import (
     MetricAggregation,
@@ -22,7 +23,14 @@ from ._model import (
 from ._sql import build_metrics_sql_metadata
 from ._store import MetricStore
 
+from ._wait import WaitResult
+
 __all__ = [
+    "MetricsControl",
+    "RuntimeMetricsControl",
+    "RuntimeMetricsStatus",
+    "RuntimeMetricsFlushResult",
+    "WaitResult",
     "MetricRecorderStatus",
     "MetricFlushResult",
     "MetricAggregation",

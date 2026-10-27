@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Retained conversation publication recovery boundaries."""
 from ._runtime_test_helpers import model_features
 
@@ -8,11 +10,12 @@ from dataclasses import replace
 import pytest
 from tests.ai.test_conversation_output_retention import _NAMESPACE, _features, _models
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.runtime import Runtime, RuntimeHistory
-from linktools.ai.runtime.state import RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.history import History
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence.contracts import (
     RecoveryCheckpointState,
     RecoveryHandoffPhase,
 )
@@ -23,16 +26,14 @@ from linktools.ai.runtime.state._contracts import (
 async def test_unknown_release_must_not_report_success_without_envelope(
     tmp_path, monkeypatch, prior_turn
 ):
-    storage = RuntimeStorage.from_plan(
-        RuntimeStoragePlan(
+    storage = PersistenceStorage.from_plan(
+        PersistencePlan(
             execution=StorageRoute.sqlite(tmp_path / "e.db"),
             conversation=StorageRoute.sqlite(tmp_path / "c.db"),
         )
     )
     try:
-        async with Runtime.open(
-            _NAMESPACE, storage=storage, features=model_features(_models(), _features())
-        ) as runtime:
+        async with Persistence.open(_NAMESPACE, storage=storage) as persistence_33, Runtime.attach(persistence=persistence_33, features=model_features(_models(), _features())) as runtime:
             session = await runtime.agents.get().create_session("s")
             if prior_turn:
                 await session.run("prior committed turn", timeout_seconds=5)
@@ -80,10 +81,7 @@ async def test_unknown_release_must_not_report_success_without_envelope(
                     execution_id, principal=principal
                 )
             assert size_error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
-            async with RuntimeHistory.open(
-                _NAMESPACE,
-                storage=RuntimeStorage.from_plan(storage.plan),
-            ) as history:
+            async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_plan(storage.plan), tenant_id="default", read_only=True) as history_persistence_84, History.open(persistence=history_persistence_84) as history:
                 with pytest.raises(AIError) as history_error:
                     await history.result(execution_id, principal=principal)
                 assert history_error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
@@ -93,15 +91,13 @@ async def test_unknown_release_must_not_report_success_without_envelope(
             ErrorCode.STORAGE_COMMIT_UNKNOWN,
             ErrorCode.STORAGE_RECOVERY_REQUIRED,
         }
-    storage = RuntimeStorage.from_plan(
-        RuntimeStoragePlan(
+    storage = PersistenceStorage.from_plan(
+        PersistencePlan(
             execution=StorageRoute.sqlite(tmp_path / "e.db"),
             conversation=StorageRoute.sqlite(tmp_path / "c.db"),
         )
     )
-    async with Runtime.open(
-        _NAMESPACE, storage=storage, features=model_features(_models(), _features())
-    ) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_102, Runtime.attach(persistence=persistence_102, features=model_features(_models(), _features())) as runtime:
         recovered_commits = await runtime._state.conversation.sessions.list_timeline_commits(
             "s", tenant_id=principal.tenant_id, start_turn_seq=seq, end_turn_seq=seq + 1
         )
@@ -120,15 +116,13 @@ async def test_unknown_release_must_not_report_success_without_envelope(
 
 @pytest.mark.asyncio
 async def test_rejected_admitted_start_retains_input(tmp_path, monkeypatch):
-    storage = RuntimeStorage.from_plan(
-        RuntimeStoragePlan(
+    storage = PersistenceStorage.from_plan(
+        PersistencePlan(
             execution=StorageRoute.sqlite(tmp_path / "e.db"),
             conversation=StorageRoute.sqlite(tmp_path / "c.db"),
         )
     )
-    async with Runtime.open(
-        _NAMESPACE, storage=storage, features=model_features(_models(), _features())
-    ) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_129, Runtime.attach(persistence=persistence_129, features=model_features(_models(), _features())) as runtime:
         session = await runtime.agents.get().create_session("s")
 
         async def reject(*args, **kwargs):
@@ -165,12 +159,8 @@ async def test_rejected_admitted_start_retains_input(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_closed_result_survives_receipt_corruption_but_timeline_rejects_it(tmp_path):
-    storage = RuntimeStorage.sqlite(tmp_path / "state.db")
-    async with Runtime.open(
-        _NAMESPACE,
-        storage=storage,
-        features=model_features(_models(), _features()),
-    ) as runtime:
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db")
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_169, Runtime.attach(persistence=persistence_169, features=model_features(_models(), _features())) as runtime:
         session = await runtime.agents.get().create_session("s")
         execution = await session.start("original input")
         await execution.wait(timeout_seconds=5)
@@ -198,10 +188,7 @@ async def test_closed_result_survives_receipt_corruption_but_timeline_rejects_it
         with pytest.raises(AIError) as timeline_error:
             await runtime.sessions.timeline("s", principal=principal)
         assert timeline_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-        async with RuntimeHistory.open(
-            _NAMESPACE,
-            storage=RuntimeStorage.sqlite(tmp_path / "state.db"),
-        ) as history:
+        async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.sqlite(tmp_path / 'state.db'), tenant_id="default", read_only=True) as history_persistence_194, History.open(persistence=history_persistence_194) as history:
             retained_result = await history.result(execution.execution_id, principal=principal)
             assert retained_result.status is ExecutionStatus.SUCCEEDED
 
@@ -210,11 +197,11 @@ async def test_closed_result_survives_receipt_corruption_but_timeline_rejects_it
 async def test_completed_receipt_old_handoff_after_later_turn(tmp_path, monkeypatch):
     from linktools.ai.runtime._local import LocalExecutionBackend
 
-    plan = RuntimeStoragePlan(
+    plan = PersistencePlan(
         execution=StorageRoute.sqlite(tmp_path / "e.db"),
         conversation=StorageRoute.sqlite(tmp_path / "c.db"),
     )
-    storage = RuntimeStorage.from_plan(plan)
+    storage = PersistenceStorage.from_plan(plan)
     old_complete = LocalExecutionBackend._complete_handoff
     first_id = None
 
@@ -226,9 +213,7 @@ async def test_completed_receipt_old_handoff_after_later_turn(tmp_path, monkeypa
             raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
         return await old_complete(self, checkpoint)
 
-    async with Runtime.open(
-        _NAMESPACE, storage=storage, features=model_features(_models(), _features())
-    ) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_229, Runtime.attach(persistence=persistence_229, features=model_features(_models(), _features())) as runtime:
         session = await runtime.agents.get().create_session("s")
         monkeypatch.setattr(LocalExecutionBackend, "_complete_handoff", fail_first)
         await session.run("first", timeout_seconds=5)
@@ -237,12 +222,8 @@ async def test_completed_receipt_old_handoff_after_later_turn(tmp_path, monkeypa
         expected_page = await session.timeline()
         expected_session = await runtime._state.conversation.sessions.get("s", tenant_id=principal.tenant_id)
     monkeypatch.setattr(LocalExecutionBackend, "_complete_handoff", old_complete)
-    reopened = RuntimeStorage.from_plan(plan)
-    async with Runtime.open(
-        _NAMESPACE,
-        storage=reopened,
-        features=model_features(_models(), _features()),
-    ) as runtime:
+    reopened = PersistenceStorage.from_plan(plan)
+    async with Persistence.open(_NAMESPACE, storage=reopened) as persistence_241, Runtime.attach(persistence=persistence_241, features=model_features(_models(), _features())) as runtime:
         page = await runtime.sessions.timeline("s", principal=principal)
         assert len(page.items) == 2
         assert page.items == expected_page.items

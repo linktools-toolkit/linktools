@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Executions without a shared run budget retain their accepted Agent limits."""
 from ._runtime_test_helpers import model_features
 
@@ -19,9 +21,11 @@ from pydantic_ai.usage import RequestUsage
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
-from linktools.ai.runtime.state._codec import _decode_enveloped_domain
-from linktools.ai.runtime.state._contracts import ExecutionRecord
+from linktools.ai.history import History
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.codec import _decode_enveloped_domain
+from linktools.ai.persistence.contracts import ExecutionRecord
 
 from . import _runtime_test_helpers as helpers
 
@@ -46,7 +50,7 @@ async def test_sqlite_execution_without_shared_budget_keeps_public_history(tmp_p
     from linktools.ai.web import create_app
 
     path, execution_id, _standalone_id = _restore_fixture(tmp_path)
-    async with RuntimeHistory.open("older-history", storage=RuntimeStorage.sqlite(path)) as history:
+    async with Persistence.open('older-history', storage=PersistenceStorage.sqlite(path), tenant_id="default", read_only=True) as history_persistence_52, History.open(persistence=history_persistence_52) as history:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=create_app(history=history)),
             base_url="http://127.0.0.1:8765",
@@ -85,10 +89,7 @@ async def test_sqlite_retry_preserves_accepted_agent_usage_limit(
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
     application = RuntimeFeatures("application")
     application.agent("default", revision=2, model="default", allow_tools=())
-    async with Runtime.open(
-        "older-history", storage=RuntimeStorage.sqlite(path),
-        features=model_features(helpers.RuntimeUsageModels(), application),
-    ) as runtime:
+    async with Persistence.open('older-history', storage=PersistenceStorage.sqlite(path)) as persistence_88, Runtime.attach(persistence=persistence_88, features=model_features(helpers.RuntimeUsageModels(), application)) as runtime:
         original = await runtime.executions.get(execution_id)
         assert await original.budget_usage() is None
         retried = await original.retry("exceed the original output limit")

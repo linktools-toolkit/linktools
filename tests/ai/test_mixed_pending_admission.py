@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Pending and source-first writers share one live admission owner."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -10,8 +10,8 @@ from dataclasses import replace
 import pytest
 from linktools.ai.core import Principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime._pending_coordination import _PendingTurnCoordination
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.coordination import PendingTurnCoordination
 from linktools.ai.storage import InMemoryCacheBackend
 
 from .persistence.test_execution_start_service import (
@@ -26,7 +26,7 @@ from .test_session_admission_conformance import _session
 _PRINCIPAL = Principal("owner", "tenant", "service")
 
 
-class _Coordinator(_PendingTurnCoordination):
+class _Coordinator(PendingTurnCoordination):
     def __init__(self, cache):
         super().__init__(cache, cache, namespace="mixed-admission", tenant_id="tenant")
         self.claims = []
@@ -44,8 +44,8 @@ class _Coordinator(_PendingTurnCoordination):
 
 @asynccontextmanager
 async def _writers():
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="mixed-admission", tenant_id="tenant")
     cache = InMemoryCacheBackend(max_bytes=1024 * 1024)
     services = []

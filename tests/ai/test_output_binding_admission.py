@@ -32,7 +32,7 @@ def test_valid_explicit_output_overrides_unusable_default_and_loads_model() -> N
 
     def load() -> ModelBinding:
         loaded.append(True)
-        return create_model(protocol="openai", model="gpt-test")
+        return create_model(api="openai", model="gpt-test")
 
     spec = AgentSpec("default", output_schema={"type": "string"})
     compiler = AgentCompiler(models={"default": load}, candidates=(), agents={spec.id: spec})

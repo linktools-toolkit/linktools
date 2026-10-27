@@ -21,10 +21,8 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelClientRequest, ModelClientResponse
 from linktools.ai.observe import MetricMeasurement, Metrics, Observation
-from linktools.ai.runtime import (
-    ExecutionHistoryItem, ExecutionInfo, ExecutionTraceItem, ListExecutionRequest,
-    ModelInteractionItem, SessionView, TranscriptItem, UsageSummary,
-)
+from linktools.ai.history import ExecutionInfo
+from linktools.ai.execution import ExecutionHistoryItem, ExecutionTraceItem, ListExecutionRequest, ModelInteractionItem, SessionView, TranscriptItem, UsageSummary
 from linktools.ai.web import create_app
 
 

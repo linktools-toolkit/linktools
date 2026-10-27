@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Durable Session admission and ownership contracts."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -21,8 +21,9 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.model import create_model
-from linktools.ai.runtime import ExecutionRequest, RuntimeStorage
-from linktools.ai.runtime._event import LiveExecutionEventBroker
+from linktools.ai.execution import ExecutionRequest
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.execution.events import LiveExecutionEventBroker
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.observe import Observation
 from linktools.ai.runtime._execution import (
@@ -30,8 +31,8 @@ from linktools.ai.runtime._execution import (
     DefaultExecutionService,
     _ExecutionRuntimeBridge,
 )
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._contracts import SessionRecord
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.contracts import SessionRecord
 from linktools.ai.spec import AgentSpec
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -53,7 +54,7 @@ def _session() -> SessionRecord:
     )
 
 
-async def _admission_result(state: RuntimeState, execution_id: str) -> str:
+async def _admission_result(state: Persistence, execution_id: str) -> str:
     try:
         record = await state.conversation.sessions.admit_execution(
             "session",
@@ -68,8 +69,8 @@ async def _admission_result(state: RuntimeState, execution_id: str) -> str:
 
 @pytest.mark.asyncio
 async def test_memory_admission_is_atomic_and_cas_preserves_token() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="session-admission-memory", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -119,8 +120,8 @@ async def test_memory_admission_is_atomic_and_cas_preserves_token() -> None:
 async def test_sql_admission_is_atomic_and_token_survives_reopen(tmp_path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
     await provision_database(engine)
-    state = RuntimeStorage.sql(engine)
-    state = RuntimeState(state)
+    state = PersistenceStorage.sql(engine)
+    state = Persistence(state)
     await state.initialize(namespace="session-admission-sql", tenant_id="tenant")
     await state.conversation.sessions.create(_session())
     try:
@@ -139,8 +140,8 @@ async def test_sql_admission_is_atomic_and_token_survives_reopen(tmp_path) -> No
         assert owner is not None
         await state.close()
 
-        reopened = RuntimeStorage.sql(engine)
-        reopened = RuntimeState(reopened)
+        reopened = PersistenceStorage.sql(engine)
+        reopened = Persistence(reopened)
         await reopened.initialize(namespace="session-admission-sql", tenant_id="tenant")
         try:
             persisted = await reopened.conversation.sessions.get(
@@ -160,7 +161,7 @@ async def test_sql_admission_is_atomic_and_token_survives_reopen(tmp_path) -> No
 
 def _binding() -> AgentBinding:
     spec = AgentSpec("agent", model="model")
-    models = {"model": create_model(protocol="openai", model="gpt-test")}
+    models = {"model": create_model(api="openai", model="gpt-test")}
     compiler = AgentCompiler(
         models=models, candidates=(), agents={spec.id: spec},
     )
@@ -295,8 +296,8 @@ class _RejectingBackend:
 
 @pytest.mark.asyncio
 async def test_rejected_admission_terminalizes_pending_start() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="session-admission-rejection", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -308,7 +309,7 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
         runtime_bridge.bind(backend)  # type: ignore[arg-type]
         service = DefaultExecutionService(
             state.execution,
-            state.object_store(RuntimeDomain.EXECUTION),
+            state.object_store(PersistenceDomain.EXECUTION),
             TenantAuthorizationPolicy(),
             conversation=True, sessions=state.conversation.sessions,
             catalog=_BindingCatalog(),
@@ -384,8 +385,8 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
 async def test_rejected_start_preserves_admission_truth_and_cleanup_before_metrics(
     commit_phase: str, cancel_metric: bool,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="rejected-start-metric", tenant_id="tenant")
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -422,7 +423,7 @@ async def test_rejected_start_preserves_admission_truth_and_cleanup_before_metri
     bridge = _ExecutionRuntimeBridge()
     bridge.bind(backend)
     service = DefaultExecutionService(
-        state.execution, state.object_store(RuntimeDomain.EXECUTION), TenantAuthorizationPolicy(),
+        state.execution, state.object_store(PersistenceDomain.EXECUTION), TenantAuthorizationPolicy(),
         conversation=True, sessions=state.conversation.sessions, catalog=_BindingCatalog(), compiler=object(),
         runtime_bridge=bridge, live_broker=LiveExecutionEventBroker(), history_reader=_History(),
     )

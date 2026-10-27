@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
+from linktools.ai.task.engine import TaskEngine
 """Restart checkpoints and durable trace are independent Runtime opt-ins."""
 from ._runtime_test_helpers import model_features
 
@@ -23,16 +26,17 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import ExecutionCapability, TraceCapability, CheckpointCapability
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeState
-from linktools.ai.runtime.state._codec import (
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
     decode_domain,
     encode_domain,
     encode_envelope,
 )
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence.contracts import (
     ExecutionHistoryState,
     ExecutionRecord,
     RecoveryCheckpointState,
@@ -53,9 +57,9 @@ class _Answer(BaseModel):
 
 
 async def _start_delegated_execution(
-    runtime: Runtime, storage: RuntimeState, parent_id: str, prompt: str,
+    runtime: Runtime, storage: Persistence, parent_id: str, prompt: str,
 ) -> str:
-    from linktools.ai.runtime import ExecutionRequest
+    from linktools.ai.execution import ExecutionRequest
 
     parent = await storage.execution.executions.get(parent_id, tenant_id=runtime.tenant_id)
     assert parent is not None
@@ -121,11 +125,9 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
         group.capability(TraceCapability(), scope="runtime")
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "runtime.db"
-    storage_factory = _split_sqlite_storage if split_storage else RuntimeStorage.sqlite
+    storage_factory = _split_sqlite_storage if split_storage else PersistenceStorage.sqlite
     storage = storage_factory(database)
-    async with Runtime.open(
-        _NAMESPACE, storage=storage, features=model_features(models, group),
-    ) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_126, Runtime.attach(persistence=persistence_126, features=model_features(models, group)) as runtime:
         await runtime.agents.get().create_session("session")
         session = runtime.agents.get().session("session")
         execution = await session.start("first question", output=_Answer, idempotency_key="first")
@@ -139,7 +141,7 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
                 namespace=_NAMESPACE, tenant_id=runtime.tenant_id,
                 execution_id=execution.execution_id, agent_run_seq=record.agent_run_seq,
             )
-            checkpoint = await runtime._state.run_store.read_store(RuntimeDomain.CHECKPOINT).latest_checkpoint(
+            checkpoint = await runtime._run_store.read_store(PersistenceDomain.CHECKPOINT).latest_checkpoint(
                 agent_run_id=run_id, include_interrupted=True,
             )
             assert (checkpoint is not None) is restart
@@ -180,11 +182,11 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
         seal = await runtime._state.execution.executions.get_history_seal(execution.execution_id, tenant_id=runtime.tenant_id)
         assert (seal is not None) is trace
         assert terminal_head.seal_digest == (seal.seal_digest if seal is not None else None)
-        archive = runtime._state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = runtime._run_store.read_store(PersistenceDomain.TRACE)
         assert (await archive.get_agent_run(agent_run_id=run_id) is not None) is trace
         assert bool(await archive.list_model_interactions(agent_run_id=run_id)) is trace
         assert bool(await archive.list_events(agent_run_id=run_id)) is trace
-        recovery = runtime._state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        recovery = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)
         assert (await recovery.latest_checkpoint(agent_run_id=run_id) is not None) is (restart or split_storage)
         if split_storage:
             handoff = await runtime._state.recovery.checkpoints.get(execution.execution_id, tenant_id=runtime.tenant_id)
@@ -193,9 +195,7 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
             assert handoff.terminal_handoff is not None
 
     reopened = storage_factory(database)
-    async with Runtime.open(
-        _NAMESPACE, storage=reopened, features=model_features(models, group),
-    ) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=reopened) as persistence_196, Runtime.attach(persistence=persistence_196, features=model_features(models, group)) as runtime:
         restored = await runtime.executions.get(execution.execution_id)
         assert (await restored.wait(timeout_seconds=10)).result.output == first_output
         record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
@@ -204,11 +204,11 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
         assert await runtime._state.execution.executions.get_history_head(
             execution.execution_id, tenant_id=runtime.tenant_id,
         ) == terminal_head
-        archive = runtime._state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = runtime._run_store.read_store(PersistenceDomain.TRACE)
         assert (await archive.get_agent_run(agent_run_id=run_id) is not None) is trace
         assert bool(await archive.list_model_interactions(agent_run_id=run_id)) is trace
         assert bool(await archive.list_events(agent_run_id=run_id)) is trace
-        recovery = runtime._state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        recovery = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)
         assert (await recovery.latest_checkpoint(agent_run_id=run_id) is not None) is (restart or split_storage)
         if trace:
             assert (await restored.trace()).items
@@ -255,21 +255,20 @@ def test_execution_wire_requires_admitted_persistence_flags(persisted: bool) -> 
 async def test_task_admission_retains_its_explicit_persistence_guarantees() -> None:
     from linktools.ai.core import TaskStatus
     from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
-    from ._runtime_test_helpers import RuntimeUsageModels
 
     async def answer(_context: TaskNodeContext[None]) -> dict[str, int]:
         return {"value": 42}
 
     task = Task("answer", answer, effect_policy="none")
-    storage = RuntimeStorage.in_memory()
-    async with Runtime.open(_NAMESPACE, features=model_features(RuntimeUsageModels()), storage=storage) as runtime:
-        graph = await runtime.tasks.bind(task).start(
+    storage = PersistenceStorage.in_memory()
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_265, TaskEngine.open(task, persistence=persistence_265) as engine:
+        graph = await engine.start(
             TaskGraph("task-guarantees", (TaskNode("answer", task=task),)),
             idempotency_key="task-guarantees",
         )
         assert (await graph.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED
         execution = await graph.execution("answer")
-        record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        record = await persistence_265.execution.executions.get(execution.execution_id, tenant_id=persistence_265.tenant_id)
         assert record is not None and record.binding_kind == "task"
         assert record.restart_checkpoints and record.durable_trace
         assert await graph.result("answer") == {"value": 42}
@@ -289,10 +288,7 @@ async def test_persistence_capabilities_reject_agent_scope(
         raise AssertionError("invalid capability scope must fail before provider execution")
 
     with pytest.raises(AIError) as invalid:
-        async with Runtime.open(
-            _NAMESPACE,
-            storage=RuntimeStorage.in_memory(), features=model_features(_Models(_UsageFunctionModel(model)), group),
-        ):
+        async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.in_memory()) as persistence_292, Runtime.attach(persistence=persistence_292, features=model_features(_Models(_UsageFunctionModel(model)), group)):
             raise AssertionError("Agent-scoped persistence capability was accepted")
     assert invalid.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
@@ -322,10 +318,8 @@ async def test_recovery_cannot_enable_restart_after_execution_admission(
         group.capability(TraceCapability(), scope="runtime")
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "recovery.db"
-    original = RuntimeStorage.sqlite(database)
-    async with Runtime.open(
-        _NAMESPACE, storage=original, features=model_features(models, group),
-    ) as owner:
+    original = PersistenceStorage.sqlite(database)
+    async with Persistence.open(_NAMESPACE, storage=original) as persistence_326, Runtime.attach(persistence=persistence_326, features=model_features(models, group)) as owner:
         execution = await owner.agents.get().start("hold the original request", idempotency_key="original")
         try:
             await asyncio.wait_for(entered.wait(), 10)
@@ -335,9 +329,7 @@ async def test_recovery_cannot_enable_restart_after_execution_admission(
             assert before.agent_run_seq > 0
             if reopen_with_restart:
                 group.capability(CheckpointCapability(), scope="runtime")
-            async with Runtime.open(
-                _NAMESPACE, storage=RuntimeStorage.sqlite(database), features=model_features(models, group),
-            ) as reopened:
+            async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.sqlite(database)) as persistence_338, Runtime.attach(persistence=persistence_338, features=model_features(models, group)) as reopened:
                 remote = await reopened.executions.get(execution.execution_id)
                 replayed = await reopened.agents.get().start(
                     "hold the original request", idempotency_key="original",
@@ -404,11 +396,9 @@ async def test_remote_force_cancel_releases_session_and_fences_late_provider(
         group.capability(TraceCapability(), scope="runtime")
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "cancel.db"
-    original = RuntimeStorage.sqlite(database)
-    remote_state = RuntimeStorage.sqlite(database)
-    async with Runtime.open(
-        _NAMESPACE, storage=original, features=model_features(models, group),
-    ) as owner:
+    original = PersistenceStorage.sqlite(database)
+    remote_state = PersistenceStorage.sqlite(database)
+    async with Persistence.open(_NAMESPACE, storage=original) as persistence_409, Runtime.attach(persistence=persistence_409, features=model_features(models, group)) as owner:
         await owner.agents.get().create_session("session")
         execution = await owner.agents.get().session("session").start("hold the provider", idempotency_key="first")
         try:
@@ -416,9 +406,7 @@ async def test_remote_force_cancel_releases_session_and_fences_late_provider(
             # Public wait can return the remote terminal result before this old
             # producer exits; retain its task to verify the later write boundary.
             worker = owner._execution_service.runtime_backend()._tasks[execution.execution_id]
-            async with Runtime.open(
-                _NAMESPACE, storage=remote_state, features=model_features(models, group),
-            ) as observer:
+            async with Persistence.open(_NAMESPACE, storage=remote_state) as persistence_419, Runtime.attach(persistence=persistence_419, features=model_features(models, group)) as observer:
                 remote = await observer.executions.get(execution.execution_id)
                 normal = await remote.cancel(idempotency_key="normal-cancel")
                 assert not normal.cancelled
@@ -476,23 +464,23 @@ async def test_remote_force_cancel_orders_with_tool_admission(
     from pydantic_ai.messages import TextPart
 
     from linktools.ai.core import ToolOperationStatus
-    from linktools.ai.runtime.state._contracts import ToolOperationAdmission, ToolOperationRecord
-    from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
+    from linktools.ai.persistence.contracts import ToolOperationAdmission, ToolOperationRecord
+    from linktools.ai.persistence._runtime_commands import StateCommands
 
     reached = asyncio.Event()
     release = asyncio.Event()
     effects: list[str] = []
-    original_admit = RuntimeStateCommands.commit_tool_admission
+    original_admit = StateCommands.commit_tool_admission
 
     async def pause_admission(
-        commands: RuntimeStateCommands, request: ToolOperationAdmission,
+        commands: StateCommands, request: ToolOperationAdmission,
     ) -> ToolOperationRecord:
         record = await original_admit(commands, request) if claimed else None
         reached.set()
         await release.wait()
         return record if record is not None else await original_admit(commands, request)
 
-    monkeypatch.setattr(RuntimeStateCommands, "commit_tool_admission", pause_admission)
+    monkeypatch.setattr(StateCommands, "commit_tool_admission", pause_admission)
 
     async def effect(_context: AgentContext[None]) -> str:
         effects.append("effect")
@@ -510,19 +498,15 @@ async def test_remote_force_cancel_orders_with_tool_admission(
     group.agent("default", model="default", allow_tools=("effect",))
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "admission-race.db"
-    original = RuntimeStorage.sqlite(database)
-    remote_state = RuntimeStorage.sqlite(database)
-    async with Runtime.open(
-        _NAMESPACE, storage=original, features=model_features(models, group),
-    ) as owner:
+    original = PersistenceStorage.sqlite(database)
+    remote_state = PersistenceStorage.sqlite(database)
+    async with Persistence.open(_NAMESPACE, storage=original) as persistence_515, Runtime.attach(persistence=persistence_515, features=model_features(models, group)) as owner:
         await owner.agents.get().create_session("session")
         execution = await owner.agents.get().session("session").start("perform effect")
         try:
             await asyncio.wait_for(reached.wait(), 10)
             worker = owner._execution_service.runtime_backend()._tasks[execution.execution_id]
-            async with Runtime.open(
-                _NAMESPACE, storage=remote_state, features=model_features(models, group),
-            ) as observer:
+            async with Persistence.open(_NAMESPACE, storage=remote_state) as persistence_523, Runtime.attach(persistence=persistence_523, features=model_features(models, group)) as observer:
                 remote = await observer.executions.get(execution.execution_id)
                 operations = await observer._state.recovery.tools.list_by_execution(
                     execution.execution_id, tenant_id=observer.tenant_id,
@@ -563,7 +547,7 @@ async def test_remote_force_cancel_requires_explicit_tool_effect_resolution(
     tmp_path: Path, resolution_kind: str,
 ) -> None:
     from linktools.ai.core import ToolOperationStatus
-    from linktools.ai.runtime import ToolEffectApplied, ToolEffectNotApplied
+    from linktools.ai.execution import ToolEffectApplied, ToolEffectNotApplied
 
     effects: list[str] = []
     requests: list[str] = []
@@ -583,19 +567,15 @@ async def test_remote_force_cancel_requires_explicit_tool_effect_resolution(
     group.agent("default", model="default", allow_tools=("uncertain_effect",))
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "unknown-effect.db"
-    original = RuntimeStorage.sqlite(database)
-    remote_state = RuntimeStorage.sqlite(database)
-    async with Runtime.open(
-        _NAMESPACE, storage=original, features=model_features(models, group),
-    ) as owner:
+    original = PersistenceStorage.sqlite(database)
+    remote_state = PersistenceStorage.sqlite(database)
+    async with Persistence.open(_NAMESPACE, storage=original) as persistence_588, Runtime.attach(persistence=persistence_588, features=model_features(models, group)) as owner:
         await owner.agents.get().create_session("session")
         execution = await owner.agents.get().session("session").start("perform uncertain effect")
         with pytest.raises(AIError) as unknown:
             await execution.wait(timeout_seconds=10)
         assert unknown.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
-        async with Runtime.open(
-            _NAMESPACE, storage=remote_state, features=model_features(models, group),
-        ) as observer:
+        async with Persistence.open(_NAMESPACE, storage=remote_state) as persistence_596, Runtime.attach(persistence=persistence_596, features=model_features(models, group)) as observer:
             remote = await observer.executions.get(execution.execution_id)
             assert not (await remote.cancel(idempotency_key="force-unknown", force=True)).cancelled
             record = await observer._state.execution.executions.get(execution.execution_id, tenant_id=observer.tenant_id)
@@ -733,11 +713,9 @@ async def test_remote_force_cancel_recursively_fences_ordinary_delegated_tree(tm
     group.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "delegated-cancel.db"
-    original = RuntimeStorage.sqlite(database)
-    remote_state = RuntimeStorage.sqlite(database)
-    async with Runtime.open(
-        _NAMESPACE, storage=original, features=model_features(models, group),
-    ) as owner:
+    original = PersistenceStorage.sqlite(database)
+    remote_state = PersistenceStorage.sqlite(database)
+    async with Persistence.open(_NAMESPACE, storage=original) as persistence_738, Runtime.attach(persistence=persistence_738, features=model_features(models, group)) as owner:
         await owner.agents.get().create_session("session")
         root = await owner.agents.get().session("session").start("root", idempotency_key="root")
         try:
@@ -748,9 +726,7 @@ async def test_remote_force_cancel_recursively_fences_ordinary_delegated_tree(tm
             await asyncio.wait_for(entered["grandchild"].wait(), 10)
             execution_ids = (root.execution_id, child_id, grandchild_id)
             workers = tuple(owner._execution_service.runtime_backend()._tasks[key] for key in execution_ids)
-            async with Runtime.open(
-                _NAMESPACE, storage=remote_state, features=model_features(models, group),
-            ) as observer:
+            async with Persistence.open(_NAMESPACE, storage=remote_state) as persistence_751, Runtime.attach(persistence=persistence_751, features=model_features(models, group)) as observer:
                 assert [item.execution_id for item in await observer.executions.list_children(
                     root.execution_id, principal=observer.default_principal,
                 )] == [child_id]
@@ -793,7 +769,7 @@ async def test_unknown_delegated_tool_effect_prevents_parent_cancel_and_session_
     from pydantic_ai.messages import TextPart
 
     from linktools.ai.core import ToolOperationStatus
-    from linktools.ai.runtime import ToolEffectApplied
+    from linktools.ai.execution import ToolEffectApplied
 
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -822,11 +798,9 @@ async def test_unknown_delegated_tool_effect_prevents_parent_cancel_and_session_
     group.agent("default", model="default", allow_tools=("uncertain_effect",))
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "delegated-effect.db"
-    original = RuntimeStorage.sqlite(database)
-    remote_state = RuntimeStorage.sqlite(database)
-    async with Runtime.open(
-        _NAMESPACE, storage=original, features=model_features(models, group),
-    ) as owner:
+    original = PersistenceStorage.sqlite(database)
+    remote_state = PersistenceStorage.sqlite(database)
+    async with Persistence.open(_NAMESPACE, storage=original) as persistence_827, Runtime.attach(persistence=persistence_827, features=model_features(models, group)) as owner:
         await owner.agents.get().create_session("session")
         root = await owner.agents.get().session("session").start("root", idempotency_key="root")
         try:
@@ -837,9 +811,7 @@ async def test_unknown_delegated_tool_effect_prevents_parent_cancel_and_session_
             with pytest.raises(AIError) as unknown:
                 await child.wait(timeout_seconds=10)
             assert unknown.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
-            async with Runtime.open(
-                _NAMESPACE, storage=remote_state, features=model_features(models, group),
-            ) as observer:
+            async with Persistence.open(_NAMESPACE, storage=remote_state) as persistence_840, Runtime.attach(persistence=persistence_840, features=model_features(models, group)) as observer:
                 remote = await observer.executions.get(root.execution_id)
                 with pytest.raises(AIError) as unresolved:
                     await remote.cancel(idempotency_key="cancel-unknown-tree", force=True)
@@ -888,8 +860,8 @@ async def test_remote_force_cancel_of_model_delegation_respects_root_owner(
 ) -> None:
     from pydantic_ai.messages import TextPart
 
-    from linktools.ai.runtime import AgentTaskInput
-    from linktools.ai.task import TaskGraph, TaskNode
+    from linktools.ai.inputs import AgentTaskInput
+    from linktools.ai.task import Task, TaskGraph, TaskNode
     from linktools.ai.storage import InMemoryCacheBackend
 
     from ._runtime_test_helpers import _wait_for_committed
@@ -927,14 +899,12 @@ async def test_remote_force_cancel_of_model_delegation_respects_root_owner(
         group.capability(CheckpointCapability(), scope="runtime")
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "model-delegation.db"
-    original = RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1024 * 1024) if cache_enabled else None)
-    remote_state = RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1024 * 1024) if cache_enabled else None)
-    async with Runtime.open(
-        _NAMESPACE, storage=original, features=model_features(models, group),
-    ) as owner:
+    original = PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1024 * 1024) if cache_enabled else None)
+    remote_state = PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1024 * 1024) if cache_enabled else None)
+    async with Persistence.open(_NAMESPACE, storage=original) as persistence_932, Runtime.attach(persistence=persistence_932, features=model_features(models, group)) as owner, TaskEngine.open(persistence=persistence_932) as engine:
         if task_owned:
-            task = owner.tasks.from_agent("delegation.agent", owner.agents.get())
-            run = await owner.tasks.bind(task).start(
+            task = Task.from_agent("delegation.agent", owner.agents.get())
+            run = await engine.with_definitions(task).start(
                 TaskGraph("delegation", (TaskNode("agent", task=task, input=AgentTaskInput("root")),)),
                 idempotency_key="task-root",
             )
@@ -955,9 +925,7 @@ async def test_remote_force_cancel_of_model_delegation_respects_root_owner(
             assert child_record is not None and not child_record.requires_task_invocation_capture
             assert child_record.root_execution_id == root_id
             workers = tuple(owner._execution_service.runtime_backend()._tasks[key] for key in (root_id, child_id))
-            async with Runtime.open(
-                _NAMESPACE, storage=remote_state, features=model_features(models, group),
-            ) as observer:
+            async with Persistence.open(_NAMESPACE, storage=remote_state) as persistence_958, Runtime.attach(persistence=persistence_958, features=model_features(models, group)) as observer:
                 remote = await observer.executions.get(root_id)
                 remote_child = await observer.executions.get(child_id)
                 if task_owned or restart:
@@ -1001,15 +969,15 @@ async def test_no_trace_terminal_readback_preserves_session_and_single_metric(
 
     from linktools.ai.observe import Metrics, Observation
     from linktools.ai.observe._memory import InMemoryMetricStore
-    from linktools.ai.runtime.state._contracts import ExecutionTerminalCommit, ExecutionTerminalCommitResult
-    from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
+    from linktools.ai.persistence.contracts import ExecutionTerminalCommit, ExecutionTerminalCommitResult
+    from linktools.ai.persistence._runtime_commands import StateCommands
 
-    original_commit = RuntimeStateCommands.commit_terminal_checkpoint
+    original_commit = StateCommands.commit_terminal_checkpoint
     committed_unknown = False
     terminal_metrics: list[Observation] = []
 
     async def commit(
-        commands: RuntimeStateCommands, request: ExecutionTerminalCommit, **kwargs: object,
+        commands: StateCommands, request: ExecutionTerminalCommit, **kwargs: object,
     ) -> ExecutionTerminalCommitResult:
         nonlocal committed_unknown
         result = await original_commit(commands, request, **kwargs)
@@ -1018,7 +986,7 @@ async def test_no_trace_terminal_readback_preserves_session_and_single_metric(
             raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
         return result
 
-    monkeypatch.setattr(RuntimeStateCommands, "commit_terminal_checkpoint", commit)
+    monkeypatch.setattr(StateCommands, "commit_terminal_checkpoint", commit)
 
     class MetricStore(InMemoryMetricStore):
         async def put_observations(self, namespace: str, observations: tuple[Observation, ...]) -> None:
@@ -1034,11 +1002,9 @@ async def test_no_trace_terminal_readback_preserves_session_and_single_metric(
     group.agent("default", model="default", allow_tools=())
     if restart:
         group.capability(CheckpointCapability(), scope="runtime")
-    storage_factory = _split_sqlite_storage if split_storage else RuntimeStorage.sqlite
+    storage_factory = _split_sqlite_storage if split_storage else PersistenceStorage.sqlite
     storage = storage_factory(tmp_path / "terminal.db")
-    async with Runtime.open(
-        _NAMESPACE, metrics=Metrics.from_store(MetricStore(), namespace=_NAMESPACE), storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_1039, Runtime.attach(persistence=persistence_1039, metrics=Metrics.from_store(MetricStore(), namespace=_NAMESPACE), features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         await runtime.agents.get().create_session("session")
         session = runtime.agents.get().session("session")
         execution = await session.start("question", idempotency_key="question")
@@ -1061,7 +1027,7 @@ async def test_no_trace_terminal_readback_preserves_session_and_single_metric(
             namespace=_NAMESPACE, tenant_id=runtime.tenant_id,
             execution_id=execution.execution_id, agent_run_seq=record.agent_run_seq,
         )
-        archive = runtime._state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = runtime._run_store.read_store(PersistenceDomain.TRACE)
         assert await archive.get_agent_run(agent_run_id=run_id) is None
         assert not await archive.list_events(agent_run_id=run_id)
         assert not await archive.list_model_interactions(agent_run_id=run_id)
@@ -1081,7 +1047,7 @@ async def test_default_admission_without_worker_never_restarts_on_reopen(
 ) -> None:
     from pydantic_ai.messages import TextPart
 
-    from linktools.ai.runtime.service_api import ExecutionRequest
+    from linktools.ai.execution import ExecutionRequest
 
     requests: list[str] = []
 
@@ -1090,19 +1056,17 @@ async def test_default_admission_without_worker_never_restarts_on_reopen(
         requests.append("unexpected restart")
         return ModelResponse(parts=[TextPart("unexpected restart")])
 
-    def storage() -> RuntimeStorage:
+    def storage() -> PersistenceStorage:
         if backend == "filesystem":
-            return RuntimeStorage.filesystem(tmp_path / "runtime")
-        return RuntimeStorage.sqlite(tmp_path / "runtime.db")
+            return PersistenceStorage.filesystem(tmp_path / "runtime")
+        return PersistenceStorage.sqlite(tmp_path / "runtime.db")
 
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     initial = storage()
-    async with Runtime.open(
-        _NAMESPACE, storage=initial, features=model_features(models, group),
-    ) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=initial) as persistence_1103, Runtime.attach(persistence=persistence_1103, features=model_features(models, group)) as runtime:
         await runtime.agents.get().create_session("session")
 
         async def interrupted_launch(
@@ -1126,9 +1090,7 @@ async def test_default_admission_without_worker_never_restarts_on_reopen(
     if reopen_with_restart:
         group.capability(CheckpointCapability(), scope="runtime")
     reopened = storage()
-    async with Runtime.open(
-        _NAMESPACE, storage=reopened, features=model_features(models, group),
-    ) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=reopened) as persistence_1129, Runtime.attach(persistence=persistence_1129, features=model_features(models, group)) as runtime:
         assert await runtime._state.execution.executions.get(
             execution.execution_id, tenant_id=runtime.tenant_id,
         ) == admitted

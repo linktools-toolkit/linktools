@@ -23,7 +23,7 @@ from linktools.ai.model._binding import _RetryingModel
 
 
 def _binding(*mime_types: str, **kwargs: object) -> ModelBinding:
-    return create_model(protocol='openai', model="gpt-file-test", input_types=tuple("mime:" + item for item in mime_types), **kwargs)
+    return create_model(api='openai', model="gpt-file-test", input_types=tuple("mime:" + item for item in mime_types), **kwargs)
 
 
 @pytest.mark.parametrize("mime", ("application/pdf", "text/plain", "image/png", "audio/wav"))
@@ -48,12 +48,12 @@ def test_family_allowlist_matches_only_its_mime_family(pattern: str, mime: str) 
 @pytest.mark.parametrize("values", (None, "image/png", [None], ["mime:*/*"], ["mime:image/p*"], ["text"], ["mime:image/png;foo=bar"]))
 def test_invalid_mime_declarations_fail_at_capture(values: object) -> None:
     with pytest.raises((TypeError, ValueError)):
-        create_model(protocol='openai', model="test", input_types=values)
+        create_model(api='openai', model="test", input_types=values)
 
 
 def test_captured_allowlist_is_normalized_immutable_and_restore_uses_current_route() -> None:
     values = ["mime: IMAGE/PNG ", "mime:image/png", "mime:text/*"]
-    resolver = _ModelResolver({"default": create_model(protocol='openai', model="test", input_types=values)})
+    resolver = _ModelResolver({"default": create_model(api='openai', model="test", input_types=values)})
     values.append("mime:application/pdf")
     original = resolver.resolve("default")
     assert original.contract["input_mime_types"] == ["image/png", "text/*"]
@@ -223,7 +223,7 @@ def test_input_categories_capture_the_official_sdk_mime_set(category: str, alias
     from typing import get_args
     import pydantic_ai.messages as messages
 
-    binding = create_model(protocol='openai', model="test", input_types=[category])
+    binding = create_model(api='openai', model="test", input_types=[category])
     assert binding.contract["input_mime_types"] == sorted(set(get_args(getattr(messages, alias_name))))
 
 
@@ -231,12 +231,12 @@ def test_categories_explicit_mime_and_duplicates_share_canonical_contract() -> N
     from typing import get_args
     from pydantic_ai.messages import ImageMediaType, DocumentMediaType
 
-    registry = create_model(protocol='openai', model="test", input_types=[
+    registry = create_model(api='openai', model="test", input_types=[
         "image", "document", "mime:audio/*", "mime:image/png", "image", "mime:application/x-private",
     ])
     resolver = _ModelResolver({"default": registry})
     expected = sorted(set((*get_args(ImageMediaType), *get_args(DocumentMediaType), "audio/*", "application/x-private")))
-    explicit = _ModelResolver({"default": create_model(protocol='openai', model="test", input_types=["mime:" + mime for mime in expected])})
+    explicit = _ModelResolver({"default": create_model(api='openai', model="test", input_types=["mime:" + mime for mime in expected])})
     binding = resolver.resolve("default")
     assert binding.contract["input_mime_types"] == expected
     assert binding.contract == explicit.resolve("default").contract
@@ -248,7 +248,7 @@ def test_categories_explicit_mime_and_duplicates_share_canonical_contract() -> N
 @pytest.mark.parametrize("value", ("ImageMediaType", "image/png", "text", "IMAGE", "mime:", "mime:mime:audio/*", 1, None))
 def test_authoring_rejects_unknown_tokens_without_coercion(value: object) -> None:
     with pytest.raises(ValueError):
-        create_model(protocol='openai', model="test", input_types=[value])
+        create_model(api='openai', model="test", input_types=[value])
 
 
 def test_authoring_rejects_literal_type_objects() -> None:
@@ -257,7 +257,7 @@ def test_authoring_rejects_literal_type_objects() -> None:
 
     for value in (ImageMediaType, Literal["application/x-private"]):
         with pytest.raises(ValueError):
-            create_model(protocol='openai', model="test", input_types=[value])
+            create_model(api='openai', model="test", input_types=[value])
 
 
 @pytest.mark.parametrize("value", ("image", "ImageMediaType", "mime:audio/*", "mime:application/pdf"))
@@ -276,12 +276,12 @@ def test_captured_mime_list_is_not_reexpanded_after_sdk_category_changes(monkeyp
     from typing import Literal
     from linktools.ai.model import _input
 
-    original = create_model(protocol='openai', model="test", input_types=["image"])
+    original = create_model(api='openai', model="test", input_types=["image"])
     stored = json.loads(json.dumps(original.contract))
     monkeypatch.setattr(_input, "ImageMediaType", Literal["image/png", "image/x-future"])
     assert original.contract == stored
     assert validate_model_input(original, "image/jpeg") is None
-    current = _ModelResolver({"default": create_model(protocol='openai', model="test", input_types=["image"])})
+    current = _ModelResolver({"default": create_model(api='openai', model="test", input_types=["image"])})
     restored = current.resolve("default")
     assert restored.contract != stored
     assert validate_model_input(restored, "image/x-future") is None

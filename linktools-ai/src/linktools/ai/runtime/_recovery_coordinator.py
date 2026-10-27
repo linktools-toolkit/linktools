@@ -18,6 +18,7 @@ from pydantic_ai.tools import (
 )
 
 from ..agent import AgentBinding
+from ..capability import PydanticToolControlCapability
 from ..core import (
     ApprovalStatus,
     ExecutionStatus,
@@ -41,15 +42,14 @@ from ..core import (
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..storage import StoredPayload
 from ..spec import RepositoryInstructionResolver, RepositoryInstructions
-from ._input import CanonicalUserInput
-from ._pydantic_tool_control import build_model_retry, build_tool_failed
+from ..inputs import CanonicalUserInput
 from ._repository_instructions import (
     _merge_repository_instructions,
     _repository_instruction_signature,
     _repository_instructions_contain,
     _validate_repository_instruction_frontier,
 )
-from .recovery import (
+from ..execution import (
     ExecutionRecoveryEffect,
     ResolveToolEffectRequest,
     ToolEffectApplied,
@@ -57,24 +57,22 @@ from .recovery import (
     ToolEffectNotApplied,
     ToolEffectResolutionResult,
 )
-from .service_api import ExecutionRequest
-from .state._contracts import (
+from ..execution import ExecutionRequest
+from ..persistence.contracts import (
     deferred_resource_id,
     ApprovalRecord,
-    ConversationCursor,
-    ExecutionRecord,
     ExternalCallRecord,
-    IdempotencyRecord,
     PendingDeferredCall,
     PendingToolContinuation,
     RecoveryCheckpoint,
     RecoveryCheckpointState,
     RecoveryHandoffPhase,
     RepositoryInstructionBarrier,
-    RuntimePayloadRef,
     ToolOperationRecord,
 )
-from .state._step_contracts import AgentRunCheckpoint, AgentRunRecord
+from ..session import ConversationCursor
+from ..execution import ExecutionRecord, IdempotencyRecord, RuntimePayloadRef
+from ..persistence.runs import AgentRunCheckpoint, AgentRunRecord
 
 _logger = environ.get_logger("ai.runtime.local")
 
@@ -1225,11 +1223,11 @@ class _RecoveryCoordinator:
             elif record.resolution_kind == "retry":
                 if not isinstance(result, str):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                deferred_results.calls[pending.tool_call_id] = build_model_retry(result)
+                deferred_results.calls[pending.tool_call_id] = PydanticToolControlCapability.build_model_retry(result)
             elif record.resolution_kind == "failed":
                 if not isinstance(result, str):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                deferred_results.calls[pending.tool_call_id] = build_tool_failed(result)
+                deferred_results.calls[pending.tool_call_id] = PydanticToolControlCapability.build_tool_failed(result)
             else:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             deferred_results.metadata[pending.tool_call_id] = dict(

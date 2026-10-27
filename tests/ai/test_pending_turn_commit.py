@@ -14,17 +14,24 @@ import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from sqlalchemy import event
 
-from linktools.ai.core import ExecutionEventType, ExecutionStatus, IdempotencyStatus, ResourceKind, StopReason, UsageMetrics
+from linktools.ai.core import (
+    ExecutionEventType,
+    ExecutionStatus,
+    IdempotencyStatus,
+    ResourceKind,
+    StopReason,
+    UsageMetrics,
+)
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeState
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence import PersistenceDomain, Persistence
+from linktools.ai.persistence.contracts import (
     ConversationCursor, ExecutionEventAppend, ExecutionHistoryState,
     ExecutionStartReservation, ExecutionTerminalCommit, ExecutionTerminalCommitResult,
     IdempotencyRecord, RecoveryCheckpointState, ResultRecord, SessionRecord,
 )
-from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
-from linktools.ai.runtime.state._store import StateStore, StateTransaction
+from linktools.ai.persistence._runtime_commands import StateCommands
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
+from linktools.ai.persistence.state import StateStore, StateTransaction
 from linktools.ai.storage import StoredPayload
 
 from .test_history_projection_conformance import _record
@@ -39,8 +46,8 @@ _NAMESPACE = "pending-turn"
 
 @dataclass(frozen=True)
 class _TurnState:
-    storage: RuntimeState
-    commands: RuntimeStateCommands
+    storage: Persistence
+    commands: StateCommands
     session: SessionRecord
 
 
@@ -56,7 +63,7 @@ class _PendingTurn:
 
 @asynccontextmanager
 async def _turn_state(backend: str, path: Path) -> AsyncIterator[_TurnState]:
-    storage = RuntimeState(_storage(backend, path))
+    storage = Persistence(_storage(backend, path))
     await storage.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         session = await storage.conversation.sessions.create(replace(
@@ -173,7 +180,7 @@ async def _assert_committed(state: _TurnState, turn: _PendingTurn, result: Execu
     assert [item.execution_id for item in timeline] == [execution_id]
     commits = await storage.conversation.sessions.list_timeline_commits("session", tenant_id="tenant", start_turn_seq=1, end_turn_seq=2)
     assert [(item.execution_id, item.start_message_index, item.end_message_index) for item in commits] == [(execution_id, 0, 2)]
-    archive = storage.run_store.read_store(RuntimeDomain.CONVERSATION)
+    archive = storage.run_store.read_store(PersistenceDomain.CONVERSATION)
     assert await archive.checkpoint_count(agent_run_id=turn.run.agent_run_id) == 1
     messages = [item async for item in archive.iter_session_messages("history", tenant_id="tenant")]
     assert messages == turn.checkpoint.messages
@@ -404,7 +411,7 @@ async def test_pending_turn_independent_connections_choose_one_session_winner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, identity: str,
 ) -> None:
     async with _turn_state("sqlite", tmp_path) as first:
-        second_storage = RuntimeState(_storage("sqlite", tmp_path))
+        second_storage = Persistence(_storage("sqlite", tmp_path))
         await second_storage.initialize(namespace=_NAMESPACE, tenant_id="tenant")
         try:
             second = _TurnState(second_storage, _runtime_commands(second_storage, _NAMESPACE), first.session)
@@ -452,7 +459,7 @@ async def test_pending_turn_independent_connections_choose_one_session_winner(
             await _assert_committed(first, committed_turn, winner)
             losing_id = next(turn.reservation.execution.execution_id for turn in contenders if turn is not committed_turn)
             assert await first.storage.execution.executions.get(losing_id, tenant_id="tenant") is None
-            archive = first.storage.run_store.read_store(RuntimeDomain.CONVERSATION)
+            archive = first.storage.run_store.read_store(PersistenceDomain.CONVERSATION)
             losing_run = next(turn.run.agent_run_id for turn in contenders if turn is not committed_turn)
             assert await archive.get_agent_run(agent_run_id=losing_run) is None
             assert await archive.checkpoint_count(agent_run_id=losing_run) == 0

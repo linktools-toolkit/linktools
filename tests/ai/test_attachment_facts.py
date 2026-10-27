@@ -13,15 +13,15 @@ from linktools.ai.core import (
     agent_conversation_id as make_agent_conversation_id,
     agent_run_id as make_agent_run_id,
 )
-from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.history._projection import StepExecutionHistoryReader
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.contracts import (
     ContextProjection,
     ModelInteractionRecord,
     RuntimePayloadRef,
     StoredUserInput,
 )
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord
+from linktools.ai.persistence._step_contracts import AgentRunRecord
 from linktools.ai.storage import StoredPayload
 
 
@@ -64,7 +64,7 @@ def _interaction(
         request_context=ContextProjection(()),
         request_envelope=RuntimePayloadRef(
             StoredPayload.inline_bytes(b"{}"),
-            RuntimeDomain.EXECUTION,
+            PersistenceDomain.EXECUTION,
         ),
         response_context=None,
         status="CANCELLED",
@@ -123,7 +123,7 @@ class _Store:
         return values if limit is None else values[:limit]
 
     async def capture_history(self, agent_run_ids, *, include_pending=False):
-        from linktools.ai.runtime.state._step_contracts import AgentRunHistoryCapture
+        from linktools.ai.persistence._step_contracts import AgentRunHistoryCapture
 
         del include_pending
         result = {}

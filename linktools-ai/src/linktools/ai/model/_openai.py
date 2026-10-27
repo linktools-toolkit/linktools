@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """OpenAI Chat and Responses model assembly."""
 
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from types import TracebackType
 
 from httpx2 import AsyncClient, Limits
@@ -13,12 +15,45 @@ except ModuleNotFoundError as error:
     raise ImportError('OpenAI model adapters require pip install "linktools-ai[openai]"') from error
 from openai.types.chat import ChatCompletion
 from pydantic_ai.exceptions import UnexpectedModelBehavior
-from pydantic_ai.models import Model, ModelRequestParameters, ModelSettings
+from pydantic_ai.models import Model, ModelMessage, ModelRequestParameters, ModelSettings, StreamedResponse
+from pydantic_ai.tools import RunContext
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
+from pydantic_ai.native_tools import WebSearchTool
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.settings import merge_model_settings
 
 from ._binding import _ProviderModelBinding
 from ._http import HttpClientOwner, capture_request, capture_response
+
+
+# Match each supported protocol's SDK request ownership without copying its encoding.
+_COMMON_REQUEST_SETTING_FIELDS = {
+    "temperature": "temperature", "top_p": "top_p", "parallel_tool_calls": "parallel_tool_calls",
+    "service_tier": "service_tier", "openai_service_tier": "service_tier",
+    "openai_user": "user", "openai_top_logprobs": "top_logprobs",
+    "openai_store": "store", "openai_moderation": "moderation",
+    "openai_prompt_cache_key": "prompt_cache_key",
+    "openai_prompt_cache_retention": "prompt_cache_retention",
+    "openai_prompt_cache_options": "prompt_cache_options",
+}
+_CHAT_REQUEST_SETTING_FIELDS = {
+    **_COMMON_REQUEST_SETTING_FIELDS,
+    "stop_sequences": "stop", "seed": "seed", "presence_penalty": "presence_penalty",
+    "frequency_penalty": "frequency_penalty", "logit_bias": "logit_bias",
+    "openai_reasoning_effort": "reasoning_effort", "openai_logprobs": "logprobs",
+    "openai_prediction": "prediction", "openai_text_verbosity": "verbosity",
+}
+_RESPONSES_REQUEST_SETTING_FIELDS = {
+    **_COMMON_REQUEST_SETTING_FIELDS,
+    "max_tokens": "max_output_tokens", "openai_reasoning_effort": "reasoning",
+    "openai_reasoning_mode": "reasoning", "openai_reasoning_context": "reasoning",
+    "openai_reasoning_summary": "reasoning", "openai_text_verbosity": "text",
+    "openai_truncation": "truncation", "openai_context_management": "context_management",
+    "openai_background": "background", "openai_logprobs": "include",
+    "openai_include_code_execution_outputs": "include",
+    "openai_include_web_search_sources": "include", "openai_include_file_search_results": "include",
+    "openai_prompt_cache_diagnostics": "prompt_cache_options",
+}
 
 
 class _OutputOnlyOpenAIChatModel(OpenAIChatModel):
@@ -32,7 +67,23 @@ class _OutputOnlyOpenAIChatModel(OpenAIChatModel):
     def prepare_request(
         self, model_settings: ModelSettings | None, model_request_parameters: ModelRequestParameters,
     ) -> tuple[ModelSettings | None, ModelRequestParameters]:
+        _ProviderModelBinding.validate_request_owners(
+            merge_model_settings(self.settings, model_settings),
+            wire_fields={**_CHAT_REQUEST_SETTING_FIELDS,
+                         "max_tokens": ("max_completion_tokens", "max_tokens")},
+            request_fields=("model", "messages", "tools", "tool_choice", "stream"),
+        )
         settings, parameters = super().prepare_request(model_settings, model_request_parameters)
+        if parameters.output_mode == "native" or (
+            parameters.output_mode == "prompted" and self.profile.get("supports_json_object_output", False)
+        ):
+            _ProviderModelBinding.validate_request_owners(
+                settings, wire_fields={}, request_fields=("response_format",),
+            )
+        if any(isinstance(tool, WebSearchTool) for tool in parameters.native_tools):
+            _ProviderModelBinding.validate_request_owners(
+                settings, wire_fields={}, request_fields=("web_search_options",),
+            )
         return _ProviderModelBinding.prepare_output_tool_settings(
             settings, parameters,
             unsupported_settings=(
@@ -42,11 +93,46 @@ class _OutputOnlyOpenAIChatModel(OpenAIChatModel):
         ), parameters
 
 
+    @asynccontextmanager
+    async def request_stream(
+        self,
+        messages: list[ModelMessage],
+        model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+        run_context: RunContext[object] | None = None,
+    ) -> AsyncGenerator[StreamedResponse, None]:
+        # Streaming usage is required by SDK accounting, not a tuning default.
+        _ProviderModelBinding.validate_request_owners(
+            merge_model_settings(self.settings, model_settings),
+            wire_fields={}, request_fields=("stream_options",),
+        )
+        async with super().request_stream(
+            messages, model_settings, model_request_parameters, run_context,
+        ) as response:
+            yield response
+
+
 class _OutputOnlyOpenAIResponsesModel(OpenAIResponsesModel):
     def prepare_request(
         self, model_settings: ModelSettings | None, model_request_parameters: ModelRequestParameters,
     ) -> tuple[ModelSettings | None, ModelRequestParameters]:
+        _ProviderModelBinding.validate_request_owners(
+            merge_model_settings(self.settings, model_settings),
+            wire_fields=_RESPONSES_REQUEST_SETTING_FIELDS,
+            request_fields=("model", "input", "instructions", "tools", "tool_choice", "stream",
+                            "previous_response_id", "conversation"),
+        )
         settings, parameters = super().prepare_request(model_settings, model_request_parameters)
+        if self.profile.get("openai_supports_encrypted_reasoning_content", False):
+            _ProviderModelBinding.validate_request_owners(
+                settings, wire_fields={}, request_fields=("include",),
+            )
+        if parameters.output_mode == "native" or (
+            parameters.output_mode == "prompted" and self.profile.get("supports_json_object_output", False)
+        ):
+            _ProviderModelBinding.validate_request_owners(
+                settings, wire_fields={}, request_fields=("text",),
+            )
         return _ProviderModelBinding.prepare_output_tool_settings(
             settings, parameters,
             unsupported_settings=(

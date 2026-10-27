@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Explicit Workspace registration, per-run binding, and listing semantics."""
 from ._runtime_test_helpers import model_features
 
@@ -10,11 +12,12 @@ import pytest
 from pydantic_ai.capabilities import CombinedCapability
 from pydantic_ai.models.test import TestModel
 
-from linktools.ai.capability import WorkspaceCapability
+from linktools.ai.capability import FileSystem
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.workspace import LocalSandbox, Workspace
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.workspace import LocalWorkspaceBackend, Workspace
 
 from .test_explicit_runtime_features import _FeatureModels
 
@@ -26,7 +29,7 @@ async def test_workspace_capability_is_the_only_workspace_registration(tmp_path:
     assert (await features.capture()).workspace is None
     with pytest.raises(TypeError):
         RuntimeFeatures("workspace", workspace=workspace)
-    capability = WorkspaceCapability(workspace)
+    capability = FileSystem(workspace)
     with pytest.raises(AIError) as invalid:
         features.capability(capability, scope="agent")
     assert invalid.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
@@ -38,25 +41,27 @@ async def test_workspace_capability_is_the_only_workspace_registration(tmp_path:
         tool.name for tool in capability.tool_definitions()
     }
     with pytest.raises(AIError) as duplicate:
-        features.capability(WorkspaceCapability(workspace), scope="runtime")
+        features.capability(FileSystem(workspace), scope="runtime")
     assert duplicate.value.code is ErrorCode.CAPABILITY_CONFLICT
 
 
 @pytest.mark.asyncio
 async def test_workspace_bindings_are_isolated_and_absence_keeps_resource(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
-    capability = WorkspaceCapability(workspace)
-    first = await LocalSandbox().open(root=tmp_path)
-    second = await LocalSandbox().open(root=tmp_path)
+    capability = FileSystem(workspace)
+    first = LocalWorkspaceBackend(tmp_path)
+    await first.working_dir()
+    second = LocalWorkspaceBackend(tmp_path)
+    await second.working_dir()
     try:
         one, two = await asyncio.gather(
-            asyncio.to_thread(capability.bind, ("list_files",), session=first),
-            asyncio.to_thread(capability.bind, ("list_directory",), session=second),
+            asyncio.to_thread(capability.bind, ("list_files",), backend=first),
+            asyncio.to_thread(capability.bind, ("list_files",), backend=second),
         )
         assert one is not two and one is not capability
         assert set(one.get_toolset().tools) == {"list_files"}
-        assert set(two.get_toolset().tools) == {"list_directory"}
-        empty = capability.bind((), session=None)
+        assert set(two.get_toolset().tools) == {"list_files"}
+        empty = capability.bind((), backend=None)
         assert empty.workspace is workspace
         assert empty.get_toolset() is None and empty.get_instructions() is None
         with pytest.raises(AIError) as unbound:
@@ -71,12 +76,12 @@ async def test_workspace_bindings_are_isolated_and_absence_keeps_resource(tmp_pa
 @pytest.mark.asyncio
 async def test_native_wrapped_workspace_has_one_selected_tool_per_run(tmp_path: Path) -> None:
     (tmp_path / "hello.txt").write_text("hello", encoding="utf-8")
-    template = WorkspaceCapability(Workspace.load(tmp_path))
+    template = FileSystem(Workspace.load(tmp_path))
     features = RuntimeFeatures("wrapped")
     features.capability(CombinedCapability([template.prefix_tools("prefix")], id="workspace.bundle"), scope="runtime")
     features.agent("default", allow_tools=("list_files",), allow_capabilities=())
     models = _FeatureModels(TestModel(call_tools=["prefix_list_files"]))
-    async with Runtime.open("workspace-native", storage=RuntimeStorage.in_memory(), features=model_features(models, features)) as runtime:
+    async with Persistence.open('workspace-native', storage=PersistenceStorage.in_memory()) as persistence_79, Runtime.attach(persistence=persistence_79, features=model_features(models, features)) as runtime:
         first, second = await asyncio.gather(
             runtime.agents.get().run("list files", timeout_seconds=10),
             runtime.agents.get().run("list files", timeout_seconds=10),
@@ -93,9 +98,10 @@ async def test_list_files_omits_unknown_mime_without_hiding_entries(tmp_path: Pa
     (tmp_path / "known.txt").write_text("hello", encoding="utf-8")
     (tmp_path / "untyped.zzz_no_known_mime").write_bytes(b"\x00\x01")
     (tmp_path / "directory").mkdir()
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
-        capability = WorkspaceCapability(Workspace.load(tmp_path)).bind(("list_files",), session=session)
+        capability = FileSystem(Workspace.load(tmp_path)).bind(("list_files",), backend=session)
         listing = await capability.get_toolset().tools["list_files"].function()
         rows = {row.split("  ")[0]: row.split("  ") for row in listing.splitlines()}
         assert rows["known.txt"] == ["known.txt", "file", "5", "text/plain", "extension"]
@@ -116,17 +122,18 @@ async def test_prefixed_workspace_write_still_checks_original_tool_policy(tmp_pa
     from linktools.ai.runtime._tool_boundary import BoundaryToolset, managed_tool_descriptor_from_metadata
     from linktools.ai.workspace import ToolPermissionPolicy, ToolPermissionRule
 
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
-        template = WorkspaceCapability(Workspace.load(tmp_path))
+        template = FileSystem(Workspace.load(tmp_path))
         declarations = {tool.name: tool for tool in template.tool_definitions()}
         def wrap(toolset):
             return BoundaryToolset(
                 (toolset,), {"write_file": managed_tool_descriptor_from_metadata(declarations["write_file"].metadata)},
-                id="workspace-policy", sandbox_session=session,
+                id="workspace-policy", workspace_backend=session,
                 permission_policy=ToolPermissionPolicy((ToolPermissionRule(decision, tool_name="write_file"),)),
             )
-        toolset = template.bind(("write_file",), session=session, wrap_toolset=wrap).prefix_tools("files").get_toolset()
+        toolset = template.bind(("write_file",), backend=session, wrap_toolset=wrap).prefix_tools("files").get_toolset()
         ctx = RunContext(deps=None, model=TestModel(), usage=RunUsage(), run_id="run", tool_call_id="call")
         tools = await toolset.get_tools(ctx)
         with pytest.raises(ToolCallFailed if decision == "deny" else ApprovalRequired) as denied:
@@ -147,12 +154,13 @@ async def test_workspace_boundary_rejects_unrelated_or_cyclic_wrapper(tmp_path: 
     from pydantic_ai.usage import RunUsage
     from linktools.ai.runtime._tool_boundary import BoundaryToolset, managed_tool_descriptor_from_metadata
 
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
-        template = WorkspaceCapability(Workspace.load(tmp_path))
-        raw = template.bind(("list_files",), session=session).get_toolset()
+        template = FileSystem(Workspace.load(tmp_path))
+        raw = template.bind(("list_files",), backend=session).get_toolset()
         declaration = next(tool for tool in template.tool_definitions() if tool.name == "list_files")
-        boundary = BoundaryToolset((raw,), {"list_files": managed_tool_descriptor_from_metadata(declaration.metadata)}, id="workspace-owner", sandbox_session=session)
+        boundary = BoundaryToolset((raw,), {"list_files": managed_tool_descriptor_from_metadata(declaration.metadata)}, id="workspace-owner", workspace_backend=session)
         ctx = RunContext(deps=None, model=TestModel(), usage=RunUsage(), run_id="run", tool_call_id="call")
         tools = await boundary.get_tools(ctx)
         foreign = WrapperToolset(FunctionToolset())

@@ -9,11 +9,11 @@ import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime.state._archive import ContentArchive, PreparedArchive
-from linktools.ai.runtime.state._contracts import ContextProjection
-from linktools.ai.runtime.state._plan import RuntimeDomain
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence._archive import ContentArchive, PreparedArchive
+from linktools.ai.persistence.contracts import ContextProjection
+from linktools.ai.persistence._plan import PersistenceDomain
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
 from .test_incremental_projection_boundaries import _storage
 from .test_shared_content_archive import _archive, _publish
 
@@ -24,7 +24,7 @@ pytestmark = pytest.mark.asyncio
 async def test_loaded_frontier_appends_without_metadata_reads_and_preserves_old_roots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
     try:
         archive = await _archive(state)
@@ -69,7 +69,7 @@ async def test_loaded_frontier_appends_without_metadata_reads_and_preserves_old_
 
 @pytest.mark.parametrize("change", ("root", "scope", "namespace", "count", "first", "next", "missing", "extra"))
 async def test_frontier_reuse_rejects_mismatched_roots_and_records(tmp_path: Path, change: str) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
     try:
         archive = await _archive(state)
@@ -107,7 +107,7 @@ async def test_frontier_reuse_rejects_mismatched_roots_and_records(tmp_path: Pat
 
 @pytest.mark.parametrize("position", (0, 1))
 async def test_reused_frontier_is_rechecked_against_fresh_publication_records(tmp_path: Path, position: int) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
     try:
         archive = await _archive(state)
@@ -135,7 +135,7 @@ async def test_reused_frontier_is_rechecked_against_fresh_publication_records(tm
 async def test_frontier_capture_does_not_load_excluded_bodies_or_escape_failed_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
     try:
         archive = await _archive(state)
@@ -176,10 +176,10 @@ async def test_frontier_capture_does_not_load_excluded_bodies_or_escape_failed_r
 async def test_checkpoint_frontier_reuse_requires_fresh_exact_loaded_prefix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str,
 ) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
     try:
-        owner = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        owner = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
         history = owner.transcript_repository
         archive = await history.content_archive(create=True)
         messages = (ModelRequest(parts=[UserPromptPart("aa")]), ModelRequest(parts=[UserPromptPart("bb")]))

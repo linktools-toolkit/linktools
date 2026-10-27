@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Response evidence survives invalid calls and asynchronous event handoff."""
 from ._runtime_test_helpers import model_features
 
@@ -12,13 +14,14 @@ from pydantic_ai.models.test import TestModel
 from linktools.ai.capability import AgentContext, TraceCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime._journal import MESSAGE_SEQ_METADATA_KEY, ModelRequestJournal
-from linktools.ai.runtime._message import decode_model_messages
-from linktools.ai.runtime._model_interaction import StagedContextInline, StagedContextSpan
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord
-from linktools.ai.runtime.state._steps import StagingAgentRunStore
+from linktools.ai.observe.journal import MESSAGE_SEQ_METADATA_KEY, ModelRequestJournal
+from linktools.ai.model.messages import decode_model_messages
+from linktools.ai.persistence._model_interaction import StagedContextInline, StagedContextSpan
+from linktools.ai.persistence._step_contracts import AgentRunRecord
+from linktools.ai.persistence.runs import StagingAgentRunStore
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
@@ -134,10 +137,7 @@ async def test_model_response_evidence_capture_blocks_duplicate_tool_effects() -
     features.agent("default", model="default", allow_tools=("work",))
     rejected_error = None
     try:
-        async with Runtime.open(
-            "invalid-response", features=model_features(_Models(_UsageFunctionModel(model)), features),
-            storage=RuntimeStorage.in_memory(),
-        ) as runtime:
+        async with Persistence.open('invalid-response', storage=PersistenceStorage.in_memory()) as persistence_137, Runtime.attach(persistence=persistence_137, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             execution = await runtime.agents.get().start("run work")
             with pytest.raises(AIError) as rejected:
                 await execution.wait(timeout_seconds=10)

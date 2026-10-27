@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Tool targets and instruction metadata have separate error contracts."""
 from ._runtime_test_helpers import is_tool_retry, model_features
 
 from ._runtime_test_helpers import workspace_features
 
 from contextlib import nullcontext
+from functools import partial
 from pathlib import Path
 from linktools.ai.capability import TraceCapability
 
@@ -15,9 +18,16 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
-from linktools.ai.workspace import LocalSandbox, ReadOnlySandboxPolicy, Workspace, WorkspaceInstructionResolver, WorkspacePolicy
+from linktools.ai.workspace import (
+    LocalWorkspaceBackend,
+    WorkspaceReadPolicy,
+    Workspace,
+    WorkspaceInstructionResolver,
+    WorkspacePolicy,
+)
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
@@ -55,13 +65,10 @@ async def test_runtime_path_retry_rechecks_allowed_target(tmp_path: Path, bad_ta
         return ModelResponse(parts=[TextPart("finished")])
 
     group = workspace_features("paths", workspace=Workspace.load(tmp_path),
-        sandbox=LocalSandbox(read_policy=ReadOnlySandboxPolicy(("allowed.txt", "missing.txt"))))
+        workspace_factory=partial(LocalWorkspaceBackend, read_policy=WorkspaceReadPolicy(("allowed.txt", "missing.txt"))))
     group.capability(TraceCapability(), scope="runtime")
     group.agent("reader", model="default", allow_tools=("read_file",))
-    async with Runtime.open(
-        "paths", storage=RuntimeStorage.in_memory(),
-        features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as runtime:
+    async with Persistence.open('paths', storage=PersistenceStorage.in_memory()) as persistence_61, Runtime.attach(persistence=persistence_61, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get("reader").start("read")
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
@@ -100,10 +107,7 @@ async def test_runtime_instruction_failure_is_not_model_retry(tmp_path: Path, mo
     group.capability(TraceCapability(), scope="runtime")
     group.agent("reader", model="default", allow_tools=("read_file",))
     with nullcontext() if failure == "malformed_document" else pytest.raises(AIError, match=expected.value):
-        async with Runtime.open(
-            "paths", storage=RuntimeStorage.in_memory(),
-            features=model_features(_Models(_UsageFunctionModel(model)), group),
-        ) as runtime:
+        async with Persistence.open('paths', storage=PersistenceStorage.in_memory()) as persistence_103, Runtime.attach(persistence=persistence_103, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
             execution = await runtime.agents.get("reader").start("read")
             if failure == "malformed_document":
                 result = (await execution.wait(timeout_seconds=10)).result
@@ -122,13 +126,12 @@ async def test_runtime_instruction_failure_is_not_model_retry(tmp_path: Path, mo
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name,args", (
     ("read_file", {"path": "data[1]/file.txt"}),
-    ("file_info", {"path": "data[1]/file.txt"}),
-    ("list_directory", {"path": "data[1]"}),
+    ("read_file", {"path": "data[1]/file.txt", "full_metadata": True}),
     ("list_files", {"path": "data[1]"}),
-    ("find_files", {"path": "data[1]", "pattern": "*.txt"}),
+    ("list_files", {"path": "data[1]", "include_glob": "*.txt"}),
     ("search_files", {"path": "data[1]", "pattern": "original"}),
     ("write_file", {"path": "data[1]/file.txt", "content": "changed"}),
-    ("edit_file", {"path": "data[1]/file.txt", "old_text": "original", "new_text": "changed"}),
+    ("write_file", {"path": "data[1]/file.txt", "old_text": "original", "content": "changed"}),
 ))
 async def test_shared_rule_boundary_allows_literal_paths_for_workspace_tools(tmp_path: Path, name: str, args: dict) -> None:
     directory = tmp_path / "data[1]"
@@ -148,11 +151,8 @@ async def test_shared_rule_boundary_allows_literal_paths_for_workspace_tools(tmp
     group = workspace_features("literal-paths", workspace=Workspace.load(tmp_path))
     group.capability(TraceCapability(), scope="runtime")
     group.agent("reader", model="default", allow_tools=(name,))
-    async with Runtime.open(
-        "literal-paths", storage=RuntimeStorage.in_memory(),
-        features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as runtime:
+    async with Persistence.open('literal-paths', storage=PersistenceStorage.in_memory()) as persistence_151, Runtime.attach(persistence=persistence_151, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         execution = await runtime.agents.get("reader").start("use the file")
         assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
         assert requests == 2
-        assert target.read_text(encoding="utf-8") == ("changed" if name in {"write_file", "edit_file"} else "original")
+        assert target.read_text(encoding="utf-8") == ("changed" if name == "write_file" else "original")

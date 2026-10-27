@@ -2,7 +2,12 @@
 # -*- coding: utf-8 -*-
 """Dataset retention reads are bounded without dropping case validation."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
+
+from linktools.ai.core import ExecutionContext
+
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -12,8 +17,8 @@ from sqlalchemy import event
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import CaseContract, CaseRef, DatasetContract, DatasetRef, TaskCaseInput
-from linktools.ai.runtime.state._evaluation_records import EvaluationCaseRecord, EvaluationDatasetRecord
-from linktools.ai.runtime.state._sql import SqlStateStore
+from linktools.ai.persistence._evaluation_records import EvaluationCaseRecord, EvaluationDatasetRecord
+from linktools.ai.persistence._sql import SqlStateStore
 
 from .test_evaluation_persistence import NOW, storage_for
 
@@ -25,7 +30,7 @@ async def test_dataset_expiry_preserves_all_case_deadlines_and_integrity(
     tmp_path: Path, backend: str, fault: str | None,
 ) -> None:
     storage = storage_for(backend, tmp_path)
-    storage = RuntimeState(storage)
+    storage = Persistence(storage)
     await storage.initialize(namespace="dataset-reads", tenant_id="tenant")
     try:
         repository = storage.evaluation.records
@@ -82,16 +87,18 @@ async def test_case_pages_batch_only_selected_content_in_original_order(tmp_path
     from linktools.ai.core import service_principal
     from linktools.ai.evaluation import CaseSpec, DatasetSpec
 
-    from linktools.ai.runtime import Runtime, RuntimeContext
 
     principal = service_principal("tenant", "owner")
     storage = storage_for(backend, tmp_path)
-    async with Runtime.open("case-pages", storage=storage,
-                            context=RuntimeContext(None, tenant_id="tenant")) as runtime:
+    async with (
+        Persistence.open('case-pages', storage=storage, tenant_id='tenant') as persistence_91,
+        TaskEngine.open(persistence=persistence_91, context=ExecutionContext(None)) as engine,
+        Evaluations.open(engine) as evaluations,
+    ):
         spec = DatasetSpec(DatasetRef("dataset", 1), tuple(CaseSpec.task(
             CaseRef("dataset", str(index), 1), input={"index": index}) for index in range(65)))
-        await runtime.evaluations.publish_dataset(spec, principal=principal, idempotency_key="publish")
-        repository = runtime._state.evaluation.records
+        await evaluations.publish_dataset(spec, principal=principal, idempotency_key="publish")
+        repository = persistence_91.evaluation.records
         statements = []
         def capture(_connection, _cursor, sql, _parameters, _context, _many):
             if sql.startswith("SELECT"):
@@ -107,7 +114,7 @@ async def test_case_pages_batch_only_selected_content_in_original_order(tmp_path
             seen = []
             while True:
                 statements.clear()
-                page = await runtime.evaluations.list_cases(spec.ref, principal=principal, limit=8, cursor=cursor)
+                page = await evaluations.list_cases(spec.ref, principal=principal, limit=8, cursor=cursor)
                 seen.extend(case.ref for case in page.items)
                 if sql_store is not None:
                     assert len(statements) <= 3, "a selected page must not read each case separately"
@@ -116,7 +123,7 @@ async def test_case_pages_batch_only_selected_content_in_original_order(tmp_path
                     break
             assert tuple(seen) == tuple(case.ref for case in spec.cases)
             with pytest.raises(AIError) as denied:
-                await runtime.evaluations.list_cases(spec.ref, principal=service_principal("tenant", "other"))
+                await evaluations.list_cases(spec.ref, principal=service_principal("tenant", "other"))
             assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
             assert await repository.get_cases(()) == ()
             reversed_refs = (*reversed(seen), seen[0], seen[-1])
@@ -135,10 +142,10 @@ async def test_case_pages_batch_only_selected_content_in_original_order(tmp_path
 async def test_required_case_batch_preserves_first_unavailable_position(
     tmp_path: Path, backend: str, fault: str,
 ) -> None:
-    from linktools.ai.runtime.state._evaluation_records import EvaluationContentTombstone
+    from linktools.ai.persistence._evaluation_records import EvaluationContentTombstone
 
     storage = storage_for(backend, tmp_path)
-    storage = RuntimeState(storage)
+    storage = Persistence(storage)
     await storage.initialize(namespace="case-errors", tenant_id="tenant")
     try:
         repository = storage.evaluation.records
@@ -174,8 +181,7 @@ async def test_evaluation_consumers_bound_case_queries_and_reload_missing_conten
         ScoreComparisonSelection, ScoreSelection, StartEvaluationRequest,
     )
 
-    from linktools.ai.runtime import Runtime
-    from linktools.ai.runtime._evaluation import _target_slot
+    from linktools.ai.evaluation.engine._service import _target_slot
     from linktools.ai.evaluation import TargetTrialRef
     from linktools.ai.task import Task
     from .test_evaluation_consumers import CONTEXT, PRINCIPAL, echo, exact, rule_scorer
@@ -183,13 +189,17 @@ async def test_evaluation_consumers_bound_case_queries_and_reload_missing_conten
     storage = storage_for("sqlite", tmp_path)
     target = Task("case-reads.target", echo, effect_policy="none")
     scorer = Task("case-reads.scorer", exact, effect_policy="none")
-    async with Runtime.open("case-consumers", storage=storage, context=CONTEXT) as runtime:
-        owner = runtime.evaluations
+    async with (
+        Persistence.open('case-consumers', storage=storage, tenant_id='evaluation-consumers') as persistence_188,
+        TaskEngine.open(target, scorer, persistence=persistence_188, context=CONTEXT) as bound,
+        Evaluations.open(bound) as evaluations,
+    ):
+        owner = evaluations
         spec = DatasetSpec(DatasetRef("ordered", 1), tuple(CaseSpec.task(
             CaseRef("ordered", name, 1), input={"answer": name}, expected=name,
         ) for name in ("third", "first", "second")))
         dataset = await owner.publish_dataset(spec, principal=PRINCIPAL, idempotency_key="dataset")
-        repository = runtime._state.evaluation.records
+        repository = persistence_188.evaluation.records
         keys = {repository._key("evaluation_case", [case.ref.dataset_id, case.ref.case_id,
                                                    case.ref.revision]).hex() for case in spec.cases}
         statements = []
@@ -201,7 +211,6 @@ async def test_evaluation_consumers_bound_case_queries_and_reload_missing_conten
         sql_engine = repository.state_store.context.engine.sync_engine
         event.listen(sql_engine, "before_cursor_execute", capture)
         try:
-            bound = runtime.tasks.bind(target, scorer)
             request = StartEvaluationRequest(EvaluationSpec(dataset, (CandidateSpec("current", task=target.ref),),
                                                             (rule_scorer(scorer),)), PRINCIPAL, "run")
             record = await owner._reserve_start(request, engine=bound)

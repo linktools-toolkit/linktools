@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Trace observation batching is per run and never weakens explicit barriers."""
 from ._runtime_test_helpers import model_features
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 
 import pytest
@@ -12,7 +14,7 @@ from linktools.ai.capability import TraceCapability
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.core import CommitPolicy
 from .test_observation_coalescing import _add_run, _observe, _setup
-from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.persistence import PersistenceDomain
 
 
 @pytest.mark.parametrize("options", [
@@ -39,7 +41,7 @@ async def test_trace_custom_pressure_and_required_flush_are_independent(tmp_path
     try:
         store = state.run_store
         store.trace_persistence.configure("run", buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=2, flush_interval=60.0)
-        archive = store.read_store(RuntimeDomain.TRACE)
+        archive = store.read_store(PersistenceDomain.TRACE)
         await _observe(store, 1)
         assert await archive.list_events(agent_run_id="run") == []
         await _observe(store, 2)
@@ -64,7 +66,7 @@ async def test_trace_scheduler_respects_each_runs_deadline(tmp_path):
         store = state.run_store
         store.trace_persistence.configure("run", buffer=store.trace_persistence._caches["run"], batch_size=100, flush_interval=0.01)
         store.trace_persistence.configure("slow", buffer=store.trace_persistence._caches["run"], batch_size=100, flush_interval=60.0)
-        archive = store.read_store(RuntimeDomain.TRACE)
+        archive = store.read_store(PersistenceDomain.TRACE)
         await _observe(store, 1, run_id="slow", execution_id="slow-execution")
         await _observe(store, 1)
         async def wait_fast():
@@ -82,7 +84,8 @@ async def test_trace_scheduler_respects_each_runs_deadline(tmp_path):
 @pytest.mark.parametrize("options,expected", [({}, (128, 3.0)), ({"batch_size": 7, "flush_interval": 0.25}, (7, 0.25))])
 async def test_runtime_binds_trace_batch_options_before_model_work(options, expected):
     from pydantic_ai.messages import ModelResponse, TextPart
-    from linktools.ai.runtime import Runtime, RuntimeStorage
+    from linktools.ai.runtime import Runtime
+    from linktools.ai.persistence import PersistenceStorage
     from .test_explicit_runtime_features import _FeatureFunctionModel, _FeatureModels, _features
 
     entered, release = asyncio.Event(), asyncio.Event()
@@ -94,18 +97,16 @@ async def test_runtime_binds_trace_batch_options_before_model_work(options, expe
 
     buffer = InMemoryCacheBackend(max_bytes=65536)
     feature = TraceCapability(commit=CommitPolicy.batch(buffer=buffer, **options))
-    storage = RuntimeStorage.in_memory()
-    async with Runtime.open(
-        "trace-options", features=model_features(_FeatureModels(_FeatureFunctionModel(model)), _features(feature)), storage=storage,
-    ) as runtime:
+    storage = PersistenceStorage.in_memory()
+    async with Persistence.open('trace-options', storage=storage) as persistence_98, Runtime.attach(persistence=persistence_98, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), _features(feature))) as runtime:
         execution = await runtime.agents.get().start("question")
         try:
             await asyncio.wait_for(entered.wait(), 2)
-            offsets = tuple(runtime._state.run_store.trace_persistence.offsets.values())
+            offsets = tuple(runtime._run_store.trace_persistence.offsets.values())
             assert len(offsets) == 1
             assert offsets[0].observation_batch_size == expected[0]
             assert offsets[0].observation_flush_interval == expected[1]
-            assert all(value is buffer for value in runtime._state.run_store.trace_persistence._caches.values())
+            assert all(value is buffer for value in runtime._run_store.trace_persistence._caches.values())
             assert feature._service is None
         finally:
             release.set()
@@ -123,7 +124,7 @@ async def test_trace_policy_survives_restoring_existing_projection_offsets(tmp_p
     await state.run_store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
     await state.close()
     restored = _storage("sqlite", tmp_path)
-    restored = RuntimeState(restored)
+    restored = Persistence(restored)
     await restored.initialize(
         namespace="observation-batches", tenant_id="tenant",
     )
@@ -137,7 +138,7 @@ async def test_trace_policy_survives_restoring_existing_projection_offsets(tmp_p
         assert offset.observation_batch_size == 2
         assert offset.observation_flush_interval == 60.0
         await _observe(store, 2)
-        archive = store.read_store(RuntimeDomain.TRACE)
+        archive = store.read_store(PersistenceDomain.TRACE)
         assert len(await archive.list_events(agent_run_id="run")) == 1
         await _observe(store, 3)
         async def wait_pressure():
@@ -158,9 +159,9 @@ async def test_independent_runtime_stores_borrow_one_buffer_without_draining_eac
         await _observe(first.run_store, 1)
         await _observe(second.run_store, 1)
         await first.close()
-        assert len(await second.run_store.read_store(RuntimeDomain.TRACE).list_events(agent_run_id="run")) == 0
+        assert len(await second.run_store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id="run")) == 0
         await second.run_store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
-        assert len(await second.run_store.read_store(RuntimeDomain.TRACE).list_events(agent_run_id="run")) == 1
+        assert len(await second.run_store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id="run")) == 1
         await shared.put("still-borrowed", b"usable")
         assert await shared.get("still-borrowed") == b"usable"
     finally:
@@ -186,7 +187,7 @@ async def test_trace_uses_buffer_without_hot_cache_protocol(tmp_path):
     state = await _setup(tmp_path, "memory", cache=Buffer())
     try:
         await _observe(state.run_store, 1)
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         assert await archive.list_events(agent_run_id="run") == []
         await state.run_store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
         assert len(await archive.list_events(agent_run_id="run")) == 1
@@ -196,7 +197,8 @@ async def test_trace_uses_buffer_without_hot_cache_protocol(tmp_path):
 
 @pytest.mark.asyncio
 async def test_trace_route_cache_does_not_supply_implicit_write_buffer():
-    from linktools.ai.runtime import Runtime, RuntimeStorage
+    from linktools.ai.runtime import Runtime
+    from linktools.ai.persistence import PersistenceStorage
     from linktools.ai.storage import StorageRoute
     from .test_explicit_runtime_features import _FeatureModels, _features
 
@@ -204,10 +206,11 @@ async def test_trace_route_cache_does_not_supply_implicit_write_buffer():
         async def append(self, *args, **kwargs):
             pytest.fail("hot-cache route must not schedule writes")
 
-    feature = TraceCapability(storage=StorageRoute.memory(cache=ReadCache(max_bytes=65536)))
-    async with Runtime.open(
-        "trace-hot-cache", features=model_features(_FeatureModels(), _features(feature)), storage=RuntimeStorage.in_memory(),
-    ) as runtime:
+    from dataclasses import replace
+    feature = TraceCapability()
+    storage = PersistenceStorage(replace(PersistenceStorage.in_memory().plan,
+                                         trace=StorageRoute.memory(cache=ReadCache(max_bytes=65536))))
+    async with Persistence.open('trace-hot-cache', storage=storage) as persistence_208, Runtime.attach(persistence=persistence_208, features=model_features(_FeatureModels(), _features(feature))) as runtime:
         execution = await runtime.agents.get().start("question")
         assert (await execution.wait(timeout_seconds=5)).result is not None
 
@@ -215,7 +218,8 @@ async def test_trace_route_cache_does_not_supply_implicit_write_buffer():
 @pytest.mark.asyncio
 async def test_shared_trace_capability_keeps_runtime_lifetimes_independent():
     from pydantic_ai.messages import ModelResponse, TextPart
-    from linktools.ai.runtime import Runtime, RuntimeStorage
+    from linktools.ai.runtime import Runtime
+    from linktools.ai.persistence import PersistenceStorage
     from .test_explicit_runtime_features import _FeatureFunctionModel, _FeatureModels, _features
 
     class Buffer(InMemoryCacheBackend):
@@ -237,15 +241,11 @@ async def test_shared_trace_capability_keeps_runtime_lifetimes_independent():
         await release.wait()
         return ModelResponse(parts=[TextPart("second")])
 
-    async with Runtime.open(
-        "shared-trace", features=model_features(_FeatureModels(_FeatureFunctionModel(blocked)), _features(feature)), storage=RuntimeStorage.in_memory(),
-    ) as second:
+    async with Persistence.open('shared-trace', storage=PersistenceStorage.in_memory()) as persistence_240, Runtime.attach(persistence=persistence_240, features=model_features(_FeatureModels(_FeatureFunctionModel(blocked)), _features(feature))) as second:
         pending = await second.agents.get().start("second")
         try:
             await asyncio.wait_for(entered.wait(), 2)
-            async with Runtime.open(
-                "shared-trace", features=model_features(_FeatureModels(), _features(feature)), storage=RuntimeStorage.in_memory(),
-            ) as first:
+            async with Persistence.open('shared-trace', storage=PersistenceStorage.in_memory()) as persistence_246, Runtime.attach(persistence=persistence_246, features=model_features(_FeatureModels(), _features(feature))) as first:
                 execution = await first.agents.get().start("first")
                 assert (await execution.wait(timeout_seconds=5)).result is not None
             assert not buffer.closed

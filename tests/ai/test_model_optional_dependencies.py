@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Run this module in each installed wheel extra combination without source PYTHONPATH."""
 from ._runtime_test_helpers import model_features
 import importlib.util
@@ -13,7 +15,8 @@ from pydantic_ai.models.test import TestModel
 
 from linktools.ai.errors import ErrorCode
 from linktools.ai.model import create_model, model_binding_error
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 import linktools.ai.web
 
 
@@ -25,9 +28,9 @@ def test_installed_provider_set_and_missing_extra_hints():
         for factory in factories:
             if importlib.util.find_spec(provider) is None:
                 with pytest.raises(ImportError, match=rf"linktools-ai\[{provider}\]"):
-                    create_model(protocol=factory, model="fixture")
+                    create_model(api=factory, model="fixture")
             else:
-                assert create_model(protocol=factory, model="fixture")
+                assert create_model(api=factory, model="fixture")
     assert model_binding_error(ModelHTTPError(429, model_name="fixture")).code == ErrorCode.MODEL_RATE_LIMITED
     assert model_binding_error(ValueError("ordinary failure")) is None
 
@@ -45,7 +48,7 @@ class _TestBinding:
 @pytest.mark.asyncio
 async def test_base_runtime_can_invoke_custom_sdk_model():
     models = _TestBinding()
-    async with Runtime.open("extras", features=model_features(models), storage=RuntimeStorage.in_memory()) as runtime:
+    async with Persistence.open('extras', storage=PersistenceStorage.in_memory()) as persistence_48, Runtime.attach(persistence=persistence_48, features=model_features(models)) as runtime:
         execution = await runtime.agents.get().start("hello")
         result = await execution.wait()
         assert result.result.status.value == "SUCCEEDED"
@@ -66,7 +69,13 @@ async def test_installed_adapter_projects_native_transport_errors(
         raise httpx2.ConnectError("fixture connection failure", request=request)
     monkeypatch.setattr(module, "DefaultAsyncHttpxClient", lambda **kwargs: httpx2.AsyncClient(
         transport=httpx2.MockTransport(fail), trust_env=False, **kwargs))
-    models = create_model(protocol=factory, model="fixture", api_key="fixture-secret", max_tokens=128, max_retries=0)
+    models = create_model(
+        api=factory,
+        model='fixture',
+        api_key='fixture-secret',
+        max_retries=0,
+        model_settings={'max_tokens': 128},
+    )
     async with models.materialize() as model:
         with pytest.raises(ModelAPIError) as caught:
             await model.request([ModelRequest(parts=[UserPromptPart("hello")])], None, ModelRequestParameters())

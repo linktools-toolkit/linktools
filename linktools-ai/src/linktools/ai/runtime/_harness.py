@@ -11,13 +11,11 @@ from typing import Any, cast, TYPE_CHECKING
 
 from linktools.core import environ
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import FallbackExceptionGroup
-from pydantic_ai.messages import BinaryContent, ModelMessage, ModelRequest, ModelResponse, SystemPromptPart, TextContent, ToolReturnPart, UserPromptPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, SystemPromptPart, TextContent, ToolReturnPart, UserPromptPart
 from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters, StreamedResponse
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext
-from pydantic_ai.usage import RequestUsage
 from pydantic_ai_harness.planning import (
     PlanItem as HarnessPlanItem,
 )
@@ -27,12 +25,11 @@ from pydantic_ai_harness.planning import (
 
 from ..capability import AgentContext, ReferencedInputsCapability, ToolCallRetry
 from ..errors import AIError, ErrorCode
-from ..model import ModelBinding, ModelClientRequestRecorder, ReferencedContent, validate_model_inputs
+from ..model import ModelBinding, ModelClientRequestRecorder, ReferencedContent, ReferencedInputModel, model_input_content
 from ..spec import CapabilityRef
 from ._plan import PlanItem, RuntimePlanStore
-from ._message import model_input_content, project_provider_messages, without_history_system_prompts
-from ._metric_capability import model_request_error
-from ._user_content_codec import RetiredReferencedContent
+from ..model.messages import RetiredReferencedContent
+from ..model.messages import project_provider_messages, without_history_system_prompts
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -41,8 +38,8 @@ _logger = environ.get_logger("ai.runtime.harness")
 
 
 
-class SummaryProviderModel(WrapperModel):
-    """Keep SDK persistence separate from the provider's supported part union."""
+class SummaryProviderModel(ReferencedInputModel):
+    """Project durable summaries before the shared provider-input boundary."""
 
     def __init__(
         self, model: Model, *, context: AgentContext[object] | None = None,
@@ -51,138 +48,61 @@ class SummaryProviderModel(WrapperModel):
         binding: ModelBinding | None = None,
         preserve_errors: bool = False,
     ) -> None:
-        super().__init__(model)
-        self._context = context
-        self._referenced_inputs = referenced_inputs if callable(referenced_inputs) else dict(referenced_inputs or {})
-        self._binding = binding
-        self._preserve_errors = preserve_errors
+        sources = referenced_inputs if callable(referenced_inputs) else dict(referenced_inputs or {})
+        self._reference_sources = sources
+        self._reference_context = context
 
-    async def _provider_messages(self, messages: list[ModelMessage]) -> list[ModelMessage]:
+        async def load(content: ReferencedContent) -> bytes:
+            available = sources() if callable(sources) else sources
+            if not available or context is None:
+                raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                              safe_details={"reason": "referenced_inputs_unavailable"})
+            if content.source not in available:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                              safe_details={"reason": "referenced_input_source_mismatch"})
+            return await available[content.source].load(context, content)
+
+        super().__init__(model, load=load, binding=binding, preserve_errors=preserve_errors)
+
+    def validate_inputs(self, value: object) -> None:
+        if isinstance(value, Sequence) and self.content_omission_reason(value) is not None:
+            available = self._reference_sources() if callable(self._reference_sources) else self._reference_sources
+            if not available or self._reference_context is None:
+                raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                              safe_details={"reason": "referenced_inputs_unavailable"})
+            if any(
+                item.source not in available
+                for message in value if isinstance(message, ModelRequest)
+                for part in message.parts
+                for item in model_input_content(part) if isinstance(item, ReferencedContent)
+            ):
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                              safe_details={"reason": "referenced_input_source_mismatch"})
+        super().validate_inputs(value)
+
+    def project_messages(self, messages: list[ModelMessage]) -> list[ModelMessage]:
         projected = project_provider_messages(messages)
-        if self._binding is not None:
-            validate_model_inputs(self._binding, projected)
-        references = [
-            item for message in projected if isinstance(message, ModelRequest)
-            for part in message.parts
-            for item in model_input_content(part) if isinstance(item, ReferencedContent)
-        ]
-        sources = self._referenced_inputs() if callable(self._referenced_inputs) else self._referenced_inputs
-        if references and (not sources or self._context is None or self._binding is None):
-            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING,
-                          safe_details={"reason": "referenced_inputs_unavailable"})
-        if any(item.source not in sources for item in references):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-                          safe_details={"reason": "referenced_input_source_mismatch"})
-        if references:
-            ModelClientRequestRecorder.omit_current_http_bodies("referenced_content_lifecycle")
-        result: list[ModelMessage] = []
+        result = []
         for message in projected:
             if not isinstance(message, ModelRequest):
                 result.append(message)
                 continue
             parts = []
             for part in message.parts:
-                if (not isinstance(part, (UserPromptPart, ToolReturnPart))
-                    or isinstance(part, UserPromptPart) and isinstance(part.content, str)):
+                if not isinstance(part, ToolReturnPart):
                     parts.append(part)
                     continue
-                content = []
-                for item in model_input_content(part):
-                    if isinstance(item, ReferencedContent):
-                        data = await sources[item.source].load(self._context, item)
-                        if item.representation == "text":
-                            try:
-                                item = data.decode("utf-8")
-                            except UnicodeDecodeError:
-                                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, retryable=False,
-                                              safe_details={"reason": "text_input_not_utf8"}) from None
-                        else:
-                            item = BinaryContent(data, media_type=item.media_type, identifier=item.identifier)
-                    elif (isinstance(part, ToolReturnPart) and (
+                content = [
+                    item.content if (
                         isinstance(item, RetiredReferencedContent)
                         or isinstance(item, TextContent) and isinstance(item.metadata, dict)
                         and item.metadata.get("source") == "linktools.attachment"
-                    )):
-                        # Durable retirement metadata must never become native result text.
-                        item = item.content
-                    content.append(item)
-                value = (content if isinstance(part, UserPromptPart) or isinstance(part.content, list)
-                         else content[0])
-                parts.append(replace(part, content=value))
+                    ) else item
+                    for item in model_input_content(part)
+                ]
+                parts.append(replace(part, content=content if isinstance(part.content, list) else content[0]))
             result.append(replace(message, parts=parts))
-        if self._binding is not None:
-            validate_model_inputs(self._binding, result)
         return result
-
-    async def request(
-        self, messages: list[ModelMessage], model_settings: ModelSettings | None,
-        model_request_parameters: ModelRequestParameters,
-    ) -> ModelResponse:
-        try:
-            return await self.wrapped.request(
-                await self._provider_messages(messages), model_settings, model_request_parameters,
-            )
-        except Exception as error:
-            if self._preserve_errors or isinstance(error, FallbackExceptionGroup):
-                raise
-            safe_error = model_request_error(error, content_omission_reason=self.content_omission_reason(messages))
-            if safe_error is not error:
-                raise safe_error from None
-            raise
-
-    async def count_tokens(
-        self, messages: list[ModelMessage], model_settings: ModelSettings | None,
-        model_request_parameters: ModelRequestParameters,
-    ) -> RequestUsage:
-        try:
-            return await self.wrapped.count_tokens(
-                await self._provider_messages(messages), model_settings, model_request_parameters,
-            )
-        except Exception as error:
-            if self._preserve_errors or isinstance(error, FallbackExceptionGroup):
-                raise
-            safe_error = model_request_error(error, content_omission_reason=self.content_omission_reason(messages))
-            if safe_error is not error:
-                raise safe_error from None
-            raise
-
-    async def compact_messages(
-        self, request_context: ModelRequestContext, *, instructions: str | None = None,
-    ) -> ModelResponse:
-        try:
-            return await self.wrapped.compact_messages(
-                replace(request_context, messages=await self._provider_messages(request_context.messages)),
-                instructions=instructions,
-            )
-        except Exception as error:
-            if self._preserve_errors or isinstance(error, FallbackExceptionGroup):
-                raise
-            safe_error = model_request_error(
-                error, content_omission_reason=self.content_omission_reason(request_context.messages),
-            )
-            if safe_error is not error:
-                raise safe_error from None
-            raise
-
-    @classmethod
-    def content_omission_reason(cls, messages: Sequence[ModelMessage]) -> str | None:
-        return "referenced_content_lifecycle" if any(
-            isinstance(item, ReferencedContent)
-            for message in messages if isinstance(message, ModelRequest)
-            for part in message.parts
-            for item in model_input_content(part)
-        ) else None
-
-    @asynccontextmanager
-    async def request_stream(
-        self, messages: list[ModelMessage], model_settings: ModelSettings | None,
-        model_request_parameters: ModelRequestParameters,
-        run_context: RunContext[Any] | None = None,
-    ) -> AsyncIterator[StreamedResponse]:
-        async with self.wrapped.request_stream(
-            await self._provider_messages(messages), model_settings, model_request_parameters, run_context,
-        ) as response:
-            yield response
 
 
 def prepare_input_retention(messages: list[ModelMessage]) -> None:

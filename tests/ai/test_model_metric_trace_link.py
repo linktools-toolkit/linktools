@@ -14,14 +14,14 @@ from linktools.ai.runtime._run_hooks import (
     AgentRunCapture,
 )
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
-from linktools.ai.runtime._history_projection import _trace_item
-from linktools.ai.runtime._journal import ModelRequestJournal
-from linktools.ai.runtime._metric_id import _model_observation_id
+from linktools.ai.history._projection import _trace_item
+from linktools.ai.observe.journal import ModelRequestJournal
+from linktools.ai.observe.identity import model_observation_id
 from pydantic_ai import Agent, ModelRetry, RunContext
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
-from linktools.ai.runtime.state._steps import (
+from linktools.ai.persistence.runs import (
     StagingAgentRunStore,
 )
 
@@ -122,7 +122,7 @@ async def test_model_metric_and_trace_share_observation_id_and_duration() -> Non
     ]
     assert len(completed) == 1
     event = completed[0]
-    expected = _model_observation_id(
+    expected = model_observation_id(
         "workspace",
         "tenant",
         "execution",
@@ -185,7 +185,7 @@ async def test_failed_model_metric_and_trace_share_observation_id_and_duration()
     ]
     assert len(failed) == 1
     event = failed[0]
-    expected = _model_observation_id(
+    expected = model_observation_id(
         "workspace",
         "tenant",
         "execution",

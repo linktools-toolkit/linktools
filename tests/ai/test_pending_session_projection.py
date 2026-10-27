@@ -3,7 +3,7 @@
 """Live cached Conversation turns share Session display paging without durable writes."""
 from ._runtime_test_helpers import model_features
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import replace
@@ -17,9 +17,10 @@ from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeStorage
-from linktools.ai.runtime.service_api import CancelExecutionRequest, ListSessionRequest
-from linktools.ai.runtime.state._store import active_state_scope, record_key_digest
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.execution import CancelExecutionRequest, ListSessionRequest
+from linktools.ai.persistence.state import active_state_scope, record_key_digest
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.core import CommitPolicy
 from linktools.ai.storage._database import SqlStorageContext
@@ -44,7 +45,7 @@ async def _runtimes(tmp_path, *, cache, shared=True):
 
     def group():
         value = RuntimeFeatures("pending-session-display")
-        value.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
+        value.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
         value.agent("default", model="default", allow_tools=())
         return value
 
@@ -56,9 +57,10 @@ async def _runtimes(tmp_path, *, cache, shared=True):
     async with AsyncExitStack() as stack:
         values = []
         for _ in range(2 if shared and cache is not None else 1):
-            storage = RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache)
-            runtime = await stack.enter_async_context(Runtime.open(
-                "pending-session-display", storage=storage, features=model_features(models, group()),
+            storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache)
+            persistence = await stack.enter_async_context(Persistence.open("pending-session-display", storage=storage))
+            runtime = await stack.enter_async_context(Runtime.attach(
+                persistence=persistence, features=model_features(models, group()),
             ))
             values.append((runtime, runtime._state))
         try:
@@ -208,8 +210,8 @@ async def test_pending_session_projection_source_wins_observation_race(
 @pytest.mark.parametrize("principal", (Principal("other", "tenant"), Principal("owner", "other")))
 @pytest.mark.parametrize("method", ("get", "refresh", "timeline"))
 async def test_pending_session_projection_denial_precedes_observation(principal: Principal, method: str) -> None:
-    storage = RuntimeStorage.in_memory()
-    storage = RuntimeState(storage)
+    storage = PersistenceStorage.in_memory()
+    storage = Persistence(storage)
     await storage.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await storage.conversation.sessions.create(_session())
@@ -228,8 +230,8 @@ async def test_pending_session_projection_denial_precedes_observation(principal:
 
 @pytest.mark.parametrize("fault", ("owner", "session", "child", "terminal", "older_session"))
 async def test_pending_session_projection_rejects_unbound_observations(fault: str) -> None:
-    storage = RuntimeStorage.in_memory()
-    storage = RuntimeState(storage)
+    storage = PersistenceStorage.in_memory()
+    storage = Persistence(storage)
     await storage.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         record = await storage.conversation.sessions.create(_session())
@@ -302,8 +304,8 @@ async def test_pending_session_projection_no_cache_keeps_source_admission(tmp_pa
 
 @pytest.mark.parametrize("limit", (1, 10))
 async def test_pending_session_projection_cannot_fill_missing_source_execution(limit: int) -> None:
-    storage = RuntimeStorage.in_memory()
-    storage = RuntimeState(storage)
+    storage = PersistenceStorage.in_memory()
+    storage = Persistence(storage)
     await storage.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await storage.conversation.sessions.create(_session())
@@ -326,8 +328,8 @@ async def test_pending_session_projection_cannot_fill_missing_source_execution(l
 
 @pytest.mark.parametrize("method", ("timeline", "refresh"))
 async def test_pending_session_projection_older_page_cannot_fill_missing_source_execution(method: str) -> None:
-    storage = RuntimeStorage.in_memory()
-    storage = RuntimeState(storage)
+    storage = PersistenceStorage.in_memory()
+    storage = Persistence(storage)
     await storage.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         sessions = storage.conversation.sessions
@@ -372,8 +374,8 @@ async def test_pending_session_projection_older_page_cannot_fill_missing_source_
 async def test_pending_session_projection_rechecks_owner_after_empty_observation(
     method: str, max_age: float, keep_active: bool, observation: str,
 ) -> None:
-    storage = RuntimeStorage.in_memory()
-    storage = RuntimeState(storage)
+    storage = PersistenceStorage.in_memory()
+    storage = Persistence(storage)
     await storage.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         sessions = storage.conversation.sessions
@@ -388,7 +390,7 @@ async def test_pending_session_projection_rechecks_owner_after_empty_observation
             kinds = (("session", "session"), ("conversation_history", record.history_id),
                      ("transcript_head", record.history_id))
             keys = tuple(record_key_digest(
-                sessions.namespace, sessions.tenant_id, RuntimeDomain.CONVERSATION.value, kind, identity,
+                sessions.namespace, sessions.tenant_id, PersistenceDomain.CONVERSATION.value, kind, identity,
             ) for kind, identity in kinds)
             await sessions.state_store.mutate(lambda transaction: transaction.delete_records(keys))
             await sessions.create(replace(_session(), owner_principal_id="other", metadata={"secret": "other owner"}))

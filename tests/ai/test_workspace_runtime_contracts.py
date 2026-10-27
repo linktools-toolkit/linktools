@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Regression tests for workspace RuntimeStorage composition."""
+
+from linktools.ai.persistence import Persistence
+"""Regression tests for workspace PersistenceStorage composition."""
 from ._runtime_test_helpers import model_features
 from linktools.ai.model import create_model
 
 from ._runtime_test_helpers import workspace_features
 
 import pytest
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.asset import (
     AssetStore,
     DirectoryAssetBackend,
@@ -16,8 +18,9 @@ from linktools.ai.asset import (
 from linktools.ai.capability import AssetCapability
 from linktools.ai.runtime import RuntimeFeatures
 
-from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeStorage
-from linktools.ai.runtime._context import RuntimeContext
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.core import ExecutionContext
 from linktools.ai.runtime._harness_memory import build_harness_memory
 from linktools.ai.runtime._memory import RuntimeMemoryStore
 from linktools.ai.storage import StorageOverlay
@@ -27,12 +30,12 @@ from pydantic_ai_harness.memory import Memory
 
 @pytest.mark.asyncio
 async def test_runtime_memory_store_implements_harness_path_storage() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="memory-regression", tenant_id="tenant")
     try:
         store = RuntimeMemoryStore(
             state.memory,
-            object_store=state.object_store(RuntimeDomain.MEMORY),
+            object_store=state.object_store(PersistenceDomain.MEMORY),
             namespace="memory-regression",
             tenant_id="tenant",
             execution_id="execution",
@@ -56,12 +59,12 @@ async def test_runtime_memory_store_implements_harness_path_storage() -> None:
 
 @pytest.mark.asyncio
 async def test_memory_capability_is_harness_owned_over_runtime_storage() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="memory-capability", tenant_id="tenant")
     try:
         store = RuntimeMemoryStore(
             state.memory,
-            object_store=state.object_store(RuntimeDomain.MEMORY),
+            object_store=state.object_store(PersistenceDomain.MEMORY),
             namespace="memory-capability",
             tenant_id="tenant",
             execution_id="execution",
@@ -88,12 +91,12 @@ async def test_memory_capability_is_harness_owned_over_runtime_storage() -> None
 
 @pytest.mark.asyncio
 async def test_memory_missing_delete_uses_harness_mutation_contract() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="memory-missing-delete", tenant_id="tenant")
     try:
         store = RuntimeMemoryStore(
             state.memory,
-            object_store=state.object_store(RuntimeDomain.MEMORY),
+            object_store=state.object_store(PersistenceDomain.MEMORY),
             namespace="memory-missing-delete",
             tenant_id="tenant",
             execution_id="execution",
@@ -118,12 +121,12 @@ async def test_memory_missing_delete_uses_harness_mutation_contract() -> None:
 
 @pytest.mark.asyncio
 async def test_memory_store_remains_writable_across_missing_delete_receipts() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="memory-sequence-gap", tenant_id="tenant")
     try:
         store = RuntimeMemoryStore(
             state.memory,
-            object_store=state.object_store(RuntimeDomain.MEMORY),
+            object_store=state.object_store(PersistenceDomain.MEMORY),
             namespace="memory-sequence-gap",
             tenant_id="tenant",
             execution_id="execution",
@@ -210,23 +213,19 @@ async def test_workspace_store_loads_kind_scoped_declarations(tmp_path) -> None:
     ]
 
 
-def _workspace_runtime_storage(workspace: Workspace) -> RuntimeStorage:
-    return RuntimeStorage.from_root(workspace.storage_root / "runtime")
+def _workspace_runtime_storage(workspace: Workspace) -> PersistenceStorage:
+    return PersistenceStorage.from_root(workspace.storage_root / "runtime")
 
 
 @pytest.mark.asyncio
 async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
     workspace = Workspace.load(tmp_path)
-    models = create_model(protocol='openai', model="gpt-test")
+    models = create_model(api='openai', model="gpt-test")
     from linktools.ai.capability import ExecutionCapability
 
     features = workspace_features("workspace", workspace=workspace)
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Runtime.open(
-        "default",
-        storage=_workspace_runtime_storage(workspace),
-        features=model_features(models, features),
-    ) as runtime:
+    async with Persistence.open('default', storage=_workspace_runtime_storage(workspace)) as persistence_225, Runtime.attach(persistence=persistence_225, features=model_features(models, features)) as runtime:
         assert runtime.tenant_id == "default"
         assert runtime.default_principal.tenant_id == "default"
         created = await runtime.agents.get("default").create_session("remember")
@@ -238,21 +237,12 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
             )
         ).items == ()
 
-    async with Runtime.open(
-        "default",
-        context=RuntimeContext(None, tenant_id="tenant-a"),
-        storage=_workspace_runtime_storage(workspace),
-        features=model_features(models, features),
-    ) as runtime:
+    async with Persistence.open('default', storage=_workspace_runtime_storage(workspace), tenant_id='tenant-a') as persistence_241, Runtime.attach(persistence=persistence_241, context=ExecutionContext(None), features=model_features(models, features)) as runtime:
         assert runtime.tenant_id == "tenant-a"
         assert runtime.default_principal.tenant_id == "tenant-a"
         await runtime.agents.get("default").create_session("custom-tenant")
 
-    async with Runtime.open(
-        "default",
-        storage=_workspace_runtime_storage(workspace),
-        features=model_features(models, features),
-    ) as runtime:
+    async with Persistence.open('default', storage=_workspace_runtime_storage(workspace)) as persistence_251, Runtime.attach(persistence=persistence_251, features=model_features(models, features)) as runtime:
         loaded = await runtime.sessions.get(
             created.session_id,
             principal=runtime.default_principal,

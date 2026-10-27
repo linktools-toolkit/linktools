@@ -15,16 +15,13 @@ from ..core import ExecutionLineageKind
 from ..core import agent_run_id as make_agent_run_id
 from ..errors import AIError, ErrorCode
 from ..storage import TurnCoordination
-from .service_api import ExecutionRequest
-from .state import RuntimeDomain
-from .state._contracts import (
-    ExecutionRecord,
-    ExecutionStartReservation,
-    LoadedModelContext,
-    SessionRecord,
-)
-from .state._step_contracts import AgentRunStore
-from .state._steps import RuntimeAgentRunStore, StateStepArchive
+from ..execution import ExecutionRequest
+from ..persistence import PersistenceDomain
+from ..execution import ExecutionRecord, ExecutionStartReservation
+from ..persistence.contracts import LoadedModelContext
+from ..session import SessionRecord
+from ..persistence.runs import AgentRunStore
+from ..persistence.runs import RuntimeAgentRunStore, StateStepArchive
 
 if TYPE_CHECKING:
     from ._run_hooks import AgentRunCapture
@@ -158,7 +155,7 @@ class ConversationService(AbstractCapability[AgentContext[AppT]]):
                 tenant_id=tenant_id,
             )
         return await run_store.load_loaded_model_context(
-            RuntimeDomain.CONVERSATION, owner
+            PersistenceDomain.CONVERSATION, owner
         )
 
     @classmethod

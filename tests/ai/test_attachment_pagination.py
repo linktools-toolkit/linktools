@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Attachment acceptance survives request preparation and archive pagination."""
 from ._runtime_test_helpers import model_features
 
@@ -30,9 +32,12 @@ from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, HmacCursorSigner
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ExecutionInputContext, ExecutionTreeEvent, Runtime, RuntimeHistory, RuntimeStorage
-from linktools.ai.runtime._attachment import bind_tool_return_attachments
-from linktools.ai.runtime._history_projection import _attachment_fact_cursor
+from linktools.ai.history import History
+from linktools.ai.execution import ExecutionInputContext, ExecutionTreeEvent
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.model._attachment import bind_tool_return_attachments
+from linktools.ai.history._projection import _attachment_fact_cursor
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
 
 from ._runtime_test_helpers import _UsageFunctionModel, _wait_for_committed
@@ -249,10 +254,7 @@ async def test_attachment_cursor_from_request_started_survives_archive_reopen(
     first = None
     started_items = ()
     group.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open(
-        "attachment-pagination", storage=RuntimeStorage.filesystem(tmp_path),
-        features=model_features(models, group),
-    ) as runtime:
+    async with Persistence.open('attachment-pagination', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_252, Runtime.attach(persistence=persistence_252, features=model_features(models, group)) as runtime:
         principal = runtime.default_principal
         prompt = ["summarize", BinaryContent(b"initial", media_type="image/png")] if initial_attachment else "summarize"
         execution = await runtime.agents.get().start(prompt, input_context=imported)
@@ -293,9 +295,7 @@ async def test_attachment_cursor_from_request_started_survives_archive_reopen(
             cursor = tail.next_cursor
         assert tuple(items) == prepared.items
 
-    async with RuntimeHistory.open(
-        "attachment-pagination", storage=RuntimeStorage.filesystem(tmp_path),
-    ) as archived:
+    async with Persistence.open('attachment-pagination', storage=PersistenceStorage.filesystem(tmp_path), tenant_id="default", read_only=True) as history_persistence_296, History.open(persistence=history_persistence_296) as archived:
         items = list(first.items)
         cursor = first.next_cursor
         while cursor is not None:

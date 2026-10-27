@@ -12,15 +12,15 @@ from sqlalchemy import Column, Integer, MetaData, String, Table, UniqueConstrain
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.asset import AssetKey, AssetStore, SqlAssetBackend
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import build_sql_schema_metadata, provision_database
 from linktools.ai.observe._sql import SqlMetricStore
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._sql import SqlStateStore
-from linktools.ai.runtime.state.schema import build_runtime_sql_metadata
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._sql import SqlStateStore
+from linktools.ai.persistence.schema import build_runtime_sql_metadata
 from linktools.ai.storage import StorageOverlay, create_sql_storage_context, read_object, validate_sql
 
 
@@ -48,7 +48,7 @@ async def test_sql_adapters_skip_schema_reflection_but_keep_data_operations(
     tmp_path: Path, schema_reads: list[str],
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'shared.db'}")
-    runtime = RuntimeState(RuntimeStorage.sql(engine))
+    runtime = Persistence(PersistenceStorage.sql(engine))
     state = SqlStateStore(engine)
     backend = SqlAssetBackend(engine, namespace="explicit-schema")
     assets = AssetStore(StorageOverlay(backend, writer=backend))
@@ -82,7 +82,7 @@ async def test_external_runtime_initialization_neither_checks_nor_creates_tables
     tmp_path: Path, schema_reads: list[str],
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'external.db'}")
-    runtime = RuntimeState(RuntimeStorage.sql(engine))
+    runtime = Persistence(PersistenceStorage.sql(engine))
     try:
         await runtime.initialize(namespace="external", tenant_id="tenant")
         assert schema_reads == []
@@ -90,7 +90,7 @@ async def test_external_runtime_initialization_neither_checks_nor_creates_tables
             tables = await connection.exec_driver_sql("SELECT name FROM sqlite_master WHERE type = 'table'")
             assert tables.all() == []
         with pytest.raises(AIError) as error:
-            await validate_sql(engine, build_runtime_sql_metadata(frozenset({RuntimeDomain.CONVERSATION})))
+            await validate_sql(engine, build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION})))
         assert error.value.code is ErrorCode.STORAGE_CAPABILITY_MISSING
     finally:
         await runtime.close()
@@ -102,7 +102,7 @@ async def test_local_sqlite_creation_and_reopen_keep_objects_without_reinspectio
     tmp_path: Path, schema_reads: list[str],
 ) -> None:
     path = tmp_path / "local.db"
-    state = RuntimeState(RuntimeStorage.sqlite(path))
+    state = Persistence(PersistenceStorage.sqlite(path))
     payload = b"retained object"
     digest = hashlib.sha256(payload).hexdigest()
 
@@ -111,18 +111,18 @@ async def test_local_sqlite_creation_and_reopen_keep_objects_without_reinspectio
 
     await state.initialize(namespace="local", tenant_id="tenant")
     try:
-        await state.object_store(RuntimeDomain.EXECUTION).put(
+        await state.object_store(PersistenceDomain.EXECUTION).put(
             "example", chunks(), expected_digest=digest, expected_size=len(payload),
         )
     finally:
         await state.close()
     assert path.is_file()
     schema_reads.clear()
-    reopened = RuntimeState(RuntimeStorage.sqlite(path))
+    reopened = Persistence(PersistenceStorage.sqlite(path))
     await reopened.initialize(namespace="local", tenant_id="tenant")
     try:
         assert await read_object(
-            reopened.object_store(RuntimeDomain.EXECUTION), "example",
+            reopened.object_store(PersistenceDomain.EXECUTION), "example",
             expected_digest=digest, expected_size=len(payload),
         ) == payload
         assert schema_reads == []
@@ -181,7 +181,7 @@ async def test_existing_metric_validation_option_remains_explicit(
 @pytest.mark.asyncio
 async def test_read_only_missing_sqlite_does_not_create_a_database(tmp_path: Path) -> None:
     path = tmp_path / "missing.db"
-    state = RuntimeState(RuntimeStorage.sqlite(path))
+    state = Persistence(PersistenceStorage.sqlite(path))
     with pytest.raises(AIError) as error:
         await state.initialize(namespace="reader", tenant_id="tenant", read_only=True)
     assert error.value.code is ErrorCode.STORAGE_NOT_FOUND
@@ -193,9 +193,9 @@ async def test_archive_preparation_is_explicit_and_preserves_scope_on_read_only_
     tmp_path: Path, schema_reads: list[str],
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'archives.db'}")
-    state = RuntimeState(RuntimeStorage.sql(engine))
-    reader = RuntimeState(RuntimeStorage.sql(engine))
-    other = RuntimeState(RuntimeStorage.sql(engine))
+    state = Persistence(PersistenceStorage.sql(engine))
+    reader = Persistence(PersistenceStorage.sql(engine))
+    other = Persistence(PersistenceStorage.sql(engine))
     try:
         await provision_database(engine)
         schema_reads.clear()

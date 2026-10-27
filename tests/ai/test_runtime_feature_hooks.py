@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Native feature binding preserves wrappers, type ordering and run isolation."""
 from ._runtime_test_helpers import model_features
 
@@ -14,7 +16,8 @@ from pydantic_ai.tools import RunContext
 
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 
 from .test_explicit_runtime_features import _FeatureModels, _features
 
@@ -43,9 +46,8 @@ async def test_wrapped_features_keep_native_order_and_isolate_concurrent_runs(ne
     tree = (_ObservedWrapper(CombinedCapability([inner, CheckpointCapability(), ExecutionCapability(retain_history=True)]),
                              id="wrapped.features", label="outer", events=events) if nested else inner)
     features = _features(tree)
-    state = RuntimeStorage.in_memory()
-    async with Runtime.open("wrapped-features", storage=state,
-                            features=model_features(_FeatureModels(), features)) as runtime:
+    state = PersistenceStorage.in_memory()
+    async with Persistence.open('wrapped-features', storage=state) as persistence_47, Runtime.attach(persistence=persistence_47, features=model_features(_FeatureModels(), features)) as runtime:
         executions = await asyncio.gather(*(runtime.agents.get().start(f"input {index}") for index in range(3)))
         results = await asyncio.gather(*(execution.wait(timeout_seconds=5) for execution in executions))
         assert all(result.result.status is ExecutionStatus.SUCCEEDED for result in results)
@@ -95,8 +97,7 @@ async def test_bound_features_preserve_public_types_and_subclass_hooks_for_nativ
     checkpoint = CheckpointCapability()
     conversation = ExecutionCapability(retain_history=True)
     features = _features(trace, checkpoint, conversation, _RequiresFeatureTypes(events=events))
-    async with Runtime.open("type-ordering", storage=RuntimeStorage.in_memory(),
-                            features=model_features(_FeatureModels(), features)) as runtime:
+    async with Persistence.open('type-ordering', storage=PersistenceStorage.in_memory()) as persistence_98, Runtime.attach(persistence=persistence_98, features=model_features(_FeatureModels(), features)) as runtime:
         executions = await asyncio.gather(*(runtime.agents.get().start(str(index)) for index in range(2)))
         results = await asyncio.gather(*(execution.wait(timeout_seconds=5) for execution in executions))
         assert all(result.result.status is ExecutionStatus.SUCCEEDED for result in results)

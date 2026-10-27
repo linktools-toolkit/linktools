@@ -297,7 +297,7 @@ def test_contract_difference_values_are_deeply_immutable() -> None:
 
 
 def test_saved_reports_round_trip_current_durable_codec() -> None:
-    from linktools.ai.runtime.state._codec import decode_domain, encode_domain
+    from linktools.ai.persistence.codec import decode_domain, encode_domain
 
     target = _manifest("run")
     evaluation = build_evaluation_report(target, CASES, _trials(target),
@@ -373,7 +373,7 @@ def test_identical_graph_templates_compare_by_content_and_preserve_scope() -> No
 
 
 def test_report_snapshot_keeps_pending_completion_after_current_work_finishes() -> None:
-    from linktools.ai.runtime.state._codec import decode_domain, encode_domain
+    from linktools.ai.persistence.codec import decode_domain, encode_domain
 
     manifest = _manifest("run")
     running_trials = [replace(trial, execution_status=ExecutionStatus.STARTED) for trial in _trials(manifest)]

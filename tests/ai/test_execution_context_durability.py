@@ -12,9 +12,9 @@ from linktools.ai.agent import AgentBindingContract, CapabilityPin
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.runtime._local import LocalExecutionBackend
-from linktools.ai.runtime.service_api import ExecutionRequest
-from linktools.ai.runtime.state._codec import decode_domain, encode_domain
-from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
+from linktools.ai.execution import ExecutionRequest
+from linktools.ai.persistence.codec import decode_domain, encode_domain
+from linktools.ai.persistence.contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 

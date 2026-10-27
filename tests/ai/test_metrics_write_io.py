@@ -14,23 +14,23 @@ from sqlalchemy import event
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.core import RunBudget
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.observe import (
     MetricAggregation, MetricDefinition, Metrics, MetricSource, MetricType, Observation,
 )
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime.state._sql import SqlStateStore
-from linktools.ai.runtime.state._store import RecordReplacement, StateTransaction, StoredRecord
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence._sql import SqlStateStore
+from linktools.ai.persistence.state import RecordReplacement, StateTransaction, StoredRecord
 
 
 async def _assert_writes(engine: AsyncEngine) -> None:
     await provision_database(engine)
     metrics = Metrics.sql(engine, namespace="write-io")
-    state = RuntimeState(RuntimeStorage.sql(engine))
-    peer = RuntimeState(RuntimeStorage.sql(engine))
+    state = Persistence(PersistenceStorage.sql(engine))
+    peer = Persistence(PersistenceStorage.sql(engine))
     await state.initialize(namespace="write-io", tenant_id="tenant")
     await peer.initialize(namespace="write-io", tenant_id="tenant")
     await metrics.get_observation("warmup")

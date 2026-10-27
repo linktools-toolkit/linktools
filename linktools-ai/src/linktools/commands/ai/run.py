@@ -27,7 +27,8 @@ from ._common import (
 )
 
 if TYPE_CHECKING:
-    from linktools.ai.runtime import Execution, ExecutionResult, ExecutionTreeEvent, Runtime
+    from linktools.ai.execution import Execution, ExecutionResult, ExecutionTreeEvent
+    from linktools.ai.runtime import Runtime
     from linktools.cli import CommandParser
 
 _logger = environ.get_logger("commands.ai.run")

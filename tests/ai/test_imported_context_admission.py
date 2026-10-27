@@ -11,9 +11,10 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 from linktools.ai.core import ExecutionStatus, IdempotencyStatus, ResourceKind
 from linktools.ai.execution import ExecutionStartReservation, IdempotencyRecord
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ExecutionInputContext, RuntimeStorage
-from linktools.ai.runtime._context_archive import ExecutionContextArchive
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeState
+from linktools.ai.execution import ExecutionInputContext
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.inputs import ExecutionContextArchive
+from linktools.ai.persistence import PersistenceDomain, Persistence
 
 from .test_history_projection_conformance import _record
 
@@ -24,15 +25,15 @@ from .test_history_projection_conformance import _record
 async def test_imported_context_admission_commits_or_rolls_back_one_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, abort: bool,
 ) -> None:
-    storage = (RuntimeStorage.in_memory() if backend == 'memory' else
-               RuntimeStorage.filesystem(tmp_path / 'state') if backend == 'filesystem' else
-               RuntimeStorage.sqlite(tmp_path / 'state.db'))
-    state = RuntimeState(storage)
+    storage = (PersistenceStorage.in_memory() if backend == 'memory' else
+               PersistenceStorage.filesystem(tmp_path / 'state') if backend == 'filesystem' else
+               PersistenceStorage.sqlite(tmp_path / 'state.db'))
+    state = Persistence(storage)
     await state.initialize(namespace='imported-context', tenant_id='tenant')
     try:
         repository = state.execution.executions
         archive = ExecutionContextArchive(
-            repository.state_store, state.archive_object_store(RuntimeDomain.EXECUTION),
+            repository.state_store, state.archive_object_store(PersistenceDomain.EXECUTION),
             namespace='imported-context', tenant_id='tenant',
         )
         context = ExecutionInputContext.from_messages(

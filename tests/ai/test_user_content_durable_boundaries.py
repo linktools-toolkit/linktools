@@ -8,10 +8,10 @@ from pydantic_ai.messages import BinaryContent
 
 from linktools.ai.agent import AgentBindingContract
 from linktools.ai.core import ExecutionLineageKind, Principal
-from linktools.ai.runtime import ExecutionRequest
+from linktools.ai.execution import ExecutionRequest
 from linktools.ai.runtime._execution import _request_digest
-from linktools.ai.runtime._input import input_intent
-from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
+from linktools.ai.inputs import input_intent
+from linktools.ai.persistence.contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 

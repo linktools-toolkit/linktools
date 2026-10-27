@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Terminal ownership preserves concurrent dependency retention metadata."""
 from ._runtime_test_helpers import model_features
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.capability import ExecutionCapability, TraceCapability
 from dataclasses import replace
 from datetime import timedelta
@@ -15,15 +17,16 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionStatus,
-    RuntimeDomain,
+    PersistenceDomain,
     StopReason,
     UsageMetrics,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime._local import LocalExecutionBackend
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence.contracts import (
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
     ResultRecord,
@@ -33,13 +36,13 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryTerminalHandoff,
     RecoveryTerminalOutcome,
 )
-from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
+from linktools.ai.persistence._runtime_commands import StateCommands
 from .test_history_projection_conformance import _record
 from .test_session_admission import _session
 from .test_evaluation_consumers import CONTEXT, PRINCIPAL, FixtureModels
 
 
-def _storage(tmp_path: Path, backend: str, split_session: bool) -> RuntimeStorage:
+def _storage(tmp_path: Path, backend: str, split_session: bool) -> PersistenceStorage:
     if split_session:
         route = (
             StorageRoute.memory()
@@ -48,17 +51,17 @@ def _storage(tmp_path: Path, backend: str, split_session: bool) -> RuntimeStorag
             if backend == "filesystem"
             else StorageRoute.sqlite(tmp_path / "execution.db")
         )
-        return RuntimeStorage(
-            RuntimeStoragePlan(
+        return PersistenceStorage(
+            PersistencePlan(
                 execution=route,
                 conversation=StorageRoute.filesystem(tmp_path / "conversation"),
             )
         )
     if backend == "memory":
-        return RuntimeStorage.in_memory()
+        return PersistenceStorage.in_memory()
     if backend == "filesystem":
-        return RuntimeStorage.filesystem(tmp_path / "runtime")
-    return RuntimeStorage.sqlite(tmp_path / "runtime.db")
+        return PersistenceStorage.filesystem(tmp_path / "runtime")
+    return PersistenceStorage.sqlite(tmp_path / "runtime.db")
 
 
 @pytest.mark.asyncio
@@ -143,12 +146,7 @@ async def test_terminal_preserves_concurrent_hold_metadata(
     group.capability(TraceCapability(), scope="runtime")
     if split_session:
         group.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Runtime.open(
-        "terminal-metadata",
-        storage=state,
-        context=CONTEXT,
-        features=model_features(FixtureModels(), group),
-    ) as runtime:
+    async with Persistence.open('terminal-metadata', storage=state, tenant_id='evaluation-consumers') as persistence_146, Runtime.attach(persistence=persistence_146, context=CONTEXT, features=model_features(FixtureModels(), group)) as runtime:
         agent = runtime.agents.get()
         if split_session:
             await agent.create_session("session", principal=PRINCIPAL)
@@ -191,7 +189,7 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
     post_commit_change: str,
 ) -> None:
     state = _storage(tmp_path, backend, split_session)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="terminal-readback", tenant_id="tenant")
     repository = state.execution.executions
     current = _record(ExecutionStatus.STARTED, 0)
@@ -248,12 +246,12 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
         handoff_phase=RecoveryHandoffPhase.COMPLETED,
         terminal_handoff=None,
     )
-    commands = RuntimeStateCommands(
+    commands = StateCommands(
         repository,
         namespace="terminal-readback",
         events=state.execution.events,
         conversation=state.conversation.sessions,
-        conversation_run_store=state.run_store.read_store(RuntimeDomain.CONVERSATION),
+        conversation_run_store=state.run_store.read_store(PersistenceDomain.CONVERSATION),
         recovery=state.recovery.checkpoints,
         background_tasks=set(),
     )
@@ -366,8 +364,8 @@ async def test_terminal_rebase_rejects_semantic_changes_without_writes(
     monkeypatch: pytest.MonkeyPatch,
     drift: str,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="terminal-conflict", tenant_id="tenant")
     repository = state.execution.executions
     current = _record(ExecutionStatus.STARTED, 0)
@@ -386,7 +384,7 @@ async def test_terminal_rebase_rejects_semantic_changes_without_writes(
         ExecutionEventType.EXECUTION_FAILED,
         {"error_code": ErrorCode.EXECUTION_FAILED.value, "safe_error_details": {}},
     )
-    commands = RuntimeStateCommands(
+    commands = StateCommands(
         repository,
         namespace="terminal-conflict",
         events=state.execution.events,
@@ -398,7 +396,7 @@ async def test_terminal_rebase_rejects_semantic_changes_without_writes(
         # A terminal seal without its terminal execution must never be treated as
         # a benign revision conflict, even when the execution is unchanged.
         if drift == "sealed":
-            from linktools.ai.runtime.state._execution_commands import (
+            from linktools.ai.persistence._execution_commands import (
                 _execution_history_seal,
             )
 
@@ -414,7 +412,7 @@ async def test_terminal_rebase_rejects_semantic_changes_without_writes(
                 lambda tx: repository.put_history_seal_in_transaction(tx, seal)
             )
         else:
-            from linktools.ai.runtime.state._contracts import (
+            from linktools.ai.persistence.contracts import (
                 RecoveryCheckpoint,
                 RecoveryCheckpointState,
                 RecoveryHandoffPhase,
@@ -479,10 +477,10 @@ async def test_terminal_rebase_rejects_semantic_changes_without_writes(
 @pytest.mark.asyncio
 async def test_stale_cancelled_worker_cannot_seal_resumed_attempt_before_run_registration() -> None:
     from .test_execution_recovery_commands import _commands
-    from linktools.ai.runtime.state._codec import decode_domain, encode_domain
+    from linktools.ai.persistence.codec import decode_domain, encode_domain
 
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="unregistered-terminal-fence", tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -492,7 +490,7 @@ async def test_stale_cancelled_worker_cannot_seal_resumed_attempt_before_run_reg
             lambda transaction: repository.admit_history_producer_in_transaction(transaction, original)
         )
         resumed = await _commands(state).commit_resumed(original)
-        commands = RuntimeStateCommands(
+        commands = StateCommands(
             repository, namespace="unregistered-terminal-fence",
             events=state.execution.events, recovery=state.recovery.checkpoints,
             background_tasks=set(),

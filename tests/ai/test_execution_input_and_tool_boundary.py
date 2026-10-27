@@ -3,7 +3,7 @@
 """Execution input and final tool-boundary regressions."""
 from linktools.ai.model import create_model
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from dataclasses import fields, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,9 +15,10 @@ from pydantic_ai.toolsets import FunctionToolset
 from linktools.ai.core import HmacCursorSigner, Principal, PromptLimits, TenantAuthorizationPolicy
 from linktools.ai.capability import ToolCallRetry
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ExecutionRequest, RuntimeStorage
+from linktools.ai.execution import ExecutionRequest
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._session import RuntimeSessionService
-from linktools.ai.runtime.service_api import (
+from linktools.ai.execution import (
     CreateSessionRequest,
     ExecutionHandle,
     ForkExecutionRequest,
@@ -25,7 +26,7 @@ from linktools.ai.runtime.service_api import (
     ResumeSessionRequest,
 )
 from linktools.ai.runtime._execution import DefaultExecutionService
-from linktools.ai.runtime._input import (
+from linktools.ai.inputs import (
     ExecutionInputMaterializer,
     stored_input_attachment_views,
     stored_user_input_view,
@@ -36,8 +37,6 @@ from linktools.ai.runtime._tool_boundary import (
 )
 from linktools.ai.storage import StoredPayload
 from linktools.ai.workspace import (
-    SandboxResource,
-    SandboxSession,
     WorkspaceAccess,
 )
 from ._runtime_test_helpers import tool_run_context, tool_with_metadata
@@ -82,18 +81,7 @@ class _ErrorSession(_Session):
         return await super().read_bytes(path, max_bytes=max_bytes)
 
 
-class _Sandbox:
-    def __init__(self, session: _Session) -> None:
-        self.session = session
 
-    async def open(
-        self,
-        *,
-        root: Path,
-        resources: tuple[SandboxResource, ...] = (),
-    ) -> SandboxSession:
-        del root, resources
-        return self.session  # type: ignore[return-value]
 
 
 class _UnavailableAccess:
@@ -123,7 +111,7 @@ def _request(*, files: tuple[str, ...] = ()) -> ExecutionRequest:
 
 def _materializer(session: _Session) -> ExecutionInputMaterializer:
     return ExecutionInputMaterializer(
-        WorkspaceAccess(_Sandbox(session), root=Path(".")),
+        WorkspaceAccess(session),
         PromptLimits(),
     )
 
@@ -175,7 +163,7 @@ async def test_execution_freezes_materialized_input_once() -> None:
             _request(files=("evidence.txt",))
         )
 
-        model = create_model(protocol='openai',
+        model = create_model(api='openai',
             model="test", input_types=("mime:text/plain",),
         )
         binding = SimpleNamespace(compiled_agent=SimpleNamespace(model=model))
@@ -289,7 +277,7 @@ def _workspace_boundary(sandbox_session: object) -> BoundaryToolset:
         (FunctionToolset([tool_with_metadata(_echo_path, descriptor)]),),
         {"_echo_path": descriptor},
         id="workspace",
-        sandbox_session=sandbox_session,  # type: ignore[arg-type]
+        workspace_backend=sandbox_session,  # type: ignore[arg-type]
     )
 
 
@@ -412,8 +400,8 @@ async def test_materializer_rejects_invalid_files_before_workspace_access(files:
 
 @pytest.mark.asyncio
 async def test_session_resume_preserves_explicit_execution_input_fields() -> None:
-    storage = RuntimeStorage.in_memory()
-    storage = RuntimeState(storage)
+    storage = PersistenceStorage.in_memory()
+    storage = Persistence(storage)
     await storage.initialize(namespace="resume-input", tenant_id="tenant")
     execution = SimpleNamespace(
         start_for_session=AsyncMock(return_value=ExecutionHandle("execution")),

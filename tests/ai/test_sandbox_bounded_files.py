@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.workspace import LocalSandbox, ReadOnlySandboxPolicy, SandboxOperationRejected
+from linktools.ai.workspace import LocalWorkspaceBackend, WorkspaceReadPolicy, WorkspaceOperationRejected
 from linktools.ai.workspace import _file_io, _local_sandbox
 from linktools.ai.workspace._bubblewrap import _read_workspace_bytes
 from linktools.ai.workspace.sandbox_worker import _dispatch
@@ -32,7 +32,8 @@ async def test_preview_has_bounded_io_and_cursor_continues_long_unicode_line(
 ) -> None:
     text = "é🙂" * 15000 + "\r\nsecond\nlast"
     (tmp_path / "long.log").write_text(text, encoding="utf-8", newline="")
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     async def read(**params: object) -> dict:
         if through_worker:
             return json.loads(await _dispatch(session, "read_text", {"path": "long.log", **params}))
@@ -58,7 +59,8 @@ async def test_preview_has_bounded_io_and_cursor_continues_long_unicode_line(
 async def test_requested_range_is_not_truncation_and_metadata_is_explicit(tmp_path: Path) -> None:
     raw = b"first\r\nsecond\rlast"
     (tmp_path / "data.txt").write_bytes(raw)
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         first = await session.read_text("data.txt", limit=1)
         assert first["content"] == "first\r\n"
@@ -77,7 +79,8 @@ async def test_requested_range_is_not_truncation_and_metadata_is_explicit(tmp_pa
 async def test_cursor_rejects_changed_source_wrong_path_and_offset(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("first\nsecond\n", encoding="utf-8")
     (tmp_path / "b.txt").write_text("first\nsecond\n", encoding="utf-8")
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         result = await session.read_text("a.txt", limit=1)
         for selected, path, offset in [(session, "b.txt", None), (session, "a.txt", 0)]:
@@ -95,7 +98,8 @@ async def test_cursor_rejects_changed_source_wrong_path_and_offset(tmp_path: Pat
 async def test_lossy_preview_and_actual_read_budget_are_reported(tmp_path: Path) -> None:
     raw = b"a\xff\x00" + "🙂".encode() * 100
     (tmp_path / "log.txt").write_bytes(raw)
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         result = await session.read_text("log.txt", max_read_bytes=17)
         assert result["bytes_read"] == 17
@@ -116,7 +120,8 @@ async def test_inspection_without_magic_preserves_basic_text_and_same_state_read
 ) -> None:
     monkeypatch.setitem(sys.modules, "magic", None)
     (tmp_path / "activity.log").write_bytes(b"hello\xff\n")
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         facts = await session.inspect_file("activity.log")
         assert facts["is_text"]
@@ -145,7 +150,8 @@ async def test_content_conflicts_and_container_types_are_not_guessed(
             return "application/zip"
     monkeypatch.setitem(sys.modules, "magic", SimpleNamespace(Magic=Detector))
     (tmp_path / "claim.png").write_bytes(b"PK" + b"\0" * 20000)
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         facts = await session.inspect_file("claim.png")
         assert facts["mime_type"] == "application/zip"
@@ -161,8 +167,9 @@ async def test_list_and_search_share_path_anchored_glob_and_visibility(tmp_path:
     (folder / "nested").mkdir(parents=True)
     for name in ("root.py", ".hidden.py", "nested/child.py", "nested/ignored.py", "text.txt"):
         (folder / name).write_text("needle\n", encoding="utf-8")
-    policy = ReadOnlySandboxPolicy(("src/*.py", "src/nested/child.py",))
-    session = await LocalSandbox(read_policy=policy).open(root=tmp_path)
+    policy = WorkspaceReadPolicy(("src/*.py", "src/nested/child.py",))
+    session = LocalWorkspaceBackend(tmp_path, read_policy=policy)
+    await session.working_dir()
     try:
         direct = await session.list_files("src", include_glob="*.py")
         recursive = await session.list_files("src", include_glob="**/*.py")
@@ -171,8 +178,6 @@ async def test_list_and_search_share_path_anchored_glob_and_visibility(tmp_path:
         assert all(name in recursive and name in search for name in ("root.py", ".hidden.py", "child.py"))
         assert "ignored.py" not in recursive + search
         assert "child.py" not in await session.search_text("needle", path="src", include_glob="*.py")
-        # Existing host search deliberately retains its prior workspace-relative fnmatch.
-        assert "child.py" in await session.search_files("needle", path="src", include_glob="*.py")
     finally:
         await session.close()
 
@@ -181,7 +186,8 @@ async def test_search_long_lines_and_enumeration_limits_never_claim_complete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     (tmp_path / "long.txt").write_text("x" * 200000 + "needle\n", encoding="utf-8")
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         result = await session.search_text("needle")
         assert "coverage incomplete" in result and "No matches found" not in result
@@ -196,19 +202,20 @@ async def test_streaming_edit_preserves_unrelated_changes_and_hash_chain(tmp_pat
     text = "x" * (65536 - 2) + "old🙂value" + "y" * 70000
     path = tmp_path / "large.txt"
     path.write_text(text, encoding="utf-8")
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         old_hash = hashlib.sha256(path.read_bytes()).hexdigest()
         path.write_text(text + "unrelated", encoding="utf-8")
-        with pytest.raises(SandboxOperationRejected) as error:
-            await session.edit_file("large.txt", "old🙂value", "new", expected_hash=old_hash)
+        with pytest.raises(WorkspaceOperationRejected) as error:
+            await session.write_file("large.txt", "new", old_text="old🙂value", expected_hash=old_hash)
         assert error.value.code is ErrorCode.STORAGE_CONFLICT
-        result = await session.edit_file("large.txt", "old🙂value", "new")
+        result = await session.write_file("large.txt", "new", old_text="old🙂value")
         expected = text.replace("old🙂value", "new") + "unrelated"
         assert path.read_text(encoding="utf-8") == expected
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         assert digest in result
-        await session.edit_file("large.txt", "new", "", expected_hash=digest)
+        await session.write_file("large.txt", "", old_text="new", expected_hash=digest)
         assert path.read_text(encoding="utf-8") == expected.replace("new", "")
     finally:
         await session.close()
@@ -224,10 +231,11 @@ async def test_failed_streaming_edits_preserve_original_and_remove_staging(
 ) -> None:
     path = tmp_path / "target.txt"
     path.write_bytes(raw)
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
-        with pytest.raises(SandboxOperationRejected) as error:
-            await session.edit_file("target.txt", old_text, "new")
+        with pytest.raises(WorkspaceOperationRejected) as error:
+            await session.write_file("target.txt", "new", old_text=old_text)
         assert error.value.safe_details["reason"] == reason
         assert path.read_bytes() == raw
         assert not list(tmp_path.glob(".linktools-????????????????????????????????"))
@@ -240,15 +248,17 @@ async def test_edit_budget_and_read_only_policy_do_not_publish_changes(
 ) -> None:
     path = tmp_path / "target.txt"
     path.write_text("old", encoding="utf-8")
-    session = await LocalSandbox().open(root=tmp_path)
-    read_only = await LocalSandbox(read_policy=ReadOnlySandboxPolicy(("target.txt",))).open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
+    read_only = LocalWorkspaceBackend(tmp_path, read_policy=WorkspaceReadPolicy(("target.txt",)))
+    await read_only.working_dir()
     try:
         monkeypatch.setattr(_local_sandbox, "_MAX_EDIT_BYTES", 4)
-        with pytest.raises(SandboxOperationRejected) as error:
-            await session.edit_file("target.txt", "old", "too long")
+        with pytest.raises(WorkspaceOperationRejected) as error:
+            await session.write_file("target.txt", "too long", old_text="old")
         assert error.value.safe_details["reason"] == "edit_staging_byte_limit"
-        with pytest.raises(SandboxOperationRejected):
-            await read_only.edit_file("target.txt", "old", "new")
+        with pytest.raises(WorkspaceOperationRejected):
+            await read_only.write_file("target.txt", "new", old_text="old")
         assert path.read_text(encoding="utf-8") == "old"
     finally:
         await session.close()
@@ -269,7 +279,8 @@ async def test_installed_libmagic_detects_bytes_despite_filename(tmp_path: Path)
             pytest.fail(f"Required libmagic/database unavailable: {error}")
         pytest.skip(f"System libmagic/database unavailable: {error}")
     (tmp_path / "misnamed.png").write_bytes(b"%PDF-1.7\n" + b"0" * 1024)
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         facts = await session.inspect_file("misnamed.png")
         assert facts["mime_type"] == "application/pdf"
@@ -286,7 +297,8 @@ async def test_preview_and_edit_peak_memory_do_not_scale_with_file_size(tmp_path
         for _ in range(64):
             stream.write(b"x" * 65536)
         stream.write(b"unique-target")
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         tracemalloc.start()
         try:
@@ -298,7 +310,7 @@ async def test_preview_and_edit_peak_memory_do_not_scale_with_file_size(tmp_path
         assert preview_peak < 2 * 1024 * 1024
         tracemalloc.start()
         try:
-            await session.edit_file("large.txt", "unique-target", "replacement")
+            await session.write_file("large.txt", "replacement", old_text="unique-target")
             _, edit_peak = tracemalloc.get_traced_memory()
         finally:
             tracemalloc.stop()
@@ -320,10 +332,11 @@ async def test_external_change_during_edit_is_preserved_as_conflict(
         path.write_text("external update", encoding="utf-8")
         check(target, logical, stream, state)
     monkeypatch.setattr(_local_sandbox, "_check_state", mutate_before_check)
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
-        with pytest.raises(SandboxOperationRejected) as error:
-            await session.edit_file("target.txt", "old", "new")
+        with pytest.raises(WorkspaceOperationRejected) as error:
+            await session.write_file("target.txt", "new", old_text="old")
         assert error.value.code is ErrorCode.STORAGE_CONFLICT
         assert path.read_text(encoding="utf-8") == "external update"
         assert not list(tmp_path.glob(".linktools-????????????????????????????????"))
@@ -338,7 +351,8 @@ async def test_split_utf8_crlf_metadata_and_probe_budget(
     monkeypatch.setattr(_file_io, "_BLOCK_BYTES", 1)
     raw = "é\r\n\n🙂\r".encode("utf-8")
     (tmp_path / "data.txt").write_bytes(raw)
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         result = await session.read_text("data.txt", full_metadata=True)
         assert result["content"].encode("utf-8") == raw
@@ -400,7 +414,8 @@ async def test_system_libmagic_buffer_facts_with_validation_adapter(
         ("activity.log", b"ordinary business log\n", "text/plain", True),
         ("without_extension", b"ordinary text\n", "text/plain", True),
     ]
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         for name, raw, media_type, is_text in fixtures:
             (tmp_path / name).write_bytes(raw)
@@ -416,13 +431,15 @@ async def test_system_libmagic_buffer_facts_with_validation_adapter(
 async def test_cursor_survives_session_reopen_without_rescanning_prefix(tmp_path: Path) -> None:
     text = "é🙂" * 15000 + "\r\nnext\n"
     (tmp_path / "long.txt").write_text(text, encoding="utf-8", newline="")
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     first = await session.read_text("long.txt", max_bytes=4096)
     await session.close()
     pieces = [first["content"]]
     current = first
     while current["next_cursor"]:
-        session = await LocalSandbox().open(root=tmp_path)
+        session = LocalWorkspaceBackend(tmp_path)
+        await session.working_dir()
         try:
             current = await session.read_text("long.txt", cursor=current["next_cursor"], max_bytes=4096)
             assert current["bytes_read"] <= 65536 + 6
@@ -440,7 +457,8 @@ async def test_line_ceiling_reports_truncation_separately_from_eof(
     tmp_path: Path, lines: int, requested: int, truncated: bool, eof: bool,
 ) -> None:
     (tmp_path / "lines.txt").write_text("x\n" * lines, encoding="utf-8")
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         result = await session.read_text("lines.txt", limit=requested)
         assert result["content"].count("\n") == min(lines, requested, 2000)
@@ -456,7 +474,8 @@ async def test_cursor_rejects_mid_character_and_out_of_bounds_positions(
 ) -> None:
     from linktools.ai.workspace import _file_io
     (tmp_path / "text.txt").write_text("🙂long line", encoding="utf-8")
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         facts = await session.inspect_file("text.txt")
         cursor = _file_io._encode_cursor({"path": "text.txt", "state": facts["state"], "byte": position, "line": 0, "column": 1})

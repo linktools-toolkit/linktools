@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from ._runtime_test_helpers import model_features
+from linktools.ai.persistence import Persistence
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
+
 import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -10,9 +13,9 @@ import pytest
 
 from linktools.ai.core import Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
-from linktools.ai.runtime import EvaluationRun
-from linktools.ai.runtime.service_api import TaskGraphRunEvent, TaskGraphProjection, TaskModelProjection
-from linktools.ai.runtime._watch_cursor import (
+from linktools.ai.evaluation.engine import EvaluationRun
+from linktools.ai.execution import TaskGraphRunEvent, TaskGraphProjection, TaskModelProjection
+from linktools.ai.observe.cursors import (
     decode_evaluation_watch_cursor, decode_graph_watch_cursor, encode_graph_watch_cursor,
 )
 from linktools.ai.task import TaskEvent, TaskEventType
@@ -35,7 +38,7 @@ def event(graph_id, sequence, content=False):
     ), cursor)
 
 
-class Evaluations:
+class ObservationFixture:
     _namespace = "eval-watch"
 
     def __init__(self, members=(), completion="running"):
@@ -48,9 +51,8 @@ class Evaluations:
         self.cleanup_error = None
         self.stream_release = asyncio.Event()
         self.event_seqs = {}
-        self._graph = SimpleNamespace(state=self.graph_state)
 
-    async def graph_state(self, graph_id, *, principal):
+    async def _read_graph(self, graph_id, *, principal):
         return SimpleNamespace(event_seq=self.event_seqs.get(graph_id, 1))
 
     async def _record(self, experiment_id, principal):
@@ -102,7 +104,7 @@ def run(owner, experiment="experiment"):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("completion", ["complete", "cancelled", "needs_attention"])
 async def test_evaluation_finite_drain_includes_confirmed_released_members(completion):
-    owner = Evaluations([intent("target", released=True), intent("score"),
+    owner = ObservationFixture([intent("target", released=True), intent("score"),
                          intent("unsettled", confirmed=False)], completion)
     items = [item async for item in run(owner).watch(include_content=True)]
     assert {item.graph_id for item in items} == {"target", "score"}
@@ -116,7 +118,7 @@ async def test_evaluation_finite_drain_includes_confirmed_released_members(compl
 
 @pytest.mark.asyncio
 async def test_evaluation_observation_spans_empty_target_scorer_gap():
-    owner = Evaluations([intent("target", released=True)])
+    owner = ObservationFixture([intent("target", released=True)])
     owner.stream_release.set()
     stream = run(owner).watch()
     first = await anext(stream)
@@ -134,7 +136,7 @@ async def test_evaluation_observation_spans_empty_target_scorer_gap():
 
 @pytest.mark.asyncio
 async def test_evaluation_terminal_transition_captures_latest_confirmed_members():
-    owner = Evaluations()
+    owner = ObservationFixture()
     async def inspect(experiment_id, principal):
         owner.members = [intent("late-score", released=True)]
         return SimpleNamespace(completion="complete")
@@ -145,7 +147,7 @@ async def test_evaluation_terminal_transition_captures_latest_confirmed_members(
 
 @pytest.mark.asyncio
 async def test_evaluation_cursor_is_scoped_and_unknown_graphs_fail_before_wait_success():
-    owner = Evaluations([intent("target")], "complete")
+    owner = ObservationFixture([intent("target")], "complete")
     first = await anext(run(owner).watch())
     async def ignore(item):
         pass
@@ -161,7 +163,7 @@ async def test_evaluation_cursor_is_scoped_and_unknown_graphs_fail_before_wait_s
 
 @pytest.mark.asyncio
 async def test_evaluation_cleanup_error_preserves_evaluation_cursor_and_primary_read_error():
-    owner = Evaluations([intent("target")])
+    owner = ObservationFixture([intent("target")])
     stream = run(owner).watch()
     first = await anext(stream)
     owner.cleanup_error = ObservationError("stream", cursor="graph-cursor", safe_details={"phase": "cleanup"})
@@ -169,7 +171,7 @@ async def test_evaluation_cleanup_error_preserves_evaluation_cursor_and_primary_
         await stream.aclose()
     assert error.value.cursor == first.cursor
 
-    owner = Evaluations([intent("target")])
+    owner = ObservationFixture([intent("target")])
     stream = run(owner).watch()
     await anext(stream)
     cause = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -182,7 +184,7 @@ async def test_evaluation_cleanup_error_preserves_evaluation_cursor_and_primary_
 
 @pytest.mark.asyncio
 async def test_evaluation_wait_returns_fixed_result_and_acknowledges_callback_only():
-    owner = Evaluations(completion="needs_attention")
+    owner = ObservationFixture(completion="needs_attention")
     result = await run(owner).wait()
     assert result.result.completion == "needs_attention"
     assert result.cursor is None and result.observation_error is None
@@ -199,7 +201,7 @@ async def test_evaluation_wait_returns_fixed_result_and_acknowledges_callback_on
 
 @pytest.mark.asyncio
 async def test_evaluation_reopens_a_known_graph_after_waiting_stage_resumes():
-    owner = Evaluations([intent("human-score")])
+    owner = ObservationFixture([intent("human-score")])
     owner.stream_release.set()
     stream = run(owner).watch()
     assert (await anext(stream)).event.event_seq == 1
@@ -219,23 +221,27 @@ async def test_evaluation_real_task_graphs_watch_and_wait_share_resumable_events
     from linktools.ai.evaluation import (
         CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationSpec, EvaluationPolicy, StartEvaluationRequest,
     )
-    from linktools.ai.runtime import Runtime, RuntimeStorage
+    from linktools.ai.persistence import PersistenceStorage
     from linktools.ai.task import Task
-    from .test_evaluation_consumers import FixtureModels, echo, exact, rule_scorer, CONTEXT, PRINCIPAL as principal
+    from .test_evaluation_consumers import echo, exact, rule_scorer, CONTEXT, PRINCIPAL as principal
 
-    storage = RuntimeStorage.in_memory() if backend == "memory" else RuntimeStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.filesystem(tmp_path)
     target = Task("watch.echo", echo, effect_policy="none")
     scorer = Task("watch.exact", exact, effect_policy="none")
-    async with Runtime.open("evaluation-watch-real", features=model_features(FixtureModels()), storage=storage, context=CONTEXT) as runtime:
-        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(
+    async with (
+        Persistence.open('evaluation-watch-real', storage=storage, tenant_id='evaluation-consumers') as persistence_229,
+        TaskEngine.open(target, scorer, persistence=persistence_229, context=CONTEXT) as engine,
+        Evaluations.open(engine) as evaluations,
+    ):
+        dataset = await evaluations.publish_dataset(DatasetSpec(
             DatasetRef("watch-cases", 1), cases=(CaseSpec.task(
                 CaseRef("watch-cases", "one", 1), input={"answer": "yes"}, expected="yes",
             ),),
         ), principal=principal, idempotency_key="publish-watch-cases")
-        handle = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(
+        handle = await evaluations.start(StartEvaluationRequest(EvaluationSpec(
             dataset, (CandidateSpec("current", task=target.ref),), (rule_scorer(scorer),),
             policy=EvaluationPolicy(allow_volatile=backend == "memory"),
-        ), principal, "start-watch-cases"), engine=runtime.tasks.bind(target, scorer))
+        ), principal, "start-watch-cases"))
         seen = []
         async def consume(item):
             seen.append(item)
@@ -264,9 +270,9 @@ async def test_evaluation_wait_preserves_outcome_when_live_stream_cleanup_is_int
 ) -> None:
     from collections.abc import AsyncIterator
 
-    from linktools.ai.runtime._observation import _ObservationSession
+    from linktools.ai.observe.stream import ObservationSession
 
-    owner = Evaluations([intent("first"), intent("second")])
+    owner = ObservationFixture([intent("first"), intent("second")])
     cancelled = {graph_id: asyncio.Event() for graph_id in ("first", "second")}
     release = asyncio.Event()
     pending = asyncio.Event()
@@ -305,7 +311,7 @@ async def test_evaluation_wait_preserves_outcome_when_live_stream_cleanup_is_int
 
     register = owner._register_observation
 
-    def register_observation(session: _ObservationSession) -> None:
+    def register_observation(session: ObservationSession) -> None:
         register(session)
         stop = session.stop
 

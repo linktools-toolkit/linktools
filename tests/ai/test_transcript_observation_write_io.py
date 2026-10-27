@@ -9,9 +9,9 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 from sqlalchemy import event
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeDomain
+from linktools.ai.persistence import PersistenceDomain
 
 from .test_incremental_projection_boundaries import _storage
 
@@ -23,10 +23,10 @@ pytestmark = pytest.mark.asyncio
 async def test_observation_append_preserves_pending_facts_and_stale_fence(
     tmp_path: Path, backend: str, transition: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="observation-write-io", tenant_id="tenant")
     try:
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         store = archive.state_store
         repository = archive.transcript_repository
         await repository.create_head("run")
@@ -82,10 +82,10 @@ async def test_observation_append_preserves_pending_facts_and_stale_fence(
 async def test_observation_append_rollback_keeps_original_head_and_retry(
     tmp_path: Path, backend: str, failure: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="observation-rollback", tenant_id="tenant")
     try:
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         store, repository = archive.state_store, archive.transcript_repository
         await repository.create_head("run")
         before = await repository.get_head("run")
@@ -117,10 +117,10 @@ async def test_observation_append_rollback_keeps_original_head_and_retry(
 async def test_empty_unchanged_observation_still_requires_head_guard(
     tmp_path: Path, backend: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="observation-guard", tenant_id="tenant")
     try:
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         store, repository = archive.state_store, archive.transcript_repository
         await repository.create_head("run")
         prepared = await repository.prepare_observation(

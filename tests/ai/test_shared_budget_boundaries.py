@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.task import Task
+
+from linktools.ai.persistence import Persistence
 """Shared budgets gate dispatched model and tool effects, including compaction."""
 from ._runtime_test_helpers import model_features
 
-from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from dataclasses import replace
 
@@ -18,10 +21,10 @@ from pydantic_ai.usage import RequestUsage
 
 from linktools.ai.core import RunBudget
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._budget import RunBudgetContext, RunBudgetCapability
 from linktools.ai.runtime._compaction import _ObservedCompactionModel
-from linktools.ai.runtime._journal import ModelRequestJournal
+from linktools.ai.observe.journal import ModelRequestJournal
 from linktools.ai.runtime._tool import ToolOperationDecision
 from linktools.ai.runtime._tool_boundary import BoundaryToolset, ManagedToolDescriptor
 from ._runtime_test_helpers import tool_run_context, tool_with_metadata
@@ -29,8 +32,8 @@ from ._runtime_test_helpers import tool_run_context, tool_with_metadata
 
 @pytest_asyncio.fixture
 async def budgets():
-    storage = RuntimeStorage.in_memory()
-    storage = RuntimeState(storage)
+    storage = PersistenceStorage.in_memory()
+    storage = Persistence(storage)
     await storage.initialize(namespace="budget-boundaries", tenant_id="tenant")
     try:
         yield storage.execution.budgets
@@ -219,7 +222,7 @@ async def test_expired_graph_budget_blocks_callable_without_unknown_effect(effec
     from datetime import datetime, timedelta, timezone
     from linktools.ai.core import TaskStatus
     from linktools.ai.runtime import Runtime
-    from linktools.ai.task import Task, TaskGraph, TaskNode
+    from linktools.ai.task import TaskGraph, TaskNode
     from ._runtime_test_helpers import RuntimeUsageModels
 
     calls = []
@@ -228,10 +231,9 @@ async def test_expired_graph_budget_blocks_callable_without_unknown_effect(effec
         calls.append(context.node_id)
         return "done"
 
-    async with Runtime.open("budget-deadline", features=model_features(RuntimeUsageModels()),
-                            storage=RuntimeStorage.in_memory()) as runtime:
+    async with Persistence.open('budget-deadline', storage=PersistenceStorage.in_memory()) as persistence_231, Runtime.attach(persistence=persistence_231, features=model_features(RuntimeUsageModels())) as runtime, TaskEngine.open(persistence=persistence_231, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         task = Task("deadline.task", handler, effect_policy=effect_policy)
-        engine = runtime.tasks.bind(task)
+        engine = runtime_engine.with_definitions(task)
         run = await engine.start(
             TaskGraph("expired", (TaskNode("node", task=task),)),
             idempotency_key="expired",
@@ -255,8 +257,8 @@ async def test_standalone_graph_service_rejects_unowned_budget_before_admission(
     )
     from .test_task_submission_fence import _Launcher
 
-    storage = RuntimeStorage.in_memory()
-    storage = RuntimeState(storage)
+    storage = PersistenceStorage.in_memory()
+    storage = Persistence(storage)
     await storage.initialize(namespace="budget-owner", tenant_id="tenant")
     try:
         launcher = _Launcher()
@@ -294,12 +296,11 @@ async def test_custom_runner_is_gated_before_dispatch(dimension: str) -> None:
     from datetime import datetime, timedelta, timezone
     from linktools.ai.core import TaskStatus
     from linktools.ai.runtime import Runtime
-    from linktools.ai.task import Task, TaskGraph, TaskNode
+    from linktools.ai.task import TaskGraph, TaskNode
     from ._runtime_test_helpers import RuntimeUsageModels
     from .test_task_mixed_node_reliability import _ExecutionBackedContractRunner
 
-    async with Runtime.open("runner-budget", features=model_features(RuntimeUsageModels()),
-                            storage=RuntimeStorage.in_memory()) as runtime:
+    async with Persistence.open('runner-budget', storage=PersistenceStorage.in_memory()) as persistence_301, Runtime.attach(persistence=persistence_301, features=model_features(RuntimeUsageModels())) as runtime, TaskEngine.open(persistence=persistence_301, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         runner = _ExecutionBackedContractRunner(runtime._execution_service)
         task = Task.from_runner("budget.runner", runner, contract={
             "version": 1, "type": "budget.runner", "effect_policy": "none",
@@ -307,7 +308,7 @@ async def test_custom_runner_is_gated_before_dispatch(dimension: str) -> None:
         })
         budget = (RunBudget(total_tokens=0) if dimension == "tokens" else
                   RunBudget(deadline_at=datetime.now(timezone.utc) - timedelta(seconds=1)))
-        run = await runtime.tasks.bind(task).start(
+        run = await runtime_engine.with_definitions(task).start(
             TaskGraph("graph", (TaskNode("node", task=task),)),
             idempotency_key="runner", budget=budget,
         )
@@ -320,7 +321,7 @@ async def test_custom_runner_is_gated_before_dispatch(dimension: str) -> None:
 async def test_failed_budget_preparation_does_not_leak_scope_into_unbudgeted_graph(monkeypatch) -> None:
     from linktools.ai.core import TaskStatus
     from linktools.ai.runtime import Runtime
-    from linktools.ai.task import Task, TaskGraph, TaskNode
+    from linktools.ai.task import TaskGraph, TaskNode
     from ._runtime_test_helpers import RuntimeUsageModels
 
     calls = []
@@ -329,12 +330,11 @@ async def test_failed_budget_preparation_does_not_leak_scope_into_unbudgeted_gra
         calls.append(context.node_id)
         return "done"
 
-    async with Runtime.open("budget-prepare", features=model_features(RuntimeUsageModels()),
-                            storage=RuntimeStorage.in_memory()) as runtime:
+    async with Persistence.open('budget-prepare', storage=PersistenceStorage.in_memory()) as persistence_332, Runtime.attach(persistence=persistence_332, features=model_features(RuntimeUsageModels())) as runtime, TaskEngine.open(persistence=persistence_332, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         task = Task("prepare.task", handler, effect_policy="none")
-        engine = runtime.tasks.bind(task)
+        engine = runtime_engine.with_definitions(task)
         graph = TaskGraph("same", (TaskNode("node", task=task),))
-        store = runtime._task_node_runtime._binding_capture_store
+        store = runtime_engine._task_node_runtime._binding_capture_store
         capture = store.capture
 
         async def fail_capture(*args, **kwargs):

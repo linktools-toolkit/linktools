@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Exhausted fallback preserves billed attempts without turning them into requests."""
 
 from collections.abc import AsyncIterator, Mapping
@@ -24,7 +26,8 @@ from pydantic_ai.usage import RequestUsage
 from linktools.ai.capability import AgentContext, ReferencedInputsCapability, TraceCapability
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.model import FallbackBinding, ReferencedContent
-from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.spec import AgentUsageLimits
 
 from .test_referenced_input_failure import _BODY, _REF, _SOURCE
@@ -128,9 +131,7 @@ async def test_exhausted_fallback_retains_known_usage_and_safe_attempts_after_re
         return group
 
     prompt = ["inspect", ReferencedContent(_REF, media_type="application/pdf", source=_SOURCE)] if referenced else "inspect"
-    async with Runtime.open(
-        "exhausted-fallback", features=features(), storage=RuntimeStorage.filesystem(tmp_path),
-    ) as runtime:
+    async with Persistence.open('exhausted-fallback', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_131, Runtime.attach(persistence=persistence_131, features=features()) as runtime:
         execution = await runtime.agents.get().start(prompt)
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is ExecutionStatus.FAILED
@@ -162,9 +163,7 @@ async def test_exhausted_fallback_retains_known_usage_and_safe_attempts_after_re
         assert interactions[0].usage.model_requests == 1
         execution_id, principal = execution.execution_id, runtime.default_principal
 
-    async with Runtime.open(
-        "exhausted-fallback", features=features(), storage=RuntimeStorage.filesystem(tmp_path),
-    ) as runtime:
+    async with Persistence.open('exhausted-fallback', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_165, Runtime.attach(persistence=persistence_165, features=features()) as runtime:
         restored = await runtime.executions.result(execution_id, principal=principal)
         assert restored.safe_error_details == result.safe_error_details
         assert restored.usage == result.usage
@@ -193,9 +192,7 @@ async def test_exhausted_provider_errors_keep_model_api_classification_and_unkno
     features.agent("default", allow_tools=(), allow_skills=(), allow_subagents=())
     features.model("default", FallbackBinding(_Binding(candidate("first")), _Binding(candidate("second"))))
     features.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open(
-        "provider-failures", features=features, storage=RuntimeStorage.in_memory(),
-    ) as runtime:
+    async with Persistence.open('provider-failures', storage=PersistenceStorage.in_memory()) as persistence_196, Runtime.attach(persistence=persistence_196, features=features) as runtime:
         execution = await runtime.agents.get().start("inspect")
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is ExecutionStatus.FAILED

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Authorized model metadata captures retain freshness with bounded read I/O."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from dataclasses import replace
 from pathlib import Path
@@ -15,13 +15,13 @@ from linktools.ai.core import (
     agent_conversation_id, agent_run_id,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
-from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
-from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
-from linktools.ai.runtime._model_interaction import StagedModelInteraction
-from linktools.ai.runtime.service_api import ModelInteractionReadBoundary, UsageReadCutoff
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord
-from linktools.ai.runtime.state._store import active_state_scope
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.history._projection import StepExecutionHistoryReader
+from linktools.ai.history._service import DefaultExecutionHistoryService
+from linktools.ai.persistence._model_interaction import StagedModelInteraction
+from linktools.ai.execution import ModelInteractionReadBoundary, UsageReadCutoff
+from linktools.ai.persistence._step_contracts import AgentRunRecord
+from linktools.ai.persistence.state import active_state_scope
 
 from .test_incremental_projection_boundaries import _storage
 from .test_step_projection import _execution
@@ -35,7 +35,7 @@ def _reader(state, *, store=None, executions=None, reader_type=StepExecutionHist
     return reader_type(
         namespace=_NAMESPACE,
         executions=state.execution.executions if executions is None else executions,
-        store=state.run_store.read_store(RuntimeDomain.TRACE) if store is None else store,
+        store=state.run_store.read_store(PersistenceDomain.TRACE) if store is None else store,
         cursor_signer=HmacCursorSigner("capture", b"capture-key"),
     )
 
@@ -78,12 +78,12 @@ async def _seed(state):
 async def test_capture_reads_fresh_metadata_in_one_post_authorization_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
         repository = state.execution.executions
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         get, capture = repository.get, archive.capture_history
         scopes = []
         authorized = False
@@ -113,7 +113,7 @@ async def test_capture_reads_fresh_metadata_in_one_post_authorization_scope(
         monkeypatch.setattr(archive, "capture_history", tracked_capture)
         monkeypatch.setattr(archive, "resolve_model_interactions", unexpected_body)
         monkeypatch.setattr(archive, "read_pending_message", unexpected_body)
-        monkeypatch.setattr(state.object_store(RuntimeDomain.TRACE), "open", unexpected_object)
+        monkeypatch.setattr(state.object_store(PersistenceDomain.TRACE), "open", unexpected_object)
         boundary = await _service(state, authorization=Authorization()).capture_model_interaction_cutoffs(
             "execution", principal=_PRINCIPAL,
         )
@@ -127,7 +127,7 @@ async def test_capture_reads_fresh_metadata_in_one_post_authorization_scope(
 async def test_capture_preserves_header_authority_and_observes_post_authorization_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     pending = None
     try:
@@ -169,7 +169,7 @@ async def test_capture_preserves_header_authority_and_observes_post_authorizatio
 
 @pytest.mark.parametrize("reader_kind", ("protocol", "subclass"))
 async def test_capture_preserves_injected_reader_protocol_and_overrides(reader_kind: str) -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     expected = ModelInteractionReadBoundary((), (), False, False)
     calls = []
@@ -192,8 +192,8 @@ async def test_capture_preserves_injected_reader_protocol_and_overrides(reader_k
 async def test_capture_keeps_independent_storage_owners(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatched_repository: bool,
 ) -> None:
-    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "execution.db"))
-    other = RuntimeState(RuntimeStorage.sqlite(tmp_path / "history.db"))
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "execution.db"))
+    other = Persistence(PersistenceStorage.sqlite(tmp_path / "history.db"))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     await other.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
@@ -211,7 +211,7 @@ async def test_capture_keeps_independent_storage_owners(
                 assert resource.owner_principal_id == "authorizing-owner"
         monkeypatch.setattr(state.execution.executions, "get_header", authorizing_header)
         monkeypatch.setattr(other.execution.executions, "get_header", unexpected_header)
-        archive = other.run_store.read_store(RuntimeDomain.TRACE)
+        archive = other.run_store.read_store(PersistenceDomain.TRACE)
         capture = archive.capture_history
         async def checked_capture(*args, **kwargs):
             assert active_state_scope() is None
@@ -235,12 +235,12 @@ async def test_capture_keeps_independent_storage_owners(
 async def test_capture_releases_metadata_scope_after_observer_cancellation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     pending = None
     try:
         await _seed(state)
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         capture = archive.capture_history
         entered, blocked = asyncio.Event(), asyncio.Event()
         async def blocked_capture(*args, **kwargs):
@@ -268,7 +268,7 @@ async def test_capture_releases_metadata_scope_after_observer_cancellation(
 
 
 async def test_terminal_capture_observes_late_flush_and_new_run() -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -297,7 +297,7 @@ async def test_terminal_capture_observes_late_flush_and_new_run() -> None:
 
 
 async def test_capture_idle_sql_has_one_authority_read_and_one_metadata_snapshot(tmp_path: Path) -> None:
-    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "capture.db"))
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "capture.db"))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -329,7 +329,7 @@ async def test_capture_idle_sql_has_one_authority_read_and_one_metadata_snapshot
 async def test_capture_rejects_failed_authority_before_reading_model_metadata(
     monkeypatch: pytest.MonkeyPatch, failure: str, custom_reader: bool,
 ) -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -349,7 +349,7 @@ async def test_capture_rejects_failed_authority_before_reading_model_metadata(
         class Reader:
             capture_model_interaction_cutoffs = unexpected
         monkeypatch.setattr(repository, "get", get_after_auth)
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         monkeypatch.setattr(archive, "capture_history", unexpected)
         service = _service(state, reader=Reader() if custom_reader else None, authorization=Authorization())
         principal = Principal("owner", "other") if failure == "tenant" else _PRINCIPAL
@@ -363,12 +363,12 @@ async def test_capture_rejects_failed_authority_before_reading_model_metadata(
 
 @pytest.mark.parametrize("custom_owner", ("repository", "archive"))
 async def test_capture_does_not_scope_custom_owner_io(custom_owner: str) -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
         repository = state.execution.executions
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         class Repository:
             async def get_header(self, execution_id, *, tenant_id):
                 assert active_state_scope() is None
@@ -395,7 +395,7 @@ async def test_capture_does_not_scope_custom_owner_io(custom_owner: str) -> None
 
 @pytest.mark.parametrize("same_repository", (False, True))
 async def test_capture_preserves_custom_repository_reader_authority(same_repository: bool) -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -434,7 +434,7 @@ async def test_capture_preserves_custom_repository_reader_authority(same_reposit
 async def test_model_reads_keep_requested_execution_as_lookup_scope(
     monkeypatch: pytest.MonkeyPatch, entrypoint: str, custom_repository: bool, operation: str,
 ) -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -491,12 +491,12 @@ async def _metadata(service, *, principal=_PRINCIPAL, agent_run_seq=1, through=1
 async def test_metadata_rows_share_fresh_authorized_scope_without_body_io(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
         repository = state.execution.executions
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         get, rows = repository.get, archive.read_model_interactions_with_run
         scopes = []
         authorized = False
@@ -519,7 +519,7 @@ async def test_metadata_rows_share_fresh_authorized_scope_without_body_io(
         monkeypatch.setattr(repository, "get", tracked_get)
         monkeypatch.setattr(archive, "read_model_interactions_with_run", tracked_rows)
         monkeypatch.setattr(archive, "resolve_model_interactions", unexpected_body)
-        monkeypatch.setattr(state.object_store(RuntimeDomain.TRACE), "open", unexpected_object)
+        monkeypatch.setattr(state.object_store(PersistenceDomain.TRACE), "open", unexpected_object)
         values = await _metadata(_service(state, authorization=Authorization()))
         assert [(value.execution_id, value.agent_run_seq, value.model_request_seq, value.status)
                 for value in values] == [("execution", 1, 1, "RUNNING")]
@@ -531,7 +531,7 @@ async def test_metadata_rows_share_fresh_authorized_scope_without_body_io(
 
 
 async def test_metadata_sql_reuses_authorized_record_and_one_snapshot(tmp_path: Path) -> None:
-    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "metadata.db"))
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "metadata.db"))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -558,7 +558,7 @@ async def test_metadata_sql_reuses_authorized_record_and_one_snapshot(tmp_path: 
 async def test_metadata_observes_authorization_time_admission_and_header_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     pending = None
     try:
@@ -597,7 +597,7 @@ async def test_metadata_observes_authorization_time_admission_and_header_authori
 
 @pytest.mark.parametrize("same_repository", (False, True))
 async def test_metadata_preserves_custom_repository_reader_authority(same_repository: bool) -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -632,7 +632,7 @@ async def test_metadata_preserves_custom_repository_reader_authority(same_reposi
 
 @pytest.mark.parametrize("reader_kind", ("protocol", "subclass"))
 async def test_metadata_preserves_injected_reader_protocol_and_overrides(reader_kind: str) -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     expected, calls = (object(),), []
     try:
@@ -656,8 +656,8 @@ async def test_metadata_preserves_injected_reader_protocol_and_overrides(reader_
 async def test_metadata_preserves_independent_owner_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner: str,
 ) -> None:
-    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "execution.db"))
-    other = RuntimeState(RuntimeStorage.sqlite(tmp_path / "history.db"))
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "execution.db"))
+    other = Persistence(PersistenceStorage.sqlite(tmp_path / "history.db"))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     await other.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
@@ -675,7 +675,7 @@ async def test_metadata_preserves_independent_owner_reads(
                 assert resource.owner_principal_id == "authorizing-owner"
         monkeypatch.setattr(state.execution.executions, "get_header", authorizing_header)
         monkeypatch.setattr(other.execution.executions, "get_header", unexpected_header)
-        archive = other.run_store.read_store(RuntimeDomain.TRACE)
+        archive = other.run_store.read_store(PersistenceDomain.TRACE)
         get_run, rows = archive.get_agent_run, archive.list_model_interactions
         combined = archive.read_model_interactions_with_run
         async def checked_run(*args, **kwargs):
@@ -709,12 +709,12 @@ async def test_metadata_preserves_independent_owner_reads(
 async def test_metadata_cancellation_releases_shared_read_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     pending = None
     try:
         await _seed(state)
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         rows = archive.read_model_interactions_with_run
         entered, blocked = asyncio.Event(), asyncio.Event()
         async def blocked_rows(*args, **kwargs):
@@ -758,7 +758,7 @@ async def test_metadata_preserves_authority_validation_and_missing_record_order(
     monkeypatch: pytest.MonkeyPatch, entrypoint: str, phase: str, limit: int, through: int,
     expected: ErrorCode,
 ) -> None:
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -779,7 +779,7 @@ async def test_metadata_preserves_authority_validation_and_missing_record_order(
         async def unexpected(*args, **kwargs):
             raise AssertionError("model rows must not be read before authority and request validation")
         monkeypatch.setattr(repository, "get", get_after_auth)
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         monkeypatch.setattr(archive, "get_agent_run", unexpected)
         monkeypatch.setattr(archive, "read_model_interactions_with_run", unexpected)
         reader = _reader(state, executions=MissingReaderRepository() if phase == "reader_missing" else repository)
@@ -799,11 +799,11 @@ async def test_metadata_preserves_authority_validation_and_missing_record_order(
 
 
 async def test_metadata_batches_run_and_interaction_records_without_skipping_high_water(tmp_path: Path) -> None:
-    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "metadata-batch.db"))
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "metadata-batch.db"))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         run = await _seed(state)
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         engine = archive.state_store.storage_group.context.engine.sync_engine
         statements = []
         def capture(_connection, _cursor, statement, _parameters, _context, _many):
@@ -840,11 +840,11 @@ async def test_metadata_batches_run_and_interaction_records_without_skipping_hig
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
 @pytest.mark.parametrize("missing", ("run", "interaction"))
 async def test_metadata_batch_rejects_missing_durable_rows(tmp_path: Path, backend: str, missing: str) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         run = await _seed(state)
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         key = archive._agent_run_key(run.agent_run_id) if missing == "run" else archive._interaction_key(run.agent_run_id, 1)
         await archive.state_store.mutate(lambda transaction: transaction.delete_record(key))
         with pytest.raises(AIError) as raised:
@@ -856,15 +856,15 @@ async def test_metadata_batch_rejects_missing_durable_rows(tmp_path: Path, backe
 
 async def test_metadata_batch_rejects_fact_in_place_of_authoritative_record(tmp_path: Path) -> None:
     from .test_model_interaction_lifecycle_paging import _terminal
-    from linktools.ai.runtime.state._step_archive import _encode_step
-    from linktools.ai.runtime.state._store import StoredFact
+    from linktools.ai.persistence._step_archive import _encode_step
+    from linktools.ai.persistence.state import StoredFact
     from linktools.ai.core import canonical_sha256
 
-    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "missing-record-metadata.db"))
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "missing-record-metadata.db"))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         run = await _seed(state)
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         value, = await archive.list_model_interactions(agent_run_id=run.agent_run_id)
         terminal = _terminal(value)
         fact = StoredFact(
@@ -887,13 +887,13 @@ async def test_metadata_batch_rejects_fact_in_place_of_authoritative_record(tmp_
 
 
 async def test_metadata_batch_preserves_custom_archive_overrides() -> None:
-    from linktools.ai.runtime.state._model_interaction_store import ModelInteractionStateStepArchive
+    from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
 
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
-        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         calls = []
         class CustomArchive(ModelInteractionStateStepArchive):
             async def get_agent_run(self, *, agent_run_id):
@@ -906,7 +906,7 @@ async def test_metadata_batch_preserves_custom_archive_overrides() -> None:
                 raise AssertionError("custom archive must retain its independent operations")
         custom = CustomArchive(
             archive.state_store, object_store=None, namespace=_NAMESPACE,
-            tenant_id="tenant", runtime_domain=RuntimeDomain.TRACE,
+            tenant_id="tenant", runtime_domain=PersistenceDomain.TRACE,
         )
         page = await _metadata(_service(state, reader=_reader(state, store=custom)))
         assert [item.model_request_seq for item in page] == [1]

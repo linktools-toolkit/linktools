@@ -16,7 +16,7 @@ from linktools.ai.spec import AgentSpec
 
 def _compiler(defaults=None, candidates=()):
     return AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=candidates, agents={}, defaults=defaults,
     )
 
@@ -91,5 +91,5 @@ def test_removed_retry_keywords_have_no_alias(name):
     with pytest.raises(TypeError):
         RuntimeFeatures("defaults", **{name: 3})
     with pytest.raises(TypeError):
-        AgentCompiler(models={"default": create_model(protocol='openai', model="gpt-test")},
+        AgentCompiler(models={"default": create_model(api='openai', model="gpt-test")},
                       candidates=(), agents={}, **{name: 3})

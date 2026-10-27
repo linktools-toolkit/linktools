@@ -3,16 +3,22 @@
 """Tool-return persistence preserves JSON and explicit media provenance."""
 
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 from pydantic import BaseModel
-from pydantic_ai.messages import BinaryContent, ModelRequest, ToolReturnPart
+from pydantic_ai import Agent as NativeAgent
+from pydantic_ai.messages import (
+    BinaryContent, ImageUrl, ModelMessage, ModelRequest, ModelResponse, TextPart,
+    ToolCallPart, ToolReturn, ToolReturnPart, UserPromptPart,
+)
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._message import decode_model_messages, encode_model_messages
-from linktools.ai.runtime._model_interaction import project_public_messages
+from linktools.ai.model.messages import decode_model_messages, encode_model_messages
+from linktools.ai.persistence._model_interaction import project_public_messages
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationDecision
 from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
 
@@ -148,3 +154,89 @@ async def test_durable_tool_result_recovery_preserves_media_shaped_json() -> Non
     assert isinstance(restored, dict)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", [
+    None,
+    "Read the attached evidence.",
+    ["Read the attached evidence."],
+    [BinaryContent(data=b"synthetic-image", media_type="image/png")],
+    [ImageUrl(url="https://example.com/evidence.png")],
+])
+async def test_native_tool_return_preserves_content_and_metadata_on_operation_replay(content: object) -> None:
+    value = ToolReturn(return_value={"status": "read"}, content=content,
+                       metadata={"source": "evidence"}, tools=["existing_tool"])
+    bridge = _tool_bridge()
+    payload = await bridge._result_payload(ToolOperationDecision("operation", "worker", 1, True), value)
+    restored = await bridge._decode_result(SimpleNamespace(
+        result_payload=payload, tool_operation_id="operation",
+    ))
+    assert isinstance(restored, ToolReturn)
+    assert restored.return_value == value.return_value
+    assert restored.content == value.content
+    assert restored.metadata == value.metadata
+    assert restored.tools == value.tools
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", [
+    "Explicit follow-up instructions.",
+    [BinaryContent(data=b"synthetic-image", media_type="image/png")],
+    [ImageUrl(url="https://example.com/evidence.png")],
+])
+async def test_replayed_tool_content_reaches_native_model_as_user_content(content: object) -> None:
+    value = ToolReturn(return_value="receipt", content=content)
+    bridge = _tool_bridge()
+    payload = await bridge._result_payload(ToolOperationDecision("operation", "worker", 1, True), value)
+    restored = await bridge._decode_result(SimpleNamespace(
+        result_payload=payload, tool_operation_id="operation",
+    ))
+    requests = []
+
+    async def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        requests.append(messages)
+        if len(requests) == 1:
+            return ModelResponse(parts=[ToolCallPart("evidence", {}, tool_call_id="read-evidence")])
+        parts = messages[-1].parts
+        assert any(isinstance(part, ToolReturnPart) and part.content == "receipt" for part in parts)
+        user_content = [part.content for part in parts if isinstance(part, UserPromptPart)]
+        assert user_content == [content]
+        return ModelResponse(parts=[TextPart("received")])
+
+    async def evidence() -> ToolReturn:
+        return restored
+
+    agent = NativeAgent(FunctionModel(respond), tools=[evidence])
+    result = await agent.run("Read the evidence")
+    assert result.output == "received"
+    assert len(requests) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_image", [False, True])
+async def test_tool_return_replay_preserves_portable_metadata_snapshot(with_image: bool) -> None:
+    class EvidenceMetadata(BaseModel):
+        captured_at: datetime
+        labels: set[str]
+
+    timestamp = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    value = ToolReturn(
+        return_value="receipt",
+        content=[BinaryContent(data=b"synthetic-image", media_type="image/png")] if with_image else None,
+        metadata={
+            "captured_at": timestamp,
+            "evidence": EvidenceMetadata(captured_at=timestamp, labels={"b", "a"}),
+        },
+    )
+    bridge = _tool_bridge()
+    payload = await bridge._result_payload(ToolOperationDecision("operation", "worker", 1, True), value)
+    restored = await bridge._decode_result(SimpleNamespace(
+        result_payload=payload, tool_operation_id="operation",
+    ))
+
+    assert isinstance(restored, ToolReturn)
+    assert restored.return_value == value.return_value
+    assert restored.content == value.content
+    assert restored.metadata == {
+        "captured_at": "2026-01-02T03:04:05Z",
+        "evidence": {"captured_at": "2026-01-02T03:04:05Z", "labels": ["a", "b"]},
+    }

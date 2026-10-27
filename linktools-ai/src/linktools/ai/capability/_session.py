@@ -5,6 +5,7 @@
 from pydantic_ai.capabilities import AbstractCapability
 
 from ._context import AgentContext
+from ..errors import AIError, ErrorCode
 
 
 class SessionCapability(AbstractCapability[AgentContext[object]]):
@@ -20,6 +21,10 @@ class SessionCapability(AbstractCapability[AgentContext[object]]):
         if not isinstance(enabled, bool):
             raise TypeError("enabled must be bool")
         self._enabled = enabled
+
+    def for_agent(self, agent: object) -> "SessionCapability":
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                      safe_details={"reason": "session_declaration_requires_host"})
 
     @property
     def enabled(self) -> bool:

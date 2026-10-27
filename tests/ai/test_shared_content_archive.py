@@ -7,16 +7,16 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import AIError
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime.state._archive import ArchiveRoot, ContentArchive, PreparedArchive
-from linktools.ai.runtime.state._plan import RuntimeDomain
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence._archive import ArchiveRoot, ContentArchive, PreparedArchive
+from linktools.ai.persistence._plan import PersistenceDomain
 from .test_incremental_projection_boundaries import _storage
 
 pytestmark = pytest.mark.asyncio
 
 
-async def _archive(state: RuntimeState) -> ContentArchive:
-    source = state.run_store.read_store(RuntimeDomain.CHECKPOINT).state_store
+async def _archive(state: Persistence) -> ContentArchive:
+    source = state.run_store.read_store(PersistenceDomain.CHECKPOINT).state_store
     scope, store = await source.storage_group.open_archive(create=True)
     return ContentArchive(store, scope, namespace="archive", tenant_id="tenant", object_store=None)
 
@@ -27,7 +27,7 @@ async def _publish(archive: ContentArchive, prepared: PreparedArchive) -> None:
 
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
 async def test_shared_content_preserves_occurrences_exact_slices_and_old_roots(tmp_path: Path, backend: str) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
     try:
         archive = await _archive(state)
@@ -58,7 +58,7 @@ async def test_shared_content_preserves_occurrences_exact_slices_and_old_roots(t
 
 
 async def test_partial_tail_is_never_extended_into_excluded_history(tmp_path: Path) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
     try:
         archive = await _archive(state)
@@ -84,7 +84,7 @@ async def test_partial_tail_is_never_extended_into_excluded_history(tmp_path: Pa
 async def test_prepared_content_reuses_verified_metadata_with_batch_local_body_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
     try:
         archive = await _archive(state)
@@ -128,7 +128,7 @@ async def test_prepared_content_reuses_verified_metadata_with_batch_local_body_r
 async def test_combined_preparation_rejects_foreign_scope_and_conflicting_records(tmp_path: Path) -> None:
     from dataclasses import replace
 
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
     try:
         archive = await _archive(state)
@@ -155,9 +155,9 @@ async def test_combined_preparation_rejects_foreign_scope_and_conflicting_record
 
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
 async def test_range_metadata_uses_one_snapshot_and_body_reads_leave_it(tmp_path, monkeypatch, backend):
-    from linktools.ai.runtime.state._store import active_state_scope
+    from linktools.ai.persistence.state import active_state_scope
 
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
     try:
         archive = await _archive(state)

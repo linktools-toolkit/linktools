@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Preparation uses captured control values without claiming producer authority."""
 from ._runtime_test_helpers import model_features
 
@@ -7,12 +9,13 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, SessionStatus
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime._execution_context import ExecutionInputContext
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.execution import ExecutionInputContext
 from linktools.ai.runtime._local import LocalExecutionBackend
 from pydantic_ai.messages import ModelResponse, TextPart
 
@@ -35,8 +38,8 @@ async def test_changes_after_launch_are_observed_before_provider(
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
-    first_state = RuntimeStorage.sqlite(tmp_path / "state.db")
-    second_state = RuntimeStorage.sqlite(tmp_path / "state.db")
+    first_state = PersistenceStorage.sqlite(tmp_path / "state.db")
+    second_state = PersistenceStorage.sqlite(tmp_path / "state.db")
     original = LocalExecutionBackend._run
 
     async def delayed(worker, *args, **kwargs):
@@ -45,9 +48,7 @@ async def test_changes_after_launch_are_observed_before_provider(
         return await original(worker, *args, **kwargs)
 
     monkeypatch.setattr(LocalExecutionBackend, "_run", delayed)
-    async with Runtime.open("launch-change", storage=first_state, features=model_features(models, group)) as first, Runtime.open(
-        "launch-change", storage=second_state, features=model_features(models, group),
-    ) as second:
+    async with Persistence.open('launch-change', storage=first_state) as persistence_48, Runtime.attach(persistence=persistence_48, features=model_features(models, group)) as first, Persistence.open('launch-change', storage=second_state) as persistence_48, Runtime.attach(persistence=persistence_48, features=model_features(models, group)) as second:
         session = await first.agents.get().create_session("session", metadata={"marker": "before"})
         execution = await session.start("question", idempotency_key="same")
         await asyncio.wait_for(launched.wait(), 5)
@@ -68,13 +69,13 @@ async def test_changes_after_launch_are_observed_before_provider(
             assert result.status is ExecutionStatus.SUCCEEDED
             assert len(calls) == 1
             current = await first._state.execution.executions.get(execution.execution_id, tenant_id=first.tenant_id)
-            from linktools.ai.runtime._context_archive import ExecutionContextArchive
+            from linktools.ai.inputs import ExecutionContextArchive
             context = await ExecutionContextArchive(
                 first._state.execution.executions.state_store,
-                first._state.archive_object_store(RuntimeDomain.EXECUTION),
+                first._state.archive_object_store(PersistenceDomain.EXECUTION),
                 namespace=first.namespace, tenant_id=first.tenant_id,
                 object_reader=lambda reference: first._state.read_archive_object(
-                    RuntimeDomain.EXECUTION, reference,
+                    PersistenceDomain.EXECUTION, reference,
                 ),
             ).load(current.input_context)
             assert context.session_metadata == {"marker": "after"}
@@ -104,8 +105,8 @@ async def test_other_runtime_claims_before_delayed_worker_without_duplicate_prov
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
-    first_state = RuntimeStorage.sqlite(tmp_path / "state.db")
-    second_state = RuntimeStorage.sqlite(tmp_path / "state.db")
+    first_state = PersistenceStorage.sqlite(tmp_path / "state.db")
+    second_state = PersistenceStorage.sqlite(tmp_path / "state.db")
     original = LocalExecutionBackend._run
 
     async def delayed(worker, *args, **kwargs):
@@ -116,9 +117,7 @@ async def test_other_runtime_claims_before_delayed_worker_without_duplicate_prov
         return await original(worker, *args, **kwargs)
 
     monkeypatch.setattr(LocalExecutionBackend, "_run", delayed)
-    async with Runtime.open("launch-winner", storage=first_state, features=model_features(models, group)) as first, Runtime.open(
-        "launch-winner", storage=second_state, features=model_features(models, group),
-    ) as second:
+    async with Persistence.open('launch-winner', storage=first_state) as persistence_119, Runtime.attach(persistence=persistence_119, features=model_features(models, group)) as first, Persistence.open('launch-winner', storage=second_state) as persistence_119, Runtime.attach(persistence=persistence_119, features=model_features(models, group)) as second:
         await first.agents.get().create_session("session")
         one = await first.agents.get().session("session").start("question", idempotency_key="same")
         await asyncio.wait_for(launched.wait(), 5)

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Whole-graph cancellation still reaches live siblings of unknown effects."""
 from ._runtime_test_helpers import model_features
 
@@ -12,8 +14,11 @@ from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, TaskStatus, ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
-from linktools.ai.task import TaskGraph, TaskNode
+from linktools.ai.inputs import AgentTaskInput
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.task import Task, TaskGraph, TaskNode
+from linktools.ai.task.engine import TaskEngine
 
 from .test_task_mixed_node_reliability import _TaskTestModels
 
@@ -55,17 +60,13 @@ async def test_graph_cancel_quiesces_active_agent_sibling_when_an_effect_is_unkn
         ("unknown", ("unknown",)),
     ):
         group.agent(name, allow_tools=tools, allow_subagents=(), allow_skills=())
-    storage = RuntimeStorage.in_memory()
+    storage = PersistenceStorage.in_memory()
     try:
-        async with Runtime.open(
-            "cancel-unknown-sibling",
-            storage=storage,
-            features=model_features(_TaskTestModels(), group),
-        ) as runtime:
-            unknown_task = runtime.tasks.from_agent(
+        async with Persistence.open('cancel-unknown-sibling', storage=storage) as persistence_60, Runtime.attach(persistence=persistence_60, features=model_features(_TaskTestModels(), group)) as runtime, TaskEngine.open(persistence=persistence_60) as engine:
+            unknown_task = Task.from_agent(
                 "review.unknown", runtime.agents.get("unknown")
             )
-            slow_task = runtime.tasks.from_agent(
+            slow_task = Task.from_agent(
                 "review.slow", runtime.agents.get("slow")
             )
             graph = TaskGraph(
@@ -77,9 +78,9 @@ async def test_graph_cancel_quiesces_active_agent_sibling_when_an_effect_is_unkn
                     TaskNode("slow", task=slow_task, input=AgentTaskInput("write")),
                 ),
             )
-            run = await runtime.tasks.bind(unknown_task, slow_task).start(
+            run = await engine.with_definitions(unknown_task, slow_task).start(
                 graph,
-                idempotency_key="start",
+                principal=runtime.default_principal, idempotency_key="start",
             )
             await asyncio.wait_for(started.wait(), timeout=10)
             initial = (await run.wait(timeout_seconds=10)).result
@@ -116,4 +117,3 @@ async def test_graph_cancel_quiesces_active_agent_sibling_when_an_effect_is_unkn
             assert effects == ["unknown-write"]
     finally:
         release.set()
-        await runtime._state.close()

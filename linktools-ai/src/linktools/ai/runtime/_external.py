@@ -22,9 +22,9 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
-from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
-from ._tool_return_codec import encode_tool_return_content
-from .service_api import (
+from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
+from ..model.messages import encode_tool_return_content
+from ..execution import (
     ExternalCallFailed,
     ExternalCallRetry,
     ExternalCallSucceeded,
@@ -32,7 +32,7 @@ from .service_api import (
     ExternalSupplyRequest,
     ExternalSupplyResult,
 )
-from .state._contracts import (
+from ..persistence.contracts import (
     deferred_resource_id,
     ExternalCallRecord,
     ExternalCallRepository,
@@ -42,7 +42,7 @@ from .state._contracts import (
     RecoveryCheckpointRepository,
     RecoveryCheckpointState,
 )
-from .state._plan import RuntimeDomain
+from ..persistence import PersistenceDomain
 
 
 _logger = environ.get_logger("ai.runtime.external")
@@ -68,7 +68,7 @@ class DefaultExternalService:
         authorization: AuthorizationPolicy,
         *,
         objects: ObjectStore,
-        object_key_factory: RuntimeObjectKeyFactory,
+        object_key_factory: ObjectKeyFactory,
         payload_policy: PayloadPolicy,
         continuation: _DeferredContinuation | None = None,
     ) -> None:
@@ -234,7 +234,7 @@ class DefaultExternalService:
             reference = await put_runtime_object(
                 self._objects,
                 self._object_key_factory,
-                RuntimeDomain.RECOVERY,
+                PersistenceDomain.RECOVERY,
                 request.principal.tenant_id,
                 raw,
             )

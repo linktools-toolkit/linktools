@@ -2,15 +2,15 @@
 # -*- coding: utf-8 -*-
 """Context metadata is captured together before loading any payloads."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from pathlib import Path
 
 import pytest
 from sqlalchemy import event
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeDomain
-from linktools.ai.runtime.state._store import active_state_scope
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.state import active_state_scope
 
 from .test_incremental_projection_boundaries import _storage
 from .test_session_history_projection import _materialize, _session
@@ -22,11 +22,11 @@ pytestmark = pytest.mark.asyncio
 async def test_empty_context_batches_projection_and_head(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reader: str,
 ) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="context-metadata", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
-        archive = state.run_store.read_store(RuntimeDomain.CONVERSATION)
+        archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         repository = archive.transcript_repository
         owner = session.history_id
         assert owner is not None
@@ -66,11 +66,11 @@ async def test_empty_context_batches_projection_and_head(
 async def test_context_metadata_keeps_projection_precedence_and_releases_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, reader: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="context-metadata", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
-        archive = state.run_store.read_store(RuntimeDomain.CONVERSATION)
+        archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         repository = archive.transcript_repository
         owner = session.history_id
         assert owner is not None
@@ -102,10 +102,10 @@ async def test_context_metadata_keeps_projection_precedence_and_releases_scope(
 async def test_empty_context_requires_head_before_session_descriptor(
     tmp_path: Path, backend: str, reader: str,
 ) -> None:
-    state = RuntimeState(_storage(backend, tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="context-metadata", tenant_id="tenant")
     try:
-        repository = state.run_store.read_store(RuntimeDomain.CONVERSATION).transcript_repository
+        repository = state.run_store.read_store(PersistenceDomain.CONVERSATION).transcript_repository
         with pytest.raises(AIError) as error:
             if reader == "session":
                 await repository.load_session_model_context("missing", tenant_id="tenant")

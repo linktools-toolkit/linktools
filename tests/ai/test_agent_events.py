@@ -26,8 +26,8 @@ from linktools.ai.runtime._agent_executor import (
     _event_stream_capability,
     _map_event,
 )
-from linktools.ai.runtime._event import ExecutionDelta
-from linktools.ai.runtime._tool_return_codec import tool_return_content_digest
+from linktools.ai.execution.events import ExecutionDelta
+from linktools.ai.model._tool_return_codec import tool_return_content_digest
 
 
 def test_thinking_parts_are_forwarded_as_thinking_events() -> None:
@@ -96,7 +96,7 @@ async def test_event_stream_forwarding_uses_native_capability() -> None:
         emissions.append(emission)
 
     from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-    from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
+    from linktools.ai.persistence._step_archive import StagingAgentRunStore
 
     recorder = AgentRunRecorder(StagingAgentRunStore(), execution_id="execution", agent_run_id="run")
     capability = _event_stream_capability(sink, recorder, 1)
@@ -155,7 +155,7 @@ async def test_stream_parts_stay_local_until_the_request_or_run_finishes(
     visible_part: TextPart | ThinkingPart,
 ) -> None:
     from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-    from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
+    from linktools.ai.persistence._step_archive import StagingAgentRunStore
 
     staged = StagingAgentRunStore()
     published: list[tuple[object, ...]] = []

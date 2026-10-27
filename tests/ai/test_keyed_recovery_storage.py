@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.core import (
     ExecutionStatus,
     OperationKind,
@@ -20,14 +20,14 @@ from linktools.ai.core import (
     ResourceKind,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.contracts import (
     AgentAttemptClaim,
     ExecutionRecord,
     RecoveryCheckpoint,
     RecoveryCheckpointState,
 )
-from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
+from linktools.ai.persistence._runtime_commands import StateCommands
 
 from .test_execution_recovery_commands import _commands, _execution
 
@@ -38,13 +38,13 @@ _NAMESPACE = "keyed-recovery"
 @pytest_asyncio.fixture(params=("memory", "filesystem", "sqlite"))
 async def storage(
     request: pytest.FixtureRequest, tmp_path: Path,
-) -> AsyncIterator[RuntimeState]:
+) -> AsyncIterator[Persistence]:
     if request.param == "memory":
-        state = RuntimeState(RuntimeStorage.in_memory())
+        state = Persistence(PersistenceStorage.in_memory())
     elif request.param == "filesystem":
-        state = RuntimeState(RuntimeStorage.filesystem(tmp_path / "state"))
+        state = Persistence(PersistenceStorage.filesystem(tmp_path / "state"))
     else:
-        state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "state.db"))
+        state = Persistence(PersistenceStorage.sqlite(tmp_path / "state.db"))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         yield state
@@ -64,7 +64,7 @@ def _operation(*, claim: str | None = "first-producer") -> OperationLedgerInput:
 
 
 async def _admission(
-    storage: RuntimeState, mode: str,
+    storage: Persistence, mode: str,
 ) -> tuple[ExecutionRecord, Callable[[OperationLedgerInput], Awaitable[ExecutionRecord]]]:
     execution = _execution(_NOW)
     if mode == "attempt":
@@ -82,7 +82,7 @@ async def _admission(
         created_at=_NOW, updated_at=_NOW,
     )
     await storage.recovery.checkpoints.create(checkpoint)
-    commands = RuntimeStateCommands(
+    commands = StateCommands(
         storage.execution.executions, namespace=_NAMESPACE,
         events=storage.execution.events, operations=storage.execution.operations,
         recovery=storage.recovery.checkpoints, background_tasks=set(),
@@ -103,7 +103,7 @@ async def _admission(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ("resume", "attempt"))
 async def test_competing_claims_share_one_recovery_admission(
-    storage: RuntimeState, mode: str,
+    storage: Persistence, mode: str,
 ) -> None:
     execution, admit = await _admission(storage, mode)
     first = _operation()
@@ -152,7 +152,7 @@ async def test_competing_claims_share_one_recovery_admission(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ("resume", "attempt"))
 async def test_recovery_receipt_rolls_back_with_producer_checkpoint(
-    storage: RuntimeState, mode: str, monkeypatch: pytest.MonkeyPatch,
+    storage: Persistence, mode: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     execution, admit = await _admission(storage, mode)
     head = await storage.execution.executions.get_history_head("execution", tenant_id="tenant")
@@ -179,7 +179,7 @@ async def test_recovery_receipt_rolls_back_with_producer_checkpoint(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ("resume", "attempt"))
 async def test_recovery_receipt_reconciles_lost_commit_acknowledgement(
-    storage: RuntimeState, mode: str, monkeypatch: pytest.MonkeyPatch,
+    storage: Persistence, mode: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     execution, admit = await _admission(storage, mode)
     group = storage.execution.executions.state_store.storage_group
@@ -207,7 +207,7 @@ async def test_recovery_receipt_reconciles_lost_commit_acknowledgement(
 
 @pytest.mark.asyncio
 async def test_cancellation_receipt_guards_revision_without_admitting_producer(
-    storage: RuntimeState,
+    storage: Persistence,
 ) -> None:
     execution = replace(_execution(_NOW), status=ExecutionStatus.RECOVERY_REQUIRED)
     repository = storage.execution.executions
@@ -235,7 +235,7 @@ async def test_cancellation_receipt_guards_revision_without_admitting_producer(
 
 @pytest.mark.asyncio
 async def test_recovery_claim_is_immutable_and_survives_operation_compaction(
-    storage: RuntimeState,
+    storage: Persistence,
 ) -> None:
     execution, admit = await _admission(storage, "resume")
     admitted = await admit(_operation())
@@ -273,7 +273,7 @@ async def test_recovery_claim_is_immutable_and_survives_operation_compaction(
 
 @pytest.mark.asyncio
 async def test_pending_operation_pages_apply_exclusive_sequence_before_limit(
-    storage: RuntimeState,
+    storage: Persistence,
 ) -> None:
     operations = storage.execution.operations
     rows = []

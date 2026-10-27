@@ -7,6 +7,7 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,15 +39,17 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.runtime._agent_binding_resolver import _AgentBindingResolver
-from linktools.ai.runtime._context import RuntimeContext
-from linktools.ai.runtime._runtime_identity import task_graph_binding_capture_key
-from linktools.ai.runtime._runtime_service import Runtime
-from linktools.ai.runtime._task_graph_binding_capture import TaskGraphBindingCaptureStore
-from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionRequest
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, SnapshotLimits
-from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
+from linktools.ai.core import ExecutionContext
+from linktools.ai.persistence._runtime_identity import task_graph_binding_capture_key
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.inputs import TaskGraphBindingCaptureStore
+from linktools.ai.execution import ExecutionHandle, ExecutionRequest
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.persistence.snapshots import SnapshotLimits
+from linktools.ai.persistence.contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import (
     AgentSpec,
     MCPServerSpec,
@@ -75,7 +78,7 @@ from linktools.ai.task import (
     TaskNodeContext,
     TaskRef,
 )
-from linktools.ai.workspace import BubblewrapSandbox, LocalSandbox, ReadOnlySandboxPolicy
+from linktools.ai.workspace import BubblewrapWorkspaceBackend, LocalWorkspaceBackend, WorkspaceReadPolicy
 
 
 @dataclass(frozen=True)
@@ -159,7 +162,7 @@ async def _fixture() -> _BindingFixture:
         ),
     }
     compiler = AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=candidates,
         agents=specs,
     )
@@ -374,50 +377,42 @@ async def test_concurrent_task_capture_keeps_the_first_manifest() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_start_admits_resolved_binding() -> None:
+async def test_runtime_start_admits_resolved_binding(monkeypatch: pytest.MonkeyPatch) -> None:
     fixture = await _fixture()
     try:
         execution = _RecordingExecution()
-        runtime = Runtime(
-            fixture.catalog,
-            fixture.compiler,
-            execution,  # type: ignore[arg-type]
-            object(),  # type: ignore[arg-type]
-            object(),  # type: ignore[arg-type]
-            SimpleNamespace(_bind_observation=lambda *args: None),  # type: ignore[arg-type]
-            object(),  # type: ignore[arg-type]
-            object(),  # type: ignore[arg-type]
-            object(),  # type: ignore[arg-type]
-            object(),  # type: ignore[arg-type]
-            None,
-            namespace="namespace",
-            context=RuntimeContext(None),
-            _binding_resolver=fixture.resolver,
-        )
+        async with Runtime.open(
+            "namespace", storage=PersistenceStorage.in_memory(), tenant_id="tenant",
+            features=RuntimeFeatures(),
+        ) as runtime:
+            monkeypatch.setattr(runtime, "_catalog", fixture.catalog)
+            monkeypatch.setattr(runtime, "_compiler", fixture.compiler)
+            monkeypatch.setattr(runtime, "_binding_resolver", fixture.resolver)
+            monkeypatch.setattr(runtime._execution_service, "start", execution.start)
 
-        compiled_agent = fixture.catalog.root_agent("parent")
-        started = await runtime._start_for_agent(
-            compiled_agent.spec.id,
-            compiled_agent.spec.revision,
-            "prompt",
-            files=(),
-            output=None,
-            principal=None,
-            session_id=None,
-            idempotency_key="runtime-resolution",
-            memory_scope=None,
-            mode="run",
-            planning=None,
-            thinking=None,
-        )
+            compiled_agent = fixture.catalog.root_agent("parent")
+            started = await runtime._start_for_agent(
+                compiled_agent.spec.id,
+                compiled_agent.spec.revision,
+                "prompt",
+                files=(),
+                output=None,
+                principal=None,
+                session_id=None,
+                idempotency_key="runtime-resolution",
+                memory_scope=None,
+                mode="run",
+                planning=None,
+                thinking=None,
+            )
 
-        assert started.execution_id == "execution"
-        assert execution.binding_contract is not None
-        assert execution.binding_digest == execution.binding_contract.binding_digest
-        assert execution.resolved_binding is not None
-        assert execution.resolved_binding.binding_contract == execution.binding_contract
-        assert execution.requires_task_invocation_capture is False
-        assert _skill_ref(_resolved_child(execution.binding_contract)).resources
+            assert started.execution_id == "execution"
+            assert execution.binding_contract is not None
+            assert execution.binding_digest == execution.binding_contract.binding_digest
+            assert execution.resolved_binding is not None
+            assert execution.resolved_binding.binding_contract == execution.binding_contract
+            assert execution.requires_task_invocation_capture is False
+            assert _skill_ref(_resolved_child(execution.binding_contract)).resources
     finally:
         await fixture.assets.close()
 
@@ -435,7 +430,7 @@ async def test_execution_binding_uses_selected_child_asset_versions() -> None:
 
 
 @pytest.mark.asyncio
-async def test_binding_resolution_restores_mcp_execution_contract() -> None:
+async def test_binding_resolution_restores_mcp_execution_contract(tmp_path: Path) -> None:
     server = MCPServerSpec(
         "server",
         "python",
@@ -449,7 +444,7 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
         allow_capabilities=(),
     )
     compiler = AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=(CapabilityContribution.from_declaration(server),),
         agents={specification.id: specification},
     )
@@ -459,6 +454,7 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
     resolver = _AgentBindingResolver(
         catalog,
         compiler,
+        workspace_backend=LocalWorkspaceBackend(tmp_path),
     )
 
     resolved = await resolver.resolve(
@@ -504,7 +500,7 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
         allow_capabilities=(),
     )
     compiler = AgentCompiler(
-        models={"default": create_model(protocol='openai', model="gpt-test")},
+        models={"default": create_model(api='openai', model="gpt-test")},
         candidates=(CapabilityContribution.from_declaration(server),),
         agents={specification.id: specification},
     )
@@ -512,22 +508,14 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
         {specification.id: compiler.compile(specification)}
     )
     if backend == "bubblewrap":
-        sandbox = BubblewrapSandbox(
-            runtime_root=tmp_path,
-            bwrap_executable=tmp_path / "bwrap",
-        )
+        sandbox = partial(BubblewrapWorkspaceBackend, runtime_root=tmp_path, bwrap_executable=tmp_path / "bwrap")
     else:
-        sandbox = LocalSandbox(
-            read_policy=(
-                ReadOnlySandboxPolicy(("visible.txt",))
-                if backend == "local_read_policy" else None
-            ),
-            allow_host_stdio_with_read_policy=backend == "local_read_policy",
-        )
+        sandbox = partial(LocalWorkspaceBackend, read_policy=WorkspaceReadPolicy(("visible.txt",))
+                if backend == "local_read_policy" else None, allow_host_stdio_with_read_policy=backend == "local_read_policy")
     resolver = _AgentBindingResolver(
         catalog,
         compiler,
-        sandbox=sandbox,
+        workspace_backend=sandbox(tmp_path),
     )
 
     resolved = await resolver.resolve(
@@ -535,7 +523,7 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
     )
 
     pin = next(item for item in resolved.binding_contract.selected if item.kind == "mcp")
-    assert pin.contract["execution_policy"] == sandbox.stdio_execution_policy()
+    assert pin.contract["execution_policy"] == sandbox(tmp_path).stdio_execution_policy()
     if backend != "bubblewrap":
         assert pin.contract["execution_policy"] == {"version": 1, "boundary": "host-stdio"}
 
@@ -544,6 +532,7 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
 @pytest.mark.parametrize("parent_resources", (False, True))
 async def test_existing_child_mcp_resolves_asset_versions(
     parent_resources: bool,
+    tmp_path: Path,
 ) -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
@@ -589,7 +578,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
             ),
         }
         compiler = AgentCompiler(
-            models={"default": create_model(protocol='openai', model="gpt-test")},
+            models={"default": create_model(api='openai', model="gpt-test")},
             candidates=(contribution,),
             agents=specs,
         )
@@ -599,7 +588,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
                 for agent_id, spec in specs.items()
             }
         )
-        resolver = _AgentBindingResolver(catalog, compiler)
+        resolver = _AgentBindingResolver(catalog, compiler, workspace_backend=LocalWorkspaceBackend(tmp_path))
         binding = compiler.bind(catalog.root_agent("parent")).binding_contract
 
         await store.put(resource, b"print('updated')")
@@ -626,7 +615,7 @@ async def test_runtime_storage_snapshot_preserves_asset_version_refs(
 ) -> None:
     fixture = await _fixture()
     storage_root = tmp_path / "state"
-    state = RuntimeState(RuntimeStorage.filesystem(storage_root))
+    state = Persistence(PersistenceStorage.filesystem(storage_root))
     await state.initialize(namespace="namespace", tenant_id="tenant")
     try:
         resolved = await fixture.resolver.resolve(fixture.binding)
@@ -670,7 +659,7 @@ async def test_runtime_storage_snapshot_preserves_asset_version_refs(
     )
 
     snapshot_store = InMemoryObjectStore("snapshot")
-    read_state = RuntimeState(RuntimeStorage.filesystem(storage_root))
+    read_state = Persistence(PersistenceStorage.filesystem(storage_root))
     await read_state.initialize(
         namespace="namespace",
         tenant_id="tenant",
@@ -685,13 +674,13 @@ async def test_runtime_storage_snapshot_preserves_asset_version_refs(
         await read_state.close()
 
     restored_root = tmp_path / "restored"
-    await RuntimeState.restore_snapshot(
+    await Persistence.restore_snapshot(
         snapshot_ref,
         object_store=snapshot_store,
         root=restored_root,
         limits=SnapshotLimits(max_entries=1024, max_bytes=8 * 1024 * 1024),
     )
-    restored = RuntimeState(RuntimeStorage.from_root(restored_root))
+    restored = Persistence(PersistenceStorage.from_root(restored_root))
     await restored.initialize(
         namespace="namespace",
         tenant_id="tenant",
@@ -737,7 +726,7 @@ async def test_runtime_storage_snapshot_restores_task_binding_capture(
         },
     )
     storage_root = tmp_path / "task-state"
-    state = RuntimeState(RuntimeStorage.filesystem(storage_root))
+    state = Persistence(PersistenceStorage.filesystem(storage_root))
     await state.initialize(namespace="namespace", tenant_id="tenant")
     graph = TaskGraph(
         "graph",
@@ -756,7 +745,7 @@ async def test_runtime_storage_snapshot_restores_task_binding_capture(
     try:
         captures = TaskGraphBindingCaptureStore(
             "namespace",
-            state.object_store(RuntimeDomain.TASK),
+            state.object_store(PersistenceDomain.TASK),
         )
         await captures.capture(admission, graph, tasks=(task,))
         await state.task.admissions.admit(admission, graph)
@@ -768,7 +757,7 @@ async def test_runtime_storage_snapshot_restores_task_binding_capture(
         await state.close()
 
     snapshot_store = InMemoryObjectStore("task-snapshot")
-    read_state = RuntimeState(RuntimeStorage.filesystem(storage_root))
+    read_state = Persistence(PersistenceStorage.filesystem(storage_root))
     await read_state.initialize(
         namespace="namespace",
         tenant_id="tenant",
@@ -783,13 +772,13 @@ async def test_runtime_storage_snapshot_restores_task_binding_capture(
         await read_state.close()
 
     restored_root = tmp_path / "task-restored"
-    await RuntimeState.restore_snapshot(
+    await Persistence.restore_snapshot(
         snapshot_ref,
         object_store=snapshot_store,
         root=restored_root,
         limits=SnapshotLimits(max_entries=1024, max_bytes=8 * 1024 * 1024),
     )
-    restored = RuntimeState(RuntimeStorage.from_root(restored_root))
+    restored = Persistence(PersistenceStorage.from_root(restored_root))
     await restored.initialize(
         namespace="namespace",
         tenant_id="tenant",
@@ -798,7 +787,7 @@ async def test_runtime_storage_snapshot_restores_task_binding_capture(
     try:
         restored_captures = TaskGraphBindingCaptureStore(
             "namespace",
-            restored.object_store(RuntimeDomain.TASK),
+            restored.object_store(PersistenceDomain.TASK),
         )
         loaded = await restored_captures.load(admission)
         assert set(loaded.tasks) == {("test.capture-agent", 1)}
@@ -871,16 +860,18 @@ async def test_recover_pending_preflights_all_subjects_before_dispatch() -> None
             events.append(("recover", graph_id, request.principal))
             return graph_id
 
-    runtime = object.__new__(Runtime)
-    runtime._closed = False
-    runtime._closing = False
-    runtime._task_admissions = admissions
-    runtime._default_principal = actor
-    runtime._context = SimpleNamespace(tenant_id="tenant")
-    runtime._namespace = "runtime"
-    runtime._graph_service = GraphService()
+    engine = object.__new__(TaskEngine)
+    engine._owner = engine
+    engine._persistence = SimpleNamespace(namespace="runtime", tenant_id="tenant", ready=True)
+    engine._closed = False
+    engine._closing = False
+    engine._task_admissions = admissions
+    engine._default_principal = actor
+    engine._context = SimpleNamespace(tenant_id="tenant")
+    engine._namespace = "runtime"
+    engine._graph_service = GraphService()
 
-    page = await runtime._recover_pending_tasks(
+    page = await engine._recover_pending_tasks(
         Engine(),
         cursor=None,
         limit=10,
@@ -899,7 +890,7 @@ async def test_recover_pending_preflights_all_subjects_before_dispatch() -> None
 
     events.clear()
     with pytest.raises(AIError) as missing_definition:
-        await runtime._recover_pending_tasks(
+        await engine._recover_pending_tasks(
             Engine(fail_on="graph-b"),
             cursor=None,
             limit=10,
@@ -914,9 +905,9 @@ async def test_recover_pending_preflights_all_subjects_before_dispatch() -> None
     ]
 
     events.clear()
-    runtime._graph_service = GraphService(fail_authorize_on="graph-b")
+    engine._graph_service = GraphService(fail_authorize_on="graph-b")
     with pytest.raises(AIError) as denied:
-        await runtime._recover_pending_tasks(
+        await engine._recover_pending_tasks(
             Engine(),
             cursor=None,
             limit=10,

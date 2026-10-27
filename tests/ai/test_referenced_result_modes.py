@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from linktools.ai.task import Task
+from linktools.ai.task.engine import TaskEngine
+
+from linktools.ai.persistence import Persistence
 """Reference representation and exact selected-source routing contracts."""
 
 import asyncio
@@ -19,13 +23,14 @@ from linktools.ai.capability import AgentContext, ReferencedInputsCapability
 from linktools.ai.core import ExecutionStatus, service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ReferencedContent
-from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._harness import SummaryProviderModel
-from linktools.ai.runtime._input import decode_task_prompt_draft, task_prompt_draft
-from linktools.ai.runtime._message import decode_model_messages, encode_model_messages, project_transient_binary_content
-from linktools.ai.runtime._tool_return_codec import decode_tool_return_content, encode_tool_return_content
-from linktools.ai.runtime._user_content_codec import decode_user_content_item, encode_user_content_item
-from linktools.ai.runtime.state._views import project_session_history_message
+from linktools.ai.inputs import decode_task_prompt_draft, task_prompt_draft
+from linktools.ai.model.messages import decode_model_messages, encode_model_messages, project_transient_binary_content
+from linktools.ai.model._tool_return_codec import decode_tool_return_content, encode_tool_return_content
+from linktools.ai.model._user_content_codec import decode_user_content_item, encode_user_content_item
+from linktools.ai.persistence._views import project_session_history_message
 from linktools.ai.spec import CapabilityRef
 from linktools.ai.storage import StorageEntryRevision
 
@@ -227,7 +232,7 @@ async def test_multiple_loaders_in_one_contribution_are_ambiguous() -> None:
     features.capability(CombinedCapability([ReferencedInputsCapability(load), ReferencedInputsCapability(load)]),
                         id="ambiguous", scope="agent")
     features.agent("reader", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open("ambiguous-references", features=features, storage=RuntimeStorage.in_memory()) as runtime:
+    async with Persistence.open('ambiguous-references', storage=PersistenceStorage.in_memory()) as persistence_230, Runtime.attach(persistence=persistence_230, features=features) as runtime:
         result = (await runtime.agents.get("reader").run("inspect", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.FAILED
         assert result.error_code == ErrorCode.CAPABILITY_CONFLICT.value
@@ -248,7 +253,7 @@ def test_text_reference_budget_counts_original_bytes_not_summary_length() -> Non
 
 @pytest.mark.asyncio
 async def test_two_sources_are_selected_and_restored_after_runtime_reopen(tmp_path) -> None:
-    from linktools.ai.runtime import AgentTaskInput, CaptureInputRequest
+    from linktools.ai.inputs import AgentTaskInput, CaptureInputRequest
     from linktools.ai.task import TaskGraph, TaskNode
     from .test_tool_result_processing import _stored_bytes
     from ._runtime_test_helpers import _UsageFunctionModel
@@ -285,27 +290,26 @@ async def test_two_sources_are_selected_and_restored_after_runtime_reopen(tmp_pa
         result.agent("reader", allow_tools=(), allow_skills=(), allow_subagents=())
         return result
 
-    async with Runtime.open("two-source-reopen", storage=RuntimeStorage.filesystem(tmp_path),
-                            features=features("original")) as runtime:
+    async with Persistence.open('two-source-reopen', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_288, Runtime.attach(persistence=persistence_288, features=features('original')) as runtime, TaskEngine.open(persistence=persistence_288, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         execution = await runtime.agents.get("reader").start([first, second], principal=principal)
         assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
-        capture = await runtime.executions.capture_input(
+        capture = await runtime_engine.inputs.capture_input(
             execution.execution_id, CaptureInputRequest(principal, "two-source-capture", "clean"),
         )
-    async with Runtime.open("two-source-reopen", storage=RuntimeStorage.filesystem(tmp_path),
-                            features=features("reopened")) as runtime:
-        task = await runtime.tasks.from_agent_capture("captured-sources", capture, principal=principal)
-        graph = await runtime.tasks.bind(task).start(TaskGraph("captured-source-graph", (
+    async with Persistence.open('two-source-reopen', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_295, Runtime.attach(persistence=persistence_295, features=features('reopened')) as runtime, TaskEngine.open(persistence=persistence_295, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        task_capture = await runtime_engine.inputs.read_agent(capture, principal=principal)
+        task_capture.require_importable()
+        task = Task.from_agent("captured-sources", runtime.agents.restore(task_capture.binding))
+        graph = await runtime_engine.with_definitions(task).start(TaskGraph("captured-source-graph", (
             TaskNode("read", task=task, input=AgentTaskInput([first, second])),
         )), principal=principal, idempotency_key="captured-source-graph")
         await graph.wait(timeout_seconds=15)
         execution = await graph.execution("read")
         assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
     assert calls == [("original", "first"), ("original", "second"), ("reopened", "first"), ("reopened", "second")]
-    async with Runtime.open("two-source-reopen", storage=RuntimeStorage.filesystem(tmp_path),
-                            features=features("changed", revision=2)) as runtime:
+    async with Persistence.open('two-source-reopen', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_305, Runtime.attach(persistence=persistence_305, features=features('changed', revision=2)) as runtime, TaskEngine.open(persistence=persistence_305, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         with pytest.raises(AIError) as unavailable:
-            await runtime.tasks.from_agent_capture("unavailable-sources", capture, principal=principal)
+            Task.from_agent("unavailable-sources", runtime.agents.restore((await runtime_engine.inputs.read_agent(capture, principal=principal)).binding))
         assert unavailable.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
     stored = _stored_bytes(tmp_path)
     assert _BODY not in stored and base64.b64encode(_BODY) not in stored

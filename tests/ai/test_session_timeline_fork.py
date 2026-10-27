@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Session timeline fork regressions."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from datetime import datetime, timezone
 
 import pytest
@@ -18,9 +18,9 @@ from linktools.ai.core import (
     TenantAuthorizationPolicy,
 )
 from linktools.ai.runtime._session import RuntimeSessionService
-from linktools.ai.runtime.service_api import ForkSessionRequest
-from linktools.ai.runtime.state import RuntimeStorage
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.execution import ForkSessionRequest
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.contracts import (
     ExecutionRecord,
     SessionRecord,
     StoredUserInput,
@@ -119,8 +119,8 @@ class _ExecutionService:
 
 @pytest.mark.asyncio
 async def test_fork_freezes_terminal_turns_and_excludes_active_turn() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="session-timeline-fork", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session("source"))

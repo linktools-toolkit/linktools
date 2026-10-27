@@ -10,14 +10,14 @@ from linktools.ai.agent._output import bind_output
 from linktools.ai.asset import AssetKey, AssetVersionRef
 from linktools.ai.capability import SkillDefinition, SkillResource, SkillSourceRef
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._codec import (
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.codec import (
     _encode_persisted_domain,
     decode_domain,
     encode_domain,
     iter_runtime_object_refs,
 )
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.persistence.contracts import (
     ExecutionRecord,
     PendingDeferredCall,
     PendingToolContinuation,
@@ -50,7 +50,7 @@ def _instruction_ref(*, object_backed: bool = False) -> RuntimePayloadRef:
         )
     else:
         payload = StoredPayload.inline_json({"version": 1, "documents": []})
-    return RuntimePayloadRef(payload, RuntimeDomain.EXECUTION)
+    return RuntimePayloadRef(payload, PersistenceDomain.EXECUTION)
 
 
 def _execution(repository_instructions: RuntimePayloadRef | None) -> ExecutionRecord:
@@ -163,11 +163,11 @@ def test_object_ref_traversal_allows_additive_skill_asset_fields() -> None:
     refs = tuple(
         iter_runtime_object_refs(
             _encode_persisted_domain(execution),
-            default_domain=RuntimeDomain.EXECUTION,
+            default_domain=PersistenceDomain.EXECUTION,
         )
     )
 
-    assert refs == ((RuntimeDomain.EXECUTION, reference.payload.ref),)
+    assert refs == ((PersistenceDomain.EXECUTION, reference.payload.ref),)
 
 
 def test_deferred_frontier_round_trips_current_contract() -> None:
@@ -185,7 +185,7 @@ def test_object_ref_traversal_finds_repository_instruction_object() -> None:
     refs = tuple(
         iter_runtime_object_refs(
             _encode_persisted_domain(execution),
-            default_domain=RuntimeDomain.EXECUTION,
+            default_domain=PersistenceDomain.EXECUTION,
         )
     )
-    assert refs == ((RuntimeDomain.EXECUTION, reference.payload.ref),)
+    assert refs == ((PersistenceDomain.EXECUTION, reference.payload.ref),)

@@ -14,8 +14,9 @@ from linktools.ai.core import (
     TaskStatus,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, TaskGraphRun
-from linktools.ai.runtime._event import DefaultEventService, LiveExecutionEventBroker
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.task.engine import TaskGraphRun
+from linktools.ai.execution.events import DefaultEventService, LiveExecutionEventBroker
 from linktools.ai.task import TaskGraphState, TaskNode, TaskNodeView
 
 
@@ -169,13 +170,13 @@ class _RecoveryTaskGraphService:
 
 @pytest.mark.asyncio
 async def test_recovery_required_task_result_is_not_ready_not_corrupt() -> None:
-    runtime = object.__new__(Runtime)
-    runtime._namespace = "namespace"
-    runtime._closed = False
-    runtime._closing = False
-    runtime._task_node_runtime = None
+    engine = object.__new__(TaskEngine)
+    engine._namespace = "namespace"
+    engine._closed = False
+    engine._closing = False
+    engine._task_node_runtime = None
     run = TaskGraphRun(
-        runtime,
+        engine,
         _RecoveryTaskGraphService(),
         "graph",
         Principal("principal", "tenant"),

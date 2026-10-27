@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Evaluation reads persist only snapshots needed by durable consumers."""
-from ._runtime_test_helpers import model_features
+
+from linktools.ai.persistence import Persistence
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 
 import asyncio
 from dataclasses import replace
@@ -16,11 +19,11 @@ from linktools.ai.evaluation import (
     DatasetSpec, EvaluationPolicy, EvaluationReport, EvaluationSpec, ScoreComparisonSelection, ScoreFilter, ScoreSelection,
     StartEvaluationRequest, TrialFilter,
 )
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task import Task, TaskNodeContext
 
 from .test_evaluation_consumers import (
-    CONTEXT, EVALUATION_COMPLETION_TIMEOUT_SECONDS, PRINCIPAL, FixtureModels, exact, rule_scorer,
+    CONTEXT, EVALUATION_COMPLETION_TIMEOUT_SECONDS, PRINCIPAL, exact, rule_scorer,
 )
 
 
@@ -37,10 +40,14 @@ async def test_pages_save_only_resumable_snapshots(
 
     task = Task("paging.target", target, effect_policy="none")
     scorer = Task("paging.scorer", exact, effect_policy="none")
-    storage = RuntimeStorage.in_memory() if backend == "memory" else RuntimeStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.filesystem(tmp_path)
     published: list[EvaluationReport | ComparisonReport] = []
-    async with Runtime.open("paging", features=model_features(FixtureModels()), storage=storage, context=CONTEXT) as runtime:
-        state = runtime.evaluations._state
+    async with (
+        Persistence.open('paging', storage=storage, tenant_id='evaluation-consumers') as persistence_42,
+        TaskEngine.open(task, scorer, persistence=persistence_42, context=CONTEXT) as engine,
+        Evaluations.open(engine) as evaluations,
+    ):
+        state = evaluations._state
         publish = state.publish_report
 
         async def save(report: EvaluationReport | ComparisonReport) -> EvaluationReport | ComparisonReport:
@@ -50,14 +57,14 @@ async def test_pages_save_only_resumable_snapshots(
             return result
 
         monkeypatch.setattr(state, "publish_report", save)
-        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("paging", 1), cases=tuple(
+        dataset = await evaluations.publish_dataset(DatasetSpec(DatasetRef("paging", 1), cases=tuple(
             CaseSpec.task(CaseRef("paging", str(index), 1), input={"answer": str(index)}, expected=str(index))
             for index in range(3)
         )), principal=PRINCIPAL, idempotency_key="dataset")
-        run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(
+        run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(
             dataset, (CandidateSpec("current", task=task.ref),), (rule_scorer(scorer),),
             policy=EvaluationPolicy(allow_volatile=backend == "memory"),
-        ), PRINCIPAL, "run"), engine=runtime.tasks.bind(task, scorer))
+        ), PRINCIPAL, "run"))
         pages = {}
         for kind in ("trials", "scores"):
             read = run.trials if kind == "trials" else run.scores
@@ -103,17 +110,17 @@ async def test_pages_save_only_resumable_snapshots(
             final_cursors[kind] = second.next_cursor
         report = await run.create_report()
         assert len(published) == 3 and published[-1] == report
-        assert await runtime.evaluations.get_report(report.report_id, principal=PRINCIPAL) == report
+        assert await evaluations.get_report(report.report_id, principal=PRINCIPAL) == report
         spec = ComparisonSpec(CandidateSlotRef(run.experiment_id, "current"),
                               CandidateSlotRef(run.experiment_id, "current"),
                               (ScoreComparisonSelection(ScoreSelection("exact", "exact_match"),
                                                         ScoreSelection("exact", "exact_match")),))
-        comparison = await runtime.evaluations.create_comparison_report(spec, principal=PRINCIPAL)
+        comparison = await evaluations.create_comparison_report(spec, principal=PRINCIPAL)
         assert len(published) == 5
         assert published[-2].cutoff == report.cutoff
         assert published[-1] == comparison
-        assert await runtime.evaluations.get_report(comparison.report_id, principal=PRINCIPAL) == comparison
-        repeated = await runtime.evaluations.create_comparison_report(replace(spec, cutoff=comparison.cutoff), principal=PRINCIPAL)
+        assert await evaluations.get_report(comparison.report_id, principal=PRINCIPAL) == comparison
+        repeated = await evaluations.create_comparison_report(replace(spec, cutoff=comparison.cutoff), principal=PRINCIPAL)
         assert repeated.cutoff == comparison.cutoff and len(published) == 6
         experiment_id = run.experiment_id
         if backend == "memory":
@@ -126,10 +133,14 @@ async def test_pages_save_only_resumable_snapshots(
             return
 
     # Reopening the backend must recover the original cursors even after live state changes.
-    storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("paging", features=model_features(FixtureModels()), storage=storage, context=CONTEXT) as runtime:
-        run = await runtime.evaluations.get(experiment_id, principal=PRINCIPAL)
-        state = runtime.evaluations._state
+    storage = PersistenceStorage.filesystem(tmp_path)
+    async with (
+        Persistence.open('paging', storage=storage, tenant_id='evaluation-consumers') as persistence_130,
+        TaskEngine.open(persistence=persistence_130, context=CONTEXT) as engine,
+        Evaluations.open(engine) as evaluations,
+    ):
+        run = await evaluations.get(experiment_id, principal=PRINCIPAL)
+        state = evaluations._state
         publish = state.publish_report
 
         async def save_after_reopen(report: EvaluationReport | ComparisonReport) -> EvaluationReport | ComparisonReport:
@@ -143,4 +154,4 @@ async def test_pages_save_only_resumable_snapshots(
             final = await read(filters=filters, cursor=final_cursors[kind], limit=1)
             assert final.next_cursor is None and final.items == frozen[2:]
             assert len(published) == 6
-            assert await runtime.evaluations.get_report(snapshot.report_id, principal=PRINCIPAL) == snapshot
+            assert await evaluations.get_report(snapshot.report_id, principal=PRINCIPAL) == snapshot

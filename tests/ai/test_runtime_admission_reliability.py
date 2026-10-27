@@ -1,25 +1,39 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from linktools.ai.task.engine import TaskEngine
+
+from linktools.ai.persistence import Persistence
+
+from linktools.ai.core import ExecutionContext
 """Invalid admission and closed Runtime requests fail before side effects."""
 from ._runtime_test_helpers import model_features
 
 import ast
 import inspect
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
 
 from linktools.ai.core import Page, Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Agent, Execution, Runtime, RuntimeContext, RuntimeStorage, TaskGraphRun
-from linktools.ai.runtime.service_api import (
-    CancelExecutionRequest, CloseSessionRequest, CreateSessionRequest,
-    ExecutionTreeEvent, ForkExecutionRequest, ForkSessionRequest,
-    RetryExecutionRequest, UpdateSessionRequest,
+from linktools.ai.runtime import Agent, Runtime, RuntimeFeatures
+from linktools.ai.execution import Execution
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.task.engine import TaskGraphRun
+from linktools.ai.execution import (
+    CancelExecutionRequest,
+    CloseSessionRequest,
+    CreateSessionRequest,
+    ExecutionTreeEvent,
+    ForkExecutionRequest,
+    ForkSessionRequest,
+    RetryExecutionRequest,
+    UpdateSessionRequest,
 )
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._memory import InMemoryStateStorageGroup, InMemoryStateStore
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._memory import InMemoryStateStorageGroup, InMemoryStateStore
 from linktools.ai.task import TaskEffectResolution, TaskGraph, TaskGraphInfo, TaskGraphState
 
 from ._runtime_test_helpers import RuntimeUsageModels
@@ -39,17 +53,17 @@ async def _reject_side_effect(*args: object, **kwargs: object) -> None:
 async def test_invalid_convenience_keys_never_activate_or_write(
     key: object, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    storage = RuntimeStorage.in_memory()
-    async with Runtime.open("admission-validation", features=model_features(RuntimeUsageModels()), storage=storage) as runtime:
+    storage = PersistenceStorage.in_memory()
+    async with Persistence.open('admission-validation', storage=storage) as persistence_45, Runtime.attach(persistence=persistence_45, features=model_features(RuntimeUsageModels())) as runtime, TaskEngine.open(persistence=persistence_45, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         agent = runtime.agents.get()
         session = agent.session("session")
         principal = runtime.default_principal
-        execution = Execution(runtime, "execution", principal, _unused_watch)
-        task_execution = Execution(runtime, "task-execution", principal, _unused_watch,
-            _task_cancel=lambda supplied_key, force: runtime._cancel_task_execution(
+        execution = Execution(runtime._execution_binding, "execution", principal, _unused_watch)
+        task_execution = Execution(runtime._execution_binding, "task-execution", principal, _unused_watch,
+            _task_cancel=lambda supplied_key, force: runtime_engine._cancel_task_execution(
                 "graph", "node", "task-execution", principal, supplied_key, force))
-        engine = runtime.tasks.bind()
-        graph = TaskGraphRun(runtime, runtime._graph_service, "graph", principal, _unused_watch, engine)
+        engine = runtime_engine.with_definitions()
+        graph = TaskGraphRun(engine, engine._graph_service, "graph", principal, _unused_watch)
         operations = (
             lambda: agent.start("prompt", idempotency_key=key),
             lambda: agent.run("prompt", idempotency_key=key),
@@ -78,8 +92,8 @@ async def test_invalid_convenience_keys_never_activate_or_write(
             guarded.setattr(InMemoryStateStorageGroup, "mutate", _reject_side_effect)
             guarded.setattr(runtime, "_resolve_agent_binding", _reject_side_effect)
             guarded.setattr(engine, "_activate_graph", _reject_side_effect)
-            guarded.setattr(runtime._task_node_runtime, "activate_graph", _reject_side_effect)
-            for domain in RuntimeDomain:
+            guarded.setattr(runtime_engine._task_node_runtime, "activate_graph", _reject_side_effect)
+            for domain in PersistenceDomain:
                 guarded.setattr(runtime._state.object_store(domain), "put", _reject_side_effect)
             for operation in operations:
                 with pytest.raises(AIError) as raised:
@@ -89,8 +103,7 @@ async def test_invalid_convenience_keys_never_activate_or_write(
 
 @pytest.mark.asyncio
 async def test_omitted_keys_generate_independent_admissions_and_explicit_keys_replay() -> None:
-    async with Runtime.open("generated-keys", features=model_features(RuntimeUsageModels()),
-                            storage=RuntimeStorage.in_memory()) as runtime:
+    async with Persistence.open('generated-keys', storage=PersistenceStorage.in_memory()) as persistence_94, Runtime.attach(persistence=persistence_94, features=model_features(RuntimeUsageModels())) as runtime:
         agent = runtime.agents.get()
         first = await agent.start("prompt")
         await first.wait()
@@ -103,76 +116,88 @@ async def test_omitted_keys_generate_independent_admissions_and_explicit_keys_re
         assert replay.execution_id == original.execution_id
 
 
-def _readable_runtime() -> Runtime[None]:
+@asynccontextmanager
+async def _readable_runtime() -> AsyncIterator[Runtime[None]]:
     async def history(*args: object, **kwargs: object) -> Page:
         return Page(())
 
-    service = SimpleNamespace(history=history)
-    stub = object()
-    return Runtime(stub, stub, service, service, stub,
-        SimpleNamespace(_bind_observation=lambda *args: None), stub, stub, stub, stub, None,
-        namespace="closed-runtime", context=RuntimeContext(None))
+    async with Runtime.open(
+        "closed-runtime", storage=PersistenceStorage.in_memory(), features=RuntimeFeatures(),
+    ) as runtime:
+        runtime._execution_service.history = history
+        runtime._session_service.history = history
+        yield runtime
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("closing", [False, True], ids=["closed", "closing"])
 async def test_closed_runtime_rejects_admission_control_and_observation_nonretryably(closing: bool) -> None:
-    runtime = _readable_runtime()
-    principal = runtime.default_principal
-    agent = Agent(runtime, "default", 1)
-    session = agent.session("session")
-    execution = Execution(runtime, "execution", principal, _unused_watch)
-    graph = TaskGraphRun(runtime, runtime._graph_service, "graph", principal, _unused_watch)
-    if closing:
-        runtime._closing = True
-    else:
-        await runtime.close()
-    operations = (
-        lambda: agent.start("prompt"),
-        lambda: agent.create_session("new-session"),
-        lambda: session.start("prompt"),
-        lambda: session.fork("new-session"),
-        lambda: session.update(expected_revision=1, metadata={}),
-        lambda: session.close(),
-        lambda: execution.cancel(),
-        lambda: execution.recover(),
-        lambda: execution.wait(),
-        lambda: graph.cancel(),
-        lambda: graph.recover(),
-        lambda: graph.wait(),
-        lambda: runtime.sessions.create("default", CreateSessionRequest(principal, "new-session", "create")),
-        lambda: runtime.sessions.fork("default", "session", ForkSessionRequest(principal, "new-session", "fork")),
-        lambda: runtime.sessions.update("default", "session", UpdateSessionRequest(principal, 1, "update", {})),
-        lambda: runtime.sessions.close("session", CloseSessionRequest(principal, "close")),
-        lambda: runtime.executions.retry("execution", RetryExecutionRequest("prompt", principal, "retry")),
-        lambda: runtime.executions.fork("execution", ForkExecutionRequest("prompt", principal, "fork")),
-        lambda: runtime.executions.cancel("execution", CancelExecutionRequest(principal, "cancel")),
-        lambda: runtime.executions.recover("execution", principal=principal),
-    )
-    for operation in operations:
-        with pytest.raises(AIError) as raised:
-            await operation()
-        assert raised.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
-        assert raised.value.retryable is False
-    for run in (execution, graph):
-        with pytest.raises(AIError) as raised:
-            run.watch()
-        assert raised.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
-        assert raised.value.retryable is False
-    assert (await execution.history()).items == ()
-    assert (await session.history()).items == ()
+    async with _readable_runtime() as runtime:
+        principal = runtime.default_principal
+        agent = Agent(runtime, "default", 1)
+        session = agent.session("session")
+        execution = Execution(runtime._execution_binding, "execution", principal, _unused_watch)
+        engine = object.__new__(TaskEngine)
+        engine._owner = engine
+        engine._persistence = SimpleNamespace(ready=True)
+        engine._closed = not closing
+        engine._closing = closing
+        graph = TaskGraphRun(engine, SimpleNamespace(), "graph", principal, _unused_watch)
+        if closing:
+            runtime._closing = True
+        else:
+            await runtime.close()
+        operations = (
+            lambda: agent.start("prompt"),
+            lambda: agent.create_session("new-session"),
+            lambda: session.start("prompt"),
+            lambda: session.fork("new-session"),
+            lambda: session.update(expected_revision=1, metadata={}),
+            lambda: session.close(),
+            lambda: execution.cancel(),
+            lambda: execution.recover(),
+            lambda: execution.wait(),
+            lambda: graph.cancel(),
+            lambda: graph.recover(),
+            lambda: graph.wait(),
+            lambda: runtime.sessions.create("default", CreateSessionRequest(principal, "new-session", "create")),
+            lambda: runtime.sessions.fork("default", "session", ForkSessionRequest(principal, "new-session", "fork")),
+            lambda: runtime.sessions.update("default", "session", UpdateSessionRequest(principal, 1, "update", {})),
+            lambda: runtime.sessions.close("session", CloseSessionRequest(principal, "close")),
+            lambda: runtime.executions.retry("execution", RetryExecutionRequest("prompt", principal, "retry")),
+            lambda: runtime.executions.fork("execution", ForkExecutionRequest("prompt", principal, "fork")),
+            lambda: runtime.executions.cancel("execution", CancelExecutionRequest(principal, "cancel")),
+            lambda: runtime.executions.recover("execution", principal=principal),
+        )
+        for operation in operations:
+            with pytest.raises(AIError) as raised:
+                await operation()
+            assert raised.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+            assert raised.value.retryable is False
+        for run in (execution, graph):
+            with pytest.raises(AIError) as raised:
+                run.watch()
+            assert raised.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+            assert raised.value.retryable is False
+        assert (await execution.history()).items == ()
+        assert (await session.history()).items == ()
 
 
 @pytest.mark.asyncio
 async def test_graph_state_content_mode_selects_existing_public_types() -> None:
-    runtime = _readable_runtime()
+    engine = object.__new__(TaskEngine)
+    engine._owner = engine
+    engine._persistence = SimpleNamespace(ready=True)
+    engine._closed = False
+    engine._closing = False
+    principal = Principal("reader", "default")
     expected = TaskGraphState("graph", TaskStatus.SUCCEEDED, (), (), 7)
 
     async def state(graph_id: str, *, principal: Principal) -> TaskGraphState:
         return expected
 
-    run = TaskGraphRun(runtime, SimpleNamespace(state=state), "graph",
-        runtime.default_principal, _unused_watch)
+    run = TaskGraphRun(engine, SimpleNamespace(state=state), "graph",
+        principal, _unused_watch)
     assert isinstance(await run.state(), TaskGraphInfo)
     assert isinstance(await run.state(include_content=False), TaskGraphInfo)
     assert await run.state(include_content=True) is expected

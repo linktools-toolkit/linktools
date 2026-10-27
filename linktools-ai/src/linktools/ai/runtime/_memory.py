@@ -34,9 +34,9 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
-from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
-from .state import RuntimeDomain
-from .state._contracts import MemoryRecord, MemoryRepositories
+from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
+from ..persistence import PersistenceDomain
+from ..persistence.contracts import MemoryRecord, MemoryRepositories
 
 _logger = environ.get_logger("ai.runtime.memory")
 _MAX_CONTENT_CHARS = 65_536
@@ -178,8 +178,8 @@ class RuntimeMemoryStore:
         if not payload_fits_inline(stored_content, self._payload_policy):
             reference = await put_runtime_object(
                 self._object_store,
-                RuntimeObjectKeyFactory(self._namespace),
-                RuntimeDomain.MEMORY,
+                ObjectKeyFactory(self._namespace),
+                PersistenceDomain.MEMORY,
                 self._tenant_id,
                 content.encode("utf-8"),
             )

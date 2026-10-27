@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import pytest
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, SessionView
+from linktools.ai.runtime.agent_execution import AgentExecutionPort
+from linktools.ai.execution import SessionView
 from linktools.ai.core import Principal, PrincipalKind
 
 
@@ -36,16 +37,15 @@ class _RaceSessionService:
 
 @pytest.mark.asyncio
 async def test_session_auto_create_race_reuses_authorized_session() -> None:
-    runtime = object.__new__(Runtime)
     service = _RaceSessionService(authorize_after_conflict=True)
-    runtime._session_service = service
-    runtime.sessions = service
+    port = SimpleNamespace(sessions=service)
     definition = SimpleNamespace(
         digest="a" * 64,
         spec=SimpleNamespace(id="agent"),
     )
 
-    await runtime._ensure_session(
+    await AgentExecutionPort._ensure_session(
+        port,
         definition,
         "session",
         Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
@@ -57,17 +57,16 @@ async def test_session_auto_create_race_reuses_authorized_session() -> None:
 
 @pytest.mark.asyncio
 async def test_session_auto_create_conflict_does_not_reveal_foreign_session() -> None:
-    runtime = object.__new__(Runtime)
     service = _RaceSessionService(authorize_after_conflict=False)
-    runtime._session_service = service
-    runtime.sessions = service
+    port = SimpleNamespace(sessions=service)
     definition = SimpleNamespace(
         digest="a" * 64,
         spec=SimpleNamespace(id="agent"),
     )
 
     with pytest.raises(AIError) as error:
-        await runtime._ensure_session(
+        await AgentExecutionPort._ensure_session(
+            port,
             definition,
             "session",
             Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),

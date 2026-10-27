@@ -13,13 +13,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.runtime.state import RuntimeState
-import linktools.ai.runtime.state._resource_scope as materializer
+from linktools.ai.persistence import Persistence
+import linktools.ai.persistence._resource_scope as materializer
 import linktools.ai.storage._files as files_module
 import linktools.ai.storage._object_filesystem as object_module
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.storage import (
     FilesystemObjectStore,
     MySQLDialect,
@@ -583,7 +583,7 @@ async def test_sqlite_route_preserves_question_mark_in_filename(
     first = tmp_path / "runtime?one.sqlite"
     second = tmp_path / "runtime?two.sqlite"
     for path, namespace in ((first, "first"), (second, "second")):
-        state = RuntimeState(RuntimeStorage.sqlite(path))
+        state = Persistence(PersistenceStorage.sqlite(path))
         await state.initialize(namespace=namespace, tenant_id="tenant")
         await state.close()
 
@@ -613,13 +613,13 @@ async def test_sqlite_initial_publish_failure_leaves_no_final_database(
         raise OSError(errno.EIO, "injected database sync failure")
 
     monkeypatch.setattr(materializer, "_sync_file", fail_sync)
-    failed = RuntimeState(RuntimeStorage.sqlite(database))
+    failed = Persistence(PersistenceStorage.sqlite(database))
     with pytest.raises(OSError):
         await failed.initialize(namespace="sqlite-failure", tenant_id="tenant")
     assert not database.exists()
 
     monkeypatch.setattr(materializer, "_sync_file", original_sync)
-    retry = RuntimeState(RuntimeStorage.sqlite(database))
+    retry = Persistence(PersistenceStorage.sqlite(database))
     await retry.initialize(namespace="sqlite-failure", tenant_id="tenant")
     await retry.close()
     assert database.is_file()
@@ -643,13 +643,13 @@ async def test_sqlite_post_publish_sync_failure_keeps_complete_database(
         original_sync(path)
 
     monkeypatch.setattr(materializer, "sync_directory", sync)
-    state = RuntimeState(RuntimeStorage.sqlite(database))
+    state = Persistence(PersistenceStorage.sqlite(database))
     with pytest.raises(AIError) as raised:
         await state.initialize(namespace="sqlite-published", tenant_id="tenant")
     assert raised.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
     assert database.is_file()
 
     monkeypatch.setattr(materializer, "sync_directory", original_sync)
-    retry = RuntimeState(RuntimeStorage.sqlite(database))
+    retry = Persistence(PersistenceStorage.sqlite(database))
     await retry.initialize(namespace="sqlite-published", tenant_id="tenant")
     await retry.close()

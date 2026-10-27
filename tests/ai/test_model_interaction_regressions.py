@@ -17,7 +17,7 @@ from pydantic_ai.messages import (
 )
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._model_interaction import (
+from linktools.ai.persistence._model_interaction import (
     StagedContextInline,
     StagedContextProjection,
     StagedContextSpan,
@@ -26,13 +26,13 @@ from linktools.ai.runtime._model_interaction import (
     model_response_projection,
     project_public_messages,
 )
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._contracts import TranscriptSpanRef
-from linktools.ai.runtime.state._model_interaction_store import (
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.contracts import TranscriptSpanRef
+from linktools.ai.persistence._model_interaction_store import (
     ModelInteractionInMemoryStepArchive,
 )
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord
-from linktools.ai.runtime.state._steps import (
+from linktools.ai.persistence._step_contracts import AgentRunRecord
+from linktools.ai.persistence.runs import (
     InMemoryStepArchive,
     RuntimeAgentRunStore,
     StagingAgentRunStore,
@@ -122,7 +122,7 @@ async def test_base_run_store_applies_interaction_page_contract(
 async def test_runtime_run_store_pages_plain_staging(enhanced: bool) -> None:
     store = RuntimeAgentRunStore(
         StagingAgentRunStore(),
-        conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
+        conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
         execution_archive=None,
         recovery_archive=None,
     )
@@ -143,10 +143,10 @@ async def test_runtime_run_store_pages_plain_staging(enhanced: bool) -> None:
 @pytest.mark.asyncio
 async def test_runtime_run_store_continues_recovery_interaction_high_water() -> None:
     staging = StagingAgentRunStore()
-    recovery = ModelInteractionInMemoryStepArchive(RuntimeDomain.CHECKPOINT)
+    recovery = ModelInteractionInMemoryStepArchive(PersistenceDomain.CHECKPOINT)
     store = RuntimeAgentRunStore(
         staging,
-        conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
+        conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
         execution_archive=None,
         recovery_archive=recovery,
     )
@@ -176,7 +176,7 @@ async def test_runtime_run_store_continues_recovery_interaction_high_water() -> 
 
 @pytest.mark.asyncio
 async def test_interaction_prepare_resolves_explicit_local_span() -> None:
-    archive = ModelInteractionInMemoryStepArchive(RuntimeDomain.TRACE)
+    archive = ModelInteractionInMemoryStepArchive(PersistenceDomain.TRACE)
     await archive.initialize()
     try:
         run = AgentRunRecord("run")
@@ -226,7 +226,7 @@ async def test_interaction_prepare_resolves_explicit_local_span() -> None:
 
         assert len(prepared) == 1
         assert prepared[0].request_context.items == (
-            TranscriptSpanRef(RuntimeDomain.TRACE, "run", 4, 5),
+            TranscriptSpanRef(PersistenceDomain.TRACE, "run", 4, 5),
         )
     finally:
         await archive.close()
@@ -353,7 +353,7 @@ async def test_interaction_capture_excludes_acknowledged_identities() -> None:
 
 @pytest.mark.asyncio
 async def test_volatile_archive_does_not_expose_staged_interactions() -> None:
-    archive = ModelInteractionInMemoryStepArchive(RuntimeDomain.TRACE)
+    archive = ModelInteractionInMemoryStepArchive(PersistenceDomain.TRACE)
     await archive.initialize()
     try:
         archive.stage_model_interaction(_interaction(1))

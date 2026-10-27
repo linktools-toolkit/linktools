@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.workspace import ReadOnlySandboxPolicy, _bubblewrap
+from linktools.ai.workspace import WorkspaceReadPolicy, _bubblewrap
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Bubblewrap requires Linux")
 
@@ -104,7 +104,7 @@ def test_restricted_host_read_never_follows_new_file_symlink(
         value = _bubblewrap._read_workspace_bytes(
             tmp_path,
             "allowed.txt",
-            read_policy=ReadOnlySandboxPolicy(("allowed.txt",)),
+            read_policy=WorkspaceReadPolicy(("allowed.txt",)),
             hidden_paths=(),
             max_bytes=None,
         )

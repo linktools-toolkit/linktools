@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Durable Task admission and recovery contracts."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from datetime import datetime, timezone
 
 import pytest
@@ -19,10 +19,10 @@ from linktools.ai.core import (
     principal_identity_payload,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
-from linktools.ai.runtime.state._plan import RuntimeDomain
-from linktools.ai.runtime.state._store import OperationQuery, stream_digest
+from linktools.ai.persistence._plan import PersistenceDomain
+from linktools.ai.persistence.state import OperationQuery, stream_digest
 from linktools.ai.task import (
     TaskGraph,
     TaskGraphAdmission,
@@ -133,8 +133,8 @@ def test_task_admission_rejects_unsupported_version() -> None:
 
 @pytest.mark.asyncio
 async def test_memory_admission_is_atomic_replay_safe_and_recoverable() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-test", tenant_id="tenant")
     try:
         request = _request("memory")
@@ -200,8 +200,8 @@ async def test_memory_admission_is_atomic_replay_safe_and_recoverable() -> None:
 async def test_partial_admission_operation_without_graph_fails_closed(
     operation_status: OperationStatus,
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-test", tenant_id="tenant")
     try:
         request = _request(f"partial-operation-{operation_status.value.lower()}")
@@ -221,8 +221,8 @@ async def test_partial_admission_operation_without_graph_fails_closed(
 async def test_existing_admitted_graph_rejects_different_operation_as_storage_conflict() -> (
     None
 ):
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-test", tenant_id="tenant")
     try:
         first = _request("occupied", idempotency_key="submit:occupied:first")
@@ -245,8 +245,8 @@ async def test_existing_admitted_graph_rejects_different_operation_as_storage_co
 @pytest.mark.asyncio
 async def test_corrupt_occupied_graph_without_its_admission_operation_fails_closed(
 ) -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-test", tenant_id="tenant")
     try:
         first = _request(
@@ -267,7 +267,7 @@ async def test_corrupt_occupied_graph_without_its_admission_operation_fails_clos
         operation_stream = stream_digest(
             "task-test",
             "tenant",
-            RuntimeDomain.TASK.value,
+            PersistenceDomain.TASK.value,
             "operation",
             [ResourceKind.TASK_GRAPH.value, first.graph.graph_id],
         )
@@ -303,19 +303,19 @@ async def test_durable_admission_survives_reopen_and_remains_recoverable(
     admission = TaskGraphAdmission.from_request(request)
     engine = None
     if backend == "filesystem":
-        def create_state() -> RuntimeStorage:
-            return RuntimeStorage.filesystem(path)
+        def create_state() -> PersistenceStorage:
+            return PersistenceStorage.filesystem(path)
     else:
         engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
         await provision_database(engine)
 
-        def create_state() -> RuntimeStorage:
+        def create_state() -> PersistenceStorage:
             assert engine is not None
-            return RuntimeStorage.sql(engine)
+            return PersistenceStorage.sql(engine)
 
     try:
         state = create_state()
-        state = RuntimeState(state)
+        state = Persistence(state)
         await state.initialize(namespace="task-test", tenant_id="tenant")
         try:
             view = await state.task.admissions.admit(admission, request.graph)
@@ -324,7 +324,7 @@ async def test_durable_admission_survives_reopen_and_remains_recoverable(
             await state.close()
 
         reopened = create_state()
-        reopened = RuntimeState(reopened)
+        reopened = Persistence(reopened)
         await reopened.initialize(namespace="task-test", tenant_id="tenant")
         try:
             page = await reopened.task.admissions.list_recoverable_page(
@@ -347,8 +347,8 @@ async def test_durable_admission_survives_reopen_and_remains_recoverable(
 
 @pytest.mark.asyncio
 async def test_recovery_discovery_uses_bounded_keyset_pages() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-test", tenant_id="tenant")
     try:
         for index in range(129):
@@ -377,8 +377,8 @@ async def test_recovery_discovery_uses_bounded_keyset_pages() -> None:
 
 @pytest.mark.asyncio
 async def test_empty_graph_is_terminal_and_excluded_from_recovery() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-test", tenant_id="tenant")
     try:
         request = _request("empty", nodes=())
@@ -398,10 +398,10 @@ async def test_empty_graph_is_terminal_and_excluded_from_recovery() -> None:
 def test_durable_pure_task_graph_does_not_require_durable_execution(tmp_path) -> None:
     task = StorageRoute.filesystem(tmp_path / "task")
 
-    state = RuntimeStorage.from_plan(
-        RuntimeStoragePlan(
+    state = PersistenceStorage.from_plan(
+        PersistencePlan(
             task=task,
             execution=StorageRoute.transient(),
         )
     )
-    assert state.plan.route(RuntimeDomain.TASK).retention.value == "durable"
+    assert state.plan.route(PersistenceDomain.TASK).retention.value == "durable"

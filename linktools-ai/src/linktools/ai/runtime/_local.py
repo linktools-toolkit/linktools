@@ -31,7 +31,7 @@ from ..spec import RepositoryInstructionResolver, RepositoryInstructions
 from ..workspace import (
     Workspace,
 )
-from ._context_archive import ExecutionContextArchive
+from ..inputs import ExecutionContextArchive
 from ._agent_executor import (
     AgentExecutor,
     _AgentRunScope,
@@ -39,7 +39,7 @@ from ._agent_executor import (
     LiveDelta,
 )
 from ._harness_memory import select_harness_memory_tools
-from ._input import (
+from ..inputs import (
     CanonicalUserInput,
     ExecutionInputMaterializer,
     stored_input_attachment_views,
@@ -82,53 +82,41 @@ from ..storage import (
     TurnCoordination,
     payload_fits_inline,
 )
-from ._event import ExecutionDelta, LiveExecutionEventBroker
+from ..execution.events import ExecutionDelta, LiveExecutionEventBroker
 from ._execution import CancelEffectOutcome, ExecutionStartIdentity, _TerminalMetricDelivery
-from ._metrics_service import (
-    _capture_execution_terminal,
-    _record_metric_observation,
-    _record_storage_operation,
-    _release_metric_execution_context,
+from ..observe.service import (
+    capture_execution_terminal,
+    record_metric_observation,
+    record_storage_operation,
+    release_metric_execution_context,
 )
-from ._message import encode_model_messages
-from ._execution_context import ExecutionInputContext
+from ..model.messages import encode_model_messages
+from ..execution import ExecutionInputContext
 from ._memory import MemoryStore, RuntimeMemoryStore
-from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
+from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
 from ._tool import (
     RuntimeToolOperationBridge,
     _ToolOperationRuntimeRepository,
 )
-from .recovery import (
-    ExecutionRecoveryEffect,
-    ResolveToolEffectRequest,
-    ToolEffectResolutionResult,
-)
+from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
 from ._budget import RunBudgetContext
-from .service_api import ExecutionRequest
+from ..execution import ExecutionRequest
 from ._conversation_service import ConversationService
-from .state import RuntimeDomain
-from .state._commands import RuntimeStateCommands
-from .state._execution_repositories import ExecutionRepositoryImpl
-from .state._conversation_repositories import SessionRepositoryImpl
-from .state._recovery_repositories import RecoveryCheckpointRepositoryImpl
-from .state._object_router import runtime_object_source_reads
-from .state._contracts import (
+from ..persistence import PersistenceDomain
+from ..persistence.commands import StateCommands
+from ..persistence.repositories import ExecutionRepositoryImpl
+from ..persistence.repositories import SessionRepositoryImpl
+from ..persistence.repositories import RecoveryCheckpointRepositoryImpl
+from ..persistence.objects import runtime_object_source_reads
+from ..persistence.contracts import (
     ApprovalRecord,
     AgentAttemptClaim,
     ConversationRepositories,
-    ConversationCursor,
-    ExecutionCancelRequestCommit,
     ExecutionEventAppend,
     ExecutionHistoryState,
     ExecutionRepository,
-    ExecutionRecord,
-    ExecutionStartClaim,
-    ExecutionStartReservation,
     ExecutionRepositories,
-    ExecutionTerminalCommit,
-    ExecutionTerminalCommitResult,
     ExternalCallRecord,
-    IdempotencyRecord,
     LoadedModelContext,
     LoadedContextMessage,
     PendingDeferredCall,
@@ -136,27 +124,31 @@ from .state._contracts import (
     RecoveryCheckpointState,
     RecoveryHandoffPhase,
     RecoveryRepositories,
-    RuntimePayloadRef,
     RecoveryCheckpoint,
     RecoveryConversationIntent,
     RecoveryTerminalHandoff,
     RecoveryTerminalOutcome,
     RepositoryInstructionBarrier,
-    ResultRecord,
-    SessionRecord,
     SessionRepository,
     ToolOperationRecord,
 )
-from .state._step_contracts import (
-    AgentRunCheckpoint,
-    AgentRunRecord,
-    StepEvent,
-    AgentRunStore,
+from ..session import ConversationCursor, SessionRecord
+from ..execution import (
+    ExecutionCancelRequestCommit,
+    ExecutionRecord,
+    ExecutionStartClaim,
+    ExecutionStartReservation,
+    ExecutionTerminalCommit,
+    ExecutionTerminalCommitResult,
+    IdempotencyRecord,
+    RuntimePayloadRef,
+    ResultRecord,
 )
-from .state._recovery_commands import RuntimeRecoveryCommands
-from .state._repository_common import operation_identity_matches
-from .state._steps import ExecutionTerminalSealPlan, RuntimeAgentRunStore, StateStepArchive
-from .state._store import StateGroupTransaction
+from ..persistence.runs import AgentRunCheckpoint, AgentRunRecord, StepEvent, AgentRunStore
+from ..persistence.commands import RuntimeRecoveryCommands
+from ..persistence.repositories import operation_identity_matches
+from ..persistence.runs import ExecutionTerminalSealPlan, RuntimeAgentRunStore, StateStepArchive
+from ..persistence.state import StateGroupTransaction
 
 
 class _SubagentDispatcher(Protocol):
@@ -275,7 +267,7 @@ class LocalExecutionBackend:
         instruction_resolver: RepositoryInstructionResolver | None = None,
         app: object,
         tenant_id: str,
-        run_stores: Mapping[RuntimeDomain, AgentRunStore],
+        run_stores: Mapping[PersistenceDomain, AgentRunStore],
         agent_run_lifecycle: _AgentRunLifecycle,
         memory_store_factory: "Callable[[str, str, str], MemoryStore] | None" = None,
         conversation_durable: bool = False,
@@ -324,9 +316,9 @@ class LocalExecutionBackend:
         self._run_stores = dict(run_stores)
         if frozenset(self._run_stores) != frozenset(
             {
-                RuntimeDomain.CONVERSATION,
-                RuntimeDomain.TRACE,
-                RuntimeDomain.CHECKPOINT,
+                PersistenceDomain.CONVERSATION,
+                PersistenceDomain.TRACE,
+                PersistenceDomain.CHECKPOINT,
             }
         ):
             raise ValueError(
@@ -351,13 +343,13 @@ class LocalExecutionBackend:
         self._accepting = True
         self._handoff_requested = False
         self._handoff_scopes: dict[str, ExecutionHandoffScope] = {}
-        execution_run_store = self._run_stores[RuntimeDomain.TRACE]
-        conversation_run_store = self._run_stores[RuntimeDomain.CONVERSATION]
+        execution_run_store = self._run_stores[PersistenceDomain.TRACE]
+        conversation_run_store = self._run_stores[PersistenceDomain.CONVERSATION]
         execution_repository: ExecutionRepository = self._execution.executions
         session_repository: SessionRepository = self._conversation.sessions
         self._session_state_store = session_repository.state_store
         self._execution_state_store = execution_repository.state_store
-        self._runtime_commands = RuntimeStateCommands(
+        self._runtime_commands = StateCommands(
             execution_repository,
             namespace=self._namespace,
             events=self._execution.events,
@@ -377,9 +369,9 @@ class LocalExecutionBackend:
             if isinstance(execution_run_store, StateStepArchive)
             else None,
             recovery_run_store=(
-                self._run_stores[RuntimeDomain.CHECKPOINT]
+                self._run_stores[PersistenceDomain.CHECKPOINT]
                 if isinstance(
-                    self._run_stores[RuntimeDomain.CHECKPOINT], StateStepArchive
+                    self._run_stores[PersistenceDomain.CHECKPOINT], StateStepArchive
                 )
                 else None
             ),
@@ -725,20 +717,20 @@ class LocalExecutionBackend:
         recorder = self._metric_recorder
         if recorder is None:
             return
-        observation = _capture_execution_terminal(
+        observation = capture_execution_terminal(
             recorder,
             source_namespace=self._namespace,
             tenant_id=self._tenant_id,
             result=committed,
             session_id=session_id,
         )
-        _release_metric_execution_context(
+        release_metric_execution_context(
             recorder,
             committed.execution.execution_id,
         )
 
         async def deliver() -> None:
-            await _record_metric_observation(recorder, observation)
+            await record_metric_observation(recorder, observation)
 
         if capture_metric is not None:
             capture_metric(deliver)
@@ -1841,13 +1833,13 @@ class LocalExecutionBackend:
         if reference is None:
             return None
         if reference.source_domain not in {
-            RuntimeDomain.EXECUTION,
-            RuntimeDomain.RECOVERY,
+            PersistenceDomain.EXECUTION,
+            PersistenceDomain.RECOVERY,
         }:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         objects = (
             self._execution_objects
-            if reference.source_domain is RuntimeDomain.EXECUTION
+            if reference.source_domain is PersistenceDomain.EXECUTION
             else self._recovery_objects
         )
         payload = reference.payload
@@ -1959,8 +1951,8 @@ class LocalExecutionBackend:
         if not payload_fits_inline(arguments_payload, self._payload_policy):
             reference = await put_runtime_object(
                 self._recovery_objects,
-                RuntimeObjectKeyFactory(self._namespace),
-                RuntimeDomain.RECOVERY,
+                ObjectKeyFactory(self._namespace),
+                PersistenceDomain.RECOVERY,
                 self._tenant_id,
                 canonical_json_bytes(arguments),
             )
@@ -2070,7 +2062,7 @@ class LocalExecutionBackend:
         self,
         agent_run_id: str,
     ) -> tuple[ModelMessage, ...]:
-        archive = self._run_stores[RuntimeDomain.CHECKPOINT]
+        archive = self._run_stores[PersistenceDomain.CHECKPOINT]
         with runtime_object_source_reads():
             checkpoint = await archive.latest_checkpoint(
                 agent_run_id=agent_run_id,
@@ -2385,7 +2377,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         store = (
             self._recovery_objects
-            if source is RuntimeDomain.RECOVERY
+            if source is PersistenceDomain.RECOVERY
             else self._execution_objects
         )
         await read_runtime_object(store, reference)
@@ -2434,15 +2426,15 @@ class LocalExecutionBackend:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if execution.durable_trace and execution.status is not ExecutionStatus.SUCCEEDED:
                     await self._agent_run_lifecycle.materialize_from_recovery(
-                        target=RuntimeDomain.TRACE,
+                        target=PersistenceDomain.TRACE,
                         agent_run_id=handoff.source_agent_run_id,
                         execution_id=checkpoint.execution_id,
                     )
                 if execution.conversation or execution.restart_checkpoints or execution.durable_trace:
                     checkpoint_domain = (
-                        RuntimeDomain.TRACE
+                        PersistenceDomain.TRACE
                         if execution.durable_trace
-                        else RuntimeDomain.CHECKPOINT
+                        else PersistenceDomain.CHECKPOINT
                     )
                     agent_run_checkpoint = await self._run_stores[checkpoint_domain].latest_checkpoint(
                         agent_run_id=handoff.source_agent_run_id,
@@ -2621,12 +2613,12 @@ class LocalExecutionBackend:
                 checkpoint.execution_id,
             )
             return
-        conversation_archive = self._run_stores[RuntimeDomain.CONVERSATION]
+        conversation_archive = self._run_stores[PersistenceDomain.CONVERSATION]
         if conversation_archive is not self._run_store:
             if handoff.source_agent_run_id is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await self._agent_run_lifecycle.materialize_from_recovery(
-                target=RuntimeDomain.CONVERSATION,
+                target=PersistenceDomain.CONVERSATION,
                 agent_run_id=handoff.source_agent_run_id,
             )
             target_checkpoint = await conversation_archive.latest_checkpoint(
@@ -2906,7 +2898,7 @@ class LocalExecutionBackend:
             execution_ref = outcome.output
             if (
                 outcome.output.kind == "object"
-                and outcome.object_source_domain is RuntimeDomain.RECOVERY
+                and outcome.object_source_domain is PersistenceDomain.RECOVERY
             ):
                 reference = outcome.output.ref
                 if reference is None:
@@ -2915,8 +2907,8 @@ class LocalExecutionBackend:
                 execution_ref = StoredPayload.object(
                     await put_runtime_object(
                         self._execution_objects,
-                        RuntimeObjectKeyFactory(self._namespace),
-                        RuntimeDomain.EXECUTION,
+                        ObjectKeyFactory(self._namespace),
+                        PersistenceDomain.EXECUTION,
                         self._tenant_id,
                         payload,
                     )
@@ -3360,7 +3352,7 @@ class LocalExecutionBackend:
     async def _prepare_input_context(self, context: ExecutionInputContext) -> RuntimePayloadRef:
         # A pending owner retains this view only in-process. Coordination publishes
         # control facts; promotion/terminal publication retains canonical content.
-        return RuntimePayloadRef(StoredPayload.inline_json(context.to_payload()), RuntimeDomain.EXECUTION)
+        return RuntimePayloadRef(StoredPayload.inline_json(context.to_payload()), PersistenceDomain.EXECUTION)
 
     async def _persist_input_context(
         self, execution: ExecutionRecord, context: ExecutionInputContext,
@@ -3529,7 +3521,7 @@ class LocalExecutionBackend:
             exact_recovery_context = not claimed_from_admitted
             recovery_history_agent_run_id = None if claimed_from_admitted else agent_run_id
             if recovery_history_agent_run_id is not None:
-                recovery_archive = self._get_run_store(RuntimeDomain.CHECKPOINT)
+                recovery_archive = self._get_run_store(PersistenceDomain.CHECKPOINT)
                 recovery_run = await recovery_archive.get_agent_run(
                     agent_run_id=recovery_history_agent_run_id
                 )
@@ -3605,7 +3597,7 @@ class LocalExecutionBackend:
                     history = source_replay_history
                 elif recovery_history_agent_run_id is not None:
                     loaded_context = await self._run_store.load_loaded_model_context(
-                        RuntimeDomain.CHECKPOINT,
+                        PersistenceDomain.CHECKPOINT,
                         recovery_history_agent_run_id,
                     )
                     history = list(loaded_context.model_messages())
@@ -3616,7 +3608,7 @@ class LocalExecutionBackend:
                     loaded_context = await ConversationService.load_session_context(
                         execution=current, session=session, history_id=history_id,
                         tenant_id=self._tenant_id, run_store=self._run_store,
-                        conversation_archive=self._run_stores[RuntimeDomain.CONVERSATION],
+                        conversation_archive=self._run_stores[PersistenceDomain.CONVERSATION],
                     )
                     history = list(loaded_context.model_messages())
                 else:
@@ -4234,7 +4226,7 @@ class LocalExecutionBackend:
             raise
         finally:
             self._handoff_scopes.pop(execution_id, None)
-            await _record_storage_operation(
+            await record_storage_operation(
                 metric_recorder,
                 observation_id=metric_id,
                 started_at_ns=metric_started,
@@ -4288,9 +4280,9 @@ class LocalExecutionBackend:
         return await ConversationService.load_history(
             execution, session=session, namespace=self._namespace, tenant_id=self._tenant_id,
             run_store=self._run_store,
-            execution_run_store=self._get_run_store(RuntimeDomain.TRACE),
-            conversation_run_store=self._get_run_store(RuntimeDomain.CONVERSATION),
-            recovery_run_store=self._get_run_store(RuntimeDomain.CHECKPOINT),
+            execution_run_store=self._get_run_store(PersistenceDomain.TRACE),
+            conversation_run_store=self._get_run_store(PersistenceDomain.CONVERSATION),
+            recovery_run_store=self._get_run_store(PersistenceDomain.CHECKPOINT),
             load_execution=lambda execution_id: self.load_execution(execution_id, tenant_id=self._tenant_id),
         )
 
@@ -4389,7 +4381,7 @@ class LocalExecutionBackend:
         )
         self._live_broker.complete(execution.execution_id)
 
-    def _get_run_store(self, runtime_domain: RuntimeDomain) -> AgentRunStore:
+    def _get_run_store(self, runtime_domain: PersistenceDomain) -> AgentRunStore:
         return self._run_stores[runtime_domain]
 
     async def _discard_terminal_producer_tail(
@@ -4476,8 +4468,8 @@ class LocalExecutionBackend:
         if not payload_fits_inline(inline, self._payload_policy):
             object_ref = await put_runtime_object(
                 self._execution_objects,
-                RuntimeObjectKeyFactory(self._namespace),
-                RuntimeDomain.EXECUTION,
+                ObjectKeyFactory(self._namespace),
+                PersistenceDomain.EXECUTION,
                 self._tenant_id,
                 payload,
             )
@@ -5231,8 +5223,8 @@ class LocalExecutionBackend:
         return StoredPayload.object(
             await put_runtime_object(
                 self._recovery_objects,
-                RuntimeObjectKeyFactory(self._namespace),
-                RuntimeDomain.RECOVERY,
+                ObjectKeyFactory(self._namespace),
+                PersistenceDomain.RECOVERY,
                 self._tenant_id,
                 data,
             )
@@ -5250,13 +5242,13 @@ class LocalExecutionBackend:
         else:
             reference = await put_runtime_object(
                 self._recovery_objects,
-                RuntimeObjectKeyFactory(self._namespace),
-                RuntimeDomain.RECOVERY,
+                ObjectKeyFactory(self._namespace),
+                PersistenceDomain.RECOVERY,
                 self._tenant_id,
                 canonical_json_bytes(payload),
             )
             stored = StoredPayload.object(reference)
-        return RuntimePayloadRef(stored, RuntimeDomain.RECOVERY)
+        return RuntimePayloadRef(stored, PersistenceDomain.RECOVERY)
 
     async def commit_repository_instruction_barrier(
         self,
@@ -5520,7 +5512,7 @@ class LocalExecutionBackend:
                 source_domain = None
                 if output is not None and output.kind == "object":
                     if self._execution_objects_durable:
-                        source_domain = RuntimeDomain.EXECUTION
+                        source_domain = PersistenceDomain.EXECUTION
                     else:
                         reference = output.ref
                         if reference is None:
@@ -5531,13 +5523,13 @@ class LocalExecutionBackend:
                         handoff_output = StoredPayload.object(
                             await put_runtime_object(
                                 self._recovery_objects,
-                                RuntimeObjectKeyFactory(self._namespace),
-                                RuntimeDomain.RECOVERY,
+                                ObjectKeyFactory(self._namespace),
+                                PersistenceDomain.RECOVERY,
                                 self._tenant_id,
                                 content,
                             )
                         )
-                        source_domain = RuntimeDomain.RECOVERY
+                        source_domain = PersistenceDomain.RECOVERY
                 conversation = None
                 if (
                     current.conversation
@@ -5840,12 +5832,12 @@ class LocalExecutionBackend:
         if execution.session_id is not None:
             stores.append(self._conversation.sessions.state_store)
         if agent_run_id is not None:
-            for domain in (RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT):
+            for domain in (PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT):
                 archive = self._run_stores[domain]
                 if isinstance(archive, StateStepArchive):
                     stores.append(archive.state_store)
             if execution.session_id is not None and status is ExecutionStatus.SUCCEEDED:
-                archive = self._run_stores[RuntimeDomain.CONVERSATION]
+                archive = self._run_stores[PersistenceDomain.CONVERSATION]
                 if not isinstance(archive, StateStepArchive):
                     return False
                 stores.append(archive.state_store)
@@ -5880,7 +5872,7 @@ class LocalExecutionBackend:
         retain_fork_context = (
             current.conversation and status is ExecutionStatus.SUCCEEDED and current.session_id is None
             and current.parent_execution_id is None and not current.durable_trace
-            and isinstance(self._run_stores[RuntimeDomain.CHECKPOINT], StateStepArchive)
+            and isinstance(self._run_stores[PersistenceDomain.CHECKPOINT], StateStepArchive)
         )
         if agent_run_id is not None and (
             retain_fork_context
@@ -5894,7 +5886,7 @@ class LocalExecutionBackend:
             if candidate_checkpoint is not None:
                 if candidate_run is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if isinstance(self._run_stores[RuntimeDomain.CHECKPOINT], StateStepArchive):
+                if isinstance(self._run_stores[PersistenceDomain.CHECKPOINT], StateStepArchive):
                     recovery_run = candidate_run
                     recovery_agent_run_checkpoint = candidate_checkpoint
             if retain_fork_context and (recovery_run is None or recovery_agent_run_checkpoint is None):
@@ -6011,7 +6003,7 @@ class LocalExecutionBackend:
             pending_count = 0
             try:
                 state_archive = current.durable_trace and isinstance(
-                    self._run_stores[RuntimeDomain.TRACE],
+                    self._run_stores[PersistenceDomain.TRACE],
                     StateStepArchive,
                 )
                 if state_archive:
@@ -6190,7 +6182,7 @@ class LocalExecutionBackend:
         candidate_agent_run_ids: Sequence[str],
     ) -> tuple[str, ...]:
         existing: list[str] = []
-        execution_archive = self._run_stores[RuntimeDomain.TRACE]
+        execution_archive = self._run_stores[PersistenceDomain.TRACE]
         for agent_run_id in dict.fromkeys(candidate_agent_run_ids):
             staged = await self._run_store.get_agent_run(agent_run_id=agent_run_id)
             if staged is not None:

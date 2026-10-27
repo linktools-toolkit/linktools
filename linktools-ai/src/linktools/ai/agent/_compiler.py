@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from ..capability import (
     CapabilityContribution,
     SkillDefinition,
-    workspace_tool_declarations,
+    tool_class_from_metadata,
 )
 from ..core import ImmutableJsonMapping, JsonValue
 from ..errors import AIError, ErrorCode
@@ -381,8 +381,8 @@ class AgentCompiler:
             else []
         )
         workspace_tool_classes = {
-            declaration.name: declaration.metadata["linktools.ai.tool_class"]
-            for declaration in workspace_tool_declarations()
+            name: tool_class_from_metadata(candidate.contract.get("metadata"))
+            for name, candidate in tools.items()
         }
         for selector in spec.allow_tools:
             if selector == "*":
@@ -470,8 +470,8 @@ class AgentCompiler:
         selected_tool_names = {item.id for item in selected_tools}
         ordinary: set[str] = {"*"} if select_all else set()
         workspace_tool_classes = {
-            declaration.name: declaration.metadata["linktools.ai.tool_class"]
-            for declaration in workspace_tool_declarations()
+            candidate.id: tool_class_from_metadata(candidate.contract.get("metadata"))
+            for candidate in selected_tools
         }
         for selector in spec.allow_tools:
             if selector == "*":
@@ -497,6 +497,7 @@ class AgentCompiler:
             if select_all
             else []
         )
+        workspace_tool_classes.update({name: "shell" for name in ("run_command", "start_command", "check_command", "stop_command", "shell")})
         for selector in spec.allow_tools:
             if selector == "*":
                 continue

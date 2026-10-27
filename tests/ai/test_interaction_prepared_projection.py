@@ -9,14 +9,18 @@ import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 
 from linktools.ai.core import UsageMetrics
-from linktools.ai.runtime import RuntimeDomain
-from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime._model_interaction import StagedContextProjection, StagedContextSpan, StagedModelInteraction
-from linktools.ai.runtime.state._archive import PreparedArchive
-from linktools.ai.runtime.state._checkpoint_persistence import CheckpointPersistence
-from linktools.ai.runtime.state._model_interaction_store import ModelInteractionStateStepArchive
-from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence import Persistence
+from linktools.ai.persistence._model_interaction import (
+    StagedContextProjection,
+    StagedContextSpan,
+    StagedModelInteraction,
+)
+from linktools.ai.persistence._archive import PreparedArchive
+from linktools.ai.persistence._checkpoint_persistence import CheckpointPersistence
+from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
+from linktools.ai.persistence._step_archive import StagingAgentRunStore
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
 
 from .test_incremental_projection_boundaries import _storage
 
@@ -27,9 +31,9 @@ pytestmark = pytest.mark.asyncio
 async def test_prepared_projection_reuse_keeps_exact_request_and_response(
     tmp_path: Path, variant: str,
 ) -> None:
-    state = RuntimeState(_storage("sqlite", tmp_path))
+    state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="prepared-projection", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     now = run.started_at
     source = (
@@ -84,9 +88,9 @@ async def test_prepared_projection_reuse_keeps_exact_request_and_response(
 
 
 async def test_checkpoint_preparation_preserves_custom_interaction_signature(tmp_path: Path) -> None:
-    state = RuntimeState(_storage("memory", tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="custom-interaction", tenant_id="tenant")
-    original = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+    original = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
     calls = []
 
     class CustomArchive(ModelInteractionStateStepArchive):
@@ -103,7 +107,7 @@ async def test_checkpoint_preparation_preserves_custom_interaction_signature(tmp
 
     custom = CustomArchive(
         original.state_store, object_store=None, namespace="custom-interaction",
-        tenant_id="tenant", runtime_domain=RuntimeDomain.CHECKPOINT,
+        tenant_id="tenant", runtime_domain=PersistenceDomain.CHECKPOINT,
     )
     try:
         run = AgentRunRecord("run")

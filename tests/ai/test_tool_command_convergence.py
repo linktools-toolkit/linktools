@@ -8,12 +8,12 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 from linktools.ai.core import ExecutionStatus, ToolOperationStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool import ToolOperationRecord
-from linktools.ai.runtime.state._commands import RuntimeStateCommands
-from linktools.ai.runtime.state._contracts import ToolOperationAdmission
+from linktools.ai.persistence.commands import StateCommands
+from linktools.ai.persistence.contracts import ToolOperationAdmission
 from linktools.ai.storage import StoredPayload
 
 
@@ -127,7 +127,7 @@ class _AdmissionTools:
 async def test_tool_admission_conflict_reenters_fresh_repository_attempt() -> None:
     current = _record()
     tools = _AdmissionTools(current)
-    commands = object.__new__(RuntimeStateCommands)
+    commands = object.__new__(StateCommands)
     commands._tools = tools
     commands._observe_cancellation = True
     commands._execution = _CommandExecution(tools.state_store)
@@ -212,7 +212,7 @@ class _TerminalTools:
 @pytest.mark.asyncio
 async def test_tool_terminal_cancellation_finishes_durable_retry_before_propagating() -> None:
     tools = _TerminalTools()
-    commands = object.__new__(RuntimeStateCommands)
+    commands = object.__new__(StateCommands)
     commands._tools = tools
     commands._observe_cancellation = True
     commands._execution = _CommandExecution(tools.state_store)
@@ -243,7 +243,7 @@ async def test_tool_terminal_cancellation_finishes_durable_retry_before_propagat
 @pytest.mark.asyncio
 async def test_tool_terminal_command_rejects_mixed_success_and_failure() -> None:
     tools = _TerminalTools()
-    commands = object.__new__(RuntimeStateCommands)
+    commands = object.__new__(StateCommands)
     commands._tools = tools
     commands._observe_cancellation = True
     commands._execution = _CommandExecution(tools.state_store)
@@ -268,7 +268,7 @@ async def test_tool_terminal_command_rejects_mixed_success_and_failure() -> None
 @pytest.mark.asyncio
 async def test_tool_terminal_command_rejects_malformed_failure_payload() -> None:
     tools = _TerminalTools()
-    commands = object.__new__(RuntimeStateCommands)
+    commands = object.__new__(StateCommands)
     commands._tools = tools
     commands._observe_cancellation = True
     commands._execution = _CommandExecution(tools.state_store)
@@ -291,11 +291,11 @@ async def test_tool_terminal_command_rejects_malformed_failure_payload() -> None
 @pytest.mark.asyncio
 async def test_superseded_history_producer_cannot_admit_a_tool_but_owned_effect_can_settle() -> None:
     from linktools.ai.core import ExecutionStatus
-    from linktools.ai.runtime import RuntimeStorage
-    from linktools.ai.runtime.state._codec import decode_domain, encode_domain
+    from linktools.ai.persistence import PersistenceStorage
+    from linktools.ai.persistence.codec import decode_domain, encode_domain
     from .test_execution_recovery_commands import _commands, _execution
 
-    state = RuntimeState(RuntimeStorage.in_memory())
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="tool-producer-fence", tenant_id="tenant")
     try:
         execution = replace(_execution(datetime.now(timezone.utc)), revision=1)
@@ -305,7 +305,7 @@ async def test_superseded_history_producer_cannot_admit_a_tool_but_owned_effect_
             lambda transaction: repository.admit_history_producer_in_transaction(transaction, execution)
         )
         resumed = await _commands(state).commit_resumed(execution)
-        commands = RuntimeStateCommands(
+        commands = StateCommands(
             repository, namespace="tool-producer-fence", events=state.execution.events,
             tools=state.recovery.tools, background_tasks=set(),
         )

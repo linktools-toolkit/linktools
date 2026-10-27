@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.task import Task
 """Workspace argument correction stays inside the agent's bounded tool loop."""
 from ._runtime_test_helpers import is_tool_retry, model_features
 
@@ -19,7 +23,9 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, TaskStatus
 from linktools.ai.errors import ErrorCode
 from linktools.ai.capability import TraceCapability
-from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
+from linktools.ai.inputs import AgentTaskInput
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task import TaskGraph, TaskNode
 from linktools.ai.workspace import Workspace
 
@@ -79,13 +85,9 @@ async def test_workspace_path_correction_respects_graph_and_effect_boundaries(
     group.tool(record_effect, effect_policy="non_replay_safe")
     group.agent("default", model="default", allow_tools=("read_file", "record_effect"),
                 tool_retries=2 if retry_limit is None else retry_limit)
-    async with Runtime.open(
-        "path-correction",
-        storage=RuntimeStorage.in_memory(),
-        features=model_features(_Models(_UsageFunctionModel(model)), group),
-    ) as runtime:
-        task = runtime.tasks.from_agent("path.agent", runtime.agents.get())
-        run = await runtime.tasks.bind(task).start(TaskGraph("path-graph", (
+    async with Persistence.open('path-correction', storage=PersistenceStorage.in_memory()) as persistence_82, Runtime.attach(persistence=persistence_82, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_82) as engine:
+        task = Task.from_agent("path.agent", runtime.agents.get())
+        run = await engine.with_definitions(task).start(TaskGraph("path-graph", (
             TaskNode("reader", task=task, input=AgentTaskInput("read the files")),
             TaskNode("downstream", task=task, dependencies=("reader",),
                      input=AgentTaskInput("downstream")),

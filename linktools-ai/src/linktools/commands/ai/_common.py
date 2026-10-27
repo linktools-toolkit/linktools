@@ -31,7 +31,8 @@ ResultT = TypeVar("ResultT")
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
     from linktools.ai.model import ModelBinding, create_model
-    from linktools.ai.runtime import Runtime, RuntimeStorage
+    from linktools.ai.runtime import Runtime
+    from linktools.ai.persistence import PersistenceStorage
 
 MODEL_APIS = ("openai", "openai-responses", "anthropic")
 MODEL_API = ConfigField(name="MODEL_API", cast=str, default=None)
@@ -92,10 +93,10 @@ def _local_runtime_assets(workspace: Workspace) -> AssetStore:
     )
 
 
-def _local_runtime_storage(workspace: Workspace) -> "RuntimeStorage":
-    from linktools.ai.runtime import RuntimeStorage
+def _local_runtime_storage(workspace: Workspace) -> "PersistenceStorage":
+    from linktools.ai.persistence import PersistenceStorage
 
-    return RuntimeStorage.from_root(_local_runtime_root(workspace))
+    return PersistenceStorage.from_root(_local_runtime_root(workspace))
 
 
 async def _local_metrics(workspace: Workspace) -> Metrics:
@@ -195,10 +196,13 @@ def _local_model(
                     configured = value_type(configured)
                 numeric_options[name] = workspace.config.get(name) if configured is None else configured
         return create_model(
-            protocol=api,
+            api=api,
             model=selected_model,
             input_types=input_types,
-            **{name: value for name, value in numeric_options.items() if value is not None},
+            model_settings={name: value for name, value in numeric_options.items()
+                            if name in {"max_tokens", "timeout"} and value is not None},
+            **{name: value for name, value in numeric_options.items()
+               if name not in {"max_tokens", "timeout"} and value is not None},
             base_url=(
                 base_url
                 if base_url is not None
@@ -229,7 +233,7 @@ async def _open_local_runtime(
     *,
     model: "ModelBinding | None" = None,
 ) -> "AsyncIterator[Runtime]":
-    from linktools.ai.capability import AssetCapability, WorkspaceCapability
+    from linktools.ai.capability import AssetCapability, FileSystem
     from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
     from linktools.ai.runtime import Runtime
@@ -240,13 +244,14 @@ async def _open_local_runtime(
         features = RuntimeFeatures("workspace")
         features.model("default", _local_model(workspace) if model is None else model)
         features.capability(AssetCapability(assets))
-        features.capability(WorkspaceCapability(workspace))
+        features.capability(FileSystem(workspace))
+        from linktools.ai.capability import ShellCapability
+        features.capability(ShellCapability())
         features.capability(ExecutionCapability(retain_history=True))
         features.capability(CheckpointCapability())
         features.capability(TraceCapability())
         async with Runtime.open(
-            "default",
-            storage=_local_runtime_storage(workspace),
+            "default", storage=_local_runtime_storage(workspace),
             features=features,
             metrics=await _local_metrics(workspace),
         ) as runtime:

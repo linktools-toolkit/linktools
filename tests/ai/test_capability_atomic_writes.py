@@ -3,6 +3,8 @@
 """Ordinary Runtime capabilities share atomic publication without sharing runs."""
 
 from __future__ import annotations
+
+from linktools.ai.persistence import Persistence
 from ._runtime_test_helpers import model_features
 
 import asyncio
@@ -29,14 +31,20 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.observe import MetricRecorder, Metrics, Observation
 from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime.persistence import CapabilityPersistence, CapabilityWriter
-from linktools.ai.runtime.state import (
-    StateGroupTransaction, StateStorageGroup, StateStore, StateTransaction, StoredFact, StoredRecord,
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.capabilities import CapabilityPersistence, CapabilityWriter
+from linktools.ai.persistence.state import (
+    StateGroupTransaction,
+    StateStorageGroup,
+    StateStore,
+    StateTransaction,
+    StoredFact,
+    StoredRecord,
 )
-from linktools.ai.runtime.state._filesystem import FilesystemStateStorageGroup
-from linktools.ai.runtime.state._memory import InMemoryStateStorageGroup
-from linktools.ai.runtime.state._sql import SqlStateStorageGroup, _SqlTransaction
+from linktools.ai.persistence._filesystem import FilesystemStateStorageGroup
+from linktools.ai.persistence._memory import InMemoryStateStorageGroup
+from linktools.ai.persistence._sql import SqlStateStorageGroup, _SqlTransaction
 from linktools.ai.storage import BatchWriteScopeFactory, InMemoryCacheBackend, StorageRoute
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
@@ -251,17 +259,20 @@ async def _opened(
     probe.observe(monkeypatch)
     engine = None
     if backend == "memory":
-        storage = RuntimeStorage.in_memory()
+        storage = PersistenceStorage.in_memory()
     elif backend == "filesystem":
-        storage = RuntimeStorage.filesystem(tmp_path / "state")
+        storage = PersistenceStorage.filesystem(tmp_path / "state")
     elif backend == "sqlite":
-        storage = RuntimeStorage.sqlite(tmp_path / "state.db")
+        storage = PersistenceStorage.sqlite(tmp_path / "state.db")
     else:
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'state.db'}")
         await provision_runtime_database(engine)
-        storage = RuntimeStorage.sql(engine)
+        storage = PersistenceStorage.sql(engine)
     if conversation_storage is not None:
-        storage = RuntimeStorage.from_plan(replace(storage.plan, conversation=conversation_storage))
+        storage = PersistenceStorage.from_plan(replace(storage.plan, conversation=conversation_storage))
+    storage = PersistenceStorage(replace(storage.plan, capability_routes={
+        identity: route for identity, route in zip(("audit", "index"), routes) if route is not None
+    }), coordination=InMemoryCacheBackend(max_bytes=2**20))
     release = asyncio.Event()
     ready: asyncio.Queue[None] = asyncio.Queue()
 
@@ -276,7 +287,6 @@ async def _opened(
     features.agent("default", model="default", allow_tools=())
     features.capability(ExecutionCapability(retain_history=True,
         commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync(),
-        coordination=InMemoryCacheBackend(max_bytes=2**20),
     ), scope="runtime")
     if trace:
         features.capability(TraceCapability(commit=CommitPolicy.terminal()), scope="runtime")
@@ -285,7 +295,7 @@ async def _opened(
             capability.id = None
         features.capability(capability, id=id, revision=1, scope=scope)
     try:
-        async with Runtime.open("atomic-capabilities", storage=storage, features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=metrics) as runtime:
+        async with Persistence.open('atomic-capabilities', storage=storage) as persistence_288, Runtime.attach(persistence=persistence_288, features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=metrics) as runtime:
             opened = _Opened(runtime, probe, templates, release, ready)
             try:
                 yield opened

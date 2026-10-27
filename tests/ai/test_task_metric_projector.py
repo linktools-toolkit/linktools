@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -20,7 +20,7 @@ from linktools.ai.core import (
     idempotency_key_digest,
 )
 from linktools.ai.observe import Observation
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task import (
     CancelGraphRequest,
     DefaultTaskGraphService,
@@ -495,8 +495,8 @@ class _DependencyRelease:
 async def test_metric_cancellation_preserves_cancel_ledger_and_dependency_handoff(
     via_submission: bool,
 ) -> None:
-    storage = RuntimeStorage.in_memory()
-    storage = RuntimeState(storage)
+    storage = PersistenceStorage.in_memory()
+    storage = Persistence(storage)
     await storage.initialize(namespace="task-metric-cancel", tenant_id="tenant")
     recorder = _BlockingRecorder()
     dependencies = _DependencyRelease()
@@ -562,8 +562,8 @@ async def test_detached_cancel_cleanup_does_not_take_over_metric_delivery() -> N
             await self.release.wait()
             await super().release_graph_dependencies(state, tenant_id=tenant_id)
 
-    storage = RuntimeStorage.in_memory()
-    storage = RuntimeState(storage)
+    storage = PersistenceStorage.in_memory()
+    storage = Persistence(storage)
     await storage.initialize(namespace="task-metric-detached", tenant_id="tenant")
     recorder = _BlockingRecorder()
     dependencies = BlockedDependencies()
@@ -606,8 +606,8 @@ async def test_detached_cancel_cleanup_does_not_take_over_metric_delivery() -> N
 
 
 async def test_terminal_wait_deadline_excludes_metric_io_and_cancellation_preserves_truth() -> None:
-    storage = RuntimeStorage.in_memory()
-    storage = RuntimeState(storage)
+    storage = PersistenceStorage.in_memory()
+    storage = Persistence(storage)
     await storage.initialize(namespace="task-metric-wait", tenant_id="tenant")
     recorder = _BlockingRecorder()
     dependencies = _DependencyRelease()

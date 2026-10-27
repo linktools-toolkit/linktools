@@ -26,12 +26,8 @@ from linktools.ai.runtime._approval import (
 from linktools.ai.runtime._external import (
     DefaultExternalService,
 )
-from linktools.ai.runtime.service_api import (
-    ApprovalDecisionRequest,
-    ExternalCallSucceeded,
-    ExternalSupplyRequest,
-)
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.execution import ApprovalDecisionRequest, ExternalCallSucceeded, ExternalSupplyRequest
+from linktools.ai.persistence.contracts import (
     deferred_resource_id,
     ApprovalRecord,
     ExternalCallRecord,
@@ -41,8 +37,8 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryCheckpointState,
 )
 from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy, StoredPayload
-from linktools.ai.runtime._object import RuntimeObjectKeyFactory
-from linktools.ai.runtime._tool_return_codec import encode_tool_return_content
+from linktools.ai.persistence.objects import ObjectKeyFactory
+from linktools.ai.model._tool_return_codec import encode_tool_return_content
 from linktools.ai.core import Principal, PrincipalKind
 
 
@@ -274,7 +270,7 @@ async def test_external_supply_exact_replay_uses_durable_result() -> None:
         checkpoints,
         _AllowAuthorization(),
         objects=InMemoryObjectStore(),
-        object_key_factory=object.__new__(RuntimeObjectKeyFactory),
+        object_key_factory=object.__new__(ObjectKeyFactory),
         payload_policy=PayloadPolicy(),
     )
     request = ExternalSupplyRequest(

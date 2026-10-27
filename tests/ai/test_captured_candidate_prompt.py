@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from linktools.ai.evaluation.engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+
+from linktools.ai.persistence import Persistence
 """Captured conversation input uses the selected candidate's Agent behavior."""
 from ._runtime_test_helpers import model_features
 
@@ -13,7 +17,10 @@ from linktools.ai.evaluation import (
     EvaluationSpec, GraphTargetSpec, StartEvaluationRequest,
 )
 from linktools.ai.capability import ExecutionCapability, TraceCapability
-from linktools.ai.runtime import AgentTaskInput, CaptureInputRequest, ExecutionInputContext, Runtime, RuntimeStorage
+from linktools.ai.inputs import AgentTaskInput, CaptureInputRequest
+from linktools.ai.execution import ExecutionInputContext
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task import Task, TaskGraph, TaskGraphTemplate, TaskNode
 
 from .test_evaluation_consumers import (
@@ -44,8 +51,7 @@ async def test_capture_uses_selected_candidate_prompt_and_preserves_history(
     for name, prompt in (("default", original_prompt), ("candidate", candidate_prompt)):
         group.agent(name, model="default", system_prompt=prompt,
                     allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open("fork-candidate", context=CONTEXT,
-                            storage=RuntimeStorage.in_memory(), features=model_features(models, group)) as runtime:
+    async with Persistence.open('fork-candidate', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_47, Runtime.attach(persistence=persistence_47, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_47, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         if source_kind == "fork":
             first = await runtime.agents.get().start("historical question", principal=PRINCIPAL)
             assert (await first.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -56,8 +62,8 @@ async def test_capture_uses_selected_candidate_prompt_and_preserves_history(
                 ModelRequest(parts=[SystemPromptPart(original_prompt), UserPromptPart("historical question")]),
                 ModelResponse(parts=[TextPart("fixture answer")]),
             ))
-            source_task = runtime.tasks.from_agent("candidate.source", runtime.agents.get())
-            graph = await runtime.tasks.bind(source_task).start(TaskGraph("source", (
+            source_task = Task.from_agent("candidate.source", runtime.agents.get())
+            graph = await runtime_engine.with_definitions(source_task).start(TaskGraph("source", (
                 TaskNode("agent", task=source_task, input=AgentTaskInput("captured question", input_context=context)),
             )), principal=PRINCIPAL, idempotency_key="source")
             assert (await graph.wait()).result.wait_status is TaskStatus.SUCCEEDED
@@ -65,12 +71,14 @@ async def test_capture_uses_selected_candidate_prompt_and_preserves_history(
         native_request = str((await source.model_interactions(include_content=True)).items[0].request)
         assert native_request.count(original_prompt) == 1
         assert candidate_prompt not in native_request
-        capture = await runtime.executions.capture_input(source.execution_id, CaptureInputRequest(PRINCIPAL, "capture-fork"))
-        original = await runtime.tasks.from_agent_capture("candidate.original", capture, principal=PRINCIPAL)
-        selected = runtime.tasks.from_agent("candidate.selected", runtime.agents.get("candidate"))
+        capture = await runtime_engine.inputs.capture_input(source.execution_id, CaptureInputRequest(PRINCIPAL, "capture-fork"))
+        original_capture = await runtime_engine.inputs.read_agent(capture, principal=PRINCIPAL)
+        original_capture.require_importable()
+        original = Task.from_agent("candidate.original", runtime.agents.restore(original_capture.binding))
+        selected = Task.from_agent("candidate.selected", runtime.agents.get("candidate"))
         scorer = Task("candidate.score", exact, effect_policy="none")
-        engine = runtime.tasks.bind(original, selected, scorer)
-        case_capture = (await runtime._input_captures.task_input(capture, principal=PRINCIPAL)
+        engine = runtime_engine.with_definitions(original, selected, scorer)
+        case_capture = (await runtime_engine.inputs.task_input(capture, principal=PRINCIPAL)
                         if source_kind == "task-reference" else capture)
         case = CaseSpec.from_capture(CaseRef("fork-input", "one", 1), capture=case_capture, expected="fixture answer")
         if target_kind != "task":
@@ -82,33 +90,34 @@ async def test_capture_uses_selected_candidate_prompt_and_preserves_history(
                 for slot, task in (("original", original), ("selected", selected)))
         else:
             candidates = (CandidateSpec("original", task=original.ref), CandidateSpec("selected", task=selected.ref))
-        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("fork-input", 1), (
-            case,
-        )), principal=PRINCIPAL, idempotency_key="publish-fork")
-        run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-            candidates,
-            (rule_scorer(scorer),), input_mode=input_mode, policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(models.contract,))),
-            PRINCIPAL, "evaluate-fork"), engine=engine)
-        view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
-        assert view.completion == "complete", view.needs_attention
-        trials = (await run.trials()).items
-        assert {trial.candidate_slot_id for trial in trials} == {"original", "selected"}
-        for trial in trials:
-            graph = await engine.get(trial.graph_ref.graph_id, principal=PRINCIPAL)
-            execution = await graph.execution("target")
-            request = str((await execution.model_interactions(include_content=True)).items[0].request)
-            expected_prompt = original_prompt if trial.candidate_slot_id == "original" else candidate_prompt
-            other_prompt = candidate_prompt if trial.candidate_slot_id == "original" else original_prompt
-            assert request.count(expected_prompt) == 1
-            assert other_prompt not in request
-            assert "historical question" in request and "fixture answer" in request
-            assert "captured question" in request
-            if trial.candidate_slot_id == "selected":
-                retry = await execution.retry("replacement question")
-                assert (await retry.wait()).result.status is ExecutionStatus.SUCCEEDED
-                retry_request = str((await retry.model_interactions(include_content=True)).items[0].request)
-                assert retry_request.count(candidate_prompt) == 1
-                assert original_prompt not in retry_request
-                assert "historical question" in retry_request and "fixture answer" in retry_request
-                assert "replacement question" in retry_request
-                assert "captured question" not in retry_request
+        async with Evaluations.open(engine) as evaluations:
+            dataset = await evaluations.publish_dataset(DatasetSpec(DatasetRef("fork-input", 1), (
+                case,
+            )), principal=PRINCIPAL, idempotency_key="publish-fork")
+            run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
+                candidates,
+                (rule_scorer(scorer),), input_mode=input_mode, policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(models.contract,))),
+                PRINCIPAL, "evaluate-fork"))
+            view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
+            assert view.completion == "complete", view.needs_attention
+            trials = (await run.trials()).items
+            assert {trial.candidate_slot_id for trial in trials} == {"original", "selected"}
+            for trial in trials:
+                graph = await engine.get(trial.graph_ref.graph_id, principal=PRINCIPAL)
+                execution = await graph.execution("target")
+                request = str((await execution.model_interactions(include_content=True)).items[0].request)
+                expected_prompt = original_prompt if trial.candidate_slot_id == "original" else candidate_prompt
+                other_prompt = candidate_prompt if trial.candidate_slot_id == "original" else original_prompt
+                assert request.count(expected_prompt) == 1
+                assert other_prompt not in request
+                assert "historical question" in request and "fixture answer" in request
+                assert "captured question" in request
+                if trial.candidate_slot_id == "selected":
+                    retry = await execution.retry("replacement question")
+                    assert (await retry.wait()).result.status is ExecutionStatus.SUCCEEDED
+                    retry_request = str((await retry.model_interactions(include_content=True)).items[0].request)
+                    assert retry_request.count(candidate_prompt) == 1
+                    assert original_prompt not in retry_request
+                    assert "historical question" in retry_request and "fixture answer" in retry_request
+                    assert "replacement question" in retry_request
+                    assert "captured question" not in retry_request

@@ -4,23 +4,25 @@
 
 from pathlib import Path
 
+from ._runtime_test_helpers import FileToolsStub
+
 import pytest
 from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from linktools.ai.capability import AgentContext, workspace_capabilities
+from linktools.ai.capability import AgentContext, filesystem_capabilities
 from linktools.ai.core import Principal, PromptLimits
 from linktools.ai.runtime._compaction import CompactionCapability
-from linktools.ai.runtime._message import binary_content_usage
+from linktools.ai.model.messages import binary_content_usage
 from linktools.ai.workspace import Workspace
 
 
-class _Session:
+class _Session(FileToolsStub):
     async def canonicalize_path(self, path: str) -> str:
         return path
 
-    async def read_bytes(self, path: str, *, max_bytes: int | None = None) -> bytes:
+    async def read_bytes(self, path: str, *, max_bytes: int | None = None, expected_state: str | None = None) -> bytes:
         values = {"evidence.png": b"png", "second.png": b"two"}
         assert path in values
         value = values[path]
@@ -30,6 +32,9 @@ class _Session:
     async def inspect_file(
         self, path: str, *, max_bytes: int | None = None,
     ) -> dict[str, object]:
+        if path in {"evidence.png", "second.png"}:
+            return {"path": path, "is_text": False, "mime_type": "image/png",
+                    "type_source": "extension", "size": 3, "state": "image-v1", "bytes_read": 0}
         assert path == "note.txt"
         assert max_bytes is None or max_bytes >= 4
         return {
@@ -68,13 +73,13 @@ class _Session:
 
 
 @pytest.mark.asyncio
-async def test_attach_files_is_visible_for_one_model_request_only(tmp_path: Path) -> None:
+async def test_read_file_is_visible_for_one_model_request_only(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
     session = _Session()
-    toolset = workspace_capabilities(
+    toolset = filesystem_capabilities(
         workspace,
-        ("attach_files", "read_file"),
-        session=session,  # type: ignore[arg-type]
+        ("read_file",),
+        backend=session,  # type: ignore[arg-type]
     )[0].get_toolset()
     observed_binary: list[tuple[int, int]] = []
 
@@ -87,8 +92,8 @@ async def test_attach_files_is_visible_for_one_model_request_only(tmp_path: Path
             return ModelResponse(
                 parts=[
                     ToolCallPart(
-                        "attach_files",
-                        {"paths": ["evidence.png"]},
+                        "read_file",
+                        {"as_file": True, "path": ["evidence.png"]},
                         "attach-call",
                     )
                 ]
@@ -131,15 +136,15 @@ async def test_attach_files_is_visible_for_one_model_request_only(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_sequential_attach_files_do_not_accumulate_binary_context(
+async def test_sequential_read_file_do_not_accumulate_binary_context(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.load(tmp_path)
     session = _Session()
-    toolset = workspace_capabilities(
+    toolset = filesystem_capabilities(
         workspace,
-        ("attach_files",),
-        session=session,  # type: ignore[arg-type]
+        ("read_file",),
+        backend=session,  # type: ignore[arg-type]
     )[0].get_toolset()
     observed_binary: list[tuple[int, int]] = []
 
@@ -152,8 +157,8 @@ async def test_sequential_attach_files_do_not_accumulate_binary_context(
             return ModelResponse(
                 parts=[
                     ToolCallPart(
-                        "attach_files",
-                        {"paths": ["evidence.png"]},
+                        "read_file",
+                        {"as_file": True, "path": ["evidence.png"]},
                         "attach-first",
                     )
                 ]
@@ -162,8 +167,8 @@ async def test_sequential_attach_files_do_not_accumulate_binary_context(
             return ModelResponse(
                 parts=[
                     ToolCallPart(
-                        "attach_files",
-                        {"paths": ["second.png"]},
+                        "read_file",
+                        {"as_file": True, "path": ["second.png"]},
                         "attach-second",
                     )
                 ]

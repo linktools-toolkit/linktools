@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Runtime callbacks borrow the same per-run instances as native SDK hooks."""
 
 import asyncio
@@ -17,8 +19,9 @@ from linktools.ai.asset import AssetKey, AssetVersionRef
 from linktools.ai.capability import AgentContext, ReferencedInputsCapability, ToolResultsCapability
 from linktools.ai.core import ExecutionStatus, service_principal
 from linktools.ai.model import ReferencedContent
-from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeStorage
-from linktools.ai.runtime._run_callbacks import RunCallbacks, bind_run_callbacks
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.capability import RunCallbacks, bind_run_callbacks
 from linktools.ai.spec import CapabilityRef
 from linktools.ai.storage import StorageEntryRevision
 
@@ -139,7 +142,7 @@ async def test_two_concurrent_runs_use_their_initialized_instance_through_close(
     features.capability(container(project), id="project", scope="agent")
     features.capability(container(source), id="source", scope="agent")
     features.agent("reader", allow_tools=("inspect",), allow_skills=(), allow_subagents=())
-    async with Runtime.open("run-lifecycle", features=features, storage=RuntimeStorage.in_memory()) as runtime:
+    async with Persistence.open('run-lifecycle', storage=PersistenceStorage.in_memory()) as persistence_142, Runtime.attach(persistence=persistence_142, features=features) as runtime:
         executions = await asyncio.gather(*(runtime.agents.get("reader").start("Inspect.") for _ in range(2)))
         outcomes = await asyncio.gather(*(execution.wait(timeout_seconds=10) for execution in executions))
         assert all(outcome.result.status is ExecutionStatus.SUCCEEDED for outcome in outcomes)
@@ -281,7 +284,7 @@ async def test_deferred_callbacks_follow_native_loading_and_returned_run_shape(s
         return "original"
     from pydantic_ai.toolsets import FunctionToolset
     from linktools.ai.runtime._harness import SummaryProviderModel
-    from linktools.ai.runtime._run_callbacks import RunCallbackScope
+    from linktools.ai.capability import RunCallbackScope
     from linktools.ai.runtime._tool_boundary import BoundaryToolset, ManagedToolDescriptor
     from ._runtime_test_helpers import tool_run_context, tool_with_metadata
     callbacks, context = RunCallbacks(), tool_run_context()

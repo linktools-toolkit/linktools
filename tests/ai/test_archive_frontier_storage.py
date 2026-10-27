@@ -16,12 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engin
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime.state import ArchiveFrontierReader, ArchiveNodeRead, ArchiveNodeSlot
-from linktools.ai.runtime.state._archive import ArchiveRoot, ContentArchive, PreparedArchive
-from linktools.ai.runtime.state._plan import RuntimeDomain
-from linktools.ai.runtime.state._schema import build_runtime_sql_metadata
-from linktools.ai.runtime.state._sql import SqlStateStore, _SqlTransaction
-from linktools.ai.runtime.state._store import StateTransaction, StoredRecord, _ReadOnlyStateTransaction
+from linktools.ai.persistence.runs import ArchiveFrontierReader, ArchiveNodeRead, ArchiveNodeSlot
+from linktools.ai.persistence._archive import ArchiveRoot, ContentArchive, PreparedArchive
+from linktools.ai.persistence._plan import PersistenceDomain
+from linktools.ai.persistence._schema import build_runtime_sql_metadata
+from linktools.ai.persistence._sql import SqlStateStore, _SqlTransaction
+from linktools.ai.persistence.state import StateTransaction, StoredRecord, _ReadOnlyStateTransaction
 from linktools.ai.storage import create_sql_storage_context
 
 
@@ -203,7 +203,7 @@ async def test_sql_frontier_batches_stay_within_999_parameters(tmp_path: Path) -
 
 def test_fixed_frontier_compiles_for_supported_server_dialects_with_bounded_parameters() -> None:
     engine = create_async_engine("sqlite+aiosqlite://")
-    metadata = build_runtime_sql_metadata(frozenset((RuntimeDomain.EXECUTION,)))
+    metadata = build_runtime_sql_metadata(frozenset((PersistenceDomain.EXECUTION,)))
     transaction = _SqlTransaction(AsyncSession(engine), metadata, create_sql_storage_context(engine), _digest("store"))
     requests = tuple(ArchiveNodeRead(_digest(f"node-{index}"), ALL, ALL) for index in range(500))
     content_keys = tuple(_digest(f"body-{index}") for index in range(500))

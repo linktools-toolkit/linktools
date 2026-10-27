@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Evaluation read reuse remains subordinate to each canonical storage read."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 from dataclasses import replace
 from datetime import timedelta
@@ -14,8 +14,8 @@ from linktools.ai.core import ImmutableJsonMapping, canonical_json_bytes
 from linktools.ai.core import _json as json_module
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import ScoreAttemptView, ScoreBundle, TargetTrialRef
-from linktools.ai.runtime.state._codec import encode_domain
-from linktools.ai.runtime.state._evaluation_records import EvaluationLaunchIntent
+from linktools.ai.persistence.codec import encode_domain
+from linktools.ai.persistence._evaluation_records import EvaluationLaunchIntent
 from linktools.ai.task import TaskGraph, TaskGraphAdmission, TaskGraphRequest, TaskGraphSubmission, TaskNode, TaskRef
 
 from .test_evaluation_persistence import NOW, PRINCIPAL, experiment, storage_for
@@ -23,7 +23,7 @@ from .test_evaluation_persistence import NOW, PRINCIPAL, experiment, storage_for
 
 async def _repository(path: Path, backend: str = "memory", record=None):
     state = storage_for(backend, path)
-    state = RuntimeState(state)
+    state = Persistence(state)
     await state.initialize(namespace="evaluation", tenant_id="tenant")
     repository = state.evaluation.records
     await repository.reserve_experiment(experiment() if record is None else record)

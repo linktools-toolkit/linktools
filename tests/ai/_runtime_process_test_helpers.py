@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from linktools.ai.persistence import Persistence
 """Independent Runtime processes for live ownership and crash recovery tests."""
 from ._runtime_test_helpers import model_features
 
@@ -15,9 +17,10 @@ from pydantic_ai.models.function import FunctionModel
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
-from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.runtime import Runtime
+from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
-from linktools.ai.runtime.service_api import CancelExecutionRequest
+from linktools.ai.execution import CancelExecutionRequest
 
 from ._session_tool_test_helpers import _split_sqlite_storage
 from ._runtime_test_helpers import _Models
@@ -36,15 +39,15 @@ def _capabilities(*, conversation: bool = False) -> RuntimeFeatures:
     return group
 
 
-def _storage(database: Path, phase: str) -> RuntimeStorage:
+def _storage(database: Path, phase: str) -> PersistenceStorage:
     if phase in {"pending", "handoff", "finalizing"}:
         return _split_sqlite_storage(database)
     if phase == "filesystem":
-        return RuntimeStorage(RuntimeStoragePlan(
+        return PersistenceStorage(PersistencePlan(
             conversation=StorageRoute.sqlite(database.with_suffix(".conversation.db")),
             execution=StorageRoute.filesystem(database.with_suffix(".execution")),
         ))
-    return RuntimeStorage.sqlite(database)
+    return PersistenceStorage.sqlite(database)
 
 
 def _runtime_process(
@@ -74,11 +77,7 @@ def _runtime_process(
             yield "owner answer"
 
         state = _storage(Path(database), phase)
-        async with Runtime.open(
-            _NAMESPACE,
-            storage=state, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(conversation=mode == "session")),
-            auto_recover=auto_recover,
-        ) as runtime:
+        async with Persistence.open(_NAMESPACE, storage=state) as persistence_77, Runtime.attach(persistence=persistence_77, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(conversation=mode == 'session')), auto_recover=auto_recover) as runtime:
             async def snapshot() -> dict[str, object]:
                 assert execution_id is not None
                 tenant = runtime.default_principal.tenant_id
@@ -109,8 +108,8 @@ def _runtime_process(
 
                 backend._reconcile_handoff = synchronized_reconcile
             if publication_order is not None:
-                from linktools.ai.runtime.state import RuntimeDomain
-                from linktools.ai.runtime.state._step_archive import StateStepArchive
+                from linktools.ai.persistence import PersistenceDomain
+                from linktools.ai.persistence._step_archive import StateStepArchive
 
                 role, prepared, cursor_committed, publication_finished = publication_order
                 backend = runtime._execution_service.runtime_backend()
@@ -120,7 +119,7 @@ def _runtime_process(
                 def ordered_publication(original):
                     async def publish(store, run, **kwargs):
                         nonlocal waiting
-                        if store._runtime_domain is not RuntimeDomain.CONVERSATION or not waiting:
+                        if store._runtime_domain is not PersistenceDomain.CONVERSATION or not waiting:
                             return await original(store, run, **kwargs)
                         waiting = False
                         if role == "delayed":
@@ -297,7 +296,7 @@ def _runtime_process(
                         ),
                     })
                 elif command == "flush_trace":
-                    await runtime._state.run_store.flush_dirty_execution_projections(
+                    await runtime._run_store.flush_dirty_execution_projections(
                         execution_id=execution_id,
                     )
                     connection.send(await snapshot())

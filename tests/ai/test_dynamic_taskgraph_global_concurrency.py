@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 """Distributed capacity invariants for durable TaskGraph claims."""
 
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.persistence import Persistence
 import asyncio
 
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task import (
     TaskGraph,
     TaskGraphAdmission,
@@ -22,8 +22,8 @@ from linktools.ai.core import Principal, PrincipalKind
 
 @pytest.mark.asyncio
 async def test_concurrent_claims_cannot_exceed_graph_capacity() -> None:
-    state = RuntimeStorage.in_memory()
-    state = RuntimeState(state)
+    state = PersistenceStorage.in_memory()
+    state = Persistence(state)
     await state.initialize(namespace="task-global-claim-capacity", tenant_id="tenant")
     try:
         graph = TaskGraph("global-capacity", (TaskNode("a"), TaskNode("b")))

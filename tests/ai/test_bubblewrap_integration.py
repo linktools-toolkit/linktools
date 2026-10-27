@@ -11,7 +11,9 @@ import socket
 import subprocess
 import sys
 import textwrap
+from functools import partial
 from pathlib import Path, PurePosixPath
+
 
 import pytest
 from fastmcp import Client
@@ -26,14 +28,14 @@ from linktools.ai.runtime._mcp import (
     _model_tool_name,
 )
 from linktools.ai.runtime._mcp_transport import (
-    _SandboxMCPTransport,
+    _WorkspaceMCPTransport,
     _close_process,
 )
 from linktools.ai.workspace import (
-    BubblewrapSandbox,
-    ReadOnlySandboxPolicy,
-    SandboxResource,
-    SandboxResourcePath,
+    BubblewrapWorkspaceBackend,
+    WorkspaceReadPolicy,
+    WorkspaceResource,
+    WorkspaceResourcePath,
 )
 from linktools.ai.workspace import _bubblewrap
 
@@ -51,7 +53,7 @@ def _sandbox_configuration() -> tuple[Path, Path]:
     return Path(runtime_root_value), Path(executable_value)
 
 
-def _create_stdio_server(root: Path) -> SandboxResource:
+def _create_stdio_server(root: Path) -> WorkspaceResource:
     root.mkdir()
     (root / "resource.txt").write_text("resource", encoding="utf-8")
     (root / "server.py").write_text(
@@ -232,7 +234,7 @@ def _create_stdio_server(root: Path) -> SandboxResource:
         ),
         encoding="utf-8",
     )
-    return SandboxResource("mcp", root)
+    return WorkspaceResource("mcp", root)
 
 
 def _prepare_probe_tree(root: Path, external: Path) -> None:
@@ -249,7 +251,7 @@ def _prepare_probe_tree(root: Path, external: Path) -> None:
 
 
 def _runtime_mcp_client(
-    transport: _SandboxMCPTransport,
+    transport: _WorkspaceMCPTransport,
     *,
     init_timeout: float | None = None,
 ) -> tuple[Client, _MCPModelToolset, RunContext[None], str]:
@@ -314,9 +316,9 @@ class _LocalStdioSession:
     async def open_stdio_process(
         self,
         command: str,
-        args: tuple[str | SandboxResourcePath, ...],
+        args: tuple[str | WorkspaceResourcePath, ...],
         *,
-        resources: tuple[SandboxResource, ...],
+        resources: tuple[WorkspaceResource, ...],
     ) -> _LocalStdioProcess:
         assert command == "/usr/bin/python3"
         roots = {resource.id: resource.source for resource in resources}
@@ -397,11 +399,11 @@ async def test_mcp_transport_discovers_and_routes_through_fastmcp(
     tmp_path: Path,
 ) -> None:
     resource = _create_stdio_server(tmp_path / "mcp-resource")
-    transport = _SandboxMCPTransport(
+    transport = _WorkspaceMCPTransport(
         _LocalStdioSession(),
         "/usr/bin/python3",
         (
-            SandboxResourcePath("mcp", "server.py"),
+            WorkspaceResourcePath("mcp", "server.py"),
             "missing",
             "9",
             "missing",
@@ -430,11 +432,11 @@ async def test_mcp_transport_cancellation_during_handshake_closes_process(
 ) -> None:
     resource = _create_stdio_server(tmp_path / "mcp-resource")
     local_session = _LocalStdioSession()
-    transport = _SandboxMCPTransport(
+    transport = _WorkspaceMCPTransport(
         local_session,
         "/usr/bin/python3",
         (
-            SandboxResourcePath("mcp", "server.py"),
+            WorkspaceResourcePath("mcp", "server.py"),
             "missing",
             "9",
             "missing",
@@ -472,33 +474,24 @@ async def test_bubblewrap_session_is_real_and_shares_workspace(tmp_path: Path) -
     skill_root.mkdir()
     (skill_root / "resource.txt").write_text("read-only", encoding="utf-8")
 
-    sandbox = BubblewrapSandbox(
-        runtime_root=Path(runtime_root_value),
-        bwrap_executable=Path(executable_value),
-    )
-    session = await sandbox.open(
+    sandbox = partial(BubblewrapWorkspaceBackend, runtime_root=Path(runtime_root_value), bwrap_executable=Path(executable_value))
+    session = sandbox(
         root=workspace_root,
-        resources=(SandboxResource("skill-resource", skill_root),),
+        resources=(WorkspaceResource("skill-resource", skill_root),),
     )
     try:
-        command_result = await session.run_command(
-            "printf 'created-by-worker' > worker.txt"
-        )
+        command_result = await session.run_command("printf 'created-by-worker' > worker.txt")
         assert "status: exited" in command_result
         assert (workspace_root / "worker.txt").read_text(encoding="utf-8") == (
             "created-by-worker"
         )
 
         resource_path = session.resource_path("skill-resource")
-        resource_result = await session.run_command(
-            f"test -r '{resource_path}/resource.txt' && "
-            f"! printf blocked >> '{resource_path}/resource.txt'"
-        )
+        resource_result = await session.run_command(f"test -r '{resource_path}/resource.txt' && "
+            f"! printf blocked >> '{resource_path}/resource.txt'")
         assert "exit_code: 0" in resource_result
 
-        hidden_result = await session.run_command(
-            "test ! -e /workspace/.linktools/host-control.txt"
-        )
+        hidden_result = await session.run_command("test ! -e /workspace/.linktools/host-control.txt")
         assert "exit_code: 0" in hidden_result
     finally:
         await session.close()
@@ -517,10 +510,8 @@ async def test_bubblewrap_blocks_external_network_but_keeps_loopback(
 
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    session = await BubblewrapSandbox(
-        runtime_root=Path(runtime_root_value),
-        bwrap_executable=Path(executable_value),
-    ).open(root=workspace_root)
+    session = BubblewrapWorkspaceBackend(workspace_root, runtime_root=Path(runtime_root_value), bwrap_executable=Path(executable_value))
+    await session.working_dir()
     try:
         blocked_code = (
             "import socket,sys; "
@@ -529,9 +520,7 @@ async def test_bubblewrap_blocks_external_network_but_keeps_loopback(
             "except OSError: sys.exit(0)\n"
             "sys.exit(1)"
         )
-        blocked = await session.run_command(
-            f"/usr/bin/python3 -c {shlex.quote(blocked_code)}"
-        )
+        blocked = await session.run_command(f"/usr/bin/python3 -c {shlex.quote(blocked_code)}")
         assert "exit_code: 0" in blocked
 
         loopback_code = (
@@ -542,9 +531,7 @@ async def test_bubblewrap_blocks_external_network_but_keeps_loopback(
             "conn,_=server.accept(); client.sendall(b'ok'); "
             "assert conn.recv(2) == b'ok'"
         )
-        loopback = await session.run_command(
-            f"/usr/bin/python3 -c {shlex.quote(loopback_code)}"
-        )
+        loopback = await session.run_command(f"/usr/bin/python3 -c {shlex.quote(loopback_code)}")
         assert "exit_code: 0" in loopback
     finally:
         await session.close()
@@ -566,13 +553,9 @@ async def test_bubblewrap_close_reaps_background_command(tmp_path: Path) -> None
         "import pathlib,time; time.sleep(2); "
         "pathlib.Path('background-marker.txt').write_text('alive', encoding='utf-8')"
     )
-    session = await BubblewrapSandbox(
-        runtime_root=Path(runtime_root_value),
-        bwrap_executable=Path(executable_value),
-    ).open(root=workspace_root)
-    started = await session.start_command(
-        f"/usr/bin/python3 -c {shlex.quote(code)}"
-    )
+    session = BubblewrapWorkspaceBackend(workspace_root, runtime_root=Path(runtime_root_value), bwrap_executable=Path(executable_value))
+    await session.working_dir()
+    started = await session.start_command(f"/usr/bin/python3 -c {shlex.quote(code)}")
     assert re.search(r"command_id: [A-Za-z0-9._-]+", started)
     await session.close()
     await asyncio.sleep(2.2)
@@ -595,13 +578,9 @@ async def test_bubblewrap_guardian_loss_is_observable(tmp_path: Path) -> None:
         "import pathlib,time; time.sleep(2); "
         "pathlib.Path('guardian-loss-marker.txt').write_text('alive', encoding='utf-8')"
     )
-    session = await BubblewrapSandbox(
-        runtime_root=Path(runtime_root_value),
-        bwrap_executable=Path(executable_value),
-    ).open(root=workspace_root)
-    started = await session.start_command(
-        f"/usr/bin/python3 -c {shlex.quote(code)}"
-    )
+    session = BubblewrapWorkspaceBackend(workspace_root, runtime_root=Path(runtime_root_value), bwrap_executable=Path(executable_value))
+    await session.working_dir()
+    started = await session.start_command(f"/usr/bin/python3 -c {shlex.quote(code)}")
     assert re.search(r"command_id: [A-Za-z0-9._-]+", started)
 
     process = session._process
@@ -629,10 +608,8 @@ async def test_bubblewrap_mcp_spawn_cancellation_reaps_process_tree(
     external = tmp_path / "host-secret.txt"
     external.write_text("host-only", encoding="utf-8")
     resource = _create_stdio_server(tmp_path / "mcp-resource")
-    session = await BubblewrapSandbox(
-        runtime_root=runtime_root,
-        bwrap_executable=bwrap,
-    ).open(root=workspace_root, resources=(resource,))
+    session = BubblewrapWorkspaceBackend(workspace_root, runtime_root=runtime_root, bwrap_executable=bwrap, resources=(resource,))
+    await session.working_dir()
     ready_wait = asyncio.Event()
 
     async def wait_for_ready(process, control_fd) -> None:
@@ -645,7 +622,7 @@ async def test_bubblewrap_mcp_spawn_cancellation_reaps_process_tree(
         session.open_stdio_process(
             "/usr/bin/python3",
             (
-                SandboxResourcePath("mcp", "server.py"),
+                WorkspaceResourcePath("mcp", "server.py"),
                 str(external),
                 "1",
                 str(external),
@@ -720,21 +697,17 @@ async def test_workspace_mcp_stdio_protocol_and_readonly_boundary(
     _prepare_probe_tree(workspace_root, external)
     (workspace_root / ".linktools").mkdir()
     resource = _create_stdio_server(tmp_path / "mcp-resource")
-    sandbox = BubblewrapSandbox(
-        runtime_root=runtime_root,
-        bwrap_executable=bwrap,
-        read_policy=ReadOnlySandboxPolicy(readable_paths=("**",)),
-    )
-    session = await sandbox.open(root=workspace_root)
+    sandbox = partial(BubblewrapWorkspaceBackend, runtime_root=runtime_root, bwrap_executable=bwrap, read_policy=WorkspaceReadPolicy(readable_paths=("**",)))
+    session = sandbox(root=workspace_root)
     with pytest.raises(AIError) as hidden_resource:
         session.resource_path("mcp")
     assert hidden_resource.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
-    transport = _SandboxMCPTransport(
+    transport = _WorkspaceMCPTransport(
         session,
         "/usr/bin/python3",
         (
-            SandboxResourcePath("mcp", "server.py"),
+            WorkspaceResourcePath("mcp", "server.py"),
             str(external),
             str(port),
             "/workspace/.." + str(external),
@@ -785,16 +758,13 @@ async def test_workspace_mcp_stdio_empty_and_narrow_read_policies(
     listener.listen()
     port = listener.getsockname()[1]
 
-    empty_session = await BubblewrapSandbox(
-        runtime_root=runtime_root,
-        bwrap_executable=bwrap,
-        read_policy=ReadOnlySandboxPolicy(readable_paths=()),
-    ).open(root=workspace_root, resources=(resource,))
-    transport = _SandboxMCPTransport(
+    empty_session = BubblewrapWorkspaceBackend(workspace_root, runtime_root=runtime_root, bwrap_executable=bwrap, read_policy=WorkspaceReadPolicy(readable_paths=()), resources=(resource,))
+    await empty_session.working_dir()
+    transport = _WorkspaceMCPTransport(
         empty_session,
         "/usr/bin/python3",
         (
-            SandboxResourcePath("mcp", "server.py"),
+            WorkspaceResourcePath("mcp", "server.py"),
             str(external),
             str(port),
             "/workspace/.." + str(external),
@@ -818,13 +788,10 @@ async def test_workspace_mcp_stdio_empty_and_narrow_read_policies(
     finally:
         await empty_session.close()
 
-    narrow_session = await BubblewrapSandbox(
-        runtime_root=runtime_root,
-        bwrap_executable=bwrap,
-        read_policy=ReadOnlySandboxPolicy(
+    narrow_session = BubblewrapWorkspaceBackend(workspace_root, runtime_root=runtime_root, bwrap_executable=bwrap, read_policy=WorkspaceReadPolicy(
             readable_paths=("allowed/*.txt",),
-        ),
-    ).open(root=workspace_root)
+        ))
+    await narrow_session.working_dir()
     try:
         with pytest.raises(AIError) as raised:
             await narrow_session.open_stdio_process("/usr/bin/python3")
@@ -846,15 +813,13 @@ async def test_workspace_mcp_stdio_close_reaps_setsid_descendant(
     external = tmp_path / "host-secret.txt"
     external.write_text("host-only", encoding="utf-8")
     resource = _create_stdio_server(tmp_path / "mcp-resource")
-    session = await BubblewrapSandbox(
-        runtime_root=runtime_root,
-        bwrap_executable=bwrap,
-    ).open(root=workspace_root, resources=(resource,))
-    transport = _SandboxMCPTransport(
+    session = BubblewrapWorkspaceBackend(workspace_root, runtime_root=runtime_root, bwrap_executable=bwrap, resources=(resource,))
+    await session.working_dir()
+    transport = _WorkspaceMCPTransport(
         session,
         "/usr/bin/python3",
         (
-            SandboxResourcePath("mcp", "server.py"),
+            WorkspaceResourcePath("mcp", "server.py"),
             str(external),
             "1",
             "/workspace/.." + str(external),
@@ -887,15 +852,13 @@ async def test_workspace_mcp_stdio_cancelled_call_closes_process(
     external = tmp_path / "host-secret.txt"
     external.write_text("host-only", encoding="utf-8")
     resource = _create_stdio_server(tmp_path / "mcp-resource")
-    session = await BubblewrapSandbox(
-        runtime_root=runtime_root,
-        bwrap_executable=bwrap,
-    ).open(root=workspace_root, resources=(resource,))
-    transport = _SandboxMCPTransport(
+    session = BubblewrapWorkspaceBackend(workspace_root, runtime_root=runtime_root, bwrap_executable=bwrap, resources=(resource,))
+    await session.working_dir()
+    transport = _WorkspaceMCPTransport(
         session,
         "/usr/bin/python3",
         (
-            SandboxResourcePath("mcp", "server.py"),
+            WorkspaceResourcePath("mcp", "server.py"),
             str(external),
             "1",
             "/workspace/.." + str(external),
@@ -934,15 +897,13 @@ async def test_workspace_mcp_stdio_cancelled_close_reaps_process_tree(
     external = tmp_path / "host-secret.txt"
     external.write_text("host-only", encoding="utf-8")
     resource = _create_stdio_server(tmp_path / "mcp-resource")
-    session = await BubblewrapSandbox(
-        runtime_root=runtime_root,
-        bwrap_executable=bwrap,
-    ).open(root=workspace_root, resources=(resource,))
-    transport = _SandboxMCPTransport(
+    session = BubblewrapWorkspaceBackend(workspace_root, runtime_root=runtime_root, bwrap_executable=bwrap, resources=(resource,))
+    await session.working_dir()
+    transport = _WorkspaceMCPTransport(
         session,
         "/usr/bin/python3",
         (
-            SandboxResourcePath("mcp", "server.py"),
+            WorkspaceResourcePath("mcp", "server.py"),
             str(external),
             "1",
             str(external),
@@ -1002,11 +963,11 @@ async def test_workspace_mcp_stdio_runtime_death_reaps_process_tree(
             from pathlib import Path
 
             from fastmcp import Client
-            from linktools.ai.runtime._mcp_transport import _SandboxMCPTransport
+            from linktools.ai.runtime._mcp_transport import _WorkspaceMCPTransport
             from linktools.ai.workspace import (
-                BubblewrapSandbox,
-                SandboxResource,
-                SandboxResourcePath,
+                BubblewrapWorkspaceBackend,
+                WorkspaceResource,
+                WorkspaceResourcePath,
             )
 
             async def main():
@@ -1015,16 +976,16 @@ async def test_workspace_mcp_stdio_runtime_death_reaps_process_tree(
                 workspace = Path(sys.argv[3])
                 resource_root = Path(sys.argv[4])
                 external = Path(sys.argv[5])
-                resource = SandboxResource("mcp", resource_root)
-                session = await BubblewrapSandbox(
+                resource = WorkspaceResource("mcp", resource_root)
+                session = await BubblewrapWorkspaceBackend(
                     runtime_root=runtime_root,
                     bwrap_executable=bwrap,
                 ).open(root=workspace, resources=(resource,))
-                transport = _SandboxMCPTransport(
+                transport = _WorkspaceMCPTransport(
                     session,
                     "/usr/bin/python3",
                     (
-                        SandboxResourcePath("mcp", "server.py"),
+                        WorkspaceResourcePath("mcp", "server.py"),
                         str(external),
                         "1",
                         "/workspace/.." + str(external),

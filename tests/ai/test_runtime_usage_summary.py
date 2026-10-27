@@ -17,16 +17,17 @@ from linktools.ai.core import (
     agent_conversation_id as make_agent_conversation_id,
     agent_run_id as make_agent_run_id,
 )
-from linktools.ai.runtime import RuntimeHistory, UsageReadCutoff, UsageSummary
-from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
-from linktools.ai.runtime.service_api import ExecutionHistoryService
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._contracts import (
+from linktools.ai.history import History
+from linktools.ai.execution import UsageReadCutoff, UsageSummary
+from linktools.ai.history._projection import StepExecutionHistoryReader
+from linktools.ai.execution import ExecutionHistoryService
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.contracts import (
     ContextProjection,
     ModelInteractionRecord,
     RuntimePayloadRef,
 )
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord
+from linktools.ai.persistence._step_contracts import AgentRunRecord
 from linktools.ai.storage import StoredPayload
 
 
@@ -105,7 +106,7 @@ class _UsageStore:
         return list(selected if limit is None else selected[:limit])
 
     async def capture_history(self, agent_run_ids, *, include_pending=False):
-        from linktools.ai.runtime.state._step_contracts import AgentRunHistoryCapture
+        from linktools.ai.persistence._step_contracts import AgentRunHistoryCapture
 
         del include_pending
         result = {}
@@ -273,7 +274,7 @@ class _GraphExecutions:
         return ()
 
 
-class _GraphUsageHistory(RuntimeHistory):
+class _GraphUsageHistory(History):
     async def task_graph(self, graph_id: str, *, principal: Principal):
         assert graph_id == "graph"
         assert principal.tenant_id == "tenant"

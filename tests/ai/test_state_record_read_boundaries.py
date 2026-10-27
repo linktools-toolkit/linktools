@@ -11,12 +11,12 @@ import pytest
 
 from linktools.ai.core import ImmutableJsonMapping, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeDomain, _model_interaction_store, _store
-from linktools.ai.runtime.state._codec import decode_record, encode_record
-from linktools.ai.runtime.state._memory import InMemoryStateStore
-from linktools.ai.runtime.state._model_interaction_store import ModelInteractionStateStepArchive
-from linktools.ai.runtime.state._sql import _record_from_row, _record_values
-from linktools.ai.runtime.state._store import StoredRecord, validate_record_identity
+from linktools.ai.persistence import PersistenceDomain, _model_interaction_store, state as _store
+from linktools.ai.persistence.codec import decode_record, encode_record
+from linktools.ai.persistence._memory import InMemoryStateStore
+from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
+from linktools.ai.persistence._sql import _record_from_row, _record_values
+from linktools.ai.persistence.state import StoredRecord, validate_record_identity
 
 from .test_model_interaction_records import _prepared, _running, _terminal
 
@@ -105,7 +105,7 @@ def test_record_identity_still_validates_custom_mapping_behavior() -> None:
 def interaction_archive() -> ModelInteractionStateStepArchive:
     return ModelInteractionStateStepArchive(
         InMemoryStateStore(), object_store=None, namespace="reads", tenant_id="tenant",
-        runtime_domain=RuntimeDomain.CHECKPOINT,
+        runtime_domain=PersistenceDomain.CHECKPOINT,
     )
 
 
