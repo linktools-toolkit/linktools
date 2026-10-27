@@ -223,3 +223,37 @@ async def test_invalid_lookup_identity_is_rejected() -> None:
             await cache.read_turn(scope, execution_id)
         with pytest.raises(ValueError):
             await cache.cancel_turn(scope, execution_id)
+
+
+@pytest.mark.asyncio
+async def test_request_lookup_is_scoped_token_free_and_does_not_extend_expiry(clock: list[float]) -> None:
+    cache = InMemoryCacheBackend(max_bytes=1)
+    owner = await _claim(cache)
+    assert owner is not None and owner.lease is not None
+    clock[0] += 9
+    assert await cache.read_turn_by_request("tenant:runtime", "request") == replace(owner, lease=None)
+    assert await cache.read_turn_by_request("other", "request") is None
+    assert await cache.read_turn_by_request("tenant:runtime", "missing") is None
+    clock[0] += 2
+    assert await cache.read_turn_by_request("tenant:runtime", "request") is None
+    assert await cache.read_turn("tenant:runtime", "execution") is None
+
+
+@pytest.mark.asyncio
+async def test_released_request_lookup_does_not_retain_old_owner() -> None:
+    cache = InMemoryCacheBackend(max_bytes=1)
+    owner = await _claim(cache)
+    assert owner is not None and owner.lease is not None
+    assert await cache.release_turn(owner.lease)
+    assert await cache.read_turn_by_request("tenant:runtime", "request") is None
+    replacement = await _claim(cache, execution_id="next", owner_id="next-owner")
+    assert replacement is not None
+    assert await cache.read_turn_by_request("tenant:runtime", "request") == replace(replacement, lease=None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope,request_key", (("", "request"), ("scope", "")))
+async def test_request_lookup_rejects_invalid_identity(scope: str, request_key: str) -> None:
+    cache = InMemoryCacheBackend(max_bytes=1)
+    with pytest.raises(ValueError):
+        await cache.read_turn_by_request(scope, request_key)

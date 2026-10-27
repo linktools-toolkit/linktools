@@ -89,4 +89,19 @@ class TurnCoordinationBackend(Protocol):
         ...
 
 
-__all__ = ["TurnCoordination", "TurnCoordinationBackend"]
+@runtime_checkable
+class TurnAdmissionReader(Protocol):
+    """Optional indexed reads of live admissions without claiming ownership."""
+
+    async def read_turn_by_request(
+        self, scope: str, request_key: str,
+    ) -> TurnCoordination | None:
+        """Return a live request's token-free owner, or None if absent.
+
+        Reads must not claim, renew, or release ownership. Backend failures
+        propagate rather than being interpreted as absence.
+        """
+        ...
+
+
+__all__ = ["TurnAdmissionReader", "TurnCoordination", "TurnCoordinationBackend"]

@@ -15,7 +15,7 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import CacheBackend, StreamBackend, Lease, TurnCoordination, TurnCoordinationBackend
+from ..storage import CacheBackend, StreamBackend, Lease, TurnAdmissionReader, TurnCoordination, TurnCoordinationBackend
 from .codec import decode_domain, encode_domain
 from ..execution import ExecutionRecord
 
@@ -100,6 +100,25 @@ class PendingTurnCoordination:
         if tenant_id != self._tenant_id:
             return None
         return await self._backend.read_turn(self._scope, execution_id)
+
+    async def read_request_execution(
+        self, request_key: str, *, tenant_id: str,
+    ) -> ExecutionRecord | None:
+        """Read an admitted request without turning an unavailable view into absence."""
+        if tenant_id != self._tenant_id:
+            return None
+        if not isinstance(self._backend, TurnAdmissionReader):
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={"reason": "admission_lookup_not_supported"},
+            )
+        owner = await self._backend.read_turn_by_request(self._scope, request_key)
+        if owner is None:
+            return None
+        current = await self._read_execution(owner.execution_id, owner_id=owner.owner_id)
+        if current is None:
+            raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
+        return current[0]
 
     async def read_execution(
         self, execution_id: str, *, tenant_id: str,

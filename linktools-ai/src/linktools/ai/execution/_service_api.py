@@ -15,6 +15,7 @@ from ..session import (
     SessionHistoryItem,
     SessionTurnItem,
     SessionTurn,
+    SessionAdmission,
     SessionHistoryReader,
     CreateSessionRequest,
     ListSessionRequest,
@@ -1314,6 +1315,10 @@ class ExecutionService(Protocol):
 
 
 class SessionService(Protocol):
+    async def lookup_admission(
+        self, session_id: str, *, principal: Principal, idempotency_key: str,
+    ) -> SessionAdmission | None: ...
+
     async def create(
         self, agent_id: str, request: CreateSessionRequest
     ) -> SessionView: ...

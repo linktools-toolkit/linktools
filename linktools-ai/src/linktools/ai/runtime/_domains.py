@@ -5,6 +5,7 @@
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
 
+from ..session import SessionAdmission
 from ..agent import AgentBindingContract
 from ..core import BudgetUsage, Principal
 from ..observe import WaitResult, RuntimeMetricsControl
@@ -251,6 +252,20 @@ class RuntimeSessions(Generic[AppT]):
 
     async def get(self, session_id: str, *, principal: Principal | None = None) -> "Session[AppT]":
         return await self._get_session(session_id, principal)
+
+    async def lookup_admission(
+        self, session_id: str, *, principal: Principal, idempotency_key: str,
+    ) -> SessionAdmission | None:
+        """Read an accepted request without starting or reconciling execution.
+
+        None means no retained admission. An uncertain admission raises
+        EXECUTION_START_UNKNOWN; retry with the same key, never a fresh key.
+        Callers must still compare their original request with the frozen input.
+        """
+        self._ensure_open()
+        return await self._service.lookup_admission(
+            session_id, principal=principal, idempotency_key=idempotency_key,
+        )
 
     async def create(self, agent_id: str, request: CreateSessionRequest) -> SessionView:
         self._ensure_open()

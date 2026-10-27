@@ -336,6 +336,15 @@ class InMemoryCacheBackend:
             key = self._turn_executions.get((scope, execution_id))
             return None if key is None else self._turns[key].coordination()
 
+    async def read_turn_by_request(self, scope: str, request_key: str) -> "TurnCoordination | None":
+        """Read the existing request index without extending its live claim."""
+        _require_turn_text(scope, "scope")
+        _require_turn_text(request_key, "request_key")
+        async with self._lock:
+            self._expire_turns(monotonic())
+            key = self._turn_requests.get((scope, request_key))
+            return None if key is None else self._turns[key].coordination()
+
     async def renew_turn(
         self, lease: Lease, *, lease_seconds: float,
     ) -> "TurnCoordination | None":
