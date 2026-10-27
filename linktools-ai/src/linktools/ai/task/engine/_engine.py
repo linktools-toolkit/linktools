@@ -8,7 +8,7 @@ import asyncio
 import secrets
 import uuid
 from copy import copy
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Sequence
 from ...execution.handle import ExecutionBinding
@@ -456,12 +456,20 @@ class TaskEngine(Generic[AppT]):
     async def _inspect_execution(self, execution_id: str, *, principal: Principal) -> ExecutionView:
         return await self._execution_reads.inspect(execution_id, principal=principal)
 
-    def _watch_execution_tree(self, execution_id: str, *, principal: Principal,
+    async def _watch_execution_tree(self, execution_id: str, *, principal: Principal,
         after_event_seqs: Mapping[str, int] | None = None, include_content: bool = False,
         ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
-        return self._tree_streamer.stream(execution_id, principal=principal,
-            after_event_seqs=after_event_seqs, include_content=include_content, ready=ready)
+        view = await self._execution_reads.inspect(execution_id, principal=principal)
+        port = None if view.binding_kind == "task" else (
+            self._agent_execution_ports.get(execution_id)
+            or self._agent_execution_ports.get(view.root_execution_id)
+        )
+        watch = self._tree_streamer.stream if port is None else port.watch_tree
+        async with aclosing(watch(execution_id, principal=principal,
+            after_event_seqs=after_event_seqs, include_content=include_content, ready=ready)) as stream:
+            async for event in stream:
+                yield event
 
     async def _capture_execution_tree(self, execution_id: str, *, principal: Principal,
         after_event_seqs: Mapping[str, int] | None = None,

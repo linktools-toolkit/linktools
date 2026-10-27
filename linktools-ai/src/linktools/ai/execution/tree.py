@@ -455,7 +455,9 @@ class ExecutionTreeStreamer:
             while True:
                 if not pending:
                     if discovery is not None:
-                        await discovery
+                        # Cleanup owns cancellation of this read, including adapters
+                        # that discard the cancellation message while unwinding.
+                        await asyncio.shield(discovery)
                         discovery = None
                         if pending:
                             continue

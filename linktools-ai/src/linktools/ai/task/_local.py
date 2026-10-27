@@ -409,6 +409,7 @@ class LocalTaskGraphLauncher:
         self._graphs: dict[tuple[str, str], _GraphRun] = {}
         self._lock = asyncio.Lock()
         self._accepting = True
+        self._hold_cleanup_failure: BaseException | None = None
 
     def bind_metric_projector(self, projector: _TaskMetricProjector) -> None:
         if not isinstance(projector, _TaskMetricProjector):
@@ -798,7 +799,9 @@ class LocalTaskGraphLauncher:
         finally:
             if not inflight.task.done():
                 inflight.task.cancel()
-            await asyncio.gather(inflight.task, return_exceptions=True)
+            (node_outcome,) = await asyncio.gather(
+                inflight.task, return_exceptions=True,
+            )
         if (
             cancellation_error is None
             and (invoke_cancel or inflight.invoke_cancel)
@@ -833,6 +836,12 @@ class LocalTaskGraphLauncher:
                 )
             except BaseException as error:  # noqa: BLE001
                 cancellation_error = error
+        if (
+            cancellation_error is None
+            and isinstance(node_outcome, BaseException)
+            and not isinstance(node_outcome, asyncio.CancelledError)
+        ):
+            cancellation_error = node_outcome
         if run.inflight.get(node_id) is inflight:
             run.inflight.pop(node_id, None)
         if cancellation_error is not None:
@@ -1152,6 +1161,8 @@ class LocalTaskGraphLauncher:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self._drain_runner_background()
+        if self._hold_cleanup_failure is not None:
+            raise self._hold_cleanup_failure
         async with self._lock:
             self._graphs.clear()
 
@@ -1431,7 +1442,7 @@ class LocalTaskGraphLauncher:
             if value.quiesce_task is None and not value.task.done():
                 value.task.cancel()
         if values:
-            await asyncio.gather(
+            outcomes = await asyncio.gather(
                 *(value.task for _node_id, value in values),
                 return_exceptions=True,
             )
@@ -1441,19 +1452,19 @@ class LocalTaskGraphLauncher:
                 if value.quiesce_task is not None
             )
             if quiescence:
-                outcomes = await asyncio.gather(
+                outcomes += await asyncio.gather(
                     *(asyncio.shield(task) for task in quiescence),
                     return_exceptions=True,
                 )
-                for outcome in outcomes:
-                    if isinstance(outcome, BaseException) and not isinstance(
-                        outcome, asyncio.CancelledError
-                    ):
-                        if run.failure is None:
-                            run.failure = _scheduler_failure(
-                                outcome,
-                                run.request.graph_id,
-                            )
+            for outcome in outcomes:
+                if isinstance(outcome, BaseException) and not isinstance(
+                    outcome, asyncio.CancelledError
+                ):
+                    if run.failure is None:
+                        run.failure = _scheduler_failure(
+                            outcome,
+                            run.request.graph_id,
+                        )
 
     async def _wait_scheduler(
         self,
@@ -1493,6 +1504,29 @@ class LocalTaskGraphLauncher:
             else:
                 run.observation_backoff = 1.0
 
+    async def _finish_execution_hold(
+        self, execution_id: str, *, tenant_id: str, hold_id: str,
+    ) -> None:
+        # A durable terminal node may be quiesced while its hold is still being
+        # released. Its owner must finish that release before leaving the task.
+        cleanup = asyncio.create_task(self._release_execution_hold(
+            execution_id, tenant_id=tenant_id, hold_id=hold_id,
+        ))
+        cancelled = False
+        try:
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    cancelled = True
+            cleanup.result()
+        except Exception as error:
+            if self._hold_cleanup_failure is None:
+                self._hold_cleanup_failure = error
+            raise
+        if cancelled:
+            raise asyncio.CancelledError
+
     async def _wait_bound_node(
         self,
         run: _GraphRun,
@@ -1517,7 +1551,7 @@ class LocalTaskGraphLauncher:
                 expected_fence,
             )
         finally:
-            await self._release_execution_hold(
+            await self._finish_execution_hold(
                 execution_id,
                 tenant_id=tenant_id,
                 hold_id=hold_id,
@@ -2093,7 +2127,7 @@ class LocalTaskGraphLauncher:
                 and node.task.revision == 1
             )
             if execution_id is not None and not is_input_wait:
-                await self._release_execution_hold(
+                await self._finish_execution_hold(
                     execution_id,
                     tenant_id=tenant_id,
                     hold_id=f"task:{graph_id}:{node.node_id}",

@@ -1231,3 +1231,59 @@ async def test_existing_tree_events_continue_during_child_discovery(
             await asyncio.gather(pending, return_exceptions=True)
         await stream.aclose()
     assert not broker._subscriptions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_cleanup", [False, True])
+async def test_tree_stop_owns_discovery_cancellation_after_member_stream_ends(
+    owner_cleanup: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import linktools.ai.execution.tree as tree_module
+    from linktools.ai.observe.stream import _CLEANUP_CANCEL
+
+    monkeypatch.setattr(tree_module, "_DISCOVERY_BACKOFF_INITIAL", 0.001)
+    ready, entered, end_member, member_ended, discovery_closed = (
+        asyncio.Event() for _ in range(5)
+    )
+    broker = ExecutionTreeBroker()
+
+    class Reader(_RootOnlyExecutionReader):
+        async def list_children(self, execution_id, *, principal):
+            if ready.is_set():
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    # Database cancellation adapters need not retain cancel messages.
+                    raise asyncio.CancelledError() from None
+                finally:
+                    discovery_closed.set()
+            return ()
+
+    class Events:
+        def stream(self, execution_id, *, principal, after_event_seq=0):
+            async def values():
+                await end_member.wait()
+                member_ended.set()
+                if False:
+                    yield
+            return values()
+
+    stream = ExecutionTreeStreamer(Reader(), Events(), broker).stream(
+        "root", principal=Principal("owner", "tenant"), ready=ready,
+    )
+    pending = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(entered.wait(), 1)
+    end_member.set()
+    await asyncio.wait_for(member_ended.wait(), 1)
+    # Let the finished member be removed before stopping its still-reading owner.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    marker = _CLEANUP_CANCEL if owner_cleanup else "caller-stop"
+    pending.cancel(marker)
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await pending
+    assert caught.value.args == (marker,)
+    assert discovery_closed.is_set()
+    await stream.aclose()
+    assert not broker._subscriptions
