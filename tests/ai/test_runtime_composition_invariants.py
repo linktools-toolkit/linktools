@@ -64,7 +64,7 @@ def test_runtime_runs_agents_and_tasks_when_mcp_client_is_unavailable(tmp_path: 
         from linktools.ai.core import ExecutionStatus, TaskStatus
         from linktools.ai.runtime import Runtime, RuntimeFeatures
         from linktools.ai.persistence import Persistence, PersistenceStorage
-        from linktools.ai.task_engine import TaskEngine
+        from linktools.ai.task.engine import TaskEngine
         from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
 
         class OfflineModelBinding:

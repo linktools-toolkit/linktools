@@ -14,8 +14,8 @@ import pytest
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal, RunBudget, TaskStatus
 from linktools.ai.errors import ErrorCode
 from linktools.ai.execution import ExecutionView
-from linktools.ai.task_engine import _agent as _agent_task
-from linktools.ai.task_engine._agent import AgentTaskRunner
+from linktools.ai.task.engine import _agent as _agent_task
+from linktools.ai.task.engine._agent import AgentTaskRunner
 from linktools.ai.task import TaskNode, TaskNodeInvocation, TaskNodeRunError
 
 

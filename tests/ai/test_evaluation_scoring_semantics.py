@@ -4,8 +4,8 @@
 
 from linktools.ai.persistence import Persistence
 from linktools.ai.history import History
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 from ._runtime_test_helpers import model_features
 
 from ._runtime_test_helpers import workspace_features
@@ -596,7 +596,7 @@ async def test_budget_stops_new_scoring_without_cancelling_accepted_work(
     monkeypatch: pytest.MonkeyPatch, finish: str,
 ) -> None:
     from datetime import timedelta
-    from linktools.ai.evaluation_engine import _service as evaluation_module
+    from linktools.ai.evaluation.engine import _service as evaluation_module
 
     entered, release, budget_reached = asyncio.Event(), asyncio.Event(), asyncio.Event()
 

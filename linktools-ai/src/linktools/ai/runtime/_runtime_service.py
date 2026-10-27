@@ -79,8 +79,8 @@ from ..execution import (
 from ..persistence import Persistence, PersistenceStatus, PersistenceStorage
 from ..persistence.runs import RuntimeAgentRunStore
 from ..task import Task, TaskExpander
-from ..task_engine import TaskEngine
-from ..evaluation_engine import Evaluations
+from ..task.engine import TaskEngine
+from ..evaluation.engine import Evaluations
 from ._composition_domains import RuntimeTasks, RuntimeEvaluations
 from ._lifecycle import _RuntimeCloseCoordinator
 

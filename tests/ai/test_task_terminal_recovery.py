@@ -18,7 +18,7 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 from linktools.ai.task import (
     DefaultTaskGraphService, RecoverGraphRequest, Task, TaskGraph, TaskNode, TaskNodeContext,
 )

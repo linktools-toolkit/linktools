@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from linktools.ai.persistence import Persistence
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 """One Runtime result boundary for ordinary, workspace, and MCP tools."""
 
 import asyncio

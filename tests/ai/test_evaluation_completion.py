@@ -3,8 +3,8 @@
 """Evaluation completion preserves execution outcomes and graph recovery independently."""
 
 from linktools.ai.persistence import Persistence
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 
 from dataclasses import replace
 from pathlib import Path
@@ -96,7 +96,7 @@ async def test_inspect_preserves_scorer_graph_read_boundaries_without_saved_scor
     from linktools.ai.core import service_principal
     from linktools.ai.errors import AIError, ErrorCode
     from linktools.ai.evaluation import TargetTrialRef, TrialView
-    from linktools.ai.evaluation_engine._service import Evaluations
+    from linktools.ai.evaluation.engine._service import Evaluations
     from linktools.ai.persistence._evaluation_records import EvaluationLaunchIntent
     from linktools.ai.task import TaskGraph, TaskGraphAdmission, TaskGraphRequest, TaskGraphState, TaskGraphSubmission, TaskNode, TaskNodeView, TaskRef
     from .test_evaluation_persistence import experiment

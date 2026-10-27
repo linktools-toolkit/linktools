@@ -18,7 +18,7 @@ from linktools.ai.evaluation import (
     ScoreAttemptView, SlotDispositionView, TargetTrialRef, TaskCaseInput, TrialPlan, TrialView,
     evaluation_completion,
 )
-from linktools.ai.evaluation_engine._service import Evaluations
+from linktools.ai.evaluation.engine._service import Evaluations
 from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
 from linktools.ai.persistence.contracts import IdempotencyRecord

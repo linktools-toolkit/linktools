@@ -439,6 +439,10 @@ Migrate the removed pre-release APIs directly; no compatibility aliases remain:
 
 - Move factory `max_tokens=` and `timeout=` into `model_settings`; no aliases remain.
   Keep transport retry parameters on the factory and remove SDK retry-owner overrides.
+  If an old `model_settings={"max_retries": 0}` meant no transport retries, use
+  `create_model(..., max_retries=0)` instead. Leaving the factory default `2` now
+  permits up to three attempts on a retryable failure; SDK zero no longer selects
+  a separate retry owner.
 - Remove `create_model(profile=...)`. Move a declared `context_window` to the
   dedicated argument; its contract location is now top-level `context_window`,
   not `profile.context_window`. Do not move the old profile wholesale into

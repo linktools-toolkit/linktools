@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 from linktools.ai.persistence import Persistence
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 
 import asyncio
 from datetime import datetime, timezone
@@ -13,7 +13,7 @@ import pytest
 
 from linktools.ai.core import Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
-from linktools.ai.evaluation_engine import EvaluationRun
+from linktools.ai.evaluation.engine import EvaluationRun
 from linktools.ai.execution import TaskGraphRunEvent, TaskGraphProjection, TaskModelProjection
 from linktools.ai.observe.cursors import (
     decode_evaluation_watch_cursor, decode_graph_watch_cursor, encode_graph_watch_cursor,

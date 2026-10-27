@@ -7,24 +7,24 @@ from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from ..agent import AgentBindingContract, AgentInputCaptureRef
-from ..asset import AssetVersionRef
-from ..capability import tool_effect_policy_from_metadata
-from ..core import JsonValue, Principal, canonical_sha256
-from ..errors import AIError, ErrorCode
-from ..evaluation import (
+from ...agent import AgentBindingContract, AgentInputCaptureRef
+from ...asset import AssetVersionRef
+from ...capability import tool_effect_policy_from_metadata
+from ...core import JsonValue, Principal, canonical_sha256
+from ...errors import AIError, ErrorCode
+from ...evaluation import (
     AgentCaseInput, CandidateContract, CandidateSpec, CaseContract, CaseSpec,
     EvaluationPolicy, GraphCaseInput, GraphInputContract, GraphTargetContract, InlineValue,
     ScorerContract, ScorerSpec, ScoreBundle, TaskCaseInput, capture_mapping,
 )
-from ..spec import canonicalize_pydantic_model_schema
-from ..task import TaskGraph, TaskNode, TaskNodeResultRef, TaskRef, TaskInvocationInputRef
-from ..inputs import AgentTaskInput
-from ..execution import ExecutionInputContext
+from ...spec import canonicalize_pydantic_model_schema
+from ...task import TaskGraph, TaskNode, TaskNodeResultRef, TaskRef, TaskInvocationInputRef
+from ...inputs import AgentTaskInput
+from ...execution import ExecutionInputContext
 
 if TYPE_CHECKING:
-    from ..inputs import InputCaptures
-    from ..task_engine import TaskEngine
+    from ...inputs import InputCaptures
+    from ...task.engine import TaskEngine
 
 
 def task_contract(engine: "TaskEngine", ref: TaskRef) -> dict[str, JsonValue]:

@@ -3,8 +3,8 @@
 """Dataset retention reads are bounded without dropping case validation."""
 
 from linktools.ai.persistence import Persistence
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 
 from linktools.ai.core import ExecutionContext
 
@@ -181,7 +181,7 @@ async def test_evaluation_consumers_bound_case_queries_and_reload_missing_conten
         ScoreComparisonSelection, ScoreSelection, StartEvaluationRequest,
     )
 
-    from linktools.ai.evaluation_engine._service import _target_slot
+    from linktools.ai.evaluation.engine._service import _target_slot
     from linktools.ai.evaluation import TargetTrialRef
     from linktools.ai.task import Task
     from .test_evaluation_consumers import CONTEXT, PRINCIPAL, echo, exact, rule_scorer

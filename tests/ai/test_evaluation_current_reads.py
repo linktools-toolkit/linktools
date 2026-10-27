@@ -3,8 +3,8 @@
 """Current evaluation reads select manifest members before native hydration."""
 
 from linktools.ai.persistence import Persistence
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 
 from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
@@ -26,7 +26,7 @@ from linktools.ai.evaluation import (
 
 from linktools.ai.history import ExecutionInfo
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.evaluation_engine import _service as evaluation_module
+from linktools.ai.evaluation.engine import _service as evaluation_module
 from linktools.ai.persistence.objects import ObjectKeyFactory, put_runtime_object
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence import _evaluation_repository as repository_module

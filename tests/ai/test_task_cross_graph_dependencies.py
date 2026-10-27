@@ -15,7 +15,7 @@ from linktools.ai.core import (
     TaskStatus,
     canonical_sha256,
 )
-from linktools.ai.task_engine._runner import TaskNodeExecutor
+from linktools.ai.task.engine._runner import TaskNodeExecutor
 from linktools.ai.task import (
     TaskDependency,
     TaskNode,

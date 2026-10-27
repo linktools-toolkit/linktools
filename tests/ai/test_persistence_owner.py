@@ -237,8 +237,8 @@ async def test_producer_scope_settles_cancelled_cleanup_before_storage_closes(
 ) -> None:
     from contextlib import AsyncExitStack
     from linktools.ai.runtime import Runtime, RuntimeFeatures
-    from linktools.ai.task_engine import TaskEngine
-    from linktools.ai.evaluation_engine import Evaluations
+    from linktools.ai.task.engine import TaskEngine
+    from linktools.ai.evaluation.engine import Evaluations
 
     entered, release = asyncio.Event(), asyncio.Event()
     observed: list[bool] = []

@@ -326,7 +326,7 @@ async def test_submission_cancellation_authorizes_registered_owner() -> None:
 async def test_submission_identity_and_fence_survive_snapshot_restore(
     phase: str, tmp_path: Path,
 ) -> None:
-    from linktools.ai.task_engine import TaskEngine
+    from linktools.ai.task.engine import TaskEngine
     from linktools.ai.persistence.snapshots import SnapshotLimits
     from linktools.ai.storage import InMemoryObjectStore
     from linktools.ai.task import Task, TaskNodeContext

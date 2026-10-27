@@ -3,8 +3,8 @@
 """Evaluation owns target preparation before private native payloads exist."""
 
 from linktools.ai.persistence import Persistence
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 
 from linktools.ai.core import ExecutionContext
 

@@ -16,7 +16,7 @@ from linktools.ai.observe import (
 from linktools.ai.observe.service import MetricsService
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.storage import InMemoryCacheBackend
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
 
 

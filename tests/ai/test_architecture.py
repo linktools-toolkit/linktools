@@ -243,3 +243,49 @@ def test_migration_exports_preserve_owner_identity() -> None:
     imported: dict[str, object] = {}
     exec("from linktools.ai.migrate import *", imported)
     assert {name: imported[name] for name in migrate.__all__} == expected
+
+
+def test_nested_public_packages_preserve_dependency_direction(tmp_path: Path) -> None:
+    errors = _errors(tmp_path, {
+        "domain/__init__.py": "Value = object()\n__all__ = ['Value']\n",
+        "storage/__init__.py": "from linktools.ai.domain import Value\nStore = object()\n__all__ = ['Store']\n",
+        "domain/engine/__init__.py": "from ._impl import Engine\n__all__ = ['Engine']\n",
+        "domain/engine/_impl.py": "from linktools.ai.storage import Store\nfrom .. import Value\nEngine = object()\n",
+        "app/use.py": "from linktools.ai.domain.engine import Engine\n",
+    })
+    assert not errors
+
+
+@pytest.mark.parametrize("files", [
+    {
+        "domain/__init__.py": "from .engine import Engine\nValue = object()\n__all__ = ['Value', 'Engine']\n",
+        "domain/engine/__init__.py": "from .. import Value\nEngine = object()\n__all__ = ['Engine']\n",
+    },
+    {
+        "domain/first/__init__.py": "A = object()\n__all__ = ['A']\n",
+        "domain/first/use.py": "from ..second import B\n",
+        "domain/second/__init__.py": "B = object()\n__all__ = ['B']\n",
+        "domain/second/use.py": "from ..first import A\n",
+    },
+])
+def test_nested_package_owner_cycles_are_rejected(tmp_path: Path, files: dict[str, str]) -> None:
+    errors = _errors(tmp_path, files)
+    assert any(error.startswith("runtime owner cycle:") for error in errors)
+
+
+@pytest.mark.parametrize("target", (".._impl", "..sibling._impl"))
+def test_nested_package_private_access_is_rejected(tmp_path: Path, target: str) -> None:
+    errors = _errors(tmp_path, {
+        "domain/_impl.py": "Value = object()\n__all__ = ['Value']\n",
+        "domain/sibling/_impl.py": "Value = object()\n__all__ = ['Value']\n",
+        "domain/engine/use.py": f"from {target} import Value\n",
+    })
+    assert any("cross-owner private module access" in error for error in errors)
+
+
+def test_private_subpackage_keeps_enclosing_owner(tmp_path: Path) -> None:
+    errors = _errors(tmp_path, {
+        "domain/_impl.py": "Value = object()\n",
+        "domain/_internal/use.py": "from .._impl import Value\n",
+    })
+    assert not errors

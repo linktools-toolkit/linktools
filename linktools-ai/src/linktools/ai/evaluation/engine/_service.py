@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Dataset publication and persisted evaluation plans over native Task graphs."""
 
-from ..storage import StorageRetentionMode
+from ...storage import StorageRetentionMode
 
 import asyncio
 import json
@@ -20,18 +20,18 @@ from typing import TYPE_CHECKING, TypeVar
 from linktools.core import environ
 from pydantic_ai.messages import BinaryContent
 
-from ..agent import AgentInputCaptureRef
+from ...agent import AgentInputCaptureRef
 
-from ..asset import AssetStoreReader, AssetVersionRef
-from ..core import (
+from ...asset import AssetStoreReader, AssetVersionRef
+from ...core import (
     AuthorizationAction, AuthorizationPolicy, CursorPayload, CursorSigner, HmacCursorSigner,
     ExecutionStatus, IdempotencyStatus, JsonValue, Page, Principal,
     ResourceKind, ResourceRef, TaskStatus, UsageMetrics, canonical_json_bytes, canonical_sha256,
     idempotency_key_digest, normalize_json_value, principal_identity_payload, validate_idempotency_key,
     validate_page_limit,
 )
-from ..errors import AIError, ErrorCode, ObservationError
-from ..evaluation import (
+from ...errors import AIError, ErrorCode, ObservationError
+from ...evaluation import (
     EvaluationPurgeResult,
     CaseContract, CaseRef, CaseSpec, ComparisonReadCutoff,
     ComparisonReport, ComparisonSpec, DatasetContract, DatasetRef, DatasetSpec,
@@ -45,31 +45,31 @@ from ..evaluation import (
     TargetTrialRef, TrialFilter, TrialPlan, TrialView, build_comparison_report,
     build_evaluation_report, capture_mapping, evaluation_completion,
 )
-from ..task import (
+from ...task import (
     Task, TaskGraph, TaskGraphState, TaskInputSupplyRequest,
     TaskNode, TaskNodeContext, TaskNodeResultRef, TaskRef, TaskGraphLimits, TaskSubmissionCancellation,
 )
-from ..inputs import AgentTaskInput
+from ...inputs import AgentTaskInput
 from ._compile import EvaluationCompiler, task_contract
 from ._retention import EvaluationRetention, require_evaluation_content
 from ._scope import EvaluationTrialScope, EvaluationTrialScopeCallback, _EnteredTrialScope
-from ..inputs import input_intent
-from ..inputs import CaptureInputRequest
-from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
-from ..execution import UsageSummary, TaskGraphRunEvent
-from ..observe import WaitResult
-from ..observe.stream import (
+from ...inputs import input_intent
+from ...inputs import CaptureInputRequest
+from ...persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
+from ...execution import UsageSummary, TaskGraphRunEvent
+from ...observe import WaitResult
+from ...observe.stream import (
     ObservationSession, wait_for_result, validate_wait, await_stream_cleanup,
     drain_stream_tasks, is_observation_cleanup, report_observation_error,
 )
-from ..observe.cursors import (
+from ...observe.cursors import (
     decode_evaluation_watch_cursor, encode_evaluation_watch_cursor, decode_graph_watch_cursor,
 )
-from ..core import token_seed
-from ..persistence import PersistenceDomain
-from ..persistence.snapshots import SnapshotExclusiveGuard
-from ..execution import IdempotencyRecord
-from ..persistence.contracts import (
+from ...core import token_seed
+from ...persistence import PersistenceDomain
+from ...persistence.snapshots import SnapshotExclusiveGuard
+from ...execution import IdempotencyRecord
+from ...persistence.contracts import (
     EvaluationLaunchIntent,
     EvaluationRecord,
     EvaluationSlotDisposition,
@@ -78,9 +78,9 @@ from ..persistence.contracts import (
 )
 
 if TYPE_CHECKING:
-    from ..inputs import InputCaptures
-    from ..history import History
-    from ..task_engine import TaskEngine
+    from ...inputs import InputCaptures
+    from ...history import History
+    from ...task.engine import TaskEngine
 
 AppT = TypeVar("AppT")
 ScopeAppT = TypeVar("ScopeAppT")
@@ -143,7 +143,7 @@ class Evaluations:
         cls, engine: "TaskEngine[AppT]", *, assets: Sequence[AssetStoreReader] = (),
     ) -> "Evaluations":
         """Create an evaluation producer whose caller owns its close lifetime."""
-        from ..history import History
+        from ...history import History
 
         history_context = History.open(
             persistence=engine.persistence, authorization=engine.authorization,

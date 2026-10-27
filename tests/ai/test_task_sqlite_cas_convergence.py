@@ -34,8 +34,8 @@ from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.runtime import Runtime
 from linktools.ai.execution import TaskGraphRunEvent, TaskGraphProjection
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.task_engine._runner import TaskNodeExecutor
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine._runner import TaskNodeExecutor
+from linktools.ai.task.engine import TaskEngine
 from linktools.ai.execution import ExecutionStreamEvent, ExecutionTreeEvent, ExecutionView, ModelInteractionReadBoundary
 from linktools.ai.persistence._sql import _SqlTransaction
 from linktools.ai.persistence._task_repository import TaskRepositoryImpl

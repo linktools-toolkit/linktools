@@ -14,8 +14,8 @@ from linktools.ai.core import (
     TaskStatus,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.task_engine import TaskGraphRun
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.task.engine import TaskGraphRun
 from linktools.ai.execution.events import DefaultEventService, LiveExecutionEventBroker
 from linktools.ai.task import TaskGraphState, TaskNode, TaskNodeView
 

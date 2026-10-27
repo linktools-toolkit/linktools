@@ -8,12 +8,12 @@ from contextlib import AbstractAsyncContextManager, contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, TypeVar
 
-from ..core import Principal
-from ..evaluation import TargetTrialRef
-from ..task import TaskGraphSubmission
+from ...core import Principal
+from ...evaluation import TargetTrialRef
+from ...task import TaskGraphSubmission
 
 if TYPE_CHECKING:
-    from ..task_engine import TaskEngine
+    from ...task.engine import TaskEngine
 
 AppT = TypeVar("AppT")
 

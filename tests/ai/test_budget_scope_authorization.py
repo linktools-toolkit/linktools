@@ -23,7 +23,7 @@ from linktools.ai.persistence.codec import _decode_enveloped_domain, encode_doma
 from linktools.ai.persistence.contracts import ExecutionRecord
 from linktools.ai.persistence.state import RecordQuery, StateTransaction
 from linktools.ai.task import TaskBindingContract, TaskGraph
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 
 from ._runtime_test_helpers import RuntimeUsageModels
 

@@ -11,7 +11,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model._openai import _OpenAIModelBinding
 from linktools.ai.execution import ExecutionResult
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.task_engine._runner import _execution_failure
+from linktools.ai.task.engine._runner import _execution_failure
 from linktools.ai.task import TaskGraph, TaskNode, TaskNodeRunError
 
 

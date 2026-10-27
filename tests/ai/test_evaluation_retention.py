@@ -4,8 +4,8 @@
 
 from linktools.ai.persistence import Persistence
 from linktools.ai.snapshot import Snapshot, SnapshotLimits
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 
 from linktools.ai.core import ExecutionContext
 
@@ -159,7 +159,7 @@ async def test_public_expiry_purge_and_reopen_do_not_revive_private_evidence(bac
         CandidateSlotRef, ComparisonReadCutoff, ComparisonSpec, ScoreComparisonSelection, ScoreSelection,
     )
     from linktools.ai.persistence.objects import ObjectKeyFactory, put_runtime_object
-    from linktools.ai.evaluation_engine import _service as evaluation_runtime
+    from linktools.ai.evaluation.engine import _service as evaluation_runtime
     from linktools.ai.persistence import _evaluation_repository as evaluation_repository
     from linktools.ai.task import Task, TaskNodeContext
 
@@ -282,7 +282,7 @@ async def test_expired_prepared_payload_is_fenced_before_deletion_and_cannot_res
         CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, DimensionContract,
         EvaluationPolicy, EvaluationSpec, StartEvaluationRequest, ScorerSpec, TargetTrialRef, GraphTargetSpec, TaskCaseInput,
     )
-    from linktools.ai.evaluation_engine._service import Evaluations
+    from linktools.ai.evaluation.engine._service import Evaluations
     from linktools.ai.persistence._evaluation_records import EvaluationLaunchIntent
     from linktools.ai.task import Task, TaskGraph, TaskGraphTemplate, TaskNode, TaskNodeContext
 
@@ -446,7 +446,7 @@ async def test_cleanup_receipt_survives_failed_physical_delete_and_retry(tmp_pat
     from datetime import timedelta
     from linktools.ai.core import service_principal
     from linktools.ai.evaluation import EvidenceAttachmentRef, EvidenceBundle, EvidenceRef, ExecutionSubjectRef, ExecutionTargetEvidence, TargetTrialRef
-    from linktools.ai.evaluation_engine._retention import EvaluationRetention
+    from linktools.ai.evaluation.engine._retention import EvaluationRetention
     from tests.ai.test_evaluation_persistence import experiment
 
     class Authorization:

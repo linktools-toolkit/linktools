@@ -3,8 +3,8 @@
 """Selected usage and derived evaluation lifetimes follow retained sources."""
 
 from linktools.ai.persistence import Persistence
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 from ._runtime_test_helpers import model_features
 
 import asyncio
@@ -25,7 +25,7 @@ from linktools.ai.evaluation import (
 )
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.evaluation_engine import _service as evaluation_module
+from linktools.ai.evaluation.engine import _service as evaluation_module
 from linktools.ai.persistence.codec import decode_domain, encode_domain
 from linktools.ai.task import Task, TaskNodeContext, TaskRef
 

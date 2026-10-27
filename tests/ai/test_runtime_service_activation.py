@@ -14,8 +14,8 @@ import pytest
 from linktools.ai.core import TaskStatus
 
 from linktools.ai.runtime import Runtime, RuntimeFeatures
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence import Persistence
 from linktools.ai.persistence import PersistenceDomain

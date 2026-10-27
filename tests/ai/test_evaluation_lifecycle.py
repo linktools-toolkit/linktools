@@ -3,8 +3,8 @@
 """Closed evaluation coordinators reject new work without changing durable facts."""
 
 from linktools.ai.persistence import Persistence
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 
 import asyncio
 from dataclasses import replace
@@ -168,7 +168,7 @@ async def test_failed_scope_exit_remains_blocked_without_reentering_or_closing_r
 ) -> None:
     from collections.abc import AsyncIterator
     from contextlib import asynccontextmanager
-    from linktools.ai.evaluation_engine._scope import _EnteredTrialScope
+    from linktools.ai.evaluation.engine._scope import _EnteredTrialScope
 
     exits: list[str] = []
     reader_closes: list[str] = []

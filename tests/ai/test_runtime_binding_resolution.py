@@ -43,7 +43,7 @@ from linktools.ai.runtime._agent_binding_resolver import _AgentBindingResolver
 from linktools.ai.core import ExecutionContext
 from linktools.ai.persistence._runtime_identity import task_graph_binding_capture_key
 from linktools.ai.runtime import Runtime, RuntimeFeatures
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 from linktools.ai.inputs import TaskGraphBindingCaptureStore
 from linktools.ai.execution import ExecutionHandle, ExecutionRequest
 from linktools.ai.persistence import PersistenceDomain, PersistenceStorage

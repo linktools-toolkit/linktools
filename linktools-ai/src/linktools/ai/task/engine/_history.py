@@ -5,12 +5,12 @@
 from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
-from ..core import Principal
-from ..errors import AIError, ErrorCode
-from ..execution import ExecutionHistoryService, ModelInteractionItem, ModelInteractionReadBoundary, ModelInteractionSubscription, UsageReadCutoff
+from ...core import Principal
+from ...errors import AIError, ErrorCode
+from ...execution import ExecutionHistoryService, ModelInteractionItem, ModelInteractionReadBoundary, ModelInteractionSubscription, UsageReadCutoff
 if TYPE_CHECKING:
-    from ..execution import ExecutionService
-    from ..runtime.agent_execution import AgentExecutionPort
+    from ...execution import ExecutionService
+    from ...runtime.agent_execution import AgentExecutionPort
 
 
 class TaskHistory:

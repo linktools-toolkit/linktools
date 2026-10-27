@@ -18,7 +18,7 @@ from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task import Task, TaskGraph, TaskNode
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, _wait_for_committed
 from .test_optional_runtime_persistence import _start_delegated_execution

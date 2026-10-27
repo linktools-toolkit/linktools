@@ -15,8 +15,8 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import CaseRef, CaseSpec, DatasetRef, DatasetSpec
 
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,7 @@ Tasks, and native TaskGraphs through a Runtime-bound TaskEngine. Runtime owns
 both domain lifecycles. Advanced callers can use `Evaluations.open(engine)` with
 an independently managed TaskEngine. Dataset, scoring, evidence and
 report values live in `linktools.ai.evaluation`; orchestration lives in
-`linktools.ai.evaluation_engine`. Function-only evaluations need no Agent Runtime.
+`linktools.ai.evaluation.engine`. Function-only evaluations need no Agent Runtime.
 
 ## An offline evaluation, end to end
 
@@ -201,7 +201,7 @@ Pass `trial_scope=...` to `start`, `cancel_admission`, `reconcile`, or `rescore`
 when each target/scorer submission needs its own TaskEngine and application
 resources (and an Agent Runtime when Agent Tasks are used). The callback is an
 asynchronous context manager accepting an `EvaluationTrialScope` from
-`linktools.ai.evaluation_engine` and yielding a `TaskEngine`. Native evaluation registers
+`linktools.ai.evaluation.engine` and yielding a `TaskEngine`. Native evaluation registers
 the durable launch intent before entering the context; a cancelled admission
 does not open one merely to perform cancellation.
 

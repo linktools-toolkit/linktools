@@ -41,15 +41,15 @@ from linktools.ai.evaluation import (
 from linktools.ai.migrate import provision_database
 
 from linktools.ai.capability import CheckpointCapability
-from linktools.ai.evaluation_engine import Evaluations, EvaluationTrialScope
+from linktools.ai.evaluation.engine import Evaluations, EvaluationTrialScope
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.task_engine import TaskEngine, TaskGraphRun
+from linktools.ai.task.engine import TaskEngine, TaskGraphRun
 from linktools.ai.storage import FilesystemObjectStore
 from linktools.ai.persistence.codec import decode_domain, encode_domain
 from linktools.ai.persistence.contracts import ExecutionRecord
 from linktools.ai.persistence._evaluation_records import EvaluationLaunchIntent
-from linktools.ai.evaluation_engine._scope import _EnteredTrialScope
+from linktools.ai.evaluation.engine._scope import _EnteredTrialScope
 from linktools.ai.task import (
     Task, TaskGraph, TaskGraphState, TaskNode, TaskNodeContext, TaskRef,
     TaskSubmissionCancellation, TaskSubmissionRef,

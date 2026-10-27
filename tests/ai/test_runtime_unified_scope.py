@@ -18,13 +18,13 @@ from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, DimensionContract,
     EvaluationSpec, ScorerSpec, ScoringInput, ScoreBundle, StartEvaluationRequest,
 )
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.evaluation.engine import Evaluations
 from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.observe import Metrics
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 
 
 class _OfflineBinding:

@@ -10,7 +10,7 @@ import pytest
 from linktools.ai.core import ExecutionContext, Principal, RunBudget, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 from linktools.ai.task import Task, TaskExpander, TaskGraph, TaskNode, TaskNodeContext, TaskExpansionContext
 
 

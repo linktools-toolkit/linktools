@@ -8,12 +8,12 @@ import weakref
 
 import pytest
 
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.evaluation.engine import Evaluations
 from linktools.ai.observe import Metrics
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime import Runtime
 from linktools.ai.task import Task, TaskGraph, TaskNode
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 
 
 class _Payload:

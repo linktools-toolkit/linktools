@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from linktools.ai.persistence import Persistence
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 from linktools.ai.task import Task
 """Workspace argument correction stays inside the agent's bounded tool loop."""
 from ._runtime_test_helpers import is_tool_retry, model_features

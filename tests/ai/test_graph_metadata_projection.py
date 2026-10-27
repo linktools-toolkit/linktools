@@ -20,7 +20,7 @@ from linktools.ai.core import ExecutionDeltaType, JsonValue, TaskStatus
 from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.execution import ExecutionTreeEvent, TaskGraphProjection, TaskGraphRunEvent, TaskModelProjection
 from linktools.ai.runtime import Runtime
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.observe.cursors import decode_graph_watch_cursor
 from linktools.ai.storage import FilesystemObjectStore

@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from linktools.ai.persistence import Persistence
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 from ._runtime_test_helpers import model_features
 
 import asyncio

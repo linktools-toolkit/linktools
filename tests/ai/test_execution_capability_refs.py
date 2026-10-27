@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from linktools.ai.persistence import Persistence
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 """Authorized execution metadata exposes bound identities without loading content."""
 from ._runtime_test_helpers import model_features
 

@@ -13,7 +13,7 @@ from linktools.ai.core import TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
 

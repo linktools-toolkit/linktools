@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 
 from linktools.ai.persistence import Persistence
 """Graph budget owners survive portable snapshots without execution records."""

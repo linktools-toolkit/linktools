@@ -10,7 +10,7 @@ import pytest
 
 from linktools.ai.core import TaskStatus
 from linktools.ai.evaluation import ScoreAttemptView, TargetTrialRef
-from linktools.ai.evaluation_engine._service import Evaluations
+from linktools.ai.evaluation.engine._service import Evaluations
 from linktools.ai.persistence._evaluation_records import EvaluationLaunchIntent
 from linktools.ai.task import (
     TaskGraph,

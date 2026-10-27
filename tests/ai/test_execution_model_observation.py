@@ -694,7 +694,7 @@ async def test_transient_task_model_observation_keeps_canonical_success_after_st
     from linktools.ai.persistence import PersistenceStorage, PersistencePlan
     from linktools.ai.storage import StorageRoute
     from linktools.ai.task import Task, TaskGraph, TaskNode
-    from linktools.ai.task_engine import TaskEngine
+    from linktools.ai.task.engine import TaskEngine
     from ._runtime_test_helpers import _UsageFunctionModel
     from .test_live_history_readback_integration import _Models
 

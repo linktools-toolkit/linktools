@@ -56,8 +56,8 @@ from linktools.ai.inputs import AgentTaskInput, AgentTaskInputContext
 from linktools.ai.execution import ExecutionInputContext, ExecutionService
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.task_engine import TaskEngine, TaskGraphRun
-from linktools.ai.task_engine._agent import _agent_task_input_identity
+from linktools.ai.task.engine import TaskEngine, TaskGraphRun
+from linktools.ai.task.engine._agent import _agent_task_input_identity
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.snapshots import SnapshotLimits
 from linktools.ai.persistence.codec import (

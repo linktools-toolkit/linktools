@@ -11,34 +11,34 @@ from copy import copy
 from contextlib import asynccontextmanager
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Sequence
-from ..execution.handle import ExecutionBinding
-from ..core import (AuthorizationPolicy, CorrelationData, ExecutionContext, PrincipalKind, PromptLimits,
+from ...execution.handle import ExecutionBinding
+from ...core import (AuthorizationPolicy, CorrelationData, ExecutionContext, PrincipalKind, PromptLimits,
     TenantAuthorizationPolicy, canonical_sha256, overlay_correlation, principal_identity_payload, validate_idempotency_key)
-from ..persistence import Persistence, PersistenceDomain
-from ..observe import Metrics, MetricsControl, MetricFlushResult, MetricRecorderStatus
-from ..storage import PayloadPolicy, StorageRetentionMode
-from ..task import (
+from ...persistence import Persistence, PersistenceDomain
+from ...observe import Metrics, MetricsControl, MetricFlushResult, MetricRecorderStatus
+from ...storage import PayloadPolicy, StorageRetentionMode
+from ...task import (
     DefaultTaskGraphService,
     LocalTaskGraphLauncher,
     TaskGraphRequest,
     CancelGraphRequest,
     RecoverGraphRequest,
 )
-from ..execution import TaskExecutionService
-from ..persistence.commands import StoredExecutionManagementAdapter
-from ..execution.events import DefaultEventService
-from ..execution.tree import ExecutionTreeBroker, ExecutionTreeStreamer
-from ..execution.coordinator import ExecutionStreamCoordinator
-from ..inputs import ExecutionInputMaterializer
-from ..observe.service import MetricsService, disabled_metric_status
-from ..persistence.objects import ObjectKeyFactory
+from ...execution import TaskExecutionService
+from ...persistence.commands import StoredExecutionManagementAdapter
+from ...execution.events import DefaultEventService
+from ...execution.tree import ExecutionTreeBroker, ExecutionTreeStreamer
+from ...execution.coordinator import ExecutionStreamCoordinator
+from ...inputs import ExecutionInputMaterializer
+from ...observe.service import MetricsService, disabled_metric_status
+from ...persistence.objects import ObjectKeyFactory
 from ._runner import TaskNodeExecutor
-from ..inputs import TaskGraphBindingCaptureStore
-from ..inputs import InputCaptures
-from ..observe.stream import ObservationSession, await_stream_cleanup
+from ...inputs import TaskGraphBindingCaptureStore
+from ...inputs import InputCaptures
+from ...observe.stream import ObservationSession, await_stream_cleanup
 from ._run import _CancelSettlement
-from ..execution import Execution
-from ..execution import ExecutionView, ExecutionTreeEvent, CancelExecutionResult, CancelExecutionRequest
+from ...execution import Execution
+from ...execution import ExecutionView, ExecutionTreeEvent, CancelExecutionResult, CancelExecutionRequest
 from linktools.core import environ
 
 _logger = environ.get_logger("ai.task.engine")
@@ -47,16 +47,16 @@ from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Generic, TypeVar
 
-from ..agent import OutputBinding, restore_output
+from ...agent import OutputBinding, restore_output
 from pydantic import BaseModel
-from ..core import JsonValue, ThinkingValue
-from ..model import CanonicalUserInput
-from ..execution import ExecutionInputContext, StoredUserInput
-from ..task import TaskNodeInvocation, TaskGraphState
+from ...core import JsonValue, ThinkingValue
+from ...model import CanonicalUserInput
+from ...execution import ExecutionInputContext, StoredUserInput
+from ...task import TaskNodeInvocation, TaskGraphState
 from ._agent import AgentTaskRunner
-from ..core import BudgetUsage, RunBudget, Page, Principal
-from ..errors import AIError, ErrorCode
-from ..task import (
+from ...core import BudgetUsage, RunBudget, Page, Principal
+from ...errors import AIError, ErrorCode
+from ...task import (
     Task,
     TaskExpander,
     TaskExpanderRef,
@@ -76,7 +76,7 @@ from ._history import TaskHistory
 from ._reads import TaskExecutionReads
 
 if TYPE_CHECKING:
-    from ..runtime.agent_execution import AgentExecutionPort
+    from ...runtime.agent_execution import AgentExecutionPort
 
 AppT = TypeVar("AppT")
 _ResultT = TypeVar("_ResultT")

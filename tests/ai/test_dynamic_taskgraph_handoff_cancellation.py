@@ -8,7 +8,7 @@ import pytest
 
 from linktools.ai.agent import AgentBindingContract
 from linktools.ai.core import Principal
-from linktools.ai.task_engine._agent import AgentTaskRunner
+from linktools.ai.task.engine._agent import AgentTaskRunner
 from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.spec import AgentSpec
 from linktools.ai.task import TaskNode, TaskNodeInvocation

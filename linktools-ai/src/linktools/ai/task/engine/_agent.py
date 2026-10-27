@@ -7,8 +7,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Generic, TypeVar
 
-from ..agent import AgentBindingContract
-from ..core import (
+from ...agent import AgentBindingContract
+from ...core import (
     ImmutableJsonMapping,
     ExecutionStatus,
     JsonValue,
@@ -19,9 +19,9 @@ from ..core import (
     normalize_thinking,
     principal_identity_payload,
 )
-from ..errors import AIError, ErrorCode
-from ..task.deadlines import deadline_policy
-from ..task import (
+from ...errors import AIError, ErrorCode
+from ...task.deadlines import deadline_policy
+from ...task import (
     Task,
     TaskNode,
     TaskNodeInvocation,
@@ -30,21 +30,21 @@ from ..task import (
     TaskNodeRunResult,
     TaskResultRef,
 )
-from ..inputs import decode_task_prompt_draft, merge_captured_input_files, task_prompt_draft
-from ..execution import StoredUserInput
-from ..persistence.contracts import TaskPreparedInputRecord
-from ..inputs import (
+from ...inputs import decode_task_prompt_draft, merge_captured_input_files, task_prompt_draft
+from ...execution import StoredUserInput
+from ...persistence.contracts import TaskPreparedInputRecord
+from ...inputs import (
     AgentTaskInput,
     AgentTaskInputBuilder,
     AgentTaskInputContext,
     AgentTaskContextError,
 )
-from ..model import CanonicalUserInput, validate_user_input
+from ...model import CanonicalUserInput, validate_user_input
 
 if TYPE_CHECKING:
-    from ..runtime.agent_execution import AgentExecutionPort
-    from ..core import RunBudget
-    from ..execution import ExecutionView
+    from ...runtime.agent_execution import AgentExecutionPort
+    from ...core import RunBudget
+    from ...execution import ExecutionView
 
 
 AppT = TypeVar("AppT")

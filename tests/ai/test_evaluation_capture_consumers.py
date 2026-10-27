@@ -4,8 +4,8 @@
 
 from linktools.ai.persistence import Persistence
 from linktools.ai.history import History
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 from ._runtime_test_helpers import model_features
 
 from ._runtime_test_helpers import workspace_features

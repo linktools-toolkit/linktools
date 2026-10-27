@@ -24,6 +24,20 @@ The main ownership rules are:
 - `AgentBinding` is created per execution and pins the exact durable semantics, including the output contract.
 - `Session` is bound to `AgentSpec.id`; retry/recovery remain pinned to the exact historical execution binding.
 
+Standalone execution owners are available from their domain packages:
+
+```python
+from linktools.ai.task import Task, TaskGraph
+from linktools.ai.task.engine import TaskEngine, TaskGraphRun
+from linktools.ai.evaluation import EvaluationSpec
+from linktools.ai.evaluation.engine import Evaluations, EvaluationRun
+```
+
+The domain roots expose definitions and value contracts without loading execution
+infrastructure. The `engine` subpackages own execution over borrowed persistence;
+ordinary applications continue using `runtime.tasks.bind` and
+`runtime.evaluations.bind` without an additional context or wrapper.
+
 ## Application capability filtering
 
 `RuntimeFeatures(..., filter=...)` accepts an optional synchronous
@@ -314,12 +328,21 @@ custom bindings, request-body extensions, restore boundaries and trace semantics
 forwards native body fields when the endpoint supports them. Common and
 provider-specific SDK settings go directly in `model_settings`; unknown keys are
 not automatically body fields. A host can pass its JSON/YAML mapping without a
-custom `ModelBinding`. Explicit settings override top-level request defaults; raw
-body fields can override standard fields, including token limits. Keep credentials
+custom `ModelBinding`. Output limits and timeouts belong in `model_settings`, not
+in duplicate factory arguments. An explicit SDK setting and `extra_body` cannot
+both own the same request object, including token limits; conflicts fail before
+sending rather than silently overriding or deep-merging values. Keep credentials
 in connection configuration, not contract-captured semantic values. Operational
-`timeout`, `request_timeout`, `max_retries` and `extra_headers` reach the SDK but
-are excluded from the semantic contract. Explicit SDK `max_retries` selects SDK
-retry policy and disables outer retries, including their delay/backoff controls.
+`timeout`, `request_timeout`, `max_retries` and `extra_headers` are excluded from
+the semantic contract.
+
+Transport retries belong only to `create_model(max_retries=...)`; native SDK
+retries stay disabled. Omit `model_settings["max_retries"]`; its only accepted
+explicit value is integer `0`, which does **not** disable LinkTools retries.
+Use `create_model(..., max_retries=0)` for no transport retries. The default `2`
+permits up to three attempts on a retryable failure, including when an old settings
+mapping contains `"max_retries": 0`; migrate that intent to the factory argument.
+See [transport retry semantics](docs/model-protocols.md#transport-retries).
 
 Agent/run `thinking=` supports `"max"`. The default `None` inherits settings/native
 capabilities; an explicit host effort takes precedence over application Thinking.

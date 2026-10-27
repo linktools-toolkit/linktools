@@ -4,8 +4,8 @@
 
 from linktools.ai.persistence import Persistence
 from linktools.ai.snapshot import Snapshot, SnapshotLimits
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 
 from linktools.ai.core import ExecutionContext
 from ._runtime_test_helpers import model_features
@@ -203,7 +203,7 @@ async def test_reserved_capture_is_owned_across_cancel_and_purge(tmp_path: Path,
 
 @pytest.mark.asyncio
 async def test_unmaterialized_capture_reservation_survives_snapshot_and_reconcile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from linktools.ai.evaluation_engine._service import Evaluations
+    from linktools.ai.evaluation.engine._service import Evaluations
     from linktools.ai.persistence.captures import input_capture_key
     from linktools.ai.storage import InMemoryObjectStore
 
@@ -265,7 +265,7 @@ async def test_unmaterialized_capture_reservation_survives_snapshot_and_reconcil
 
 @pytest.mark.asyncio
 async def test_content_purge_redacts_inline_template_and_keeps_admission_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from linktools.ai.evaluation_engine._service import Evaluations
+    from linktools.ai.evaluation.engine._service import Evaluations
     from linktools.ai.persistence.codec import decode_domain, encode_domain
     from linktools.ai.persistence._evaluation_records import EvaluationRecord
 

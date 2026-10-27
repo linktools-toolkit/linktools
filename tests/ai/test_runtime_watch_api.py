@@ -20,7 +20,7 @@ from linktools.ai.errors import AIError, ErrorCode, ObservationError
 from linktools.ai.execution import Execution, TaskGraphRunEvent
 from linktools.ai.execution.handle import ExecutionBinding
 from linktools.ai.runtime import Runtime
-from linktools.ai.task_engine import TaskGraphRun
+from linktools.ai.task.engine import TaskGraphRun
 from linktools.ai.core import _signed_cursor as _cursor
 from linktools.ai.runtime._domains import RuntimeExecutions, RuntimeSessions
 from linktools.ai.execution.tree import ExecutionTreeBroker, ExecutionTreeStreamer
@@ -1507,7 +1507,7 @@ async def test_task_graph_watch_preserves_cursor_protocol_failures(
     def fail(*args, **kwargs):
         raise cause
 
-    monkeypatch.setattr(f"linktools.ai.task_engine._run.{encoding}", fail)
+    monkeypatch.setattr(f"linktools.ai.task.engine._run.{encoding}", fail)
     run = _task_graph_run(_Runtime(), "graph", Principal("owner", "tenant"), _watch_tree)
 
     with pytest.raises(ValueError) as raised:

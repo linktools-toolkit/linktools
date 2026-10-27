@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from linktools.ai.persistence import Persistence
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 """Conversation guarantees are fixed at admission and preserved through recovery."""
 from ._runtime_test_helpers import model_features
 

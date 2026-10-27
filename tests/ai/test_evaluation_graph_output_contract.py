@@ -3,8 +3,8 @@
 """Captured graph replay preserves the native node's structured output contract."""
 
 from linktools.ai.persistence import Persistence
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 from ._runtime_test_helpers import model_features
 
 import json

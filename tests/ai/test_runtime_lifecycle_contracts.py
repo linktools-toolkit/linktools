@@ -480,7 +480,7 @@ async def test_runtime_composition_defers_task_recovery_to_explicit_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from linktools.ai.runtime import Runtime
-    from linktools.ai.task_engine import TaskEngine
+    from linktools.ai.task.engine import TaskEngine
 
     state = PersistenceStorage.in_memory()
     state_close_calls = 0

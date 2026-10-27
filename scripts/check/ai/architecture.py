@@ -296,12 +296,12 @@ def _validate_runtime_cycles(inventory: _Inventory) -> tuple[str, ...]:
 
     owner_edges: dict[str, set[str]] = {}
     for source, targets in inventory.runtime_edges.items():
-        source_owner = _owner(source)
+        source_owner = _owner(source, inventory.modules)
         if source_owner in {None, "__root__"}:
             continue
         owner_edges.setdefault(source_owner, set())
         for target in targets:
-            target_owner = _owner(target)
+            target_owner = _owner(target, inventory.modules)
             if target_owner not in {None, "__root__"} and target_owner != source_owner:
                 owner_edges[source_owner].add(target_owner)
                 owner_edges.setdefault(target_owner, set())
@@ -328,7 +328,7 @@ def _validate_cross_owner_access(
     errors: list[str] = []
     known = frozenset(inventory.modules)
     for source in sources:
-        source_owner = _owner(source.name)
+        source_owner = _owner(source.name, inventory.modules)
         aliases: dict[str, str] = {}
         for node in _runtime_imports(source.tree):
             if isinstance(node, ast.Import):
@@ -341,7 +341,7 @@ def _validate_cross_owner_access(
                     target = alias.name
                     bound = alias.asname or alias.name.split(".", 1)[0]
                     aliases[bound] = target if alias.asname else alias.name.split(".", 1)[0]
-                    errors.extend(_check_module_boundary(source, source_owner, target))
+                    errors.extend(_check_module_boundary(inventory, source, source_owner, target))
             else:
                 base = _resolve_from_module(
                     source.name,
@@ -357,13 +357,13 @@ def _validate_cross_owner_access(
                         child = f"{base}.{alias.name}"
                         if child not in known:
                             continue
-                        errors.extend(_check_module_boundary(source, source_owner, child))
+                        errors.extend(_check_module_boundary(inventory, source, source_owner, child))
                         aliases[alias.asname or alias.name] = child
                     continue
-                errors.extend(_check_module_boundary(source, source_owner, base))
+                errors.extend(_check_module_boundary(inventory, source, source_owner, base))
                 for alias in node.names:
                     if alias.name == "*":
-                        if _owner(base) != source_owner and inventory.modules[base].exports is None:
+                        if _owner(base, inventory.modules) != source_owner and inventory.modules[base].exports is None:
                             errors.append(
                                 f"{source.name}: cross-owner star import from {base} "
                                 "requires static __all__"
@@ -380,7 +380,7 @@ def _validate_cross_owner_access(
                     )
                     child = f"{base}.{alias.name}"
                     if child in known:
-                        errors.extend(_check_module_boundary(source, source_owner, child))
+                        errors.extend(_check_module_boundary(inventory, source, source_owner, child))
                         aliases[alias.asname or alias.name] = child
                     else:
                         aliases[alias.asname or alias.name] = f"{base}.{alias.name}"
@@ -413,11 +413,12 @@ def _validate_cross_owner_access(
 
 
 def _check_module_boundary(
+    inventory: _Inventory,
     source: _ModuleInfo,
     source_owner: str | None,
     target: str,
 ) -> tuple[str, ...]:
-    target_owner = _owner(target)
+    target_owner = _owner(target, inventory.modules)
     if target_owner is None or target_owner == source_owner:
         return ()
     relative = target[len(_AI_ROOT) + 1 :] if target != _AI_ROOT else ""
@@ -434,10 +435,10 @@ def _check_symbol_boundary(
     target_module: str,
     symbol: str,
 ) -> tuple[str, ...]:
-    target_owner = _owner(target_module)
+    target_owner = _owner(target_module, inventory.modules)
     if target_owner is None or target_owner == source_owner:
         return ()
-    module_errors = _check_module_boundary(source, source_owner, target_module)
+    module_errors = _check_module_boundary(inventory, source, source_owner, target_module)
     if module_errors:
         return module_errors
     module = inventory.modules[target_module]
@@ -626,13 +627,21 @@ def _attribute_chain(node: ast.Attribute) -> tuple[str, ...] | None:
     return tuple(reversed(parts))
 
 
-def _owner(module: str) -> str | None:
+def _owner(module: str, modules: Mapping[str, _ModuleInfo]) -> str | None:
     if module == _AI_ROOT:
         return "__root__"
     prefix = _AI_ROOT + "."
     if not module.startswith(prefix):
         return None
-    return module[len(prefix) :].split(".", 1)[0]
+    parts = module[len(prefix):].split(".")
+    for length in range(len(parts), 0, -1):
+        namespace = parts[:length]
+        if any(part.startswith("_") for part in namespace):
+            continue
+        candidate = modules.get(prefix + ".".join(namespace))
+        if candidate is not None and candidate.path.name == "__init__.py":
+            return ".".join(namespace)
+    return parts[0]
 
 
 def _strongly_connected_components(

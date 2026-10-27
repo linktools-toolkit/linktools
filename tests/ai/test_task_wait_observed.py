@@ -13,7 +13,7 @@ from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Page, Princ
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
 from linktools.ai.observe import WaitResult
 from linktools.ai.persistence import Persistence, PersistenceStorage
-from linktools.ai.task_engine import TaskEngine, TaskGraphRun
+from linktools.ai.task.engine import TaskEngine, TaskGraphRun
 from linktools.ai.core import _signed_cursor as _cursor
 from linktools.ai.execution import ExecutionView
 from linktools.ai.observe.stream import ExecutionStreamFailure

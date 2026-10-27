@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from linktools.ai.persistence import Persistence
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 from linktools.ai.task import Task
 """TaskGraph cancellation closes remote MCP resources without replaying effects."""
 from ._runtime_test_helpers import model_features

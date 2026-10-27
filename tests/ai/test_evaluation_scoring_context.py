@@ -3,8 +3,8 @@
 """Authoritative case context and durable scoring submission boundaries."""
 
 from linktools.ai.persistence import Persistence
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 
 import asyncio
 from dataclasses import replace

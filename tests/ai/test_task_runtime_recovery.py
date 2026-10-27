@@ -24,7 +24,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.task import (
     Task,

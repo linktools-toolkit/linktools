@@ -28,7 +28,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.execution import TaskGraphRunEvent
-from linktools.ai.task_engine import TaskGraphRun
+from linktools.ai.task.engine import TaskGraphRun
 from linktools.ai.execution.events import (
     DefaultEventService,
     ExecutionDelta,

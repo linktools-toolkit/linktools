@@ -12,7 +12,7 @@ import pytest
 from linktools.ai.core import ExecutionStatus, JsonValue, Principal, TaskStatus
 from linktools.ai.errors import ErrorCode
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
 
 

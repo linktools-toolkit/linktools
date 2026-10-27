@@ -3,8 +3,8 @@
 """Snapshot-local evidence reads keep current authorization and retention checks."""
 
 from linktools.ai.persistence import Persistence
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -22,9 +22,9 @@ from linktools.ai.evaluation import (
     EvidenceAttachmentRef, RescoreRequest, StartEvaluationRequest,
 )
 
-from linktools.ai.evaluation_engine import EvaluationRun
+from linktools.ai.evaluation.engine import EvaluationRun
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.evaluation_engine import _service as evaluation_module
+from linktools.ai.evaluation.engine import _service as evaluation_module
 from linktools.ai.persistence.objects import ObjectKeyFactory, put_runtime_object
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.state import RecordQuery

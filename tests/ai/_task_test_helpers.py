@@ -12,7 +12,7 @@ from linktools.ai.core import Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.runtime import Runtime
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 from linktools.ai.task import (
     Task,
     TaskExpander,

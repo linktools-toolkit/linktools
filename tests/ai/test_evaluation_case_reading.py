@@ -8,7 +8,7 @@ import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import CaseRef, TargetTrialRef
-from linktools.ai.evaluation_engine._service import Evaluations
+from linktools.ai.evaluation.engine._service import Evaluations
 
 
 @pytest.mark.asyncio

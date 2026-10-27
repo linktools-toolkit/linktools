@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from linktools.ai.persistence import Persistence
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 from linktools.ai.task import Task
 
 from concurrent.futures import ThreadPoolExecutor

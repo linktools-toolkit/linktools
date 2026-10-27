@@ -3,8 +3,8 @@
 """Application-facing evaluation flows through real Runtime and Task engines."""
 
 from linktools.ai.persistence import Persistence
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 
 from linktools.ai.core import ExecutionContext
 from ._runtime_test_helpers import model_features
@@ -29,7 +29,7 @@ from linktools.ai.evaluation import (
     ScoreNotApplicable, ScoreSelection, ScorerSpec, ScoringInput,
     StartEvaluationRequest, TaskCaseInput, TrialFilter,
 )
-from linktools.ai.evaluation_engine import EvaluationRun
+from linktools.ai.evaluation.engine import EvaluationRun
 from linktools.ai.inputs import AgentTaskInputContext
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage

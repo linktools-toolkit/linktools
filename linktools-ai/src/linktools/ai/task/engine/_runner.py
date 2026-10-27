@@ -15,8 +15,8 @@ from linktools.core import environ
 from pydantic import BaseModel
 from pydantic_ai.messages import UserContent
 
-from ..agent import AgentBindingContract, bind_output, restore_output
-from ..core import (
+from ...agent import AgentBindingContract, bind_output, restore_output
+from ...core import (
     AuthorizationAction,
     AuthorizationPolicy,
     ExecutionStatus,
@@ -37,9 +37,9 @@ from ..core import (
     normalize_thinking,
     principal_identity_payload,
 )
-from ..errors import AIError, ErrorCode
-from ..storage import ObjectRef, ObjectStore
-from ..task import (
+from ...errors import AIError, ErrorCode
+from ...storage import ObjectRef, ObjectStore
+from ...task import (
     RecoverGraphRequest,
     TaskBindingContract,
     TaskDependency,
@@ -67,37 +67,37 @@ from ..task import (
     TaskInvocationInputRef,
     TaskRef,
 )
-from ..inputs import InputCaptures
+from ...inputs import InputCaptures
 from ._agent import AgentTaskRunner
-from ..inputs import AgentTaskInput
-from ..task import AgentTaskNode
-from ..inputs import (
+from ...inputs import AgentTaskInput
+from ...task import AgentTaskNode
+from ...inputs import (
     CanonicalUserInput,
     ExecutionInputMaterializer,
     decode_task_prompt_draft,
     task_prompt_draft,
     validate_user_input,
 )
-from ..persistence.codec import encode_domain
-from ..execution import ExecutionRecord, StoredUserInput
-from ..persistence.contracts import ExecutionRepository, TaskAdmissionRepository, TaskPreparedInputRecord
-from ..persistence.objects import ObjectKeyFactory
-from ..inputs import (
+from ...persistence.codec import encode_domain
+from ...execution import ExecutionRecord, StoredUserInput
+from ...persistence.contracts import ExecutionRepository, TaskAdmissionRepository, TaskPreparedInputRecord
+from ...persistence.objects import ObjectKeyFactory
+from ...inputs import (
     TaskGraphBindingCapture,
     TaskGraphBindingCaptureStore,
     builtin_task_declaration,
     task_declaration_semantics,
 )
-from ..execution import ExecutionService, ExecutionView
-from ..execution import ExecutionResult
-from ..persistence.contracts import ArtifactRecord, ArtifactRepositories
-from ..persistence import PersistenceDomain
-from ..persistence.contracts import BudgetRepository
+from ...execution import ExecutionService, ExecutionView
+from ...execution import ExecutionResult
+from ...persistence.contracts import ArtifactRecord, ArtifactRepositories
+from ...persistence import PersistenceDomain
+from ...persistence.contracts import BudgetRepository
 
 if TYPE_CHECKING:
     from ._reads import TaskExecutionReads
-    from ..core import RunBudget
-    from ..execution import ExecutionService
+    from ...core import RunBudget
+    from ...execution import ExecutionService
 
 _logger = environ.get_logger("ai.runtime.planner")
 AppT = TypeVar("AppT")

@@ -5,7 +5,7 @@
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 from linktools.ai.runtime import Runtime, RuntimeFeatures
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 from linktools.ai.task import Task, TaskGraph, TaskNode
 from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.persistence import Persistence, PersistenceStorage

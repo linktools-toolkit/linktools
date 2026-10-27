@@ -12,7 +12,7 @@ import pytest
 
 from linktools.ai.core import BudgetUsage, Page, Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.task_engine._run import TaskGraphRun
+from linktools.ai.task.engine._run import TaskGraphRun
 from linktools.ai.execution import ExecutionTreeEvent
 from linktools.ai.task import CancelGraphRequest, TaskEvent, TaskEventType, TaskGraphState
 

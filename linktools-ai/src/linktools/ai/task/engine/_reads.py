@@ -5,11 +5,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
-from ..core import BudgetUsage, Principal
-from ..errors import AIError, ErrorCode
-from ..execution import ExecutionResult, ExecutionService, ExecutionView, TaskExecutionService
+from ...core import BudgetUsage, Principal
+from ...errors import AIError, ErrorCode
+from ...execution import ExecutionResult, ExecutionService, ExecutionView, TaskExecutionService
 if TYPE_CHECKING:
-    from ..runtime.agent_execution import AgentExecutionPort
+    from ...runtime.agent_execution import AgentExecutionPort
 
 
 class TaskExecutionReads:

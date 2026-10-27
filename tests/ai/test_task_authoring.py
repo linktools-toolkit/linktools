@@ -17,7 +17,7 @@ from linktools.ai.core import JsonValue, Principal, TaskStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.task_engine import TaskEngine
+from linktools.ai.task.engine import TaskEngine
 from linktools.ai.persistence.codec import decode_domain, encode_domain
 from linktools.ai.task import (
     Task, TaskDependency, TaskDependencyState, TaskExpander, TaskExpansionContext,

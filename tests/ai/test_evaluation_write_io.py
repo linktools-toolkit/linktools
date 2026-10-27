@@ -23,8 +23,8 @@ from linktools.ai.evaluation import CaseRef, CaseSpec, DatasetRef, DatasetSpec
 from linktools.ai.migrate import provision_database
 
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 
 
 _PRINCIPAL = service_principal("evaluation-io", "owner")

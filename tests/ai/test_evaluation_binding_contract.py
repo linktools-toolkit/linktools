@@ -3,8 +3,8 @@
 """Evaluation preserves historical bindings and rejects changed source contracts."""
 
 from linktools.ai.persistence import Persistence
-from linktools.ai.task_engine import TaskEngine
-from linktools.ai.evaluation_engine import Evaluations
+from linktools.ai.task.engine import TaskEngine
+from linktools.ai.evaluation.engine import Evaluations
 from ._runtime_test_helpers import model_features
 
 from pathlib import Path

@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 
 if TYPE_CHECKING:
     from ..asset import AssetStoreReader
-    from ..evaluation_engine import Evaluations
+    from ..evaluation.engine import Evaluations
     from ..task import Task, TaskExpander
-    from ..task_engine import TaskEngine
+    from ..task.engine import TaskEngine
 
 AppT = TypeVar("AppT")
 
