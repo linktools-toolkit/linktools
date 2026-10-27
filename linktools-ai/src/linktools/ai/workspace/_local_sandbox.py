@@ -158,7 +158,10 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
                 self._root = _normalize_root(self._root)
                 self._workspace = Workspace(self._root, {})
                 resources = _validate_resources(self._workspace, self._resource_config)
-                self._resources = {resource.id: (resource.source, resource) for resource in resources}
+                self._resources = {
+                    resource.id: (resource.source.resolve() if resource.source is not None else None, resource)
+                    for resource in resources
+                }
                 if self._lock_root is None:
                     self._lock_root = self._workspace.locks_root
                 self._state = "OPEN"

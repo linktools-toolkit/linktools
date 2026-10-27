@@ -709,9 +709,6 @@ class FileSystem(AbstractCapability[AgentContext[object]]):
             raise ValueError(f"unknown workspace tools: {tuple(sorted(unknown))}")
         if selected and backend is None:
             raise AIError(ErrorCode.SANDBOX_SESSION_CLOSED)
-        if selected and not isinstance(backend, SupportsFileTools):
-            raise AIError(ErrorCode.SANDBOX_UNAVAILABLE,
-                          safe_details={"reason": "workspace_bounded_file_tools_required"})
         bound = copy(self)
         bound._bound = True
         bound._toolset = None

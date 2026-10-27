@@ -313,3 +313,54 @@ def test_same_root_environments_do_not_share_command_job_ownership(tmp_path: Pat
             await first.close()
             await second.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("restricted", [False, True])
+def test_resource_ancestor_symlink_preserves_grant_boundaries(tmp_path: Path, restricted: bool) -> None:
+    from linktools.ai.workspace import WorkspaceResource
+
+    async def run() -> None:
+        root = tmp_path / "workspace"
+        root.mkdir()
+        resource_root = tmp_path / "real" / "assets"
+        resource_root.mkdir(parents=True)
+        granted = resource_root / "granted.txt"
+        denied = resource_root / "denied.txt"
+        policy_denied = resource_root / "policy-denied.txt"
+        granted.write_text("granted")
+        denied.write_text("denied")
+        policy_denied.write_text("policy-denied")
+        alias = tmp_path / "alias"
+        alias.symlink_to(resource_root.parent, target_is_directory=True)
+        resource = WorkspaceResource("docs", alias / "assets", files={
+            "granted.txt": granted, "policy-denied.txt": policy_denied,
+        })
+        policy = WorkspaceReadPolicy((), resource_paths={"docs": ("granted.txt",)}) if restricted else None
+        backend = LocalWorkspaceBackend(root, resources=(resource,), read_policy=policy)
+        try:
+            await backend.working_dir()
+            resource_path = backend.resource_path("docs")
+            assert resource_path is not None
+            assert await backend.read_bytes(resource_path + "/granted.txt") == b"granted"
+            with pytest.raises(PermissionError):
+                await backend.read_bytes(resource_path + "/denied.txt")
+            if restricted:
+                with pytest.raises(PermissionError):
+                    await backend.read_bytes(resource_path + "/policy-denied.txt")
+            else:
+                assert await backend.read_bytes(resource_path + "/policy-denied.txt") == b"policy-denied"
+        finally:
+            await backend.close()
+    asyncio.run(run())
+
+
+def test_read_bytes_invalid_path_retains_standard_error(tmp_path: Path) -> None:
+    async def run() -> None:
+        backend = LocalWorkspaceBackend(tmp_path)
+        try:
+            with pytest.raises(AIError) as raised:
+                await backend.read_bytes(None)
+            assert raised.value.code == ErrorCode.REQUEST_FIELD_INVALID
+        finally:
+            await backend.close()
+    asyncio.run(run())

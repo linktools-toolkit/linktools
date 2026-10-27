@@ -256,3 +256,32 @@ async def test_runtime_rejects_owned_provider_without_close_before_activation() 
         assert rejected.value.code is ErrorCode.SANDBOX_UNAVAILABLE
         assert rejected.value.safe_details["reason"] == "workspace_cleanup_required"
     assert not activated
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("denied", (False, True))
+async def test_selected_file_tool_accepts_narrow_backend_without_widening_authority(tmp_path: Path, denied: bool) -> None:
+    from linktools.ai.workspace import WorkspacePolicy
+
+    calls = []
+
+    class ListingBackend:
+        async def list_files(self, path: str = ".", *, include_glob: str = "*") -> str:
+            calls.append((path, include_glob))
+            return "report.txt"
+
+    def model(messages, info):
+        assert {tool.name for tool in info.function_tools} == {"list_files"}
+        if not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
+            return ModelResponse(parts=[ToolCallPart("list_files", {"path": "."})])
+        return ModelResponse(parts=[TextPart("done")])
+
+    workspace = Workspace.load(tmp_path, policy=WorkspacePolicy(
+        tool_permissions=ToolPermissionPolicy(default="deny" if denied else "allow"),
+    ))
+    capability = FileSystem(workspace).bind(("list_files",), backend=ListingBackend())
+    result = await Agent(FunctionModel(model), capabilities=[
+        PydanticToolControlCapability(), capability,
+    ]).run("list the directory")
+    assert result.output == "done"
+    assert calls == ([] if denied else [(".", "*")])

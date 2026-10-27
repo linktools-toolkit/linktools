@@ -74,7 +74,7 @@ class _NativeWorkspaceOperations:
             await self._ensure_open()
             return await self._read_bytes(path, max_bytes=max_bytes, expected_state=expected_state)
         except AIError as error:
-            if posixpath.isabs(path):
+            if isinstance(path, str) and posixpath.isabs(path):
                 self._raise(error, path)
             raise
 
