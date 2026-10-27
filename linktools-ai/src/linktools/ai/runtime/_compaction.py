@@ -14,6 +14,7 @@ from linktools.core import environ
 from pydantic_ai.capabilities import AbstractCapability, WrapModelRequestHandler
 from pydantic_ai.exceptions import RunCancelled
 from pydantic_ai.messages import (
+    CompactionPart,
     InstructionPart,
     ModelMessage,
     ModelRequest,
@@ -176,8 +177,9 @@ class RuntimeSummarizingCompaction(SummarizingCompaction):
             return messages
         original = {id(part) for message in messages for part in message.parts}
         created = [
-            part for message in result for part in message.parts
-            if isinstance(part, SystemPromptPart) and id(part) not in original
+            part for message in result if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, (SystemPromptPart, CompactionPart)) and id(part) not in original
         ]
         tail = len(messages)
         result_tail = len(result)
@@ -186,8 +188,14 @@ class RuntimeSummarizingCompaction(SummarizingCompaction):
             result_tail -= 1
         if (
             len(created) != 1 or tail > start
-            or any(isinstance(part, SummaryPromptPart)
-                   for message in result for part in message.parts)
+            or any(isinstance(part, CompactionPart) and (
+                not isinstance(part.content, str) or part.provider_name is not None
+                or part.id is not None or part.provider_details is not None
+            ) for part in created)
+            or any(isinstance(part, SummaryPromptPart) or (
+                isinstance(message, ModelRequest) and isinstance(part, CompactionPart)
+                and id(part) in original
+            ) for message in result for part in message.parts)
         ):
             raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE,
                           safe_details={"reason": "unsupported_compaction_projection"})
@@ -195,7 +203,8 @@ class RuntimeSummarizingCompaction(SummarizingCompaction):
         identified: list[ModelMessage] = [
             replace(message, parts=[
                 SummaryPromptPart(part.content, timestamp=part.timestamp, dynamic_ref=part.dynamic_ref)
-                if part is summary else part for part in message.parts
+                if part is summary and isinstance(part, SystemPromptPart) else part
+                for part in message.parts
             ]) if isinstance(message, ModelRequest) and any(
                 part is summary for part in message.parts
             ) else message
@@ -214,7 +223,7 @@ class RuntimeSummarizingCompaction(SummarizingCompaction):
                      if isinstance(part, UserPromptPart) and not is_pinned(part)]
             summary_index = next(
                 index for index, message in enumerate(identified)
-                if any(isinstance(part, SummaryPromptPart) for part in message.parts)
+                if any(part is summary or isinstance(part, SummaryPromptPart) for part in message.parts)
             )
             identified.insert(summary_index + 1, replace(request, parts=parts))
         return identified

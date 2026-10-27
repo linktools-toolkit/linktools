@@ -14,6 +14,7 @@ from typing import cast
 from pydantic import TypeAdapter
 from pydantic_core import ErrorDetails
 from pydantic_ai import RequestUsage
+from pydantic_ai.settings import ThinkingEffort
 from pydantic_ai.messages import (
     BinaryContent,
     CompactionPart,
@@ -46,6 +47,11 @@ try:
     from pydantic_ai.messages import RetryFeedbackPart, RetryInfo
 except ImportError:
     RetryFeedbackPart = RetryInfo = None
+
+try:
+    from pydantic_ai.messages import ModelSettingsDeltaPart
+except ImportError:
+    ModelSettingsDeltaPart = None
 
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
@@ -462,6 +468,12 @@ def _encode_request_part(part: object) -> dict[str, JsonValue]:
             "tools_added": list(part.tools_added),
             "tool_call_id": part.tool_call_id,
         }
+    if ModelSettingsDeltaPart is not None and isinstance(part, ModelSettingsDeltaPart):
+        return {
+            "part_kind": "model-settings-delta",
+            "settings": _recorded_model_settings(part.settings),
+            "top_level": _settings_top_level(part.top_level),
+        }
     if isinstance(part, InstructionBaselinePart):
         if not isinstance(part.instructions, list):
             raise TypeError("instruction baseline must contain a list")
@@ -476,6 +488,10 @@ def _encode_request_part(part: object) -> dict[str, JsonValue]:
             "content": _optional_string(part.content),
             "base_hash": None if part.base_hash is None else _instruction_hash(part.base_hash),
         }
+    if isinstance(part, CompactionPart):
+        if not hasattr(CompactionPart, "metadata"):
+            raise TypeError("SDK does not support request-side compaction")
+        return _encode_response_part(part)
     if isinstance(part, SpeechPart):
         return _encode_speech_part(part)
     raise TypeError(f"unsupported model request part: {type(part).__name__}")
@@ -544,6 +560,14 @@ def _decode_request_part(value: object) -> object:
             tools_added=cast(list[str], tools),
             tool_call_id=_optional_string(part["tool_call_id"]),
         )
+    if kind == "model-settings-delta":
+        _require_keys(part, {"part_kind", "settings", "top_level"})
+        if ModelSettingsDeltaPart is None:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        return ModelSettingsDeltaPart(
+            settings=_recorded_model_settings(part["settings"]),
+            top_level=_settings_top_level(part["top_level"]),
+        )
     if kind == "instruction-baseline":
         _require_keys(part, {"part_kind", "instructions"})
         instructions = part["instructions"]
@@ -557,12 +581,30 @@ def _decode_request_part(value: object) -> object:
             content=_optional_string(part["content"]),
             base_hash=None if part["base_hash"] is None else _instruction_hash(part["base_hash"]),
         )
+    if kind == "compaction":
+        if not hasattr(CompactionPart, "metadata"):
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        return _decode_response_part(part)
     if kind == "speech":
         speech = _decode_speech_part(part)
         if speech.speaker != "user":
             raise ValueError("request speech speaker is invalid")
         return speech
     raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+
+
+def _recorded_model_settings(value: object) -> dict[str, JsonValue]:
+    if not isinstance(value, Mapping):
+        raise ValueError("recorded model settings must be a mapping")
+    if value.get("thinking") is not None:
+        TypeAdapter(ThinkingEffort).validate_python(value["thinking"], strict=True)
+    return cast(dict[str, JsonValue], _portable_json(value))
+
+
+def _settings_top_level(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError("model settings top_level must be a boolean")
+    return value
 
 
 def _encode_instruction_block(block: object) -> dict[str, JsonValue]:
@@ -678,6 +720,8 @@ def _encode_response_part(part: object) -> dict[str, JsonValue]:
             "id": part.id,
             "provider_name": part.provider_name,
             "provider_details": _encode_optional_mapping(part.provider_details),
+            **({"metadata": _encode_optional_mapping(part.metadata)}
+               if hasattr(part, "metadata") and part.metadata is not None else {}),
         }
     if isinstance(part, FilePart):
         return {
@@ -734,8 +778,11 @@ def _decode_response_part(value: object) -> object:
     if kind == "compaction":
         _require_keys(
             part,
-            {"part_kind", "content", "id", "provider_name", "provider_details"},
+            {"part_kind", "content", "id", "provider_name", "provider_details"}
+            | ({"metadata"} if "metadata" in part else set()),
         )
+        if "metadata" in part and not hasattr(CompactionPart, "metadata"):
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         content = part["content"]
         if content is not None and not isinstance(content, str):
             raise ValueError("compaction content is invalid")
@@ -744,6 +791,7 @@ def _decode_response_part(value: object) -> object:
             id=_optional_string(part["id"]),
             provider_name=_optional_string(part["provider_name"]),
             provider_details=_decode_optional_mapping(part["provider_details"]),
+            **({"metadata": _decode_optional_mapping(part["metadata"])} if "metadata" in part else {}),
         )
     if kind == "file":
         _require_keys(

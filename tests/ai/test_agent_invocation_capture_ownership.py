@@ -8,6 +8,7 @@ from linktools.ai.persistence import Persistence
 from ._runtime_test_helpers import model_features
 
 import asyncio
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -88,12 +89,14 @@ async def test_invocation_capture_failure_cancels_the_bound_execution(
             assert (await runtime.executions.inspect(execution.execution_id, principal=principal)).status is ExecutionStatus.CANCELLED
             await run.cancel(idempotency_key="cancel")
             assert (await runtime.executions.inspect(execution.execution_id, principal=principal)).status is ExecutionStatus.CANCELLED
-            record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
-            assert record.dependency_hold_ids == ()
             with pytest.raises(AIError) as missing:
                 await runtime_engine.inputs.capture_input(execution.execution_id,
                     CaptureInputRequest(principal, "failed-input"))
             assert missing.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
+            # Durable terminal observation does not drain the local scheduler.
+            await runtime_engine.close()
+            record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
+            assert record.dependency_hold_ids == ()
             assert models.requests == 1
         finally:
             models.release.set()
@@ -101,6 +104,141 @@ async def test_invocation_capture_failure_cancels_the_bound_execution(
         with pytest.raises(AIError) as missing:
             await runtime_engine.inputs.capture_input(execution.execution_id, CaptureInputRequest(principal, "failed-input"))
         assert missing.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_fails", (False, True))
+async def test_terminal_capture_failure_quiescence_finishes_dependency_hold_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, release_fails: bool,
+) -> None:
+    models = _ControlledModels()
+    principal = service_principal("default", "owner")
+    storage = PersistenceStorage.filesystem(tmp_path)
+    verified = False
+    with pytest.raises(AIError) if release_fails else nullcontext():
+        async with Runtime.open("capture-hold-release", storage=storage,
+                                features=model_features(models, _agents())) as runtime:
+            engine = await runtime.tasks.bind(Task.from_agent("capture.agent", runtime.agents.get()))
+            objects = engine.persistence.object_store(PersistenceDomain.TASK)
+            original_put = objects.put
+            release_entered, release_allowed = asyncio.Event(), asyncio.Event()
+            quiesce_entered, quiesce_allowed = asyncio.Event(), asyncio.Event()
+            cancel_requested, quiesced = asyncio.Event(), asyncio.Event()
+            launcher = engine._launcher
+            original_release = launcher._release_execution_hold
+            original_quiesce = launcher._quiesce_node_owned
+
+            async def fail_invocation(key: str, *args: object, **kwargs: object) -> object:
+                if key.startswith("v1/input-capture/invocation/"):
+                    await models.entered.wait()
+                    raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+                return await original_put(key, *args, **kwargs)
+
+            async def pause_release(*args: object, **kwargs: object) -> None:
+                release_entered.set()
+                await release_allowed.wait()
+                if release_fails:
+                    raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+                await original_release(*args, **kwargs)
+
+            async def pause_quiesce(*args: object, **kwargs: object) -> None:
+                await release_entered.wait()
+                inflight = args[3]
+                original_cancel = inflight.task.cancel
+
+                def observe_cancel(msg: object = None) -> bool:
+                    result = original_cancel(msg)
+                    cancel_requested.set()
+                    return result
+
+                monkeypatch.setattr(inflight.task, "cancel", observe_cancel)
+                quiesce_entered.set()
+                await quiesce_allowed.wait()
+                try:
+                    await original_quiesce(*args, **kwargs)
+                finally:
+                    quiesced.set()
+
+            monkeypatch.setattr(objects, "put", fail_invocation)
+            monkeypatch.setattr(launcher, "_release_execution_hold", pause_release)
+            monkeypatch.setattr(launcher, "_quiesce_node_owned", pause_quiesce)
+            run = await engine.start(TaskGraph("source", (
+                TaskNode("agent", task=engine.definitions[0], input=AgentTaskInput("question")),
+            )), principal=principal, idempotency_key="source")
+            try:
+                await asyncio.wait_for(quiesce_entered.wait(), 5)
+                assert (await run.wait(timeout_seconds=5)).result.wait_status is TaskStatus.FAILED
+                quiesce_allowed.set()
+                await asyncio.wait_for(cancel_requested.wait(), 5)
+                release_allowed.set()
+                await asyncio.wait_for(quiesced.wait(), 5)
+                execution = await run.execution("agent")
+                record = await engine.persistence.execution.executions.get(
+                    execution.execution_id, tenant_id=principal.tenant_id,
+                )
+                assert record.status is ExecutionStatus.CANCELLED
+                assert record.dependency_hold_ids == (("task:source:agent",) if release_fails else ())
+                assert models.requests == 1
+                if release_fails:
+                    graph_run = launcher._graphs[(principal.tenant_id, "source")]
+                    await asyncio.gather(graph_run.task, return_exceptions=True)
+                    assert launcher.graph_failure("source", tenant_id=principal.tenant_id).code is ErrorCode.STORAGE_UNAVAILABLE
+                    with pytest.raises(AIError) as cleanup_error:
+                        await engine.close()
+                    assert cleanup_error.value.code is ErrorCode.STORAGE_UNAVAILABLE
+                    assert launcher.owns_graph("source", tenant_id=principal.tenant_id)
+                else:
+                    await engine.close()
+                verified = True
+            finally:
+                quiesce_allowed.set()
+                release_allowed.set()
+                models.release.set()
+    assert verified
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_fails", (False, True))
+async def test_dependency_hold_release_preserves_failure_and_repeated_cancellation(
+    release_fails: bool,
+) -> None:
+    from linktools.ai.task._local import LocalTaskGraphLauncher
+
+    entered, allowed, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    failure = AIError(ErrorCode.STORAGE_UNAVAILABLE)
+
+    async def release(execution_id: str, *, tenant_id: str, hold_id: str) -> None:
+        assert (execution_id, tenant_id, hold_id) == ("execution", "tenant", "hold")
+        entered.set()
+        await allowed.wait()
+        finished.set()
+        if release_fails:
+            raise failure
+
+    launcher = object.__new__(LocalTaskGraphLauncher)
+    launcher._hold_cleanup_failure = None
+    launcher._release_execution_hold = release
+    cleanup = asyncio.create_task(launcher._finish_execution_hold(
+        "execution", tenant_id="tenant", hold_id="hold",
+    ))
+    await entered.wait()
+    try:
+        for _ in range(2):
+            cleanup.cancel()
+            await asyncio.sleep(0)
+            assert not cleanup.done()
+        allowed.set()
+        if release_fails:
+            with pytest.raises(AIError) as caught:
+                await cleanup
+            assert caught.value is failure
+        else:
+            with pytest.raises(asyncio.CancelledError):
+                await cleanup
+        assert finished.is_set()
+    finally:
+        allowed.set()
+        await asyncio.gather(cleanup, return_exceptions=True)
 
 
 @pytest.mark.asyncio

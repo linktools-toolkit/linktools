@@ -9,6 +9,7 @@ import traceback
 
 import httpx2
 import pytest
+from pydantic_ai import exceptions as sdk_errors
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models import ModelRequestParameters
 
@@ -208,7 +209,10 @@ async def test_native_error_echoes_of_referenced_bytes_are_omitted_from_safe_dia
     }
     assert error.diagnostics.content_omission_reason == _REASON
     assert error.diagnostics.exception_message == f"[content omitted: {_REASON}]"
-    assert "ModelHTTPError" in error.diagnostics.traceback
+    rejection_type = getattr(sdk_errors, "ModelRequestRejectedError", sdk_errors.ModelHTTPError)
+    assert error.diagnostics.exception_type == rejection_type.__name__
+    assert error.diagnostics.exception_chain[0]["exception_type"] == rejection_type.__name__
+    assert f"root: {rejection_type.__name__}:" in error.diagnostics.traceback
     assert "in request\n" in error.diagnostics.traceback
     rendered = json.dumps(error.diagnostics.to_payload()) + str(error) + "".join(traceback.format_exception(error))
     assert _BODY.decode() not in rendered and _BASE64 not in rendered

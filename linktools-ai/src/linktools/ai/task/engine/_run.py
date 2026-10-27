@@ -549,6 +549,7 @@ class TaskGraphRun(Generic[AppT]):
         return self._watch(
             after_graph_event_seq=graph_event_seq, after_execution_event_seqs=sequences,
             include_content=include_content, ready=ready, initial_ready=initial_ready,
+            initial_cursor=cursor,
         )
 
     async def _watch(
@@ -559,6 +560,7 @@ class TaskGraphRun(Generic[AppT]):
         include_content: bool,
         ready: asyncio.Event | None = None,
         initial_ready: asyncio.Event | None = None,
+        initial_cursor: str | None = None,
     ) -> AsyncIterator[TaskGraphRunEvent]:
         standalone = ready is None
         graph_state = await self._state()
@@ -665,8 +667,14 @@ class TaskGraphRun(Generic[AppT]):
                 prepared.cancel()
                 await asyncio.gather(prepared, return_exceptions=True)
 
+        # Projections retain the exact ACK, not a newly signed equivalent position.
+        delivered_cursor = initial_cursor
+
         def last_delivered_cursor() -> str | None:
-            return encode_graph_watch_cursor(
+            nonlocal delivered_cursor
+            if delivered_cursor is not None:
+                return delivered_cursor
+            delivered_cursor = encode_graph_watch_cursor(
                 self._engine.namespace,
                 self._principal.tenant_id,
                 self.graph_id,
@@ -674,6 +682,7 @@ class TaskGraphRun(Generic[AppT]):
                 graph_event_seq=cursor_graph_event_seq,
                 execution_event_seqs=cursor_execution_event_seqs,
             )
+            return delivered_cursor
 
         try:
             graph_stream = self._graph.stream_events(
@@ -796,6 +805,7 @@ class TaskGraphRun(Generic[AppT]):
                             ),
                         )
                         cursor_graph_event_seq = event.event_seq
+                        delivered_cursor = projected_event.cursor
                         yield projected_event
                         graph_task = asyncio.create_task(
                             graph_stream.__anext__(),
@@ -858,6 +868,7 @@ class TaskGraphRun(Generic[AppT]):
                         ),
                     )
                     cursor_execution_event_seqs = next_execution_event_seqs
+                    delivered_cursor = projected_event.cursor
                     yield projected_event
                     stream = execution_streams[node_id]
                     execution_tasks[node_id] = asyncio.create_task(

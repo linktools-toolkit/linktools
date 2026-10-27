@@ -340,6 +340,12 @@ async def test_graph_wait_ack_survives_cursor_issuance_crossing_a_second(monkeyp
 
     async def acknowledge(event) -> None:
         nonlocal issued_at
+        if delivered and decode_graph_watch_cursor(
+            _NAMESPACE, "tenant", "graph", delivered[-1], include_content=include_content,
+        ) == decode_graph_watch_cursor(
+            _NAMESPACE, "tenant", "graph", event.cursor, include_content=include_content,
+        ):
+            assert event.cursor == delivered[-1]
         delivered.append(event.cursor)
         issued_at += 2
 
@@ -363,9 +369,12 @@ async def test_graph_wait_ack_survives_cursor_issuance_crossing_a_second(monkeyp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("owner", ["execution", "graph", "evaluation", "facade"])
-async def test_eventless_wait_preserves_input_ack_and_rejects_cursor_without_callback(owner) -> None:
+async def test_eventless_wait_preserves_input_ack_and_rejects_cursor_without_callback(owner, monkeypatch) -> None:
+    issued_at = int(time.time())
+    monkeypatch.setattr(_signed_cursor, "time", SimpleNamespace(time=lambda: issued_at))
     bundle = await _Bundle.create()
     cursor = bundle.cursor(owner)
+    issued_at += 2
     try:
         with pytest.raises(AIError) as raised:
             await bundle.wait(owner, cursor=cursor)
