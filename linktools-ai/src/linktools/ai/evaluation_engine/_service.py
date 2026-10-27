@@ -10,6 +10,7 @@ import sys
 import time
 import uuid
 from builtins import BaseExceptionGroup
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
@@ -138,11 +139,10 @@ class Evaluations:
     """Own immutable evaluation plans; delegate all execution to TaskEngine."""
 
     @classmethod
-    @asynccontextmanager
-    async def open(
+    async def create(
         cls, engine: "TaskEngine[AppT]", *, assets: Sequence[AssetStoreReader] = (),
-    ) -> AsyncIterator["Evaluations"]:
-        """Own evaluation coordination while borrowing task execution and persistence."""
+    ) -> "Evaluations":
+        """Create an evaluation producer whose caller owns its close lifetime."""
         from ..history import History
 
         history_context = History.open(
@@ -162,6 +162,15 @@ class Evaluations:
                 raise BaseExceptionGroup("Evaluation initialization and cleanup failed", [primary, cleanup])
             raise
         evaluations._history_context = history_context
+        return evaluations
+
+    @classmethod
+    @asynccontextmanager
+    async def open(
+        cls, engine: "TaskEngine[AppT]", *, assets: Sequence[AssetStoreReader] = (),
+    ) -> AsyncIterator["Evaluations"]:
+        """Own evaluation coordination while borrowing task execution and persistence."""
+        evaluations = await cls.create(engine, assets=assets)
         try:
             yield evaluations
         except BaseException as primary:
@@ -207,6 +216,8 @@ class Evaluations:
         self._trial_scopes: dict[tuple[str, str], _EnteredTrialScope] = {}
         self._observation_sessions: set[ObservationSession] = set()
         self._closed = False
+        self._notifying_closed = False
+        self._close_callbacks: deque[Callable[["Evaluations"], None]] = deque()
         self._accepting = True
         self._active_controls = 0
         self._controls_idle = asyncio.Event()
@@ -274,10 +285,28 @@ class Evaluations:
             if not self._active_controls:
                 self._controls_idle.set()
 
+    def add_close_callback(self, callback: Callable[["Evaluations"], None]) -> None:
+        """Notify an owner after successful cleanup, retrying failed callbacks on close."""
+        self._close_callbacks.append(callback)
+        if self._closed:
+            self._notify_closed()
+
+    def _notify_closed(self) -> None:
+        if self._notifying_closed:
+            return
+        self._notifying_closed = True
+        try:
+            while self._close_callbacks:
+                self._close_callbacks[0](self)
+                self._close_callbacks.popleft()
+        finally:
+            self._notifying_closed = False
+
     async def close(self) -> None:
         """Settle admitted producer controls, then stop owned coordination and resource scopes."""
         self.stop_admission()
         if self._closed:
+            self._notify_closed()
             return
         if self._close_task is None or self._close_task.done():
             self._close_task = asyncio.create_task(self._cleanup(), name="evaluation-close")
@@ -322,6 +351,7 @@ class Evaluations:
             await self._history_context.__aexit__(None, None, None)
             self._history_context = None
         self._closed = True
+        self._notify_closed()
 
     def _ensure_accepting(self) -> None:
         self._ensure_open()

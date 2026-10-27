@@ -9,7 +9,8 @@ import secrets
 import uuid
 from copy import copy
 from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator, Sequence
+from collections import deque
+from collections.abc import AsyncIterator, Callable, Sequence
 from ..execution.handle import ExecutionBinding
 from ..core import (AuthorizationPolicy, CorrelationData, ExecutionContext, PrincipalKind, PromptLimits,
     TenantAuthorizationPolicy, canonical_sha256, overlay_correlation, principal_identity_payload, validate_idempotency_key)
@@ -112,6 +113,8 @@ class TaskEngine(Generic[AppT]):
                 port.operations.ensure_open()
         self._owner = self
         self._closed = False
+        self._notifying_closed = False
+        self._close_callbacks: deque[Callable[[TaskEngine[AppT]], None]] = deque()
         self._closing = False
         self._close_task: asyncio.Task[None] | None = None
         self._observation_sessions: set[ObservationSession] = set()
@@ -478,11 +481,34 @@ class TaskEngine(Generic[AppT]):
     def _release_observation(self, session: ObservationSession) -> None:
         self._observation_sessions.discard(session)
 
+    def add_close_callback(self, callback: Callable[[TaskEngine[AppT]], None]) -> None:
+        """Notify an owner after successful cleanup; definition views share that lifetime.
+
+        Callbacks run synchronously and are removed only after returning. A failed
+        callback is retried by close without repeating successful resource cleanup.
+        """
+        owner = self._owner
+        owner._close_callbacks.append(callback)
+        if owner._closed:
+            owner._notify_closed()
+
+    def _notify_closed(self) -> None:
+        if self._notifying_closed:
+            return
+        self._notifying_closed = True
+        try:
+            while self._close_callbacks:
+                self._close_callbacks[0](self)
+                self._close_callbacks.popleft()
+        finally:
+            self._notifying_closed = False
+
     async def close(self) -> None:
         if self._owner is not self:
             self._closed = True
             return
         if self._closed:
+            self._notify_closed()
             return
         self._closing = True
         if self._close_task is None or (self._close_task.done() and (self._close_task.cancelled() or self._close_task.exception() is not None)):
@@ -506,6 +532,7 @@ class TaskEngine(Generic[AppT]):
         if self._metrics is not None:
             await self._metrics.close()
         self._closed = True
+        self._notify_closed()
 
     @property
     def definitions(self) -> tuple[Task[AppT, object], ...]:

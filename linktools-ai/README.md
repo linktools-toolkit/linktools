@@ -130,7 +130,10 @@ Runtime-scoped opt-ins: `ExecutionCapability(retain_history=True)`,
 none of these optional guarantees. `Runtime.open(..., metrics=dataset)` independently enables automatic
 Agent observations and supplies the dataset to Runtime-bound Task engines for
 Task and evaluation execution observations. Each producer owns its recorder
-and drain lifecycle; the shared dataset remains caller-owned. Task and Evaluation
+and drain lifecycle; the shared dataset remains caller-owned. `runtime.metrics`
+reports only currently owned producers, not cumulative closed-recorder counters;
+closing a bound Task engine drains its recorder and releases it from the Runtime. Historical
+observations remain in the shared dataset. Task and Evaluation
 need no capability wrappers. Session metadata and display history
 are enabled by the default `SessionCapability`; use `SessionCapability(enabled=False)`
 to disable them explicitly. Conversation adds retained model context for future turns

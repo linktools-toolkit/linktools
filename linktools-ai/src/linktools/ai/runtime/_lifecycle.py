@@ -3,34 +3,8 @@
 """Ordered, retryable cleanup of resources owned by one Runtime."""
 
 import asyncio
+from collections import deque
 from collections.abc import Awaitable, Callable
-from contextlib import AbstractAsyncContextManager
-from typing import Generic, Protocol, TypeVar
-
-
-class _Closeable(Protocol):
-    async def close(self) -> None: ...
-
-
-_ResourceT = TypeVar("_ResourceT", bound=_Closeable)
-
-
-class _OpenedDomain(Generic[_ResourceT]):
-    """Retain an entered domain's manager without using it as its retry handle."""
-
-    def __init__(
-        self, resource: _ResourceT, manager: AbstractAsyncContextManager[_ResourceT],
-    ) -> None:
-        self.resource = resource
-        self._manager = manager
-        self._exited = False
-
-    async def close(self) -> None:
-        if self._exited:
-            return
-        await self.resource.close()
-        await self._manager.__aexit__(None, None, None)
-        self._exited = True
 
 
 class _RuntimeCloseCoordinator:
@@ -38,7 +12,7 @@ class _RuntimeCloseCoordinator:
         self, actions: tuple[Callable[[], Awaitable[None]], ...],
         handoff_actions: tuple[Callable[[], Awaitable[None]], ...] = (),
     ) -> None:
-        self._actions = actions
+        self._actions = deque(actions)
         self._handoff_actions = handoff_actions
         self._cursor = 0
         self._task: asyncio.Task[None] | None = None
@@ -46,12 +20,13 @@ class _RuntimeCloseCoordinator:
 
     async def handoff(self) -> None:
         if self._task is None and self._cursor == 0:
-            self._actions = self._handoff_actions
+            self._actions = deque(self._handoff_actions)
         await self.close()
 
     async def close(self) -> None:
         async with self._lock:
-            if self._cursor >= len(self._actions):
+            self._handoff_actions = ()
+            if not self._actions:
                 return
             task = self._task
             if task is None or task.done():
@@ -60,8 +35,9 @@ class _RuntimeCloseCoordinator:
         await asyncio.shield(task)
 
     async def _run(self) -> None:
-        while self._cursor < len(self._actions):
-            await self._actions[self._cursor]()
+        while self._actions:
+            await self._actions[0]()
+            self._actions.popleft()
             self._cursor += 1
 
 

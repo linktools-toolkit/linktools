@@ -3,7 +3,6 @@
 """Unified composition retains independent execution and resource ownership."""
 
 import asyncio
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -356,13 +355,15 @@ async def test_evaluations_stop_before_tasks_and_failed_task_close_does_not_clos
         def stop_admission(self) -> None:
             events.append("stop-evaluation")
 
+        def add_close_callback(self, callback):
+            self.callback = callback
+
         async def close(self) -> None:
             events.append("evaluation")
+            self.callback(self)
 
-    @asynccontextmanager
     async def opened(*args: object, **kwargs: object):
-        yield Evaluation()
-        events.append("evaluation-exit")
+        return Evaluation()
 
     async def close_engine() -> None:
         events.append("task")
@@ -370,12 +371,12 @@ async def test_evaluations_stop_before_tasks_and_failed_task_close_does_not_clos
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         await original_close()
 
-    monkeypatch.setattr(Evaluations, "open", opened)
+    monkeypatch.setattr(Evaluations, "create", opened)
     monkeypatch.setattr(engine, "close", close_engine)
     await runtime.evaluations.bind(engine)
     with pytest.raises(AIError):
         await runtime.close()
-    assert events == ["stop-evaluation", "evaluation", "evaluation-exit", "task"]
+    assert events == ["stop-evaluation", "evaluation", "task"]
     assert engine.persistence.ready
     fail = False
     await runtime.close()

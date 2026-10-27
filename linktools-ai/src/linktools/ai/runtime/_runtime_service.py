@@ -82,7 +82,7 @@ from ..task import Task, TaskExpander
 from ..task_engine import TaskEngine
 from ..evaluation_engine import Evaluations
 from ._composition_domains import RuntimeTasks, RuntimeEvaluations
-from ._lifecycle import _OpenedDomain, _RuntimeCloseCoordinator
+from ._lifecycle import _RuntimeCloseCoordinator
 
 _logger = environ.get_logger("ai.runtime")
 AppT = TypeVar("AppT")
@@ -190,8 +190,8 @@ class Runtime(Generic[AppT]):
         self._metric_control: _MetricControl | None = None
         self._agent_metric_control = MetricsControl(self._metric_status, self._flush_metrics)
         self._observation_sessions: set[ObservationSession] = set()
-        self._task_engines: list[TaskEngine[AppT]] = []
-        self._evaluations: list[_OpenedDomain[Evaluations]] = []
+        self._task_engines: dict[TaskEngine[AppT], None] = {}
+        self._evaluations: dict[Evaluations, None] = {}
         self.agents = RuntimeAgents(self._get_agent, self._restore_agent)
         self.tasks = RuntimeTasks(self._bind_tasks)
         self.evaluations = RuntimeEvaluations(self._bind_evaluations)
@@ -293,7 +293,8 @@ class Runtime(Generic[AppT]):
                 *definitions, persistence=self._state, context=self.context,
                 authorization=self._authorization, metrics=self._metrics_dataset,
             )
-            self._task_engines.append(engine)
+            self._task_engines[engine] = None
+            engine.add_close_callback(self._release_task_engine)
             return engine
 
     async def _bind_evaluations(
@@ -301,10 +302,16 @@ class Runtime(Generic[AppT]):
     ) -> Evaluations:
         async with self._close_lock:
             self._ensure_open()
-            manager = Evaluations.open(engine, assets=assets)
-            evaluations = await manager.__aenter__()
-            self._evaluations.append(_OpenedDomain(evaluations, manager))
+            evaluations = await Evaluations.create(engine, assets=assets)
+            self._evaluations[evaluations] = None
+            evaluations.add_close_callback(self._release_evaluations)
             return evaluations
+
+    def _release_task_engine(self, engine: TaskEngine[AppT]) -> None:
+        self._task_engines.pop(engine, None)
+
+    def _release_evaluations(self, evaluations: Evaluations) -> None:
+        self._evaluations.pop(evaluations, None)
 
     def _metric_controls(self) -> tuple[MetricsControl, ...]:
         controls = (() if not self._agent_ready else (self._agent_metric_control,))
@@ -896,10 +903,10 @@ class Runtime(Generic[AppT]):
                         raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING,
                             safe_details={"capability": "durable_runtime_handoff"})
                     for domain in self._evaluations:
-                        domain.resource.preflight_handoff()
+                        domain.preflight_handoff()
                     self._handoff_requested = True
                 for domain in self._evaluations:
-                    domain.resource.stop_admission()
+                    domain.stop_admission()
                 self._closing = True
                 for session in tuple(self._observation_sessions):
                     session.stop()
@@ -964,6 +971,7 @@ class Runtime(Generic[AppT]):
             if self._owns_persistence:
                 actions.append(self._state.close)
             self._close_coordinator = _RuntimeCloseCoordinator(tuple(actions))
+            del actions
         await self._close_coordinator.close()
         async with self._close_lock:
             self._closed = True
