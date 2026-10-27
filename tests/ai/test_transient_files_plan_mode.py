@@ -21,12 +21,12 @@ async def test_plan_mode_keeps_workspace_file_reads_only() -> None:
     )
     tools = [
         ToolDefinition(
-            name="attach_files",
+            name="list_files",
             metadata=tool_metadata(
                 effect_policy="none",
                 plan_safe=True,
                 tool_class="filesystem.read",
-                path_fields=["paths"],
+                path_fields=["path"],
             ),
         ),
         ToolDefinition(
@@ -50,7 +50,7 @@ async def test_plan_mode_keeps_workspace_file_reads_only() -> None:
 
     selected = await prepare(None, tools)  # type: ignore[arg-type]
 
-    assert [tool.name for tool in selected] == ["attach_files", "read_file"]
+    assert [tool.name for tool in selected] == ["list_files", "read_file"]
 
 
 @pytest.mark.asyncio

@@ -40,7 +40,7 @@ async def test_public_capabilities_allow_model_correction_without_runtime(kind: 
     class BorrowedSession(FileToolsStub):
         closed = 0
 
-        async def list_directory(self, path: str = ".") -> list[object]:
+        async def list_files(self, path: str = ".", *, include_glob: str = "*") -> list[object]:
             if path != ".":
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             return []
@@ -63,10 +63,10 @@ async def test_public_capabilities_allow_model_correction_without_runtime(kind: 
         corrected_call = ToolCallPart("list_subagents", {}, tool_call_id="corrected")
     else:
         capability = filesystem_capabilities(
-            Workspace.load(tmp_path), ("list_directory",), backend=session,  # type: ignore[arg-type]
+            Workspace.load(tmp_path), ("list_files",), backend=session,  # type: ignore[arg-type]
         )[0]
-        failed_call = ToolCallPart("list_directory", {"path": "missing"}, tool_call_id="missing")
-        corrected_call = ToolCallPart("list_directory", {"path": "."}, tool_call_id="corrected")
+        failed_call = ToolCallPart("list_files", {"path": "missing"}, tool_call_id="missing")
+        corrected_call = ToolCallPart("list_files", {"path": "."}, tool_call_id="corrected")
     requests = 0
 
     def respond(messages, _info):

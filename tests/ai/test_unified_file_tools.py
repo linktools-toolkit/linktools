@@ -193,9 +193,8 @@ async def test_unified_file_selection_keeps_scenarios_minimal(tmp_path: Path) ->
         for names in (("read_file", "search_files"), ("read_file", "search_files", "list_files"),
                       ("read_file", "search_files", "list_files", "write_file")):
             assert set(_tools(tmp_path, session, names=names)) == set(names)
-        narrow = _tools(tmp_path, session, names=("edit_file",))
-        assert set(narrow) == {"edit_file"}
-        assert "old_text" in narrow["edit_file"].tool_def.parameters_json_schema["required"]
+        with pytest.raises(ValueError, match="unknown workspace tools"):
+            _tools(tmp_path, session, names=("edit_file",))
     finally:
         await session.close()
 
@@ -206,19 +205,18 @@ def test_workspace_tools_use_initial_behavior_revision(tmp_path: Path) -> None:
     assert {name: revisions[name] for name in ("read_file", "write_file", "search_files")} == {
         "read_file": 1, "write_file": 1, "search_files": 1,
     }
-    assert revisions["attach_files"] == 1
-    assert revisions["edit_file"] == revisions["list_files"] == 1
+    assert revisions["list_files"] == 1
 
 
 @pytest.mark.asyncio
-async def test_legacy_attach_obeys_explicit_model_route_before_publication(tmp_path: Path) -> None:
+async def test_whole_file_read_obeys_explicit_model_route_before_publication(tmp_path: Path) -> None:
     (tmp_path / "report.pdf").write_bytes(b"%PDF-1.7\n")
     binding = create_model(api='openai', model="no-files", input_types=())
     session = LocalWorkspaceBackend(tmp_path)
     await session.working_dir()
     try:
         with pytest.raises(ToolCallRetry):
-            await _tools(tmp_path, session, binding=binding, names=("attach_files",))["attach_files"].function(["report.pdf"])
+            await _tools(tmp_path, session, binding=binding, names=("read_file",))["read_file"].function(["report.pdf"], as_file=True)
     finally:
         await session.close()
 

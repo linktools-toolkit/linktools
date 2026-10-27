@@ -82,15 +82,15 @@ async def test_host_stdio_advertisement_matches_process_permission(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("allow_stdio", (False, True))
 @pytest.mark.parametrize(
-    ("operation", "args"),
+    ("operation", "args", "kwargs"),
     (
-        ("write_file", ("visible.txt", "changed")),
-        ("edit_file", ("visible.txt", "visible", "changed")),
-        ("create_directory", ("new",)),
-        ("run_command", ("echo denied",)),
-        ("start_command", ("echo denied",)),
-        ("check_command", ("command",)),
-        ("stop_command", ("command",)),
+        ("write_file", ("visible.txt", "changed"), {}),
+        ("write_file", ("visible.txt", "changed"), {"old_text": "visible"}),
+        ("make_dir", ("new",), {}),
+        ("run_command", ("echo denied",), {}),
+        ("start_command", ("echo denied",), {}),
+        ("check_command", ("command",), {}),
+        ("stop_command", ("command",), {}),
     ),
 )
 async def test_host_stdio_permission_does_not_allow_commands_or_file_mutation(
@@ -99,15 +99,17 @@ async def test_host_stdio_permission_does_not_allow_commands_or_file_mutation(
     allow_stdio: bool,
     operation: str,
     args: tuple[str, ...],
+    kwargs: dict[str, str],
 ) -> None:
     _process, spawn, _stop = subprocess_double
     (tmp_path / "visible.txt").write_text("visible", encoding="utf-8")
     session = LocalWorkspaceBackend(tmp_path, read_policy=WorkspaceReadPolicy(("visible.txt",)), allow_host_stdio_with_read_policy=allow_stdio)
     await session.working_dir()
     try:
-        with pytest.raises(WorkspaceOperationRejected) as denied:
-            await getattr(session, operation)(*args)
-        assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+        with pytest.raises(PermissionError if operation == "make_dir" else WorkspaceOperationRejected) as denied:
+            await getattr(session, operation)(*args, **kwargs)
+        error = denied.value.__cause__ if operation == "make_dir" else denied.value
+        assert error.code is ErrorCode.AUTHORIZATION_DENIED
         assert await session.read_bytes("visible.txt") == b"visible"
         assert not (tmp_path / "new").exists()
         spawn.assert_not_awaited()

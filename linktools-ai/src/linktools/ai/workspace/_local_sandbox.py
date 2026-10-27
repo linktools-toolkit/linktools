@@ -13,7 +13,6 @@ import shutil
 import codecs
 import ctypes
 import fnmatch
-import heapq
 import hashlib
 import mimetypes
 import os
@@ -62,7 +61,6 @@ from ._local_process import (
 _logger = environ.get_logger("ai.workspace.local_sandbox")
 _MAX_RENDERED_CHARS = 50_000
 _MAX_CONTENT_CHARS = 50_000
-_MAX_READ_LINES = 2_000
 _MAX_ITEMS = 1_000
 _MAX_SEARCH_PATTERN_CHARS = 1_000
 _MAX_WRITE_CHARS = 10 * 1024 * 1024
@@ -546,70 +544,17 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
                 raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
         return await self._run_sync(operation)
 
-    async def read_file(
-        self,
-        path: str,
-        *,
-        offset: int = 0,
-        limit: int | None = None,
-    ) -> str:
-        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        selected_limit = _MAX_READ_LINES if limit is None else limit
-        if (
-            not isinstance(selected_limit, int)
-            or isinstance(selected_limit, bool)
-            or selected_limit <= 0
-        ):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        selected_limit = min(selected_limit, _MAX_READ_LINES)
-        validate_request_size(
-            "read_file",
-            {"path": path, "offset": offset, "limit": limit},
-        )
-        def operation() -> str:
-            target, display, _resource_key = self._read_target(path)
-            try:
-                info = target.stat()
-            except FileNotFoundError as error:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
-            except OSError as error:
-                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-            if not stat.S_ISREG(info.st_mode):
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            binary_size = _binary_file_size(target)
-            if binary_size is not None:
-                return _bound_output(
-                    f"[Binary file: {binary_size} bytes. "
-                    "Use a binary-aware tool to inspect.]"
-                )
-            digest, line_count, visible, selected_truncated = _read_selected_lines(
-                target,
-                display,
-                offset,
-                selected_limit,
-            )
-            if offset >= line_count and line_count:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            rendered = _render_read(
-                display,
-                digest,
-                line_count,
-                offset,
-                visible,
-                selected_truncated,
-            )
-            return _bound_output(rendered)
-
-        return await self._run_sync(operation)
 
     async def write_file(
         self,
         path: str,
         content: str,
         *,
+        old_text: str | None = None,
         expected_hash: str | None = None,
     ) -> str:
+        if old_text is not None:
+            return await self._edit_file(path, old_text, content, expected_hash=expected_hash)
         self._reject_read_only()
         try:
             normalized = _normalize_path(path)
@@ -624,7 +569,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
 
         def operation() -> str:
             try:
-                target = self._file_path(normalized, write=True)
+                target = self._file_path(normalized, write=True, allow_missing_parent=True)
             except AIError as error:
                 raise WorkspaceOperationRejected.from_error(error) from error
             with _file_lock(self._lock_root, _relative(self._root, target)):
@@ -640,7 +585,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
 
         return await self._run_sync(operation)
 
-    async def edit_file(
+    async def _edit_file(
         self,
         path: str,
         old_text: str,
@@ -655,11 +600,11 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             expected = _validate_expected_hash(expected_hash)
             validate_request_size(
-                "edit_file",
+                "write_file",
                 {
                     "path": path,
                     "old_text": old_text,
-                    "new_text": new_text,
+                    "content": new_text,
                     "expected_hash": expected_hash,
                 },
             )
@@ -799,323 +744,6 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
             return _bound_output(result)
         return await self._run_sync(operation)
 
-    async def list_directory(self, path: str = ".") -> str:
-        validate_request_size("list_directory", {"path": path})
-
-        def operation() -> str:
-            target, display, resource_key = self._read_target(
-                path,
-                directory=True,
-            )
-            try:
-                candidates: Iterable[Path] = target.iterdir()
-                if self._read_policy is not None:
-                    candidates = (
-                        entry
-                        for entry in candidates
-                        if self._policy_lists_entry(
-                            entry,
-                            display=display,
-                            parent=target,
-                            resource_key=resource_key,
-                        )
-                    )
-                entries = heapq.nsmallest(
-                    _MAX_ITEMS + 1,
-                    candidates,
-                    key=lambda item: item.name,
-                )
-            except FileNotFoundError as error:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
-            except OSError as error:
-                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-            visible = entries[:_MAX_ITEMS]
-            incomplete = len(entries) > _MAX_ITEMS
-            rows: list[str] = []
-            for entry in visible:
-                try:
-                    info = entry.lstat()
-                except OSError:
-                    incomplete = True
-                    continue
-                if stat.S_ISLNK(info.st_mode):
-                    if self._read_policy is not None:
-                        continue
-                    if not self._visible_read_path(
-                        _child_display(display, entry, target),
-                        resource_key=resource_key,
-                        directory=False,
-                    ):
-                        continue
-                    rows.append(entry.name + "@")
-                elif stat.S_ISDIR(info.st_mode):
-                    if not self._visible_read_path(
-                        _child_display(display, entry, target),
-                        resource_key=resource_key,
-                        directory=True,
-                    ):
-                        continue
-                    rows.append(entry.name + "/")
-                elif stat.S_ISREG(info.st_mode):
-                    if not self._visible_read_path(
-                        _child_display(display, entry, target),
-                        resource_key=resource_key,
-                        directory=False,
-                    ):
-                        continue
-                    rows.append(f"{entry.name}  ({info.st_size} bytes)")
-            result = "\n".join(rows) if rows else "(empty directory)"
-            if incomplete:
-                return _bound_output_with_marker(result, "\n[truncated]")
-            return _bound_output(result)
-
-        return await self._run_sync(operation)
-
-    def _policy_lists_entry(
-        self,
-        entry: Path,
-        *,
-        display: str,
-        parent: Path,
-        resource_key: str | None,
-    ) -> bool:
-        try:
-            info = entry.lstat()
-        except OSError:
-            return False
-        if stat.S_ISLNK(info.st_mode):
-            return False
-        is_directory = stat.S_ISDIR(info.st_mode)
-        if not is_directory and not stat.S_ISREG(info.st_mode):
-            return False
-        return self._visible_read_path(
-            _child_display(display, entry, parent),
-            resource_key=resource_key,
-            directory=is_directory,
-        )
-
-    async def search_files(
-        self,
-        pattern: str,
-        *,
-        path: str = ".",
-        include_glob: str | None = None,
-    ) -> str:
-        expression = _compile_pattern(pattern)
-        if include_glob is not None and not isinstance(include_glob, str):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if include_glob is not None:
-            _validate_glob(include_glob)
-        validate_request_size(
-            "search_files",
-            {
-                "pattern": pattern,
-                "path": path,
-                "include_glob": include_glob,
-            },
-        )
-
-        def operation() -> str:
-            target, display, resource_key = self._read_target(
-                path,
-                directory=True,
-            )
-            walk_state = _WalkState()
-            if target.is_file():
-                candidates: Iterable[Path] = (target,)
-            elif target.is_dir():
-                candidates = _walk_files(target, walk_state)
-            else:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-
-            rows: list[str] = []
-            row_chars = 0
-            incomplete = False
-            for candidate in candidates:
-                relative = _child_display(display, candidate, target)
-                if not self._visible_read_path(
-                    relative,
-                    resource_key=resource_key,
-                    directory=False,
-                ):
-                    continue
-                if include_glob is not None and not fnmatch.fnmatchcase(
-                    relative, include_glob
-                ):
-                    continue
-                try:
-                    matches, file_truncated = _search_file_lines(
-                        candidate,
-                        relative,
-                        expression,
-                        _MAX_ITEMS - len(rows),
-                    )
-                except AIError as error:
-                    if error.code in {
-                        ErrorCode.REQUEST_FIELD_INVALID,
-                        ErrorCode.STORAGE_NOT_FOUND,
-                        ErrorCode.STORAGE_UNAVAILABLE,
-                        ErrorCode.STORAGE_CONFLICT,
-                    }:
-                        incomplete = True
-                        continue
-                    raise
-                for row in matches:
-                    separator_chars = 1 if rows else 0
-                    if (
-                        row_chars
-                        + separator_chars
-                        + len(row)
-                        > _MAX_RENDERED_CHARS - len("\n[results incomplete]")
-                    ):
-                        incomplete = True
-                        break
-                    rows.append(row)
-                    row_chars += separator_chars + len(row)
-                if len(rows) >= _MAX_ITEMS or file_truncated:
-                    incomplete = True
-                if incomplete and (
-                    len(rows) >= _MAX_ITEMS
-                    or row_chars >= _MAX_RENDERED_CHARS - len("\n[results incomplete]")
-                ):
-                    break
-            if walk_state.failed:
-                incomplete = True
-            result = "\n".join(rows) if rows else "No matches found."
-            if incomplete:
-                return _bound_output_with_marker(
-                    result,
-                    "\n[results incomplete]",
-                )
-            return _bound_output(result)
-
-        return await self._run_sync(operation)
-
-    async def find_files(self, pattern: str, *, path: str = ".") -> str:
-        _validate_glob(pattern)
-        validate_request_size("find_files", {"pattern": pattern, "path": path})
-
-        def operation() -> str:
-            directory, display, resource_key = self._read_target(
-                path,
-                directory=True,
-            )
-            if not directory.is_dir():
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            matches: list[str] = []
-            too_many = False
-            walk_state = _WalkState()
-            for target in _walk_files_and_directories(directory, walk_state):
-                relative = _child_display(display, target, directory)
-                if not self._visible_read_path(
-                    relative,
-                    resource_key=resource_key,
-                    directory=target.is_dir(),
-                ):
-                    continue
-                if target.is_symlink():
-                    continue
-                if fnmatch.fnmatchcase(relative, pattern) or fnmatch.fnmatchcase(
-                    target.name, pattern
-                ):
-                    if len(matches) >= _MAX_ITEMS:
-                        too_many = True
-                        break
-                    matches.append(relative)
-            matches.sort()
-            result = "\n".join(matches) if matches else "No matches found."
-            if too_many or walk_state.failed:
-                return _bound_output_with_marker(
-                    result,
-                    "\n[results incomplete]",
-                )
-            return _bound_output(result)
-
-        return await self._run_sync(operation)
-
-    async def create_directory(self, path: str) -> str:
-        self._reject_read_only()
-        try:
-            normalized = _normalize_path(path)
-            validate_request_size("create_directory", {"path": path})
-        except AIError as error:
-            raise WorkspaceOperationRejected.from_error(error) from error
-
-        def operation() -> str:
-            try:
-                if _is_protected(self._workspace, normalized):
-                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-                target = self._directory_path(normalized, allow_missing=True)
-                relative = _relative(self._root, target)
-                if _is_protected(self._workspace, relative):
-                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-                if target.exists():
-                    return _write_result(normalized, "directory", status="exists")
-                _check_parent_chain(self._root, target.parent)
-            except AIError as error:
-                raise WorkspaceOperationRejected.from_error(error) from error
-            with _file_lock(self._lock_root, relative):
-                try:
-                    target.mkdir(parents=True, exist_ok=True)
-                except FileNotFoundError as error:
-                    raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
-                except OSError as error:
-                    raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-                return _write_result(normalized, "directory", status="created")
-
-        return await self._run_sync(operation)
-
-    async def file_info(self, path: str) -> str:
-        validate_request_size("file_info", {"path": path})
-
-        def operation() -> str:
-            target, display, _resource_key = self._read_target(
-                path,
-                directory=None,
-            )
-            self._authorize_read(
-                display,
-                resource_key=_resource_key,
-                directory=target.is_dir(),
-            )
-            original = (
-                self._root / _normalize_path(path)
-                if self._read_policy is None
-                else target
-            )
-            is_link = original.is_symlink()
-            try:
-                info = target.stat()
-            except FileNotFoundError as error:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
-            except OSError as error:
-                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-            if not stat.S_ISDIR(info.st_mode) and not stat.S_ISREG(info.st_mode):
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            kind = "directory" if stat.S_ISDIR(info.st_mode) else "file"
-            parts = [
-                f"path: {display}",
-                f"type: {kind}",
-                f"size: {info.st_size} bytes",
-                f"mode: {stat.S_IMODE(info.st_mode):04o}",
-            ]
-            if stat.S_ISREG(info.st_mode):
-                binary = _binary_file_size(target) is not None
-                parts.append(f"binary: {str(binary).lower()}")
-                if not binary:
-                    digest, line_count, _visible, _truncated = _read_selected_lines(
-                        target,
-                        display,
-                        0,
-                        1,
-                    )
-                    parts.append(f"lines: {line_count}")
-                    parts.append(f"hash: {digest}")
-            if is_link:
-                parts.append(f"symlink_target: {_relative(self._root, target.resolve())}")
-            return _bound_output("\n".join(parts))
-
-        return await self._run_sync(operation)
 
     async def run_command(
         self,
@@ -1499,15 +1127,20 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         return resolved if candidate.is_symlink() else candidate
 
-    def _file_path(self, path: str, *, write: bool) -> Path:
+    def _file_path(self, path: str, *, write: bool, allow_missing_parent: bool = False) -> Path:
         if write and _is_protected(self._workspace, path):
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         candidate = self._resolve_path(path, allow_missing=write)
         resolved = candidate.resolve(strict=False)
         if write and _is_protected(self._workspace, _relative(self._root, resolved)):
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        if write and not candidate.parent.is_dir():
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        if write:
+            parent = candidate.parent
+            if allow_missing_parent:
+                while parent != self._root and not parent.exists():
+                    parent = parent.parent
+            if not parent.is_dir():
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         if candidate.exists():
             info = candidate.lstat()
             if not stat.S_ISREG(info.st_mode):
@@ -1516,14 +1149,6 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         return candidate
 
-    def _directory_path(self, path: str, *, allow_missing: bool = False) -> Path:
-        candidate = self._root / path
-        if candidate.is_symlink():
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        candidate = self._resolve_path(path, allow_missing=allow_missing)
-        if candidate.exists() and not candidate.is_dir():
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        return candidate
 
     async def _start_process(self, command: str, *, environment: Mapping[str, str] | None = None) -> "_ProcessState":
         started = asyncio.get_running_loop().create_future()
@@ -1671,8 +1296,6 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
     async def _forget_process(self, command_id: str) -> None:
         async with self._process_lock:
             self._processes.pop(command_id, None)
-
-
 
 
 class _LocalStdioProcess:
@@ -1973,253 +1596,6 @@ class _WalkState:
     failed: bool = False
 
 
-def _walk_files(root: Path, state: _WalkState) -> Iterable[Path]:
-    def onerror(error: OSError) -> None:
-        del error
-        state.failed = True
-
-    for current, directories, files in os.walk(
-        root,
-        followlinks=False,
-        onerror=onerror,
-    ):
-        directories[:] = sorted(
-            name for name in directories if not (Path(current) / name).is_symlink()
-        )
-        for name in sorted(files):
-            target = Path(current) / name
-            if target.is_symlink():
-                continue
-            try:
-                info = target.lstat()
-            except OSError:
-                state.failed = True
-                continue
-            if stat.S_ISREG(info.st_mode):
-                yield target
-
-
-def _walk_files_and_directories(
-    root: Path,
-    state: _WalkState,
-) -> Iterable[Path]:
-    def onerror(error: OSError) -> None:
-        del error
-        state.failed = True
-
-    yield root
-    for current, directories, files in os.walk(
-        root,
-        followlinks=False,
-        onerror=onerror,
-    ):
-        directories[:] = sorted(
-            name for name in directories if not (Path(current) / name).is_symlink()
-        )
-        for name in sorted(directories):
-            yield Path(current) / name
-        for name in sorted(files):
-            target = Path(current) / name
-            if target.is_symlink():
-                continue
-            try:
-                info = target.lstat()
-            except OSError:
-                state.failed = True
-                continue
-            if stat.S_ISREG(info.st_mode):
-                yield target
-
-
-def _read_selected_lines(
-    path: Path,
-    logical: str,
-    offset: int,
-    limit: int,
-) -> tuple[str, int, list[str], bool]:
-    try:
-        digest = hashlib.sha256()
-        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-        selected: list[str] = []
-        selected_chars = 0
-        selected_truncated = False
-        line_count = 0
-        line_parts: list[str] = []
-        line_chars = 0
-        line_truncated = False
-        line_started = False
-        pending_cr = False
-
-        def append_text(value: str) -> None:
-            nonlocal line_chars, line_truncated, selected_truncated
-            if line_count < offset or line_count >= offset + limit:
-                return
-            if line_truncated:
-                return
-            remaining = min(
-                _MAX_RENDERED_CHARS - line_chars,
-                _MAX_RENDERED_CHARS - 256 - selected_chars,
-            )
-            if len(value) > remaining:
-                if remaining:
-                    line_parts.append(value[:remaining])
-                    line_chars += remaining
-                line_truncated = True
-                selected_truncated = True
-                return
-            line_parts.append(value)
-            line_chars += len(value)
-
-        def finish_line(ended: bool) -> None:
-            nonlocal line_count, line_parts, line_chars, line_truncated
-            nonlocal selected_chars, selected_truncated
-            if offset <= line_count < offset + limit:
-                value = "".join(line_parts)
-                if line_truncated:
-                    value += "...[line truncated]"
-                    if ended:
-                        value += "\n"
-                remaining = _MAX_RENDERED_CHARS - 256 - selected_chars
-                if remaining <= 0:
-                    selected_truncated = True
-                elif len(value) <= remaining:
-                    selected.append(value)
-                    selected_chars += len(value)
-                else:
-                    marker = "...[output truncated]"
-                    if remaining > len(marker):
-                        selected.append(value[: remaining - len(marker)] + marker)
-                        selected_chars += remaining
-                    selected_truncated = True
-            line_count += 1
-            line_parts = []
-            line_chars = 0
-            line_truncated = False
-
-        def consume(value: str) -> None:
-            nonlocal line_started, pending_cr
-            for character in value:
-                if pending_cr:
-                    if character == "\n":
-                        append_text(character)
-                        finish_line(ended=True)
-                        pending_cr = False
-                        line_started = False
-                        continue
-                    finish_line(ended=True)
-                    pending_cr = False
-                    line_started = False
-                if character == "\r":
-                    line_started = True
-                    append_text(character)
-                    pending_cr = True
-                elif character in "\n\v\f\x1c\x1d\x1e\x85\u2028\u2029":
-                    line_started = True
-                    append_text(character)
-                    finish_line(ended=True)
-                    line_started = False
-                else:
-                    if character == "\x00":
-                        character = "\ufffd"
-                    line_started = True
-                    append_text(character)
-
-        with path.open("rb") as stream:
-            identity = _file_identity(stream.fileno())
-            while chunk := stream.read(64 * 1024):
-                digest.update(chunk)
-                try:
-                    consume(decoder.decode(chunk, final=False))
-                except UnicodeDecodeError as error:
-                    raise AIError(
-                        ErrorCode.REQUEST_FIELD_INVALID,
-                        safe_details={"path": logical, "reason": "invalid_utf8"},
-                    ) from error
-            try:
-                consume(decoder.decode(b"", final=True))
-            except UnicodeDecodeError as error:
-                raise AIError(
-                    ErrorCode.REQUEST_FIELD_INVALID,
-                    safe_details={"path": logical, "reason": "invalid_utf8"},
-                ) from error
-            if pending_cr:
-                finish_line(ended=True)
-            elif line_started:
-                finish_line(ended=False)
-            if _file_identity(stream.fileno()) != identity or _path_identity(path) != identity:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-    except FileNotFoundError as error:
-        raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
-    except OSError as error:
-        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-    return digest.hexdigest(), line_count, selected, selected_truncated
-
-
-def _binary_file_size(path: Path) -> int | None:
-    try:
-        with path.open("rb") as stream:
-            identity = _file_identity(stream.fileno())
-            info = os.fstat(stream.fileno())
-            sample = stream.read(8192)
-            if (
-                _file_identity(stream.fileno()) != identity
-                or _path_identity(path) != identity
-            ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-        return info.st_size if b"\x00" in sample else None
-    except AIError:
-        raise
-    except FileNotFoundError as error:
-        raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
-    except OSError as error:
-        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-
-
-def _search_file_lines(
-    path: Path,
-    logical: str,
-    expression: re.Pattern[str],
-    limit: int,
-) -> tuple[list[str], bool]:
-    if limit <= 0:
-        return [], True
-    try:
-        with path.open("rb") as probe:
-            identity = _file_identity(probe.fileno())
-            if b"\x00" in probe.read(8192):
-                return [], False
-        matches: list[str] = []
-        truncated = False
-        with path.open(
-            "r",
-            encoding="utf-8",
-            errors="replace",
-            newline=None,
-        ) as stream:
-            if _file_identity(stream.fileno()) != identity:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            for line_number, line in enumerate(stream, 1):
-                value = line.rstrip("\r\n")
-                if not expression.search(value):
-                    continue
-                if len(matches) >= limit:
-                    truncated = True
-                    break
-                matches.append(f"{logical}:{line_number}:{value}")
-            if (
-                _file_identity(stream.fileno()) != identity
-                or _path_identity(path) != identity
-            ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-        return matches, truncated
-    except AIError:
-        raise
-    except FileNotFoundError as error:
-        raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
-    except OSError as error:
-        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-
-
 def _search_bounded_lines(
     path: Path, logical: str, expression: re.Pattern[str], max_bytes: int,
     deadline: float, limit: int,
@@ -2516,7 +1892,33 @@ def _copy_windows_security(source: Path, target: Path) -> None:
 def _atomic_write(root: Path, path: Path, content: str) -> None:
     def write(stream: BinaryIO) -> None:
         stream.write(content.encode("utf-8"))
-    _atomic_stream_write(root, path, write)
+    created: list[tuple[Path, int, int]] = []
+    try:
+        current = root
+        for part in path.parent.relative_to(root).parts:
+            current = current / part
+            _check_parent_chain(root, current)
+            try:
+                current.mkdir()
+            except FileExistsError:
+                if current.is_symlink() or not current.is_dir():
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            else:
+                info = current.lstat()
+                created.append((current, info.st_dev, info.st_ino))
+        _atomic_stream_write(root, path, write)
+    except BaseException as error:
+        for directory, device, inode in reversed(created):
+            try:
+                _check_parent_chain(root, directory)
+                info = directory.lstat()
+                if (info.st_dev, info.st_ino) == (device, inode) and stat.S_ISDIR(info.st_mode):
+                    directory.rmdir()
+            except (OSError, AIError):
+                pass
+        if isinstance(error, OSError):
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+        raise
 
 
 def _atomic_stream_write(
@@ -2603,32 +2005,6 @@ def _file_lock(lock_dir: Path, logical: str) -> FileLock:
     _prepare_lock_root(lock_dir)
     digest = hashlib.sha256(logical.encode("utf-8")).hexdigest()
     return FileLock(str(lock_dir / f"{digest}.lock"))
-
-
-def _render_read(
-    logical: str,
-    digest: str,
-    line_count: int,
-    offset: int,
-    visible: list[str],
-    selected_truncated: bool,
-) -> str:
-    if line_count == 0:
-        return f"path: {logical}\nhash: {digest}\nlines: 0/0"
-    end = offset + len(visible)
-    body = "".join(
-        f"{offset + index + 1}: {line}" for index, line in enumerate(visible)
-    )
-    if selected_truncated:
-        body += "\n...[output truncated]"
-    if visible and len(body) > _MAX_RENDERED_CHARS - 180:
-        body = body[: _MAX_RENDERED_CHARS - 180] + "...[line truncated]"
-    return (
-        f"path: {logical}\n"
-        f"hash: {digest}\n"
-        f"lines: {offset + 1}-{end}/{line_count}\n"
-        + body
-    )
 
 
 def _bound_output(value: str) -> str:
@@ -2721,8 +2097,6 @@ def _secret_environment_key(key: str) -> bool:
             "OPENROUTER_",
         )
     ) or key == "PYDANTIC_AI_GATEWAY_API_KEY"
-
-
 
 
 __all__ = ["LocalWorkspaceBackend"]

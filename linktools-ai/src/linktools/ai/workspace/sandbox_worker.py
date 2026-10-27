@@ -380,39 +380,13 @@ async def _dispatch(
         return await session.list_files(params.get("path", "."), include_glob=params.get("include_glob", "*"))
     if method == "search_text":
         return await session.search_text(params["pattern"], path=params.get("path", "."), include_glob=params.get("include_glob"))
-    if method == "read_file":
-        return await session.read_file(
-            params["path"],
-            offset=params.get("offset", 0),
-            limit=params.get("limit"),
-        )
     if method == "write_file":
         return await session.write_file(
             params["path"],
             params["content"],
+            old_text=params.get("old_text"),
             expected_hash=params.get("expected_hash"),
         )
-    if method == "edit_file":
-        return await session.edit_file(
-            params["path"],
-            params["old_text"],
-            params["new_text"],
-            expected_hash=params.get("expected_hash"),
-        )
-    if method == "list_directory":
-        return await session.list_directory(params.get("path", "."))
-    if method == "search_files":
-        return await session.search_files(
-            params["pattern"],
-            path=params.get("path", "."),
-            include_glob=params.get("include_glob"),
-        )
-    if method == "find_files":
-        return await session.find_files(params["pattern"], path=params.get("path", "."))
-    if method == "create_directory":
-        return await session.create_directory(params["path"])
-    if method == "file_info":
-        return await session.file_info(params["path"])
     if method == "run_command":
         return await session.run_command(
             params["command"],

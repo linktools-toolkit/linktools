@@ -33,13 +33,13 @@ async def test_canonicalize_path_does_not_apply_read_authorization(
     await session.working_dir()
     try:
         assert await session.canonicalize_path("allowed") == "allowed"
-        assert "visible.py" in await session.list_directory("allowed")
+        assert "visible.py" in await session.list_files("allowed")
     finally:
         await session.close()
 
 
 @pytest.mark.parametrize("allow_stdio", (False, True))
-async def test_file_info_does_not_authorize_a_file_as_a_directory(
+async def test_inspection_does_not_authorize_a_file_as_a_directory(
     tmp_path: Path,
     allow_stdio: bool,
 ) -> None:
@@ -49,7 +49,7 @@ async def test_file_info_does_not_authorize_a_file_as_a_directory(
     await session.working_dir()
     try:
         with pytest.raises(AIError) as error:
-            await session.file_info("secret")
+            await session.inspect_file("secret")
         assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
     finally:
         await session.close()
@@ -246,12 +246,12 @@ async def test_local_sandbox_reads_empty_file_with_complete_hash(
     session = LocalWorkspaceBackend(tmp_path)
     await session.working_dir()
     try:
-        result = await session.read_file("empty.txt")
+        result = await session.read_text("empty.txt", full_metadata=True)
     finally:
         await session.close()
 
-    assert f"hash: {hashlib.sha256(b'').hexdigest()}" in result
-    assert "lines: 0/0" in result
+    assert result["hash"] == hashlib.sha256(b"").hexdigest()
+    assert result["total_lines"] == 0 and result["content"] == ""
 
 
 async def test_local_sandbox_allows_explicit_skill_resource_under_storage(
@@ -273,7 +273,7 @@ async def test_local_sandbox_search_continues_after_large_file(tmp_path: Path) -
     session = LocalWorkspaceBackend(tmp_path)
     await session.working_dir()
     try:
-        result = await session.search_files("needle")
+        result = await session.search_text("needle")
     finally:
         await session.close()
 
@@ -288,7 +288,7 @@ async def test_local_sandbox_search_reads_beyond_old_file_prefix(tmp_path: Path)
     session = LocalWorkspaceBackend(tmp_path)
     await session.working_dir()
     try:
-        result = await session.search_files("needle-after-prefix")
+        result = await session.search_text("needle-after-prefix")
     finally:
         await session.close()
 
@@ -300,7 +300,7 @@ async def test_local_sandbox_search_accepts_single_file_path(tmp_path: Path) -> 
     session = LocalWorkspaceBackend(tmp_path)
     await session.working_dir()
     try:
-        result = await session.search_files("needle", path="target.txt")
+        result = await session.search_text("needle", path="target.txt")
     finally:
         await session.close()
 
@@ -313,11 +313,12 @@ async def test_local_sandbox_read_reports_binary_file(tmp_path: Path) -> None:
     session = LocalWorkspaceBackend(tmp_path)
     await session.working_dir()
     try:
-        result = await session.read_file("image.bin")
+        result = await session.inspect_file("image.bin")
     finally:
         await session.close()
 
-    assert result == f"[Binary file: {len(payload)} bytes. Use a binary-aware tool to inspect.]"
+    assert result["is_text"] is False
+    assert result["size"] == len(payload)
 
 
 async def test_local_sandbox_read_replaces_invalid_utf8(tmp_path: Path) -> None:
@@ -325,11 +326,12 @@ async def test_local_sandbox_read_replaces_invalid_utf8(tmp_path: Path) -> None:
     session = LocalWorkspaceBackend(tmp_path)
     await session.working_dir()
     try:
-        result = await session.read_file("mixed.txt")
+        result = await session.read_text("mixed.txt")
     finally:
         await session.close()
 
-    assert "before-\ufffd-after" in result
+    assert "before-\ufffd-after" in result["content"]
+    assert result["lossy"] is True
 
 
 async def test_local_sandbox_listing_includes_regular_file_size(tmp_path: Path) -> None:
@@ -337,11 +339,11 @@ async def test_local_sandbox_listing_includes_regular_file_size(tmp_path: Path) 
     session = LocalWorkspaceBackend(tmp_path)
     await session.working_dir()
     try:
-        result = await session.list_directory()
+        result = await session.list_files()
     finally:
         await session.close()
 
-    assert "sample.txt  (3 bytes)" in result
+    assert "sample.txt  file  3" in result
 
 
 @pytest.mark.parametrize("allow_stdio", (False, True))
@@ -357,12 +359,12 @@ async def test_local_sandbox_read_policy_filters_descendants_and_writes(
     session = LocalWorkspaceBackend(tmp_path, read_policy=policy, allow_host_stdio_with_read_policy=allow_stdio)
     await session.working_dir()
     try:
-        assert "visible.py" in await session.list_directory("allowed")
-        assert "hidden.txt" not in await session.list_directory("allowed")
-        assert "type: directory" in await session.file_info("allowed")
-        assert "print('ok')" in await session.read_file("allowed/visible.py")
+        assert "visible.py" in await session.list_files("allowed")
+        assert "hidden.txt" not in await session.list_files("allowed")
+        assert (await session.stat("allowed")).is_dir
+        assert "print('ok')" in (await session.read_text("allowed/visible.py"))["content"]
         with pytest.raises(AIError) as denied:
-            await session.read_file("allowed/hidden.txt")
+            await session.read_text("allowed/hidden.txt")
         assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
         with pytest.raises(WorkspaceOperationRejected) as rejected:
             await session.write_file("allowed/new.py", "blocked")
@@ -385,26 +387,27 @@ async def test_local_sandbox_read_policy_filters_before_listing_limit(
     session = LocalWorkspaceBackend(tmp_path, read_policy=WorkspaceReadPolicy(("allowed/*.py",)))
     await session.working_dir()
     try:
-        result = await session.list_directory("allowed")
+        result = await session.list_files("allowed")
     finally:
         await session.close()
 
-    assert result == "visible.py  (3 bytes)"
+    assert "allowed/visible.py  file  3" in result
+    assert "hidden" not in result
 
 
-async def test_local_sandbox_file_info_includes_text_metadata(tmp_path: Path) -> None:
+async def test_local_sandbox_full_text_metadata_includes_hash_and_lines(tmp_path: Path) -> None:
     content = "first\nsecond\n"
     (tmp_path / "sample.txt").write_text(content, encoding="utf-8")
     session = LocalWorkspaceBackend(tmp_path)
     await session.working_dir()
     try:
-        result = await session.file_info("sample.txt")
+        result = await session.read_text("sample.txt", full_metadata=True)
     finally:
         await session.close()
 
-    assert "binary: false" in result
-    assert "lines: 2" in result
-    assert f"hash: {hashlib.sha256(content.encode()).hexdigest()}" in result
+    assert result["content"] == content
+    assert result["total_lines"] == 2
+    assert result["hash"] == hashlib.sha256(content.encode()).hexdigest()
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux process groups")

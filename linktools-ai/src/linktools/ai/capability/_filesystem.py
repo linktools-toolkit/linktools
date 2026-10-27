@@ -5,7 +5,6 @@
 import asyncio
 import hashlib
 import json
-import mimetypes
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import copy
 from dataclasses import dataclass
@@ -69,40 +68,6 @@ def _runtime_tool_metadata(
 
 
 _FILESYSTEM_TOOL_DECLARATIONS = (
-    FileSystemToolDeclaration("attach_files", tool_metadata(
-        effect_policy="none",
-        plan_safe=True,
-        tool_class="filesystem.read",
-        path_fields=("paths",),
-    )),
-    FileSystemToolDeclaration("create_directory", tool_metadata(
-        effect_policy="non_replay_safe",
-        tool_class="filesystem.write",
-        path_fields=("path",),
-    )),
-    FileSystemToolDeclaration("edit_file", tool_metadata(
-        effect_policy="non_replay_safe",
-        tool_class="filesystem.write",
-        path_fields=("path",),
-    )),
-    FileSystemToolDeclaration("file_info", tool_metadata(
-        effect_policy="none",
-        plan_safe=True,
-        tool_class="filesystem.read",
-        path_fields=("path",),
-    )),
-    FileSystemToolDeclaration("find_files", tool_metadata(
-        effect_policy="none",
-        plan_safe=True,
-        tool_class="filesystem.read",
-        path_fields=("path",),
-    )),
-    FileSystemToolDeclaration("list_directory", tool_metadata(
-        effect_policy="none",
-        plan_safe=True,
-        tool_class="filesystem.read",
-        path_fields=("path",),
-    )),
     FileSystemToolDeclaration("list_files", tool_metadata(
         effect_policy="none",
         plan_safe=True,
@@ -198,11 +163,6 @@ _INVALID_UTF8_WORKSPACE_CONTENT = (
     "approach or choose a UTF-8 text target."
 )
 _INVALID_WORKSPACE_REQUESTS = {
-    "attach_files": (
-        "The attachment request is invalid. Provide at least one existing workspace "
-        "file with a recognized type and reduce the number or total size of files "
-        "before retrying."
-    ),
     "read_file": (
         "The read_file arguments are invalid. Use a non-negative offset and a positive "
         "limit; if the offset is past the file, retry from an earlier offset."
@@ -211,32 +171,11 @@ _INVALID_WORKSPACE_REQUESTS = {
         "The write_file arguments are invalid. Use a writable workspace path and valid "
         "UTF-8 text; if expected_hash is supplied, use the current file hash."
     ),
-    "edit_file": (
-        "The edit_file arguments are invalid. Read the target and retry with non-empty "
-        "old_text that matches exactly once, valid UTF-8 replacement text, and the "
-        "current hash if supplied."
-    ),
-    "list_directory": (
-        "The list_directory target is invalid. Use a valid workspace directory path "
-        "and retry."
-    ),
     "search_files": (
         "The search_files arguments are invalid. Use a valid regular expression, a "
         "valid workspace path, and a relative include_glob when provided."
     ),
-    "find_files": (
-        "The find_files arguments are invalid. Use a relative glob pattern and a valid "
-        "workspace directory path."
-    ),
-    "create_directory": (
-        "The create_directory target is invalid. Use an allowed writable workspace "
-        "path and retry."
-    ),
-    "file_info": (
-        "The file_info target is invalid. Use a workspace path that resolves to a "
-        "regular file or directory."
-    ),
-
+    "list_files": "Use a valid workspace directory and a relative include_glob.",
 }
 
 
@@ -253,7 +192,6 @@ class _FileSystemToolSurface:
         self._policy = policy
         self._limits = limits
         self._model_binding = model_binding
-        self._mime = mimetypes.MimeTypes(filenames=())
 
     def _require_backend(self) -> SupportsFileTools:
         if self._backend is None:
@@ -279,69 +217,7 @@ class _FileSystemToolSurface:
                 raise
             raise _filesystem_tool_rejected(name, error, rejected_message) from error
 
-    async def attach_files(self, paths: list[str]) -> ToolReturn:
-        """Attach Workspace files to the next model request.
 
-        Args:
-            paths: File paths relative to the root directory.
-
-        Returns:
-            Lightweight file metadata plus the file content for the next model request.
-        """
-        return await self._call(
-            self._attach_files(paths),
-            name="attach_files",
-        )
-
-    async def _attach_files(self, paths: list[str]) -> ToolReturn:
-        if not paths:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        attachment_paths = tuple(paths)
-        if len(attachment_paths) > self._limits.max_binary_input_parts:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-
-        backend = self._require_backend()
-        total_bytes = 0
-        metadata: list[dict[str, object]] = []
-        content: list[UserContent] = []
-        for path in attachment_paths:
-            media_type, _ = self._mime.guess_type(path, strict=False)
-            if not media_type:
-                raise AIError(
-                    ErrorCode.REQUEST_FIELD_INVALID,
-                    safe_details={
-                        "field": "paths",
-                        "reason": "media_type_unknown",
-                    },
-                )
-            if self._model_binding is not None:
-                validate_model_input(self._model_binding, media_type)
-            remaining = self._limits.max_binary_input_bytes - total_bytes
-            if remaining < 0:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            body = await backend.read_bytes(path, max_bytes=remaining)
-            if self._model_binding is not None:
-                validate_model_inputs(self._model_binding, BinaryContent(body, media_type=media_type))
-            total_bytes += len(body)
-            if total_bytes > self._limits.max_binary_input_bytes:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            metadata.append(
-                {
-                    "path": path,
-                    "mime_type": media_type,
-                    "size": len(body),
-                    "sha256": hashlib.sha256(body).hexdigest(),
-                }
-            )
-            content.append(
-                BinaryContent(
-                    data=body,
-                    media_type=media_type,
-                )
-            )
-        return ToolReturn(
-            return_value=[{"files": metadata}, *content],
-        )
 
     async def read_file(
         self,
@@ -500,9 +376,7 @@ class _FileSystemToolSurface:
         ):
             raise ToolCallRetry("content must be text; old_text must be nonempty or omitted.")
         backend = self._require_backend()
-        operation = (backend.write_file(path, content, expected_hash=expected_hash)
-                     if old_text is None else backend.edit_file(
-                         path, old_text, content, expected_hash=expected_hash))
+        operation = backend.write_file(path, content, old_text=old_text, expected_hash=expected_hash)
         rejected_codes = _WORKSPACE_REJECTED_CODES
         if expected_hash is not None:
             rejected_codes |= {ErrorCode.STORAGE_CONFLICT}
@@ -513,56 +387,7 @@ class _FileSystemToolSurface:
         return await self._call(self._require_backend().list_files(
             path, include_glob=include_glob), name="list_files")
 
-    async def edit_file(
-        self,
-        path: str,
-        old_text: str,
-        new_text: str,
-        *,
-        expected_hash: str | None = None,
-    ) -> str:
-        """Edit a file by exact string replacement with conflict detection.
 
-        The old_text must appear exactly once in the file. Include surrounding
-        context lines to ensure uniqueness.
-
-        Args:
-            path: File path relative to the root directory.
-            old_text: The exact text to find (must appear exactly once).
-            new_text: The replacement text.
-            expected_hash: If provided, rejects the edit when the file's
-                current hash doesn't match (optimistic concurrency).
-
-        Returns:
-            Summary with new hash for subsequent operations.
-        """
-        rejected_codes = _WORKSPACE_REJECTED_CODES
-        if expected_hash is not None:
-            rejected_codes |= {ErrorCode.STORAGE_CONFLICT}
-        return await self._call(
-            self._require_backend().edit_file(
-                path,
-                old_text,
-                new_text,
-                expected_hash=expected_hash,
-            ),
-            name="edit_file",
-            rejected_codes=rejected_codes,
-        )
-
-    async def list_directory(self, path: str = ".") -> str:
-        """List the contents of a directory.
-
-        Args:
-            path: Directory path relative to the root directory.
-
-        Returns:
-            A newline-separated listing with type indicators and sizes.
-        """
-        return await self._call(
-            self._require_backend().list_directory(path),
-            name="list_directory",
-        )
 
     async def search_files(
         self,
@@ -584,49 +409,8 @@ class _FileSystemToolSurface:
             name="search_files",
         )
 
-    async def find_files(self, pattern: str, *, path: str = ".") -> str:
-        """Find files by glob pattern (name matching, not content search).
 
-        Args:
-            pattern: Glob pattern to match, relative to `path` (e.g. '*.py',
-                '**/*.json'). Absolute patterns are rejected.
-            path: Directory to search in, relative to the root directory.
 
-        Returns:
-            Newline-separated list of matching file paths relative to root.
-        """
-        return await self._call(
-            self._require_backend().find_files(pattern, path=path),
-            name="find_files",
-        )
-
-    async def create_directory(self, path: str) -> str:
-        """Create a directory and any missing parents.
-
-        Args:
-            path: Directory path relative to the root directory.
-
-        Returns:
-            Confirmation message.
-        """
-        return await self._call(
-            self._require_backend().create_directory(path),
-            name="create_directory",
-        )
-
-    async def file_info(self, path: str) -> str:
-        """Get metadata about a file or directory.
-
-        Args:
-            path: File or directory path relative to the root directory.
-
-        Returns:
-            Formatted metadata including size, type, and permissions.
-        """
-        return await self._call(
-            self._require_backend().file_info(path),
-            name="file_info",
-        )
 
 
 
@@ -837,9 +621,9 @@ def _filesystem_tool_rejected(
     default_message: str,
 ) -> ToolCallRetry:
     reason = error.safe_details.get("reason")
-    if name in {"attach_files", "read_file"} and reason == "image_input_not_supported":
+    if name == "read_file" and reason == "image_input_not_supported":
         message = _UNSUPPORTED_IMAGE_INPUT
-    elif name in {"attach_files", "read_file"} and reason == "media_type_unknown":
+    elif name == "read_file" and reason == "media_type_unknown":
         message = _UNRECOGNIZED_ATTACHMENT_TYPE
     elif isinstance(reason, str) and reason in _FILE_REASON_MESSAGES:
         message = _FILE_REASON_MESSAGES[reason]

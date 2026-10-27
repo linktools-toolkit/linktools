@@ -56,8 +56,7 @@ def _command_model(messages, info):
 def test_filesystem_keeps_file_surface_without_shell(tmp_path: Path) -> None:
     tools = FileSystem(Workspace.load(tmp_path)).tool_definitions()
     assert {tool.name for tool in tools} == {
-        "attach_files", "create_directory", "edit_file", "file_info", "find_files",
-        "list_directory", "list_files", "read_file", "search_files", "write_file",
+        "list_files", "read_file", "search_files", "write_file",
     }
 
 
@@ -285,3 +284,48 @@ async def test_selected_file_tool_accepts_narrow_backend_without_widening_author
     ]).run("list the directory")
     assert result.output == "done"
     assert calls == ([] if denied else [(".", "*")])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("selector", "expected"), (
+    ("file:read", {"list_files", "read_file", "search_files"}),
+    ("file:write", {"write_file"}),
+    ("file:*", {"list_files", "read_file", "search_files", "write_file"}),
+    ("*", {"list_files", "read_file", "search_files", "write_file"}),
+))
+async def test_runtime_file_selectors_expose_only_unified_model_schemas(
+    tmp_path: Path, selector: str, expected: set[str],
+) -> None:
+    from linktools.ai.persistence import Persistence, PersistenceStorage
+    from linktools.ai.runtime import Runtime
+    from .test_explicit_runtime_features import _FeatureFunctionModel, _FeatureModels
+
+    observed = []
+
+    def model(messages, info):
+        schemas = {tool.name: tool.parameters_json_schema for tool in info.function_tools}
+        assert set(schemas) == expected
+        if "list_files" in schemas:
+            assert set(schemas["list_files"]["properties"]) == {"path", "include_glob"}
+        if "search_files" in schemas:
+            assert set(schemas["search_files"]["properties"]) == {"pattern", "path", "include_glob"}
+        if "read_file" in schemas:
+            assert set(schemas["read_file"]["properties"]) == {
+                "path", "as_file", "offset", "limit", "cursor", "full_metadata",
+            }
+        if "write_file" in schemas:
+            assert set(schemas["write_file"]["properties"]) == {
+                "path", "content", "old_text", "expected_hash",
+            }
+        observed.append(schemas)
+        return ModelResponse(parts=[TextPart("done")])
+
+    features = RuntimeFeatures("unified-file-tools")
+    features.capability(FileSystem(Workspace.load(tmp_path)))
+    features.agent("default", allow_tools=(selector,))
+    features.model("default", _FeatureModels(_FeatureFunctionModel(model)))
+    async with Persistence.open("unified-files", storage=PersistenceStorage.in_memory()) as persistence:
+        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+            execution = await runtime.agents.get().run("inspect tool availability", timeout_seconds=10)
+            assert execution.result.status.value == "SUCCEEDED", execution.result
+    assert len(observed) == 1

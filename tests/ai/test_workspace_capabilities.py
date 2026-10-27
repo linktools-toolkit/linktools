@@ -69,8 +69,6 @@ class _RecordingSession(FileToolsStub):
         self.calls.append((name, args, kwargs))
         return name
 
-    async def read_file(self, path: str, *, offset: int = 0, limit: "int | None" = None) -> str:
-        return await self._record("read_file", path, offset=offset, limit=limit)
 
     async def inspect_file(self, path: str, *, max_bytes=None):
         return {"path": path, "is_text": True, "mime_type": "text/plain",
@@ -85,51 +83,16 @@ class _RecordingSession(FileToolsStub):
         path: str,
         content: str,
         *,
+        old_text: "str | None" = None,
         expected_hash: "str | None" = None,
     ) -> str:
-        return await self._record("write_file", path, content, expected_hash=expected_hash)
+        return await self._record("write_file", path, content, old_text=old_text, expected_hash=expected_hash)
 
-    async def edit_file(
-        self,
-        path: str,
-        old_text: str,
-        new_text: str,
-        *,
-        expected_hash: "str | None" = None,
-    ) -> str:
-        return await self._record(
-            "edit_file",
-            path,
-            old_text,
-            new_text,
-            expected_hash=expected_hash,
-        )
 
-    async def list_directory(self, path: str = ".") -> str:
-        return await self._record("list_directory", path)
 
-    async def search_files(
-        self,
-        pattern: str,
-        *,
-        path: str = ".",
-        include_glob: "str | None" = None,
-    ) -> str:
-        return await self._record(
-            "search_files",
-            pattern,
-            path=path,
-            include_glob=include_glob,
-        )
 
-    async def find_files(self, pattern: str, *, path: str = ".") -> str:
-        return await self._record("find_files", pattern, path=path)
 
-    async def create_directory(self, path: str) -> str:
-        return await self._record("create_directory", path)
 
-    async def file_info(self, path: str) -> str:
-        return await self._record("file_info", path)
 
     async def run_command(
         self,
@@ -218,13 +181,7 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
     contributions = _workspace_tool_contributions(workspace)
 
     assert tuple(sorted(item.id for item in contributions)) == (
-        "attach_files",
         "check_command",
-        "create_directory",
-        "edit_file",
-        "file_info",
-        "find_files",
-        "list_directory",
         "list_files",
         "read_file",
         "run_command",
@@ -296,7 +253,7 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
 
     workspace = Workspace.load(tmp_path)
     snapshot = await workspace_features("workspace", workspace=workspace).capture()
-    for selectors in (("new_tool",), ("*", "new_tool")):
+    for selectors in (("new_tool",), ("*", "new_tool"), ("edit_file",), ("*", "edit_file")):
         spec = AgentSpec("agent", allow_tools=selectors)
         compiler = AgentCompiler(
             models={"default": create_model(api='openai', model="gpt-test")},
@@ -450,13 +407,7 @@ async def test_workspace_runtime_tool_contracts_match_durable_contributions(tmp_
     capability = filesystem_capabilities(
         workspace,
         (
-            "attach_files",
-            "create_directory",
-            "edit_file",
-            "file_info",
-            "find_files",
-            "list_directory",
-            "list_files",
+                                    "list_files",
             "read_file",
             "search_files",
             "write_file",
@@ -562,7 +513,7 @@ async def test_custom_sandbox_does_not_fallback_to_host_filesystem(tmp_path: Pat
     await run_toolset.tools["write_file"].function("host.txt", "content")  # type: ignore[attr-defined]
     assert not (tmp_path / "host.txt").exists()
     assert sandbox.sessions[0].calls == [
-        ("write_file", ("host.txt", "content"), {"expected_hash": None})
+        ("write_file", ("host.txt", "content"), {"old_text": None, "expected_hash": None})
     ]
     await run_toolset.__aexit__(None, None, None)
     await session.close()

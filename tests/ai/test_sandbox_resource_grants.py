@@ -44,7 +44,7 @@ def read_policy() -> WorkspaceReadPolicy:
 
 
 @pytest.mark.parametrize("through_worker", (False, True))
-@pytest.mark.parametrize("method", ("read_text", "inspect_file", "read_file", "file_info"))
+@pytest.mark.parametrize("method", ("read_text", "inspect_file"))
 async def test_file_reads_require_membership_and_read_policy(
     resource_tree: tuple[Path, WorkspaceResource], through_worker: bool, method: str,
 ) -> None:
@@ -75,7 +75,7 @@ async def test_file_reads_require_membership_and_read_policy(
 
 
 @pytest.mark.parametrize("through_worker", (False, True))
-@pytest.mark.parametrize("method", ("list_files", "list_directory", "search_text", "search_files", "find_files"))
+@pytest.mark.parametrize("method", ("list_files", "search_text"))
 async def test_directory_results_only_expose_permitted_resource_members(
     resource_tree: tuple[Path, WorkspaceResource], through_worker: bool, method: str,
 ) -> None:
@@ -86,8 +86,6 @@ async def test_directory_results_only_expose_permitted_resource_members(
         params = {"path": str(resource.source)}
         if method.startswith("search"):
             params["pattern"] = "synthetic"
-        elif method == "find_files":
-            params["pattern"] = "*"
         elif method == "list_files":
             params["include_glob"] = "**"
         for directory in (resource.source, resource.source / "nested"):

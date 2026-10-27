@@ -534,71 +534,20 @@ class BubblewrapWorkspaceBackend(_NativeWorkspaceOperations):
     ) -> str:
         return await self._call("search_text", {"pattern": pattern, "path": path, "include_glob": include_glob})
 
-    async def read_file(
-        self,
-        path: str,
-        *,
-        offset: int = 0,
-        limit: int | None = None,
-    ) -> str:
-        return await self._call(
-            "read_file",
-            {"path": path, "offset": offset, "limit": limit},
-        )
 
     async def write_file(
         self,
         path: str,
         content: str,
         *,
+        old_text: str | None = None,
         expected_hash: str | None = None,
     ) -> str:
         return await self._call(
             "write_file",
-            {"path": path, "content": content, "expected_hash": expected_hash},
+            {"path": path, "content": content, "old_text": old_text, "expected_hash": expected_hash},
         )
 
-    async def edit_file(
-        self,
-        path: str,
-        old_text: str,
-        new_text: str,
-        *,
-        expected_hash: str | None = None,
-    ) -> str:
-        return await self._call(
-            "edit_file",
-            {
-                "path": path,
-                "old_text": old_text,
-                "new_text": new_text,
-                "expected_hash": expected_hash,
-            },
-        )
-
-    async def list_directory(self, path: str = ".") -> str:
-        return await self._call("list_directory", {"path": path})
-
-    async def search_files(
-        self,
-        pattern: str,
-        *,
-        path: str = ".",
-        include_glob: str | None = None,
-    ) -> str:
-        return await self._call(
-            "search_files",
-            {"pattern": pattern, "path": path, "include_glob": include_glob},
-        )
-
-    async def find_files(self, pattern: str, *, path: str = ".") -> str:
-        return await self._call("find_files", {"pattern": pattern, "path": path})
-
-    async def create_directory(self, path: str) -> str:
-        return await self._call("create_directory", {"path": path})
-
-    async def file_info(self, path: str) -> str:
-        return await self._call("file_info", {"path": path})
 
     async def run_command(
         self,

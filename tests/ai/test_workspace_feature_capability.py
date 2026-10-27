@@ -56,11 +56,11 @@ async def test_workspace_bindings_are_isolated_and_absence_keeps_resource(tmp_pa
     try:
         one, two = await asyncio.gather(
             asyncio.to_thread(capability.bind, ("list_files",), backend=first),
-            asyncio.to_thread(capability.bind, ("list_directory",), backend=second),
+            asyncio.to_thread(capability.bind, ("list_files",), backend=second),
         )
         assert one is not two and one is not capability
         assert set(one.get_toolset().tools) == {"list_files"}
-        assert set(two.get_toolset().tools) == {"list_directory"}
+        assert set(two.get_toolset().tools) == {"list_files"}
         empty = capability.bind((), backend=None)
         assert empty.workspace is workspace
         assert empty.get_toolset() is None and empty.get_instructions() is None

@@ -113,15 +113,15 @@ async def test_workspace_invalid_utf8_edit_explains_text_boundary(tmp_path: Path
     try:
         capability = filesystem_capabilities(
             workspace,
-            ("edit_file",),
+            ("write_file",),
             backend=session,
         )[0]
         toolset = capability.get_toolset()
         with pytest.raises(ToolCallRetry, match="valid UTF-8 text"):
-            await toolset.tools["edit_file"].function(  # type: ignore[attr-defined]
+            await toolset.tools["write_file"].function(  # type: ignore[attr-defined]
                 "binary.txt",
-                "old",
                 "new",
+                old_text="old",
             )
     finally:
         await session.close()
@@ -136,35 +136,38 @@ async def test_workspace_edit_miss_explains_unique_match_requirement(tmp_path: P
     try:
         capability = filesystem_capabilities(
             workspace,
-            ("edit_file",),
+            ("write_file",),
             backend=session,
         )[0]
         toolset = capability.get_toolset()
         with pytest.raises(ToolCallRetry, match="matches exactly once"):
-            await toolset.tools["edit_file"].function(  # type: ignore[attr-defined]
+            await toolset.tools["write_file"].function(  # type: ignore[attr-defined]
                 "note.txt",
-                "missing",
                 "after",
+                old_text="missing",
             )
     finally:
         await session.close()
 
 
 @pytest.mark.asyncio
-async def test_workspace_unknown_attachment_type_explains_alternative(tmp_path: Path) -> None:
+async def test_workspace_unknown_attachment_type_requires_model_support(tmp_path: Path) -> None:
+    from linktools.ai.model import create_model
+    (tmp_path / "evidence.unknown").write_bytes(b"\x00\x01")
     workspace = Workspace.load(tmp_path)
     session = LocalWorkspaceBackend(workspace.root)
     await session.working_dir()
     try:
         capability = filesystem_capabilities(
             workspace,
-            ("attach_files",),
+            ("read_file",),
             backend=session,
+            model_binding=create_model(api="openai", model="test", input_types=("image",)),
         )[0]
         toolset = capability.get_toolset()
-        with pytest.raises(ToolCallRetry, match="recognized media type"):
-            await toolset.tools["attach_files"].function(  # type: ignore[attr-defined]
-                ["evidence.unknown"]
+        with pytest.raises(ToolCallRetry, match="does not support this file type"):
+            await toolset.tools["read_file"].function(  # type: ignore[attr-defined]
+                ["evidence.unknown"], as_file=True
             )
     finally:
         await session.close()
@@ -185,6 +188,7 @@ async def test_workspace_unknown_command_id_explains_source(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_workspace_pre_effect_write_failure_is_model_retry(tmp_path: Path) -> None:
+    (tmp_path / "blocked").write_text("not a directory")
     workspace = Workspace.load(tmp_path)
     session = LocalWorkspaceBackend(workspace.root)
     await session.working_dir()
@@ -195,12 +199,12 @@ async def test_workspace_pre_effect_write_failure_is_model_retry(tmp_path: Path)
             backend=session,
         )[0]
         toolset = capability.get_toolset()
-        with pytest.raises(ToolCallRetry, match="parent directory"):
+        with pytest.raises(ToolCallRetry, match="invalid|directory"):
             await toolset.tools["write_file"].function(  # type: ignore[attr-defined]
-                "missing/report.txt",
+                "blocked/report.txt",
                 "report",
             )
-        assert not (tmp_path / "missing").exists()
+        assert (tmp_path / "blocked").read_text() == "not a directory"
     finally:
         await session.close()
 

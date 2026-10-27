@@ -208,5 +208,4 @@ class FileToolsStub:
 
     run_command = start_command = check_command = stop_command = unsupported
     canonicalize_path = read_bytes = inspect_file = read_text = unsupported
-    list_files = search_text = read_file = write_file = edit_file = unsupported
-    list_directory = search_files = find_files = create_directory = file_info = unsupported
+    list_files = search_text = write_file = unsupported

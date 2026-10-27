@@ -15,8 +15,8 @@ pytestmark = pytest.mark.asyncio
 
 async def test_sandbox_protocol_rejects_unknown_or_missing_fields() -> None:
     invalid_requests = (
-        ("read_file", {}),
-        ("read_file", {"path": "a", "unknown": None}),
+        ("read_text", {}),
+        ("read_text", {"path": "a", "unknown": None}),
         ("unknown", {}),
     )
     for method, params in invalid_requests:
@@ -30,23 +30,18 @@ async def test_missing_file_is_reported_as_not_found(tmp_path: Path) -> None:
     await session.working_dir()
     try:
         with pytest.raises(AIError) as raised:
-            await session.read_file("missing.json")
+            await session.read_text("missing.json")
     finally:
         await session.close()
 
     assert raised.value.code is ErrorCode.STORAGE_NOT_FOUND
 
 
-async def test_missing_write_parent_is_reported_as_not_found(tmp_path: Path) -> None:
+async def test_write_creates_missing_parent_directories(tmp_path: Path) -> None:
     session = LocalWorkspaceBackend(tmp_path)
     await session.working_dir()
     try:
-        with pytest.raises(AIError) as raised:
-            await session.write_file(
-                "worker/personnel_context/report.md",
-                "report",
-            )
+        await session.write_file("worker/personnel_context/report.md", "report")
+        assert (tmp_path / "worker/personnel_context/report.md").read_text() == "report"
     finally:
         await session.close()
-
-    assert raised.value.code is ErrorCode.STORAGE_NOT_FOUND

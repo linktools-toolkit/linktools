@@ -178,8 +178,6 @@ async def test_list_and_search_share_path_anchored_glob_and_visibility(tmp_path:
         assert all(name in recursive and name in search for name in ("root.py", ".hidden.py", "child.py"))
         assert "ignored.py" not in recursive + search
         assert "child.py" not in await session.search_text("needle", path="src", include_glob="*.py")
-        # Existing host search deliberately retains its prior workspace-relative fnmatch.
-        assert "child.py" in await session.search_files("needle", path="src", include_glob="*.py")
     finally:
         await session.close()
 
@@ -210,14 +208,14 @@ async def test_streaming_edit_preserves_unrelated_changes_and_hash_chain(tmp_pat
         old_hash = hashlib.sha256(path.read_bytes()).hexdigest()
         path.write_text(text + "unrelated", encoding="utf-8")
         with pytest.raises(WorkspaceOperationRejected) as error:
-            await session.edit_file("large.txt", "old🙂value", "new", expected_hash=old_hash)
+            await session.write_file("large.txt", "new", old_text="old🙂value", expected_hash=old_hash)
         assert error.value.code is ErrorCode.STORAGE_CONFLICT
-        result = await session.edit_file("large.txt", "old🙂value", "new")
+        result = await session.write_file("large.txt", "new", old_text="old🙂value")
         expected = text.replace("old🙂value", "new") + "unrelated"
         assert path.read_text(encoding="utf-8") == expected
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         assert digest in result
-        await session.edit_file("large.txt", "new", "", expected_hash=digest)
+        await session.write_file("large.txt", "", old_text="new", expected_hash=digest)
         assert path.read_text(encoding="utf-8") == expected.replace("new", "")
     finally:
         await session.close()
@@ -237,7 +235,7 @@ async def test_failed_streaming_edits_preserve_original_and_remove_staging(
     await session.working_dir()
     try:
         with pytest.raises(WorkspaceOperationRejected) as error:
-            await session.edit_file("target.txt", old_text, "new")
+            await session.write_file("target.txt", "new", old_text=old_text)
         assert error.value.safe_details["reason"] == reason
         assert path.read_bytes() == raw
         assert not list(tmp_path.glob(".linktools-????????????????????????????????"))
@@ -257,10 +255,10 @@ async def test_edit_budget_and_read_only_policy_do_not_publish_changes(
     try:
         monkeypatch.setattr(_local_sandbox, "_MAX_EDIT_BYTES", 4)
         with pytest.raises(WorkspaceOperationRejected) as error:
-            await session.edit_file("target.txt", "old", "too long")
+            await session.write_file("target.txt", "too long", old_text="old")
         assert error.value.safe_details["reason"] == "edit_staging_byte_limit"
         with pytest.raises(WorkspaceOperationRejected):
-            await read_only.edit_file("target.txt", "old", "new")
+            await read_only.write_file("target.txt", "new", old_text="old")
         assert path.read_text(encoding="utf-8") == "old"
     finally:
         await session.close()
@@ -312,7 +310,7 @@ async def test_preview_and_edit_peak_memory_do_not_scale_with_file_size(tmp_path
         assert preview_peak < 2 * 1024 * 1024
         tracemalloc.start()
         try:
-            await session.edit_file("large.txt", "unique-target", "replacement")
+            await session.write_file("large.txt", "replacement", old_text="unique-target")
             _, edit_peak = tracemalloc.get_traced_memory()
         finally:
             tracemalloc.stop()
@@ -338,7 +336,7 @@ async def test_external_change_during_edit_is_preserved_as_conflict(
     await session.working_dir()
     try:
         with pytest.raises(WorkspaceOperationRejected) as error:
-            await session.edit_file("target.txt", "old", "new")
+            await session.write_file("target.txt", "new", old_text="old")
         assert error.value.code is ErrorCode.STORAGE_CONFLICT
         assert path.read_text(encoding="utf-8") == "external update"
         assert not list(tmp_path.glob(".linktools-????????????????????????????????"))

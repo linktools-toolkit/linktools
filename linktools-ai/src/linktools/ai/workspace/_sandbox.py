@@ -272,52 +272,15 @@ class SupportsFileTools(Protocol):
         self, pattern: str, *, path: str = ".", include_glob: str | None = None,
     ) -> str: ...
 
-    async def read_file(
-        self,
-        path: str,
-        *,
-        offset: int = 0,
-        limit: "int | None" = None,
-    ) -> str: ...
 
     async def write_file(
         self,
         path: str,
         content: str,
         *,
+        old_text: "str | None" = None,
         expected_hash: "str | None" = None,
     ) -> str: ...
-
-    async def edit_file(
-        self,
-        path: str,
-        old_text: str,
-        new_text: str,
-        *,
-        expected_hash: "str | None" = None,
-    ) -> str: ...
-
-    async def list_directory(self, path: str = ".") -> str: ...
-
-    async def search_files(
-        self,
-        pattern: str,
-        *,
-        path: str = ".",
-        include_glob: "str | None" = None,
-    ) -> str: ...
-
-    async def find_files(
-        self,
-        pattern: str,
-        *,
-        path: str = ".",
-    ) -> str: ...
-
-    async def create_directory(self, path: str) -> str: ...
-
-    async def file_info(self, path: str) -> str: ...
-
 
 
 @dataclass(frozen=True, slots=True)
@@ -465,7 +428,6 @@ def normalize_workspace_input_path(path: str) -> str:
         return validate_workspace_path(normalized)
     except ValueError as error:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
-
 
 
 def _normalize_read_pattern(value: str) -> str:

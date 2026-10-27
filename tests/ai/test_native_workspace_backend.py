@@ -364,3 +364,107 @@ def test_read_bytes_invalid_path_retains_standard_error(tmp_path: Path) -> None:
         finally:
             await backend.close()
     asyncio.run(run())
+
+
+def test_write_creates_only_necessary_parent_directories(tmp_path: Path) -> None:
+    async def run() -> None:
+        backend = LocalWorkspaceBackend(tmp_path)
+        try:
+            await backend.write_file("new/nested/file.txt", "hello")
+            assert await backend.read_bytes("new/nested/file.txt") == b"hello"
+            with pytest.raises(AIError) as conflict:
+                await backend.write_file("rejected/nested/file.txt", "hello", expected_hash="0" * 64)
+            assert conflict.value.code == ErrorCode.STORAGE_CONFLICT
+            assert not (tmp_path / "rejected").exists()
+            with pytest.raises(AIError):
+                await backend.write_file("edit/nested/file.txt", "new", old_text="old")
+            assert not (tmp_path / "edit").exists()
+        finally:
+            await backend.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("restricted", [False, True])
+def test_write_parent_creation_preserves_path_authority(tmp_path: Path, restricted: bool) -> None:
+    async def run() -> None:
+        root = tmp_path / "workspace"
+        outside = tmp_path / "outside"
+        root.mkdir()
+        outside.mkdir()
+        (root / "link").symlink_to(outside, target_is_directory=True)
+        policy = WorkspaceReadPolicy(("**",)) if restricted else None
+        backend = LocalWorkspaceBackend(root, read_policy=policy)
+        try:
+            for path in ("link/new/file.txt", "../outside/new/file.txt", ".git/new/file.txt", "secrets/new/file.txt"):
+                with pytest.raises(AIError):
+                    await backend.write_file(path, "blocked")
+            assert not (outside / "new").exists()
+            assert not (root / ".git").exists()
+            assert not (root / "secrets").exists()
+            if restricted:
+                with pytest.raises(AIError):
+                    await backend.write_file("ordinary/new/file.txt", "blocked")
+                assert not (root / "ordinary").exists()
+        finally:
+            await backend.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["empty", "foreign_content", "replacement", "cancellation"])
+def test_failed_write_rolls_back_only_owned_empty_parents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    from linktools.ai.workspace import _local_sandbox
+
+    def fail_write(root, path, write):
+        if failure == "foreign_content":
+            (path.parent / "foreign.txt").write_text("keep")
+        elif failure == "replacement":
+            path.parent.rename(path.parent.with_name("owned-moved"))
+            path.parent.mkdir()
+        elif failure == "cancellation":
+            raise asyncio.CancelledError()
+        raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+
+    monkeypatch.setattr(_local_sandbox, "_atomic_stream_write", fail_write)
+
+    async def run() -> None:
+        backend = LocalWorkspaceBackend(tmp_path)
+        try:
+            expected_error = asyncio.CancelledError if failure == "cancellation" else AIError
+            with pytest.raises(expected_error):
+                await backend.write_file("new/nested/file.txt", "hello")
+            assert not (tmp_path / "new/nested/file.txt").exists()
+            if failure == "foreign_content":
+                assert (tmp_path / "new/nested/foreign.txt").read_text() == "keep"
+            elif failure == "replacement":
+                assert (tmp_path / "new/nested").is_dir()
+                assert (tmp_path / "new/owned-moved").is_dir()
+            else:
+                assert not (tmp_path / "new").exists()
+        finally:
+            await backend.close()
+    asyncio.run(run())
+
+
+def test_worker_write_supports_creation_and_exact_replacement(tmp_path: Path) -> None:
+    from linktools.ai.workspace._sandbox_protocol import validate_request_params
+    from linktools.ai.workspace.sandbox_worker import _dispatch
+
+    async def run() -> None:
+        backend = LocalWorkspaceBackend(tmp_path)
+        try:
+            create = {"path": "new/nested/report.txt", "content": "before value", "old_text": None}
+            validate_request_params("write_file", create)
+            await _dispatch(backend, "write_file", create)
+            replace = {"path": create["path"], "content": "after", "old_text": "before"}
+            validate_request_params("write_file", replace)
+            await _dispatch(backend, "write_file", replace)
+            assert await backend.read_bytes(create["path"]) == b"after value"
+            with pytest.raises(AIError) as invalid:
+                await _dispatch(backend, "write_file", {**replace, "old_text": ""})
+            assert invalid.value.code == ErrorCode.REQUEST_FIELD_INVALID
+            assert await backend.read_bytes(create["path"]) == b"after value"
+        finally:
+            await backend.close()
+    asyncio.run(run())

@@ -38,6 +38,7 @@ from . import ReferencedContent
 from ..workspace import validate_workspace_path
 
 _URL_TYPES = (ImageUrl, AudioUrl, DocumentUrl, VideoUrl)
+# Stored tool results retain their original names and occurrence identities.
 _FILE_TOOLS = frozenset({"attach_files", "read_file"})
 
 

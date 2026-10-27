@@ -71,16 +71,16 @@ class _Bridge:
         return ()
 
 
-class _PartialDirectorySession(FileToolsStub):
+class _PartialWriteSession(FileToolsStub):
     def __init__(self, root: Path) -> None:
         self._root = root
 
     async def canonicalize_path(self, path: str) -> str:
         return path
 
-    async def create_directory(self, path: str) -> str:
+    async def write_file(self, path: str, content: str, *, old_text=None, expected_hash=None) -> str:
         del path
-        (self._root / "partial").mkdir()
+        (self._root / "partial").write_text(content)
         raise AIError(ErrorCode.STORAGE_NOT_FOUND)
 
 
@@ -91,7 +91,7 @@ class _MissingReadSession(FileToolsStub):
 
 
 @pytest.mark.asyncio
-async def test_missing_write_parent_is_known_failure_not_effect_unknown(
+async def test_invalid_write_parent_is_known_failure_not_effect_unknown(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.load(tmp_path)
@@ -119,13 +119,14 @@ async def test_missing_write_parent_is_known_failure_not_effect_unknown(
             tool_operations=bridge,  # type: ignore[arg-type]
         )
         context = tool_run_context()
-        args = {"path": "missing/report.txt", "content": "report"}
+        (tmp_path / "parent").write_text("not a directory")
+        args = {"path": "parent/report.txt", "content": "report"}
         with pytest.raises(ToolCallRetry):
             tools = await boundary.get_tools(context)
             await boundary.call_tool("write_file", args, context, tools["write_file"])
 
         assert bridge.calls == ["begin", "fail"]
-        assert not (tmp_path / "missing").exists()
+        assert (tmp_path / "parent").read_text() == "not a directory"
     finally:
         await session.close()
 
@@ -135,17 +136,17 @@ async def test_effectful_plain_ai_error_after_partial_effect_becomes_unknown(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.load(tmp_path)
-    session = _PartialDirectorySession(tmp_path)
+    session = _PartialWriteSession(tmp_path)
     workspace_capability = filesystem_capabilities(
         workspace,
-        ("create_directory",),
+        ("write_file",),
         backend=session,  # type: ignore[arg-type]
     )[0]
     bridge = _Bridge()
     boundary = BoundaryToolset(
         (workspace_capability.get_toolset(),),
         {
-            "create_directory": ManagedToolDescriptor(
+            "write_file": ManagedToolDescriptor(
                 effect_owner="tool_operation",
                 effect_policy="non_replay_safe",
                 tool_class="filesystem.write",
@@ -161,15 +162,15 @@ async def test_effectful_plain_ai_error_after_partial_effect_becomes_unknown(
     tools = await boundary.get_tools(context)
     with pytest.raises(AIError) as captured:
         await boundary.call_tool(
-            "create_directory",
-            {"path": "target"},
+            "write_file",
+            {"path": "target", "content": "partial"},
             context,
-            tools["create_directory"],
+            tools["write_file"],
         )
 
     assert captured.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
     assert bridge.calls == ["begin", "unknown"]
-    assert (tmp_path / "partial").is_dir()
+    assert (tmp_path / "partial").read_text() == "partial"
 
 
 @pytest.mark.asyncio

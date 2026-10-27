@@ -494,19 +494,28 @@ def test_wait_observed_synchronous_callback_requires_schedulable_loop():
             graph.release.clear()
             runtime, run = await make_run(graph)
             elapsed = []
+            loop = asyncio.get_running_loop()
+            real_time = loop.time
+            admitted_at = real_time()
+            # Only callback execution advances the deadline clock, not setup load.
+            loop.time = lambda: admitted_at
             async def callback(event):
                 start = time.monotonic()
                 time.sleep(0.05)
                 elapsed.append(time.monotonic() - start)
+                loop.time = real_time
             start = time.monotonic()
             try:
-                await run.wait(on_event=callback, timeout_seconds=0.001)
-            except AIError as error:
-                assert error.code is ErrorCode.WAIT_TIMEOUT
-            else:
-                raise AssertionError("wait should time out")
-            assert elapsed and time.monotonic() - start >= 0.05
-            await runtime.close()
+                try:
+                    await run.wait(on_event=callback, timeout_seconds=0.001)
+                except AIError as error:
+                    assert error.code is ErrorCode.WAIT_TIMEOUT
+                else:
+                    raise AssertionError("wait should time out")
+                assert elapsed and time.monotonic() - start >= 0.05
+            finally:
+                loop.time = real_time
+                await runtime.close()
         asyncio.run(main())
     ''')
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=15)

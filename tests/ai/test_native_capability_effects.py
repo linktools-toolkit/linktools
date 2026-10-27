@@ -199,7 +199,7 @@ async def test_bound_workspace_enforces_its_policy_without_a_runtime(tmp_path):
         assert second.output == "done"
         assert (tmp_path / "approved.txt").read_text() == "approved"
         assert not (tmp_path / "denied.txt").exists()
-        assert "approved.txt" in await session.list_directory(".")
+        assert "approved.txt" in await session.list_files(".")
     finally:
         await session.close()
 
@@ -619,7 +619,7 @@ async def test_native_projection_cancellation_drains_the_owned_resource(tmp_path
             toolset = FunctionToolset()
             @toolset.tool_plain
             async def inspect() -> str:
-                return await self.session.list_directory(".")
+                return await self.session.list_files(".")
             return toolset
     class Project(ToolResultsCapability):
         async def process_tool_result(self, context, tool, arguments, result):
@@ -652,5 +652,5 @@ async def test_native_projection_cancellation_drains_the_owned_resource(tmp_path
         await asyncio.gather(task, waiting, return_exceptions=True)
     assert cleaned == ["run"]
     with pytest.raises(AIError) as caught:
-        await sessions[0].list_directory(".")
+        await sessions[0].list_files(".")
     assert caught.value.code is ErrorCode.SANDBOX_SESSION_CLOSED
