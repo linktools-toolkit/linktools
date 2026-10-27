@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import pytest
 from linktools.ai.core import (
     HmacCursorSigner,
+    canonical_sha256,
     Principal,
     SessionStatus,
     TenantAuthorizationPolicy,
@@ -20,6 +21,7 @@ from linktools.ai.execution import ForkSessionRequest
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.history._projection import StepSessionHistoryReader
 from linktools.ai.runtime._session import RuntimeSessionService
+from linktools.ai.persistence.runs import SESSION_HISTORY_VIEW_V1
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.contracts import ConversationCursor, SessionRecord
 from pydantic_ai.messages import (
@@ -234,6 +236,16 @@ async def test_session_history_cursor_binds_to_current_continuation() -> None:
             "session", principal=Principal("owner", "tenant"), limit=2
         )
         assert first_page.next_cursor is not None
+        assert SESSION_HISTORY_VIEW_V1 == 1
+        payload = HmacCursorSigner("session-history", b"session-history-key").decode(first_page.next_cursor)
+        assert payload.filter_digest == canonical_sha256({
+            "session_id": "session", "projection_version": 1,
+        })
+        continuation = await service.history(
+            "session", principal=Principal("owner", "tenant"),
+            cursor=first_page.next_cursor, limit=2,
+        )
+        assert [item.content for item in continuation.items] == ["B", "answer:B"]
 
         await _materialize(state, second_run, ("C",))
         await _advance(

@@ -476,19 +476,19 @@ class TranscriptRepository:
         async def capture(transaction: StateTransaction):
             entry = await self.get_head_in_transaction(transaction, owner_id)
             head = self.empty_head(owner_id) if entry is None else entry[0]
-            version = -1 if entry is None else entry[1].storage_revision
+            storage_revision = -1 if entry is None else entry[1].storage_revision
             cache = self._pending_cache.get(owner_id)
             previous = ()
             if (cache is not None and cache.message_index == head.message_count
-                    and cache.storage_revision <= version and cache.pending == head.pending
+                    and cache.storage_revision <= storage_revision and cache.pending == head.pending
                     and len(cache.parts) <= head.pending_part_count):
                 previous = cache.parts
             chunks, keys = await self._capture_pending_suffix(
                 transaction, head, tuple(part.key for part in previous),
             )
-            return head, version, previous, chunks, keys
+            return head, storage_revision, previous, chunks, keys
 
-        head, base_version, cached, previous_chunks, previous_keys = await self._store.read(capture)
+        head, base_storage_revision, cached, previous_chunks, previous_keys = await self._store.read(capture)
         if head.message_count != first_message_index:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         loaded = list(cached)
@@ -565,13 +565,13 @@ class TranscriptRepository:
             # Only the prefix read from durable facts is safe to reuse after rollback.
             if previous:
                 self._pending_cache[owner_id] = _PendingCache(
-                    head.message_count, base_version, head.pending,
+                    head.message_count, base_storage_revision, head.pending,
                     tuple(next_parts[:len(previous)]),
                 )
             else:
                 self._pending_cache.pop(owner_id, None)
         return PreparedTranscriptObservation(
-            owner_id, first_message_index, target, chunks, base_version,
+            owner_id, first_message_index, target, chunks, base_storage_revision,
             shell, tuple(next_parts), tuple(additions), archive,
         )
 

@@ -34,7 +34,7 @@ from ..errors import AIError, ErrorCode
 from ..model import ReferencedContent
 from ..session import SessionHistoryItem
 
-SESSION_HISTORY_VIEW_V1 = 2
+SESSION_HISTORY_VIEW_V1 = 1
 EXECUTION_TRANSCRIPT_VIEW_V1 = 1
 
 
