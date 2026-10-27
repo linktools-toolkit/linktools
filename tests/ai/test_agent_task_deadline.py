@@ -59,7 +59,7 @@ async def test_agent_node_deadline_cancels_work_and_preserves_unknown_effects(
 
     # Exclude setup from the deadline, then let real elapsed time drive the
     # original wait and cancellation after the intended work has started.
-    for module in ("task_engine._agent", "execution._service", "runtime._execution", "runtime._local"):
+    for module in ("task.engine._agent", "execution._service", "runtime._execution", "runtime._local"):
         monkeypatch.setattr(f"linktools.ai.{module}.datetime", Clock)
     monkeypatch.setattr(AgentTaskRunner, "_wait_execution", wait_after_work_started)
 
@@ -144,7 +144,7 @@ async def test_agent_node_deadline_uses_tighter_limit_without_replacing_shared_b
 
     # First establish a real shared-budget reservation, then expire only the
     # tighter limit. Startup speed must not decide whether a request exists.
-    for module in ("task_engine._agent", "execution._service", "runtime._execution", "runtime._local", "persistence._budget"):
+    for module in ("task.engine._agent", "execution._service", "runtime._execution", "runtime._local", "persistence._budget"):
         monkeypatch.setattr(f"linktools.ai.{module}.datetime", Clock)
     monkeypatch.setattr(AgentTaskRunner, "_wait_execution", wait_after_model_started)
 
