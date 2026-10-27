@@ -5057,6 +5057,8 @@ async def test_waiting_recovery_reestablishes_hold_until_task_commit() -> None:
                 await asyncio.sleep(0)
 
         await asyncio.wait_for(wait_terminal(), 1)
+        # Durable task completion precedes the owned dependency-hold cleanup.
+        await launcher.shutdown()
         assert calls == [
             "acquire:execution:task:waiting-hold:node",
             "wait:execution",

@@ -388,6 +388,7 @@ async def test_task_scheduler_arm_cancellation_detaches_pending_launcher() -> No
 @pytest.mark.asyncio
 async def test_task_shutdown_waits_for_cancellation_resistant_graph_cleanup() -> None:
     launcher = object.__new__(LocalTaskGraphLauncher)
+    launcher._hold_cleanup_failure = None
     launcher._accepting = True
     launcher._lock = asyncio.Lock()
     launcher._runner = SimpleNamespace()
@@ -438,6 +439,7 @@ async def test_task_shutdown_drains_runner_owned_background_work() -> None:
             return None
 
     launcher = object.__new__(LocalTaskGraphLauncher)
+    launcher._hold_cleanup_failure = None
     launcher._accepting = True
     launcher._graphs = {}
     launcher._lock = asyncio.Lock()

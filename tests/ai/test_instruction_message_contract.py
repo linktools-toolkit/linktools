@@ -18,7 +18,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import (
     AgentInstructionSource, CapabilityInstructionSource, InstructionBaselinePart, InstructionDeltaPart,
     InstructionDigest, InstructionId, InstructionPart,
-    ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, ToolsetInstructionSource,
+    ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, ToolsetInstructionSource, UserPromptPart,
 )
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from pydantic_ai.toolsets import FunctionToolset
@@ -144,6 +144,22 @@ def test_instruction_writer_rejects_invalid_values_instead_of_dropping_them(inva
         encode_model_messages((ModelRequest(parts=[InstructionBaselinePart(instructions=[block])]),))
 
 
+def _is_deferred_instruction_return(part: ToolReturnPart, messages: list[object]) -> bool:
+    if part.content == {"instructions": "Activated instruction."}:
+        return True
+    if not isinstance(part.content, dict) or part.content.get("message") != (
+        "Capability 'deferred' loaded. Its instructions, if any, follow."
+    ):
+        return False
+    assert "instructions" not in part.content
+    return any(
+        isinstance(item, UserPromptPart) and item.content == (
+            '<system><context id="capability:deferred">\nActivated instruction.\n</context></system>'
+        )
+        for message in messages for item in message.parts
+    )
+
+
 class _DeferredInstructions(AbstractCapability):
     id, defer_loading = "deferred", True
 
@@ -181,7 +197,7 @@ async def test_native_deferred_two_request_writer_round_trips_real_baseline_dige
             return ModelResponse(parts=[ToolCallPart("load_capability", {"id": "deferred"}, "load-deferred")])
         assert len(requests) == 2
         assert "activated" in {tool.name for tool in info.function_tools}
-        assert any(isinstance(part, ToolReturnPart) and part.content == {"instructions": "Activated instruction."}
+        assert any(isinstance(part, ToolReturnPart) and _is_deferred_instruction_return(part, messages)
                    for message in messages for part in message.parts)
         return ModelResponse(parts=[TextPart("done")])
 
@@ -194,7 +210,8 @@ async def test_native_deferred_two_request_writer_round_trips_real_baseline_dige
     baseline, = [part for part in parts if isinstance(part, InstructionBaselinePart)]
     assert any(isinstance(block, InstructionDigest) for block in baseline.instructions)
     assert any(isinstance(block, InstructionPart) for block in baseline.instructions)
-    delta, = [part for part in parts if isinstance(part, InstructionDeltaPart)]
+    delta, = [part for part in parts if isinstance(part, InstructionDeltaPart)
+              and str(part.id) == "capability:changing:details"]
     assert delta.content == "replacement" and delta.base_hash == _HASH
     assert str(delta.id) == "capability:changing:details"
     assert decode_model_messages(encode_model_messages(messages)) == tuple(messages)
@@ -210,7 +227,7 @@ async def _runtime_deferred_session(root: str, resumed: bool, backend: str) -> N
         names = {tool.name for tool in info.function_tools}
         if resumed:
             assert "activated" in names
-            assert any(isinstance(part, ToolReturnPart) and part.content == {"instructions": "Activated instruction."}
+            assert any(isinstance(part, ToolReturnPart) and _is_deferred_instruction_return(part, messages)
                        for message in messages for part in message.parts)
             if requests == 1:
                 yield {0: DeltaToolCall(name="activated", json_args="{}", tool_call_id="use-activated")}

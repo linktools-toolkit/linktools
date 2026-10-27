@@ -7,7 +7,7 @@ from dataclasses import replace
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.messages import (
-    ModelMessage, ModelRequest, ModelResponse, RetryPromptPart, SystemPromptPart, TextContent,
+    CompactionPart, ModelMessage, ModelRequest, ModelResponse, RetryPromptPart, SystemPromptPart, TextContent,
     TextPart, ToolCallPart, ToolReturnPart, UserPromptPart,
 )
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
@@ -26,7 +26,7 @@ from linktools.ai.model.messages import SummaryPromptPart, decode_model_messages
 
 def _summaries(messages):
     return [part for message in messages for part in message.parts
-            if isinstance(part, SummaryPromptPart)]
+            if isinstance(part, (SummaryPromptPart, CompactionPart))]
 
 
 def _history():
@@ -57,7 +57,8 @@ async def test_summary_survives_codec_reinjection_capture_and_repeated_compactio
         if 'context summarization assistant' in str(messages):
             summary_inputs.append(str(messages))
             return ModelResponse(parts=[TextPart(f'trusted-summary-{len(summary_inputs)}')])
-        assert not _summaries(messages)
+        assert not any(isinstance(part, SummaryPromptPart)
+                       for message in messages for part in message.parts)
         assert all(type(part) is SystemPromptPart for message in messages
                    for part in message.parts if isinstance(part, SystemPromptPart))
         provider_views.append(messages)
@@ -92,7 +93,9 @@ async def test_summary_survives_codec_reinjection_capture_and_repeated_compactio
             # Compaction is a context projection; the SDK's raw transcript stays raw.
             continuation = [*captures[-1], persistent[-1]]
         raw = encode_model_messages(continuation)
-        assert b'"part_kind":"runtime-summary-prompt"' in raw
+        kind = (b'"part_kind":"compaction"' if isinstance(_summaries(continuation)[0], CompactionPart)
+                else b'"part_kind":"runtime-summary-prompt"')
+        assert kind in raw
         history = list(decode_model_messages(raw))
         assert len(_summaries(history)) == 1
         view = str(provider_views[-1])
@@ -247,3 +250,31 @@ async def test_unverifiable_compaction_does_not_publish_or_mutate_context(
         await adapter.compact(source, ctx)
     assert encode_model_messages(source) == original
     assert encode_model_messages(ctx.messages) == original
+
+
+@pytest.mark.asyncio
+async def test_native_summary_preserves_request_role_without_claiming_provider_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pydantic_ai.models.test import TestModel
+    from pydantic_ai_harness.compaction import SummarizingCompaction
+
+    source = [ModelRequest(parts=[UserPromptPart('original task')]),
+              ModelResponse(parts=[TextPart('old answer')]),
+              ModelRequest(parts=[UserPromptPart('continue')])]
+    original = encode_model_messages(source)
+    summary = CompactionPart('summarized context')
+
+    async def compact(self, messages, ctx):
+        return [ModelRequest(parts=[summary]), source[-1]]
+
+    monkeypatch.setattr(SummarizingCompaction, 'compact', compact)
+    model = TestModel()
+    adapter = RuntimeSummarizingCompaction(model=model, max_messages=1, keep_messages=1)
+    ctx = RunContext(deps=None, model=model, usage=RunUsage())
+    result = await adapter.compact(source, ctx)
+    assert result[0].parts == [summary] and result[0].parts[0] is summary
+    assert isinstance(result[0], ModelRequest)
+    assert not any(isinstance(part, SystemPromptPart) for message in result for part in message.parts)
+    assert result[1].parts == source[0].parts and result[-1] is source[-1]
+    assert encode_model_messages(source) == original
