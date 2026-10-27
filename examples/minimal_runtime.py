@@ -5,7 +5,7 @@
 import os
 from pathlib import Path
 
-from linktools.ai.capability import WorkspaceCapability
+from linktools.ai.capability import FileSystem
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.model import create_model
 from linktools.ai.runtime import Runtime
@@ -26,7 +26,7 @@ async def run(project: Path) -> object:
     workspace = Workspace.load(project)
     application = RuntimeFeatures[None]("application")
     application.model("default", binding)
-    application.capability(WorkspaceCapability(workspace))
+    application.capability(FileSystem(workspace))
     application.agent(
         "writer",
         revision=2,

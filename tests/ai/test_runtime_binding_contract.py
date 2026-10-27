@@ -6,6 +6,7 @@ from linktools.ai.model import create_model
 
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Annotated
 
@@ -727,16 +728,23 @@ def test_capability_binding_identity_ignores_configuration_but_preserves_named_r
 
 
 @pytest.mark.asyncio
-async def test_mcp_resolution_keeps_historical_contract_when_current_arguments_change() -> None:
+async def test_mcp_resolution_keeps_historical_contract_when_current_arguments_change(tmp_path: Path) -> None:
     from linktools.ai.runtime._agent_binding_resolver import _AgentBindingResolver
+    from linktools.ai.workspace import LocalWorkspaceBackend
+
+    workspace_backend = LocalWorkspaceBackend(tmp_path)
 
     original_compiler = _contribution_compiler(_configured_contribution("mcp", "sample", 1, "original"))
     changed_compiler = _contribution_compiler(_configured_contribution("mcp", "sample", 1, "changed"))
     spec = AgentSpec("agent")
     original_catalog = AgentCatalog({"agent": original_compiler.compile(spec)})
     changed_catalog = AgentCatalog({"agent": changed_compiler.compile(spec)})
-    original = await _AgentBindingResolver(original_catalog, original_compiler).resolve_root("agent")
-    resolved = await _AgentBindingResolver(changed_catalog, changed_compiler).resolve_contract(original)
+    original = await _AgentBindingResolver(
+        original_catalog, original_compiler, workspace_backend=workspace_backend,
+    ).resolve_root("agent")
+    resolved = await _AgentBindingResolver(
+        changed_catalog, changed_compiler, workspace_backend=workspace_backend,
+    ).resolve_contract(original)
     assert resolved == original
     assert resolved.selected[0].contract["args"] == ["original"]
     assert changed_compiler.restore(resolved).compiled_agent.mcp_servers[0].args == ("changed",)

@@ -762,7 +762,7 @@ async def test_agent_metric_cancellation_follows_usage_accounting(failure: bool)
             raise original_error
         return AgentExecutionResult("run", "done", [], usage)
 
-    executor._execute_with_sandbox = execute
+    executor._execute_with_workspace = execute
     scope = SimpleNamespace(
         binding=SimpleNamespace(compiled_agent=SimpleNamespace(
             spec=SimpleNamespace(id="agent", usage_limits=None),

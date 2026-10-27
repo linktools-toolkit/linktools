@@ -2,17 +2,17 @@
 # -*- coding: utf-8 -*-
 """Native protocol operations shared by the concrete workspace providers."""
 
+from __future__ import annotations
+
 import errno
 import math
 import posixpath
 import shlex
 from collections.abc import Mapping, Sequence
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
-from pydantic_ai.workspaces import (
-    CommandResult, FileEntry, WorkspaceRef, WorkspaceTimeoutError,
-    WorkspaceOutputLimitError, WorkspaceUnavailableError,
-)
+if TYPE_CHECKING:
+    from pydantic_ai.workspaces import CommandResult, FileEntry, WorkspaceRef
 
 from ..errors import AIError, ErrorCode
 from ._sandbox import WorkspaceOperationRejected, normalize_workspace_input_path
@@ -23,7 +23,11 @@ class _NativeWorkspaceOperations:
 
     @property
     def ref(self) -> WorkspaceRef | None:
-        return None if self._ref_id is None else WorkspaceRef(provider="linktools-workspace", id=self._ref_id)
+        if self._ref_id is None:
+            return None
+        from pydantic_ai.workspaces import WorkspaceRef
+
+        return WorkspaceRef(provider="linktools-workspace", id=self._ref_id)
 
     async def working_dir(self) -> str:
         try:
@@ -54,6 +58,8 @@ class _NativeWorkspaceOperations:
 
     def _raise(self, error: AIError, path: str = "", *, mutation: bool = False) -> None:
         if error.code in {ErrorCode.SANDBOX_SESSION_CLOSED, ErrorCode.SANDBOX_SESSION_LOST}:
+            from pydantic_ai.workspaces import WorkspaceUnavailableError
+
             raise WorkspaceUnavailableError("Sandbox session is unavailable") from error
         if mutation and not isinstance(error, WorkspaceOperationRejected):
             return
@@ -83,6 +89,8 @@ class _NativeWorkspaceOperations:
         return tuple(self._entry(entry) for entry in cast(Sequence[Mapping[str, object]], result["entries"]))
 
     def _entry(self, entry: Mapping[str, object]) -> FileEntry:
+        from pydantic_ai.workspaces import FileEntry
+
         return FileEntry(name=cast(str, entry["name"]), path=cast(str, entry["path"]),
                          is_dir=cast(bool, entry["is_dir"]), size=cast(int, entry["size"]))
 
@@ -104,6 +112,8 @@ class _NativeWorkspaceOperations:
         self, command: str | Sequence[str], *, shell: bool = False,
         env: Mapping[str, str] | None = None, timeout: float | None = None,
     ) -> CommandResult:
+        from pydantic_ai.workspaces import CommandResult, WorkspaceOutputLimitError, WorkspaceTimeoutError
+
         if shell != isinstance(command, str):
             raise TypeError("Use shell=True with a shell string, otherwise an argv sequence")
         if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (float, int))
