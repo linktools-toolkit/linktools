@@ -200,15 +200,24 @@ def test_ordinary_binary_keeps_existing_durable_bytes_contract() -> None:
     assert decode_model_messages(raw)[0].parts[0].content[0].data == _BODY
 
 
-def test_result_object_snapshot_is_plain_data_not_a_reference_input_carrier() -> None:
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_result_object_snapshot_is_plain_data_not_a_reference_input_carrier(wrapped: bool) -> None:
     @dataclass
     class Result:
         attachment: ReferencedContent
 
-    payload = encode_tool_return_content(ToolReturn(return_value=Result(_content())))
+    result = Result(_content())
+    payload = encode_tool_return_content(ToolReturn(return_value=result) if wrapped else result)
     restored = decode_tool_return_content(payload)
+    node = payload["value"]
+    if wrapped:
+        assert isinstance(restored, ToolReturn)
+        assert restored.content is None
+        restored = restored.return_value
+        node = node["return_value"]
+    assert node["type"] == "json-snapshot"
     assert isinstance(restored, dict)
-    attachment = restored["return_value"]["attachment"]
+    attachment = restored["attachment"]
     assert isinstance(attachment, dict)
     assert not isinstance(attachment, ReferencedContent)
     serialized = json.dumps(payload).encode()
