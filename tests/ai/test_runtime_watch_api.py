@@ -1425,6 +1425,7 @@ def test_runtime_domain_facades_match_the_supported_method_sets() -> None:
     }
     assert session_methods == {
         "get",
+        "lookup_admission",
         "create",
         "reconcile",
         "refresh",
