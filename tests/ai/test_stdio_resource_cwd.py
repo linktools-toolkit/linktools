@@ -22,17 +22,17 @@ from linktools.ai.asset import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import StorageOverlay
 from linktools.ai.workspace import (
-    BubblewrapSandbox,
-    LocalSandbox,
-    SandboxResource,
-    StdioSandboxSession,
+    BubblewrapWorkspaceBackend,
+    LocalWorkspaceBackend,
+    WorkspaceResource,
+    SupportsStdio,
 )
 from linktools.ai.workspace import _bubblewrap, sandbox_guardian
 
 
 def _guardian_config(
     root: Path,
-    resources: tuple[SandboxResource, ...],
+    resources: tuple[WorkspaceResource, ...],
     cwd_resource_id: str | None,
     *,
     mode: str = "stdio",
@@ -71,9 +71,10 @@ async def test_local_stdio_starts_relative_script_in_selected_directory(
             encoding="utf-8",
         )
         (root / "value.txt").write_text(root.name, encoding="utf-8")
-    resource = SandboxResource("package", package)
-    session = await LocalSandbox().open(root=workspace)
-    assert isinstance(session, StdioSandboxSession)
+    resource = WorkspaceResource("package", package)
+    session = LocalWorkspaceBackend(workspace)
+    await session.working_dir()
+    assert isinstance(session, SupportsStdio)
     try:
         process = await session.open_stdio_process(
             sys.executable,
@@ -106,9 +107,10 @@ async def test_session_resource_does_not_grant_process_working_directory(
     package = tmp_path / "package"
     workspace.mkdir()
     package.mkdir()
-    resource = SandboxResource("package", package)
-    session = await LocalSandbox().open(root=workspace, resources=(resource,))
-    assert isinstance(session, StdioSandboxSession)
+    resource = WorkspaceResource("package", package)
+    session = LocalWorkspaceBackend(workspace, resources=(resource,))
+    await session.working_dir()
+    assert isinstance(session, SupportsStdio)
     try:
         with pytest.raises(AIError) as error:
             await session.open_stdio_process(
@@ -137,7 +139,7 @@ async def test_stdio_resource_working_directory_fails_closed(
     package.mkdir()
     script = package / "server.py"
     script.write_text("raise AssertionError('must not start')\n", encoding="utf-8")
-    resource = SandboxResource(
+    resource = WorkspaceResource(
         "package",
         None if invalid_resource == "files_only" else package,
         {"server.py": script},
@@ -155,8 +157,9 @@ async def test_stdio_resource_working_directory_fails_closed(
             _guardian_config(tmp_path, resources, "package")
         return
 
-    session = await LocalSandbox().open(root=workspace)
-    assert isinstance(session, StdioSandboxSession)
+    session = LocalWorkspaceBackend(workspace)
+    await session.working_dir()
+    assert isinstance(session, SupportsStdio)
     try:
         with pytest.raises(AIError):
             await session.open_stdio_process(
@@ -178,7 +181,7 @@ def test_bubblewrap_resource_cwd_preserves_readonly_and_process_isolation(
     script.write_text("print('ready')\n", encoding="utf-8")
     sibling = package / "secret.txt"
     sibling.write_text("not granted", encoding="utf-8")
-    resource = SandboxResource("package", package, {"server.py": script})
+    resource = WorkspaceResource("package", package, {"server.py": script})
 
     config = _guardian_config(tmp_path, (resource,), "package")
     sandbox_guardian._validate_config(config)
@@ -217,7 +220,7 @@ def test_worker_cannot_select_stdio_resource_cwd(tmp_path: Path) -> None:
     with pytest.raises(AIError) as error:
         _guardian_config(
             tmp_path,
-            (SandboxResource("package", package),),
+            (WorkspaceResource("package", package),),
             "package",
             mode="worker",
         )
@@ -273,7 +276,7 @@ async def test_asset_resource_materialization_preserves_native_paths_when_usable
         ref = (await store.resolve_versions((key,)))[0]
         relative = "actual.sh" if backend_kind == "native" else "server.sh"
         async with AssetMaterializer() as materializer:
-            resource = await SandboxResource.from_asset_versions(
+            resource = await WorkspaceResource.from_asset_versions(
                 "package",
                 store,
                 {relative: ref},
@@ -306,7 +309,7 @@ async def test_empty_asset_resource_remains_absent_with_materializer() -> None:
     await store.initialize()
     try:
         async with AssetMaterializer() as materializer:
-            assert await SandboxResource.from_asset_versions(
+            assert await WorkspaceResource.from_asset_versions(
                 "package", store, {}, materializer=materializer
             ) is None
     finally:
@@ -340,16 +343,14 @@ async def test_bubblewrap_runs_relative_script_from_readonly_resource_cwd(
         "Path('value.txt').read_text(), writable]), flush=True)\n",
         encoding="utf-8",
     )
-    session = await BubblewrapSandbox(
-        runtime_root=Path(runtime_root),
-        bwrap_executable=Path(executable),
-    ).open(root=workspace)
-    assert isinstance(session, StdioSandboxSession)
+    session = BubblewrapWorkspaceBackend(workspace, runtime_root=Path(runtime_root), bwrap_executable=Path(executable))
+    await session.working_dir()
+    assert isinstance(session, SupportsStdio)
     try:
         process = await session.open_stdio_process(
             "/usr/bin/python3",
             ("server.py",),
-            resources=(SandboxResource("package", package),),
+            resources=(WorkspaceResource("package", package),),
             cwd_resource_id="package",
         )
         try:

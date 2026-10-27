@@ -37,8 +37,6 @@ from linktools.ai.runtime._tool_boundary import (
 )
 from linktools.ai.storage import StoredPayload
 from linktools.ai.workspace import (
-    SandboxResource,
-    SandboxSession,
     WorkspaceAccess,
 )
 from ._runtime_test_helpers import tool_run_context, tool_with_metadata
@@ -83,18 +81,7 @@ class _ErrorSession(_Session):
         return await super().read_bytes(path, max_bytes=max_bytes)
 
 
-class _Sandbox:
-    def __init__(self, session: _Session) -> None:
-        self.session = session
 
-    async def open(
-        self,
-        *,
-        root: Path,
-        resources: tuple[SandboxResource, ...] = (),
-    ) -> SandboxSession:
-        del root, resources
-        return self.session  # type: ignore[return-value]
 
 
 class _UnavailableAccess:
@@ -124,7 +111,7 @@ def _request(*, files: tuple[str, ...] = ()) -> ExecutionRequest:
 
 def _materializer(session: _Session) -> ExecutionInputMaterializer:
     return ExecutionInputMaterializer(
-        WorkspaceAccess(_Sandbox(session), root=Path(".")),
+        WorkspaceAccess(session),
         PromptLimits(),
     )
 
@@ -290,7 +277,7 @@ def _workspace_boundary(sandbox_session: object) -> BoundaryToolset:
         (FunctionToolset([tool_with_metadata(_echo_path, descriptor)]),),
         {"_echo_path": descriptor},
         id="workspace",
-        sandbox_session=sandbox_session,  # type: ignore[arg-type]
+        workspace_backend=sandbox_session,  # type: ignore[arg-type]
     )
 
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Construct explicit MCP transports and bridge sandbox-owned stdio bytes."""
+"""Construct explicit MCP transports and bridge workspace-owned stdio bytes."""
 
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import anyio
 from fastmcp.client.transports import (
@@ -20,12 +20,17 @@ from pydantic import TypeAdapter
 
 from ..errors import AIError, ErrorCode
 from ..spec import MCPServerSpec
+
 from ..workspace import (
-    SandboxResource,
-    SandboxResourcePath,
-    SandboxStdioProcess,
-    StdioSandboxSession,
+    WorkspaceResource,
+    WorkspaceResourcePath,
+    WorkspaceStdioProcess,
+    SupportsStdio,
 )
+
+
+if TYPE_CHECKING:
+    from pydantic_ai.workspaces import WorkspaceBackend
 
 _JSON_RPC_MESSAGE_ADAPTER = TypeAdapter(JSONRPCMessage)
 
@@ -33,11 +38,10 @@ _JSON_RPC_MESSAGE_ADAPTER = TypeAdapter(JSONRPCMessage)
 def _create_mcp_transport(
     server: MCPServerSpec,
     *,
-    sandboxed: bool,
-    sandbox_session: object | None,
+    workspace_backend: "WorkspaceBackend | None",
     host_cwd: str | None,
-    args: tuple[str | SandboxResourcePath, ...] = (),
-    resources: tuple[SandboxResource, ...] = (),
+    args: tuple[str | WorkspaceResourcePath, ...] = (),
+    resources: tuple[WorkspaceResource, ...] = (),
     cwd_resource_id: str | None = None,
 ) -> ClientTransport:
     if server.transport == "streamable-http":
@@ -57,11 +61,11 @@ def _create_mcp_transport(
         )
     if server.transport != "stdio" or server.command is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if sandboxed:
-        if not isinstance(sandbox_session, StdioSandboxSession):
+    if workspace_backend is not None:
+        if not isinstance(workspace_backend, SupportsStdio):
             raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
-        return _SandboxMCPTransport(
-            sandbox_session,
+        return _WorkspaceMCPTransport(
+            workspace_backend,
             server.command,
             args,
             resources,
@@ -81,26 +85,26 @@ def _create_mcp_transport(
     )
 
 
-class _SandboxMCPTransport(ClientTransport):
-    """Use a Sandbox session's supervised stdio process as an MCP transport."""
+class _WorkspaceMCPTransport(ClientTransport):
+    """Borrow a workspace backend's supervised stdio process as an MCP transport."""
 
     def __init__(
         self,
-        session: StdioSandboxSession,
+        backend: SupportsStdio,
         command: str,
-        args: tuple[str | SandboxResourcePath, ...],
-        resources: tuple[SandboxResource, ...],
+        args: tuple[str | WorkspaceResourcePath, ...],
+        resources: tuple[WorkspaceResource, ...],
         environment: "Mapping[str, str] | None" = None,
         *,
         cwd_resource_id: str | None = None,
     ) -> None:
-        self._session = session
+        self._backend = backend
         self._command = command
         self._args = args
         self._resources = resources
         self._environment = dict(environment or {})
         self._cwd_resource_id = cwd_resource_id
-        self._process: SandboxStdioProcess | None = None
+        self._process: WorkspaceStdioProcess | None = None
 
     @asynccontextmanager
     async def connect_session(self, **session_kwargs: Any) -> AsyncIterator[ClientSession]:
@@ -109,7 +113,7 @@ class _SandboxMCPTransport(ClientTransport):
             kwargs["environment"] = self._environment
         if self._cwd_resource_id is not None:
             kwargs["cwd_resource_id"] = self._cwd_resource_id
-        process = await self._session.open_stdio_process(
+        process = await self._backend.open_stdio_process(
             self._command,
             self._args,
             **kwargs,
@@ -176,7 +180,7 @@ class _SandboxMCPTransport(ClientTransport):
 
     @staticmethod
     async def _read_messages(
-        process: SandboxStdioProcess,
+        process: WorkspaceStdioProcess,
         output: anyio.abc.ObjectSendStream[SessionMessage | Exception],
     ) -> None:
         pending = bytearray()
@@ -208,7 +212,7 @@ class _SandboxMCPTransport(ClientTransport):
     @classmethod
     async def _read_worker(
         cls,
-        process: SandboxStdioProcess,
+        process: WorkspaceStdioProcess,
         output: anyio.abc.ObjectSendStream[SessionMessage | Exception],
         cancel_scope: anyio.CancelScope,
         done: anyio.Event,
@@ -221,7 +225,7 @@ class _SandboxMCPTransport(ClientTransport):
 
     @staticmethod
     async def _write_messages(
-        process: SandboxStdioProcess,
+        process: WorkspaceStdioProcess,
         incoming: anyio.abc.ObjectReceiveStream[SessionMessage],
     ) -> None:
         async with incoming:
@@ -235,7 +239,7 @@ class _SandboxMCPTransport(ClientTransport):
     @classmethod
     async def _write_worker(
         cls,
-        process: SandboxStdioProcess,
+        process: WorkspaceStdioProcess,
         incoming: anyio.abc.ObjectReceiveStream[SessionMessage],
         cancel_scope: anyio.CancelScope,
         done: anyio.Event,
@@ -255,7 +259,7 @@ def _invalid_protocol() -> AIError:
 
 
 async def _close_process(
-    process: SandboxStdioProcess,
+    process: WorkspaceStdioProcess,
     reader_scope: anyio.CancelScope,
     writer_scope: anyio.CancelScope,
     reader_done: anyio.Event,

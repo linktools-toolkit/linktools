@@ -21,7 +21,8 @@ from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RequestUsage, RunUsage
 
 from linktools.ai.asset import AssetStore
-from linktools.ai.capability import AssetCapability, WorkspaceCapability, tool_metadata
+from linktools.ai.capability import ShellCapability
+from linktools.ai.capability import AssetCapability, FileSystem, tool_metadata
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.model import ModelBinding
 from linktools.ai.core import JsonValue
@@ -71,7 +72,8 @@ def workspace_features(
     if assets is not None:
         features.capability(AssetCapability(assets), scope="runtime")
     if workspace is not None:
-        features.capability(WorkspaceCapability(workspace), scope="runtime")
+        features.capability(FileSystem(workspace), scope="runtime")
+        features.capability(ShellCapability(), scope="runtime")
     return features
 
 
@@ -196,3 +198,15 @@ class _RuntimeUsageModelBinding:
 
 class RuntimeUsageModels(_RuntimeUsageModelBinding):
     pass
+
+
+class FileToolsStub:
+    """Complete bounded-file test double that rejects unexpected operations."""
+
+    async def unsupported(self, *args: object, **kwargs: object) -> Any:
+        raise NotImplementedError("Unexpected file operation in this test")
+
+    run_command = start_command = check_command = stop_command = unsupported
+    canonicalize_path = read_bytes = inspect_file = read_text = unsupported
+    list_files = search_text = read_file = write_file = edit_file = unsupported
+    list_directory = search_files = find_files = create_directory = file_info = unsupported

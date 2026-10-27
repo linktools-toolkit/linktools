@@ -11,6 +11,7 @@ from typing import TypeVar
 
 from linktools.core import environ
 from pydantic_ai.capabilities import AbstractCapability, WrapperCapability
+from pydantic_ai.workspaces import WorkspaceBackend
 
 from ..asset import AssetStoreReader
 from ..agent import AgentCatalog, AgentCompiler
@@ -49,8 +50,8 @@ from ..spec import (
 from ..storage import BatchWriteScope, CacheBackend, ObjectStore, PayloadPolicy, StreamBackend, TurnCoordinationBackend
 from ..workspace import (
     WorkspaceInstructionResolver,
-    LocalSandbox,
-    Sandbox,
+    LocalWorkspaceBackend,
+    SupportsClose,
     Workspace,
     WorkspaceAccess,
 )
@@ -196,9 +197,15 @@ async def compose_runtime_components(
     session_declared = False
     tool_responses: ToolResponseFixture | None = None
     workspace = None if captured is None else captured.workspace
-    sandbox = LocalSandbox() if captured is None or captured.sandbox is None else captured.sandbox
+    workspace_factory = LocalWorkspaceBackend if captured is None else captured.workspace_factory
     if workspace is not None:
         workspace.policy.validate()
+    execution_cwd = _capture_host_cwd() if workspace is None else str(workspace.root)
+    input_backend = (None if workspace_factory is None or execution_cwd is None
+                     else workspace_factory(Path(execution_cwd), resources=()))
+    if input_backend is not None and not isinstance(input_backend, SupportsClose):
+        raise AIError(ErrorCode.SANDBOX_UNAVAILABLE,
+                      safe_details={"reason": "workspace_cleanup_required"})
 
     selected_state: Persistence | None = None
     run_store: RuntimeAgentRunStore | None = None
@@ -376,7 +383,6 @@ async def compose_runtime_components(
                 else None
             )
             workspace_access = None
-            execution_cwd = _capture_host_cwd()
         else:
             instruction_resolver = WorkspaceInstructionResolver(
                 workspace.root,
@@ -384,8 +390,7 @@ async def compose_runtime_components(
                 rules,
             )
             workspace_access = WorkspaceAccess.for_workspace(
-                workspace,
-                sandbox=sandbox,
+                workspace, backend=input_backend, owns_backend=True,
             )
             lifecycle.workspace_access = workspace_access
             execution_cwd = str(workspace.root)
@@ -432,7 +437,8 @@ async def compose_runtime_components(
             tenant_id=effective_tenant_id,
             namespace=resolved_namespace,
             workspace=workspace,
-            sandbox=sandbox,
+            workspace_factory=workspace_factory,
+            workspace_backend=input_backend,
             limits=selected_limits,
             execution_cwd=execution_cwd,
             app=app,
@@ -591,7 +597,8 @@ async def _build_local_components(
     tenant_id: str,
     namespace: str,
     workspace: "Workspace | None",
-    sandbox: "Sandbox | None",
+    workspace_factory: "Callable[..., WorkspaceBackend] | None",
+    workspace_backend: "WorkspaceBackend | None",
     limits: PromptLimits,
     execution_cwd: "str | None",
     app: AppT,
@@ -684,7 +691,7 @@ async def _build_local_components(
         binding_resolver = _AgentBindingResolver(
             catalog,
             compiler,
-            sandbox=sandbox,
+            workspace_backend=workspace_backend,
         )
         execution = DefaultExecutionService(
             state.execution,
@@ -730,7 +737,7 @@ async def _build_local_components(
             runtime_capabilities=runtime_capabilities,
             asset_sources=asset_sources,
             metrics=metric_buffer,
-            sandbox=sandbox,
+            workspace_factory=workspace_factory,
             tool_responses=tool_responses,
         )
     except BaseException:

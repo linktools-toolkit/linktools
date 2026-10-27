@@ -17,7 +17,7 @@ except ModuleNotFoundError:
     _acp = None
     _acp_schema = None
 
-from .capability import ExecutionCapability, WorkspaceCapability
+from .capability import ExecutionCapability, FileSystem
 from .runtime import RuntimeFeatures
 from .persistence import PersistenceStorage
 from .core import (
@@ -242,7 +242,9 @@ class ACPApplication:
 
     def __post_init__(self) -> None:
         """Complete this application's feature declarations once, before serving."""
-        self.features.capability(WorkspaceCapability(self.workspace))
+        self.features.capability(FileSystem(self.workspace))
+        from .capability import ShellCapability
+        self.features.capability(ShellCapability())
         self.features.capability(
             ExecutionCapability(retain_history=True) if self.execution is None else self.execution
         )

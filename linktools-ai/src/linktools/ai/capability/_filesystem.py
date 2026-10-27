@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Adapt one opened workspace session to Pydantic AI tools."""
+"""Adapt one opened workspace backend to Pydantic AI tools."""
 
 import asyncio
 import hashlib
@@ -16,28 +16,28 @@ from linktools.core import environ
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import BinaryContent, InstructionPart, ToolReturn, UserContent
-from pydantic_ai.tools import RunContext, ToolDefinition
-from pydantic_ai.toolsets import AbstractToolset, ApprovalRequiredToolset, FunctionToolset, ToolsetTool, WrapperToolset
+
+from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 
 from ..core import PromptLimits
 from ..model import ModelBinding, validate_model_input, validate_model_inputs
 from ..errors import AIError, ErrorCode
 from ..workspace import (
-    SandboxOperationRejected,
-    SandboxSession,
+    WorkspaceOperationRejected,
+    SupportsFileTools,
     Workspace,
     WorkspacePolicy,
-    ToolPermissionPolicy,
 )
 from ._context import AgentContext
+from ._workspace_policy import workspace_policy_toolset
 from ._tool_signal import ToolCallFailed, ToolCallRetry
-from ._tool_metadata import tool_class_from_metadata, tool_effect_policy_from_metadata, tool_metadata
+from ._tool_metadata import tool_effect_policy_from_metadata, tool_metadata
 
 _ResultT = TypeVar("_ResultT")
 
 
 @dataclass(frozen=True, slots=True)
-class WorkspaceToolDeclaration:
+class FileSystemToolDeclaration:
     """Immutable metadata declaration for one Workspace tool."""
 
     name: str
@@ -59,7 +59,7 @@ def _immutable_tool_metadata(
 
 
 def _runtime_tool_metadata(
-    declaration: WorkspaceToolDeclaration,
+    declaration: FileSystemToolDeclaration,
 ) -> dict[str, object]:
     metadata = dict(declaration.metadata)
     path_fields = metadata.get("linktools.ai.path_fields")
@@ -68,91 +68,75 @@ def _runtime_tool_metadata(
     return metadata
 
 
-_WORKSPACE_TOOL_DECLARATIONS = (
-    WorkspaceToolDeclaration("attach_files", tool_metadata(
+_FILESYSTEM_TOOL_DECLARATIONS = (
+    FileSystemToolDeclaration("attach_files", tool_metadata(
         effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("paths",),
     )),
-    WorkspaceToolDeclaration("create_directory", tool_metadata(
+    FileSystemToolDeclaration("create_directory", tool_metadata(
         effect_policy="non_replay_safe",
         tool_class="filesystem.write",
         path_fields=("path",),
     )),
-    WorkspaceToolDeclaration("edit_file", tool_metadata(
+    FileSystemToolDeclaration("edit_file", tool_metadata(
         effect_policy="non_replay_safe",
         tool_class="filesystem.write",
         path_fields=("path",),
     )),
-    WorkspaceToolDeclaration("file_info", tool_metadata(
+    FileSystemToolDeclaration("file_info", tool_metadata(
         effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
     )),
-    WorkspaceToolDeclaration("find_files", tool_metadata(
+    FileSystemToolDeclaration("find_files", tool_metadata(
         effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
     )),
-    WorkspaceToolDeclaration("list_directory", tool_metadata(
+    FileSystemToolDeclaration("list_directory", tool_metadata(
         effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
     )),
-    WorkspaceToolDeclaration("list_files", tool_metadata(
+    FileSystemToolDeclaration("list_files", tool_metadata(
         effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
     )),
-    WorkspaceToolDeclaration("read_file", tool_metadata(
+    FileSystemToolDeclaration("read_file", tool_metadata(
         effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
         context_dedupe="workspace_file_read_v1",
     )),
-    WorkspaceToolDeclaration("search_files", tool_metadata(
+    FileSystemToolDeclaration("search_files", tool_metadata(
         effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
     ), revision=1),
-    WorkspaceToolDeclaration("write_file", tool_metadata(
+    FileSystemToolDeclaration("write_file", tool_metadata(
         effect_policy="non_replay_safe",
         tool_class="filesystem.write",
         path_fields=("path",),
     ), revision=1),
-    WorkspaceToolDeclaration("check_command", tool_metadata(
-        effect_policy="none",
-        plan_safe=True,
-        tool_class="shell",
-    )),
-    WorkspaceToolDeclaration("run_command", tool_metadata(
-        effect_policy="non_replay_safe",
-        tool_class="shell",
-    )),
-    WorkspaceToolDeclaration("start_command", tool_metadata(
-        effect_policy="non_replay_safe",
-        tool_class="shell",
-    )),
-    WorkspaceToolDeclaration("stop_command", tool_metadata(
-        effect_policy="non_replay_safe",
-        tool_class="shell",
-    )),
+
 )
-_WORKSPACE_TOOL_DECLARATIONS_BY_NAME = {
+_FILESYSTEM_TOOL_DECLARATIONS_BY_NAME = {
     declaration.name: declaration
-    for declaration in _WORKSPACE_TOOL_DECLARATIONS
+    for declaration in _FILESYSTEM_TOOL_DECLARATIONS
 }
 _EFFECTFUL_WORKSPACE_TOOLS = frozenset(
     {
         declaration.name
-        for declaration in _WORKSPACE_TOOL_DECLARATIONS
+        for declaration in _FILESYSTEM_TOOL_DECLARATIONS
         if tool_effect_policy_from_metadata(
             _runtime_tool_metadata(declaration),
             require=True,
@@ -160,7 +144,7 @@ _EFFECTFUL_WORKSPACE_TOOLS = frozenset(
         != "none"
     }
 )
-_WORKSPACE_SANDBOX_CAPABILITY_ID = "workspace-sandbox"
+_FILESYSTEM_CAPABILITY_ID = "filesystem"
 _WORKSPACE_INSTRUCTIONS = InstructionPart(
     content=(
         "Workspace file-tool paths are relative to the logical Workspace root unless "
@@ -252,44 +236,29 @@ _INVALID_WORKSPACE_REQUESTS = {
         "The file_info target is invalid. Use a workspace path that resolves to a "
         "regular file or directory."
     ),
-    "run_command": (
-        "The run_command arguments are invalid. Use a permitted non-interactive "
-        "command and a valid timeout, then retry."
-    ),
-    "start_command": (
-        "The start_command arguments are invalid. Use a permitted non-interactive "
-        "command and retry."
-    ),
-    "check_command": (
-        "The command id is invalid or no longer active. Use an active command id "
-        "returned by start_command."
-    ),
-    "stop_command": (
-        "The command id is invalid or no longer active. Use an active command id "
-        "returned by start_command."
-    ),
+
 }
 
 
-class _WorkspaceToolSurface:
+class _FileSystemToolSurface:
     def __init__(
         self,
-        session: SandboxSession | None,
+        backend: SupportsFileTools | None,
         policy: WorkspacePolicy,
         limits: PromptLimits,
         *,
         model_binding: ModelBinding | None = None,
     ) -> None:
-        self._session = session
+        self._backend = backend
         self._policy = policy
         self._limits = limits
         self._model_binding = model_binding
         self._mime = mimetypes.MimeTypes(filenames=())
 
-    def _require_session(self) -> SandboxSession:
-        if self._session is None:
-            raise RuntimeError("workspace sandbox session is not open")
-        return self._session
+    def _require_backend(self) -> SupportsFileTools:
+        if self._backend is None:
+            raise RuntimeError("workspace sandbox backend is not open")
+        return self._backend
 
     @staticmethod
     async def _call(
@@ -301,14 +270,14 @@ class _WorkspaceToolSurface:
     ) -> _ResultT:
         try:
             return await operation
-        except SandboxOperationRejected as error:
+        except WorkspaceOperationRejected as error:
             if error.code not in rejected_codes:
                 raise
-            raise _workspace_tool_rejected(name, error, rejected_message) from error
+            raise _filesystem_tool_rejected(name, error, rejected_message) from error
         except AIError as error:
             if name in _EFFECTFUL_WORKSPACE_TOOLS or error.code not in rejected_codes:
                 raise
-            raise _workspace_tool_rejected(name, error, rejected_message) from error
+            raise _filesystem_tool_rejected(name, error, rejected_message) from error
 
     async def attach_files(self, paths: list[str]) -> ToolReturn:
         """Attach Workspace files to the next model request.
@@ -331,7 +300,7 @@ class _WorkspaceToolSurface:
         if len(attachment_paths) > self._limits.max_binary_input_parts:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
-        session = self._require_session()
+        backend = self._require_backend()
         total_bytes = 0
         metadata: list[dict[str, object]] = []
         content: list[UserContent] = []
@@ -350,7 +319,7 @@ class _WorkspaceToolSurface:
             remaining = self._limits.max_binary_input_bytes - total_bytes
             if remaining < 0:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            body = await session.read_bytes(path, max_bytes=remaining)
+            body = await backend.read_bytes(path, max_bytes=remaining)
             if self._model_binding is not None:
                 validate_model_inputs(self._model_binding, BinaryContent(body, media_type=media_type))
             total_bytes += len(body)
@@ -427,7 +396,7 @@ class _WorkspaceToolSurface:
                 or cursor is not None and offset is not None):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
                           safe_details={"reason": "text_range_invalid"})
-        session = self._require_session()
+        backend = self._require_backend()
         facts = []
         probe_bytes = 0
         source_budget = self._limits.max_binary_input_bytes + 8192 * len(paths)
@@ -436,7 +405,7 @@ class _WorkspaceToolSurface:
             if remaining <= 0:
                 raise AIError(ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
                               safe_details={"reason": "file_batch_bytes_limit"})
-            fact = await session.inspect_file(item, max_bytes=remaining)
+            fact = await backend.inspect_file(item, max_bytes=remaining)
             probe_bytes += cast(int, fact["bytes_read"])
             facts.append(fact)
         if ranged and not facts[0]["is_text"]:
@@ -462,7 +431,7 @@ class _WorkspaceToolSurface:
                 if available < 4:
                     raise AIError(ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
                                   safe_details={"reason": "file_batch_output_limit"})
-                text = dict(await session.read_text(
+                text = dict(await backend.read_text(
                     item, offset=offset, limit=limit, cursor=cursor,
                     full_metadata=full_metadata, max_bytes=available,
                     max_read_bytes=source_budget - source_bytes,
@@ -496,7 +465,7 @@ class _WorkspaceToolSurface:
                     validate_model_input(self._model_binding, media_type)
                 except AIError as error:
                     raise _file_input_error(error, item, media_type, size) from error
-            body = await session.read_bytes(item, max_bytes=remaining,
+            body = await backend.read_bytes(item, max_bytes=remaining,
                                             expected_state=cast(str, fact["state"]))
             binary = BinaryContent(data=body, media_type=media_type)
             if self._model_binding is not None:
@@ -530,9 +499,9 @@ class _WorkspaceToolSurface:
             not isinstance(old_text, str) or not old_text
         ):
             raise ToolCallRetry("content must be text; old_text must be nonempty or omitted.")
-        session = self._require_session()
-        operation = (session.write_file(path, content, expected_hash=expected_hash)
-                     if old_text is None else session.edit_file(
+        backend = self._require_backend()
+        operation = (backend.write_file(path, content, expected_hash=expected_hash)
+                     if old_text is None else backend.edit_file(
                          path, old_text, content, expected_hash=expected_hash))
         rejected_codes = _WORKSPACE_REJECTED_CODES
         if expected_hash is not None:
@@ -541,7 +510,7 @@ class _WorkspaceToolSurface:
 
     async def list_files(self, path: str = ".", include_glob: str = "*") -> str:
         """List names and type hints; only ** globs recurse below path."""
-        return await self._call(self._require_session().list_files(
+        return await self._call(self._require_backend().list_files(
             path, include_glob=include_glob), name="list_files")
 
     async def edit_file(
@@ -571,7 +540,7 @@ class _WorkspaceToolSurface:
         if expected_hash is not None:
             rejected_codes |= {ErrorCode.STORAGE_CONFLICT}
         return await self._call(
-            self._require_session().edit_file(
+            self._require_backend().edit_file(
                 path,
                 old_text,
                 new_text,
@@ -591,7 +560,7 @@ class _WorkspaceToolSurface:
             A newline-separated listing with type indicators and sizes.
         """
         return await self._call(
-            self._require_session().list_directory(path),
+            self._require_backend().list_directory(path),
             name="list_directory",
         )
 
@@ -607,7 +576,7 @@ class _WorkspaceToolSurface:
         include_glob is relative to path: * stays in one level; ** spans zero or more.
         """
         return await self._call(
-            self._require_session().search_text(
+            self._require_backend().search_text(
                 pattern,
                 path=path,
                 include_glob=include_glob,
@@ -627,7 +596,7 @@ class _WorkspaceToolSurface:
             Newline-separated list of matching file paths relative to root.
         """
         return await self._call(
-            self._require_session().find_files(pattern, path=path),
+            self._require_backend().find_files(pattern, path=path),
             name="find_files",
         )
 
@@ -641,7 +610,7 @@ class _WorkspaceToolSurface:
             Confirmation message.
         """
         return await self._call(
-            self._require_session().create_directory(path),
+            self._require_backend().create_directory(path),
             name="create_directory",
         )
 
@@ -655,128 +624,32 @@ class _WorkspaceToolSurface:
             Formatted metadata including size, type, and permissions.
         """
         return await self._call(
-            self._require_session().file_info(path),
+            self._require_backend().file_info(path),
             name="file_info",
         )
 
-    async def run_command(
-        self,
-        command: str,
-        *,
-        timeout_seconds: float | None = None,
-    ) -> str:
-        """Execute a shell command and return its output.
-
-        Args:
-            command: The shell command to run.
-            timeout_seconds: Maximum seconds to wait (default: 30).
-
-        Returns:
-            Labeled stdout/stderr output with exit code on non-zero exit.
-        """
-        return await self._call(
-            self._require_session().run_command(
-                command,
-                timeout_seconds=timeout_seconds,
-            ),
-            name="run_command",
-            rejected_codes=frozenset(
-                {
-                    ErrorCode.REQUEST_FIELD_INVALID,
-                    ErrorCode.AUTHORIZATION_DENIED,
-                    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
-                }
-            ),
-        )
-
-    async def start_command(self, command: str) -> str:
-        """Start a long-running command in the background (e.g. a server or watcher).
-
-        Callers MUST call `stop_command(command_id)` when done to terminate the
-        process and clean up temporary output files.
-
-        Args:
-            command: The shell command to run in the background.
-
-        Returns:
-            A message containing the unique command ID for later check/stop calls.
-        """
-        return await self._call(
-            self._require_session().start_command(command),
-            name="start_command",
-            rejected_codes=frozenset(
-                {
-                    ErrorCode.REQUEST_FIELD_INVALID,
-                    ErrorCode.AUTHORIZATION_DENIED,
-                    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
-                    ErrorCode.TOO_MANY_PENDING_OPERATIONS,
-                }
-            ),
-        )
-
-    async def check_command(self, command_id: str) -> str:
-        """Check the status and recent output of a background command.
-
-        Args:
-            command_id: The ID returned by start_command.
-
-        Returns:
-            Status and recent output of the background command.
-        """
-        return await self._call(
-            self._require_session().check_command(command_id),
-            name="check_command",
-            rejected_codes=frozenset(
-                {
-                    ErrorCode.REQUEST_FIELD_INVALID,
-                    ErrorCode.STORAGE_NOT_FOUND,
-                    ErrorCode.AUTHORIZATION_DENIED,
-                }
-            ),
-        )
-
-    async def stop_command(self, command_id: str) -> str:
-        """Stop a background command and return its final output.
-
-        Args:
-            command_id: The ID returned by start_command.
-
-        Returns:
-            Final output and exit status of the stopped command.
-        """
-        return await self._call(
-            self._require_session().stop_command(command_id),
-            name="stop_command",
-            rejected_codes=frozenset(
-                {
-                    ErrorCode.REQUEST_FIELD_INVALID,
-                    ErrorCode.STORAGE_NOT_FOUND,
-                    ErrorCode.AUTHORIZATION_DENIED,
-                }
-            ),
-        )
 
 
-class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
+class _FileSystemToolset(FunctionToolset[AgentContext[object]]):
     def __init__(
         self,
         selected_tool_names: tuple[str, ...],
-        session: SandboxSession | None,
+        backend: SupportsFileTools | None,
         policy: WorkspacePolicy,
         limits: PromptLimits,
         *,
         model_binding: ModelBinding | None = None,
     ) -> None:
-        super().__init__(id=_WORKSPACE_SANDBOX_CAPABILITY_ID)
-        surface = _WorkspaceToolSurface(
-            session,
+        super().__init__(id=_FILESYSTEM_CAPABILITY_ID)
+        surface = _FileSystemToolSurface(
+            backend,
             policy,
             limits,
             model_binding=model_binding,
         )
         for name in selected_tool_names:
             self.add_tool(
-                _workspace_tool(
+                _filesystem_tool(
                     surface,
                     name,
                     _runtime_tool_metadata(_declaration_for(name)),
@@ -784,36 +657,16 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
             )
 
 
-@dataclass
-class _WorkspacePermissionToolset(WrapperToolset[AgentContext[object]]):
-    policy: ToolPermissionPolicy
-
-    def requires_approval(
-        self, ctx: RunContext[AgentContext[object]], tool: ToolDefinition, arguments: dict[str, Any],
-    ) -> bool:
-        return self.policy.decide(
-            tool_name=tool.name, tool_class=tool_class_from_metadata(tool.metadata),
-        ) == "ask"
-
-    async def call_tool(
-        self, name: str, tool_args: dict[str, Any], ctx: RunContext[AgentContext[object]],
-        tool: ToolsetTool[AgentContext[object]],
-    ) -> Any:
-        if self.policy.decide(
-            tool_name=tool.tool_def.name, tool_class=tool_class_from_metadata(tool.tool_def.metadata),
-        ) == "deny":
-            raise ToolCallFailed("Workspace policy does not allow this tool.")
-        return await super().call_tool(name, tool_args, ctx, tool)
 
 
-class WorkspaceCapability(AbstractCapability[AgentContext[object]]):
-    """Expose selected tools through a caller-owned sandbox session.
+class FileSystem(AbstractCapability[AgentContext[object]]):
+    """Expose selected tools through a caller-owned sandbox backend.
 
     Native bindings enforce the Workspace tool policy. Runtime supplies its own
-    admitted execution boundary; both borrow, rather than close, the session.
+    admitted execution boundary; both borrow, rather than close, the backend.
     """
 
-    id: str | None = "runtime.workspace"
+    id: str | None = "runtime.filesystem"
 
     def __init__(self, workspace: Workspace) -> None:
         if not isinstance(workspace, Workspace):
@@ -828,21 +681,21 @@ class WorkspaceCapability(AbstractCapability[AgentContext[object]]):
 
     def tool_definitions(self) -> tuple[Tool[Any], ...]:
         """Return stable declarations for Agent selection and durable bindings."""
-        return _workspace_tool_definitions(self.workspace)
+        return _filesystem_tool_definitions(self.workspace)
 
     def bind(
         self,
         selected_tool_names: Sequence[str],
         *,
-        session: SandboxSession | None,
+        backend: SupportsFileTools | None,
         limits: PromptLimits | None = None,
         model_binding: ModelBinding | None = None,
         wrap_toolset: Callable[
             [AbstractToolset[AgentContext[object]]],
             AbstractToolset[AgentContext[object]],
         ] | None = None,
-    ) -> "WorkspaceCapability":
-        """Build tools without modifying this declaration or owning the session.
+    ) -> "FileSystem":
+        """Build tools without modifying this declaration or owning the backend.
 
         A supplied wrap_toolset owns the execution boundary, including policy
         enforcement. Without one, the native SDK handles this Workspace policy.
@@ -851,29 +704,27 @@ class WorkspaceCapability(AbstractCapability[AgentContext[object]]):
         if not isinstance(selected_limits, PromptLimits):
             raise TypeError("limits must be PromptLimits")
         selected = frozenset(selected_tool_names)
-        unknown = selected.difference(_WORKSPACE_TOOL_DECLARATIONS_BY_NAME)
+        unknown = selected.difference(_FILESYSTEM_TOOL_DECLARATIONS_BY_NAME)
         if unknown:
             raise ValueError(f"unknown workspace tools: {tuple(sorted(unknown))}")
-        if selected and session is None:
+        if selected and backend is None:
             raise AIError(ErrorCode.SANDBOX_SESSION_CLOSED)
+        if selected and not isinstance(backend, SupportsFileTools):
+            raise AIError(ErrorCode.SANDBOX_UNAVAILABLE,
+                          safe_details={"reason": "workspace_bounded_file_tools_required"})
         bound = copy(self)
         bound._bound = True
         bound._toolset = None
         if selected:
-            toolset = _WorkspaceSandboxToolset(
-                tuple(item.name for item in workspace_tool_declarations() if item.name in selected),
-                session, self.workspace.policy, selected_limits, model_binding=model_binding,
+            toolset = _FileSystemToolset(
+                tuple(item.name for item in filesystem_tool_declarations() if item.name in selected),
+                backend, self.workspace.policy, selected_limits, model_binding=model_binding,
             )
             policy = self.workspace.policy.tool_permissions
             if wrap_toolset is not None:
                 bound._toolset = wrap_toolset(toolset)
-            elif policy.default == "allow" and all(rule.decision == "allow" for rule in policy.rules):
-                bound._toolset = toolset
             else:
-                permissions = _WorkspacePermissionToolset(toolset, policy)
-                bound._toolset = ApprovalRequiredToolset(
-                    permissions, approval_required_func=permissions.requires_approval,
-                )
+                bound._toolset = workspace_policy_toolset(toolset, policy)
         return bound
 
     def get_instructions(self) -> InstructionPart | None:
@@ -885,50 +736,50 @@ class WorkspaceCapability(AbstractCapability[AgentContext[object]]):
         return self._toolset
 
 
-def _workspace_tool_definitions(workspace: Workspace) -> tuple[Tool[Any], ...]:
+def _filesystem_tool_definitions(workspace: Workspace) -> tuple[Tool[Any], ...]:
     """Return stable Workspace tool definitions before execution materialization."""
-    surface = _WorkspaceToolSurface(None, workspace.policy, PromptLimits())
+    surface = _FileSystemToolSurface(None, workspace.policy, PromptLimits())
     return tuple(
-        _workspace_tool(
+        _filesystem_tool(
             surface,
             declaration.name,
             _runtime_tool_metadata(declaration),
         )
-        for declaration in workspace_tool_declarations()
+        for declaration in filesystem_tool_declarations()
     )
 
 
-def workspace_tool_declarations() -> tuple[WorkspaceToolDeclaration, ...]:
+def filesystem_tool_declarations() -> tuple[FileSystemToolDeclaration, ...]:
     """Return the canonical Workspace tool declarations in name order."""
     return tuple(
-        sorted(_WORKSPACE_TOOL_DECLARATIONS, key=lambda item: item.name)
+        sorted(_FILESYSTEM_TOOL_DECLARATIONS, key=lambda item: item.name)
     )
 
 
-def _declaration_for(name: str) -> WorkspaceToolDeclaration:
+def _declaration_for(name: str) -> FileSystemToolDeclaration:
     try:
-        return _WORKSPACE_TOOL_DECLARATIONS_BY_NAME[name]
+        return _FILESYSTEM_TOOL_DECLARATIONS_BY_NAME[name]
     except KeyError as error:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
 
 
-def workspace_capabilities(
+def filesystem_capabilities(
     workspace: Workspace,
     selected_tool_names: Sequence[str],
     *,
     limits: "PromptLimits | None" = None,
-    session: SandboxSession | None = None,
+    backend: SupportsFileTools | None = None,
     model_binding: ModelBinding | None = None,
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
-    """Adapt selected tools to a caller-owned, already-opened session."""
-    bound = WorkspaceCapability(workspace).bind(
-        selected_tool_names, session=session, limits=limits, model_binding=model_binding,
+    """Adapt selected tools to a caller-owned, already-opened backend."""
+    bound = FileSystem(workspace).bind(
+        selected_tool_names, backend=backend, limits=limits, model_binding=model_binding,
     )
     return () if bound.get_toolset() is None else (bound,)
 
 
-def _workspace_tool(
-    surface: _WorkspaceToolSurface,
+def _filesystem_tool(
+    surface: _FileSystemToolSurface,
     name: str,
     metadata: Mapping[str, object],
 ) -> Tool[Any]:
@@ -983,7 +834,7 @@ def _file_input_error(error: AIError, path: str, mime_type: str, size: int) -> A
                    diagnostics=error.diagnostics)
 
 
-def _workspace_tool_rejected(
+def _filesystem_tool_rejected(
     name: str,
     error: AIError,
     default_message: str,
@@ -1023,8 +874,8 @@ def _workspace_tool_rejected(
 
 
 __all__ = [
-    "WorkspaceCapability",
-    "WorkspaceToolDeclaration",
-    "workspace_tool_declarations",
-    "workspace_capabilities",
+    "FileSystem",
+    "FileSystemToolDeclaration",
+    "filesystem_tool_declarations",
+    "filesystem_capabilities",
 ]

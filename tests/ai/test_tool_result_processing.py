@@ -9,6 +9,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import os
 import sqlite3
 import sys
 import textwrap
@@ -26,7 +27,7 @@ from linktools.ai.asset import AssetKey, AssetStore, AssetVersionRef, InMemoryAs
 from linktools.ai.capability import (
     AgentContext, AssetCapability, CapabilityContribution, CapabilityLoadContext,
     CheckpointCapability, ExecutionCapability, ReferencedInputsCapability,
-    ToolCallRetry, TraceCapability, ToolResultsCapability, WorkspaceCapability,
+    ToolCallRetry, TraceCapability, ToolResultsCapability, FileSystem,
     TOOL_MCP_SELECTOR_METADATA_KEY,
 )
 from linktools.ai.core import ExecutionStatus, ToolOperationStatus, service_principal
@@ -106,7 +107,27 @@ class _Binding:
 
 def _stored_bytes(root: Path) -> bytes:
     """Inspect physical objects and decoded SQLite inline payloads."""
-    blobs = [path.read_bytes() for path in root.rglob("*") if path.is_file()]
+    def is_transaction_path(path: Path, *, directory: bool = False) -> bool:
+        relative = path.relative_to(root)
+        parts = relative.parts if directory else relative.parts[:-1]
+        return any(part == ".txn" or part.startswith(".txn-") for part in parts)
+
+    def traversal_error(error: OSError) -> None:
+        if (isinstance(error, FileNotFoundError) and error.filename is not None
+                and is_transaction_path(Path(error.filename), directory=True)):
+            return
+        raise error
+
+    blobs = []
+    for directory, children, files in os.walk(root, onerror=traversal_error):
+        for name in files:
+            path = Path(directory) / name
+            try:
+                blobs.append(path.read_bytes())
+            except FileNotFoundError:
+                # Commit cleanup can remove staging after enumeration; committed objects cannot disappear.
+                if not is_transaction_path(path):
+                    raise
 
     def walk(value: object) -> None:
         if isinstance(value, dict):
@@ -140,6 +161,51 @@ def _stored_bytes(root: Path) -> bytes:
                 for (payload,) in connection.execute(f"SELECT payload_json FROM {table}"):
                     walk(json.loads(payload))
     return b"\n".join(blobs)
+
+
+def test_storage_inspection_includes_staging_and_preserves_committed_read_errors(tmp_path, monkeypatch):
+    committed = tmp_path / "trace" / "result.json"
+    committed.parent.mkdir()
+    committed.write_bytes(b"committed-result")
+    stage = tmp_path / ".txn-test" / "stage" / "trace" / "pending.json"
+    stage.parent.mkdir(parents=True)
+    stage.write_bytes(b"unprocessed-result")
+    assert b"unprocessed-result" in _stored_bytes(tmp_path)
+    read_bytes = Path.read_bytes
+
+    def disappearing_stage(path):
+        if path == stage:
+            path.unlink()
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", disappearing_stage)
+    assert _stored_bytes(tmp_path) == b"committed-result"
+
+    def disappearing_committed(path):
+        if path == committed:
+            path.unlink()
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", disappearing_committed)
+    with pytest.raises(FileNotFoundError):
+        _stored_bytes(tmp_path)
+
+
+@pytest.mark.parametrize("transaction", (False, True))
+def test_storage_inspection_tolerates_only_transaction_directory_cleanup(tmp_path, monkeypatch, transaction):
+    import errno
+    target = tmp_path / (".txn-test" if transaction else "trace") / "stage"
+
+    def removed_directory(root, *, onerror):
+        onerror(FileNotFoundError(errno.ENOENT, "directory disappeared", str(target)))
+        return iter(())
+
+    monkeypatch.setattr(os, "walk", removed_directory)
+    if transaction:
+        assert _stored_bytes(tmp_path) == b""
+    else:
+        with pytest.raises(FileNotFoundError):
+            _stored_bytes(tmp_path)
 
 
 @pytest.mark.asyncio
@@ -260,7 +326,7 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
         root = tmp_path / "workspace"
         root.mkdir()
         (root / filename).write_bytes(body)
-        features.capability(WorkspaceCapability(Workspace.load(root)))
+        features.capability(FileSystem(Workspace.load(root)))
         selected = "read_file"
     else:
         features.tool(render, effect_policy=kind)
@@ -428,7 +494,7 @@ async def test_final_results_bypass_live_result_projections(tmp_path: Path, sour
         async def process_tool_result(self, context, tool, arguments, result):
             raise AssertionError("Final results must not be projected again")
 
-    store, capabilities = None, ()
+    store, capabilities, workspace_backend = None, (), None
     callbacks = RunCallbacks()
     try:
         if source == "fixture":
@@ -443,7 +509,9 @@ async def test_final_results_bypass_live_result_projections(tmp_path: Path, sour
         else:
             manifest = None
             server = _server(tmp_path)
-            bindings = {server.id: _MCPBinding(None, None, _mcp_execution_policy(server, None))}
+            from linktools.ai.workspace import LocalWorkspaceBackend
+            workspace_backend = LocalWorkspaceBackend(tmp_path)
+            bindings = {server.id: _MCPBinding(None, None, _mcp_execution_policy(server, workspace_backend))}
             projections = await prepare_mcp_projections(
                 (server,), bindings, asset_readers={}, sandboxed=False,
             )
@@ -451,8 +519,7 @@ async def test_final_results_bypass_live_result_projections(tmp_path: Path, sour
             expected = ToolReturn(return_value={"page": 1}, content=[_REFERENCE])
             bridge = _Bridge(False, cached_result=expected, has_cached_result=True)
         capabilities = await materialize_mcp_capabilities(
-            (server,), (f"mcp:{server.id}:{tool_name}",), sandbox=None,
-            sandbox_session=None, host_cwd=str(tmp_path), bindings=bindings,
+            (server,), (f"mcp:{server.id}:{tool_name}",), workspace_backend=workspace_backend, host_cwd=None, bindings=bindings,
             projections=projections, tool_operations=bridge, tool_metrics=None,
             response_fixture=manifest, result_callbacks=callbacks,
         )
@@ -466,6 +533,8 @@ async def test_final_results_bypass_live_result_projections(tmp_path: Path, sour
         assert not (tmp_path / "calls").exists()
     finally:
         await close_mcp_resources(capabilities)
+        if workspace_backend is not None:
+            await workspace_backend.close()
         if store is not None:
             await store.close()
 

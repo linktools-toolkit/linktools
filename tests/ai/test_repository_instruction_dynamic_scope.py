@@ -98,7 +98,7 @@ def _boundary(
         (toolset,),
         {name: descriptor},
         id="workspace",
-        sandbox_session=_Session(),  # type: ignore[arg-type]
+        workspace_backend=_Session(),  # type: ignore[arg-type]
         permission_policy=(None if policy is None else policy),
         repository_boundary=repository,
     )

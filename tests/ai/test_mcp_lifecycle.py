@@ -23,7 +23,7 @@ def _discovery() -> _MCPDiscoveryToolset:
         "remote", transport="streamable-http", url="https://example.invalid/mcp",
     )
     transport = _create_mcp_transport(
-        server, sandboxed=False, sandbox_session=None, host_cwd=None,
+        server, workspace_backend=None, host_cwd=None,
     )
     return _MCPDiscoveryToolset(transport, server=server)
 

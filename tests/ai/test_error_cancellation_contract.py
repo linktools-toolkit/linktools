@@ -42,7 +42,7 @@ from linktools.ai.task import (
 )
 from linktools.ai.task._local import LocalTaskGraphLauncher
 from linktools.ai.core import Principal, PrincipalKind
-from linktools.ai.workspace import BubblewrapSandbox
+from linktools.ai.workspace import BubblewrapWorkspaceBackend
 
 
 @pytest_asyncio.fixture
@@ -70,8 +70,7 @@ async def test_mcp_materialization_rejects_unselected_server(tmp_path) -> None:
         await materialize_mcp_capabilities(
             (MCPServerSpec("server", "echo"),),
             (),
-            sandbox=None,
-            sandbox_session=None,
+            workspace_backend=None,
             host_cwd=str(tmp_path),
             bindings={},
             projections={},
@@ -83,7 +82,7 @@ async def test_mcp_materialization_rejects_unselected_server(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_mcp_materialization_requires_captured_runtime_cwd() -> None:
+async def test_mcp_materialization_rejects_disabled_workspace() -> None:
     server = MCPServerSpec("server", "echo")
     binding = _MCPBinding(
         None,
@@ -101,8 +100,7 @@ async def test_mcp_materialization_requires_captured_runtime_cwd() -> None:
         await materialize_mcp_capabilities(
             (server,),
             (mcp_server_selector(server.id),),
-            sandbox=None,
-            sandbox_session=None,
+            workspace_backend=None,
             host_cwd=None,
             bindings={server.id: binding},
             projections=projections,
@@ -110,14 +108,13 @@ async def test_mcp_materialization_requires_captured_runtime_cwd() -> None:
             tool_metrics=None,
         )
 
-    assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
-    assert error.value.safe_details == {"reason": "mcp_cwd_unavailable"}
+    assert error.value.code is ErrorCode.SANDBOX_UNAVAILABLE
 
 
 @pytest.mark.asyncio
-async def test_sandboxed_mcp_requires_session_without_workspace(tmp_path) -> None:
-    sandbox = BubblewrapSandbox(
-        runtime_root=tmp_path,
+async def test_mcp_requires_stdio_support_on_the_selected_workspace(tmp_path) -> None:
+    sandbox = BubblewrapWorkspaceBackend(
+        tmp_path, runtime_root=tmp_path,
         bwrap_executable=tmp_path / "bwrap",
     )
     server = MCPServerSpec("server", "echo")
@@ -137,8 +134,7 @@ async def test_sandboxed_mcp_requires_session_without_workspace(tmp_path) -> Non
         await materialize_mcp_capabilities(
             (server,),
             (mcp_server_selector(server.id),),
-            sandbox=sandbox,
-            sandbox_session=None,
+            workspace_backend=object(),
             host_cwd=None,
             bindings={server.id: binding},
             projections=projections,
@@ -174,8 +170,7 @@ async def test_remote_mcp_materialization_does_not_require_sandbox_or_cwd(
     capabilities = await materialize_mcp_capabilities(
         (server,),
         (mcp_server_selector(server.id),),
-        sandbox=None,
-        sandbox_session=None,
+        workspace_backend=None,
         host_cwd=None,
         bindings={server.id: binding},
         projections=projections,

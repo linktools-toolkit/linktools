@@ -40,7 +40,7 @@ class Command(BaseCommand):
         workspace = _load_workspace(args.project)
 
         async def serve() -> int:
-            from linktools.ai.capability import AssetCapability, WorkspaceCapability
+            from linktools.ai.capability import AssetCapability, FileSystem
             from linktools.ai.runtime import RuntimeFeatures
             from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
             from linktools.ai.runtime import Runtime
@@ -55,7 +55,9 @@ class Command(BaseCommand):
                 features = RuntimeFeatures("workspace")
                 features.model("default", model_binding)
                 features.capability(AssetCapability(assets))
-                features.capability(WorkspaceCapability(workspace))
+                features.capability(FileSystem(workspace))
+                from linktools.ai.capability import ShellCapability
+                features.capability(ShellCapability())
                 features.capability(ExecutionCapability(retain_history=True))
                 features.capability(CheckpointCapability())
                 features.capability(TraceCapability())

@@ -28,7 +28,7 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import StorageLayer, StorageOverlay
-from linktools.ai.workspace import SandboxResource
+from linktools.ai.workspace import WorkspaceResource
 
 
 class _SuffixSkillPathAdapter:
@@ -305,7 +305,7 @@ async def test_sandbox_uses_original_pinned_asset_files(tmp_path: Path) -> None:
         modes = {
             item.path: item.executable_bits for item in source_ref.resources
         }
-        resource = await SandboxResource.from_asset_versions(
+        resource = await WorkspaceResource.from_asset_versions(
             "review", store, files, executable_bits=modes
         )
         assert resource is not None
@@ -314,7 +314,7 @@ async def test_sandbox_uses_original_pinned_asset_files(tmp_path: Path) -> None:
 
         script.write_text("#!/bin/sh\necho changed\n", encoding="utf-8")
         with pytest.raises(AIError) as error:
-            await SandboxResource.from_asset_versions(
+            await WorkspaceResource.from_asset_versions(
                 "review", store, files, executable_bits=modes
             )
         assert error.value.code in {
@@ -334,7 +334,7 @@ async def test_sandbox_keeps_memory_assets_virtual() -> None:
         key = AssetKey("skill", "review/run.sh")
         await store.put(key, b"#!/bin/sh\n")
         version = (await store.resolve_versions((key,)))[0]
-        assert await SandboxResource.from_asset_versions(
+        assert await WorkspaceResource.from_asset_versions(
             "review", store, {"run.sh": version}
         ) is None
     finally:

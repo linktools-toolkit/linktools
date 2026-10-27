@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Native LocalSandbox command contract."""
+"""Native LocalWorkspaceBackend command contract."""
 
 import asyncio
 import hashlib
@@ -12,12 +12,11 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.workspace._local_sandbox import _LocalSandboxSession
 from linktools.ai.workspace import (
-    LocalSandbox,
-    ReadOnlySandboxPolicy,
-    SandboxOperationRejected,
-    SandboxResource,
+    LocalWorkspaceBackend,
+    WorkspaceReadPolicy,
+    WorkspaceOperationRejected,
+    WorkspaceResource,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -30,10 +29,8 @@ async def test_canonicalize_path_does_not_apply_read_authorization(
 ) -> None:
     (tmp_path / "allowed").mkdir()
     (tmp_path / "allowed" / "visible.py").write_text("ok", encoding="utf-8")
-    session = await LocalSandbox(
-        read_policy=ReadOnlySandboxPolicy(("allowed/*.py",)),
-        allow_host_stdio_with_read_policy=allow_stdio,
-    ).open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path, read_policy=WorkspaceReadPolicy(("allowed/*.py",)), allow_host_stdio_with_read_policy=allow_stdio)
+    await session.working_dir()
     try:
         assert await session.canonicalize_path("allowed") == "allowed"
         assert "visible.py" in await session.list_directory("allowed")
@@ -47,11 +44,9 @@ async def test_file_info_does_not_authorize_a_file_as_a_directory(
     allow_stdio: bool,
 ) -> None:
     (tmp_path / "secret").write_text("private contents", encoding="utf-8")
-    policy = ReadOnlySandboxPolicy(("secret/allowed.txt",))
-    session = await LocalSandbox(
-        read_policy=policy,
-        allow_host_stdio_with_read_policy=allow_stdio,
-    ).open(root=tmp_path)
+    policy = WorkspaceReadPolicy(("secret/allowed.txt",))
+    session = LocalWorkspaceBackend(tmp_path, read_policy=policy, allow_host_stdio_with_read_policy=allow_stdio)
+    await session.working_dir()
     try:
         with pytest.raises(AIError) as error:
             await session.file_info("secret")
@@ -67,13 +62,8 @@ async def test_read_only_policy_hides_unauthorized_resource_root(
 ) -> None:
     resource = tmp_path / "resource"
     resource.mkdir()
-    session = await LocalSandbox(
-        read_policy=ReadOnlySandboxPolicy(("allowed.txt",)),
-        allow_host_stdio_with_read_policy=allow_stdio,
-    ).open(
-        root=tmp_path,
-        resources=(SandboxResource("resource", resource),),
-    )
+    session = LocalWorkspaceBackend(tmp_path, read_policy=WorkspaceReadPolicy(("allowed.txt",)), allow_host_stdio_with_read_policy=allow_stdio, resources=(WorkspaceResource("resource", resource),))
+    await session.working_dir()
     try:
         assert session.resource_path("resource") is None
     finally:
@@ -87,16 +77,11 @@ async def test_read_only_policy_exposes_authorized_resource_root(
 ) -> None:
     resource = tmp_path / "resource"
     resource.mkdir()
-    session = await LocalSandbox(
-        read_policy=ReadOnlySandboxPolicy(
+    session = LocalWorkspaceBackend(tmp_path, read_policy=WorkspaceReadPolicy(
             ("allowed.txt",),
             {"resource": ("resource.txt",)},
-        ),
-        allow_host_stdio_with_read_policy=allow_stdio,
-    ).open(
-        root=tmp_path,
-        resources=(SandboxResource("resource", resource),),
-    )
+        ), allow_host_stdio_with_read_policy=allow_stdio, resources=(WorkspaceResource("resource", resource),))
+    await session.working_dir()
     try:
         assert session.resource_path("resource") == str(resource.resolve())
     finally:
@@ -111,10 +96,8 @@ async def test_local_sandbox_keeps_non_native_resource_virtual(
     source = tmp_path / "run.py"
     source.write_text("print('ready')\n", encoding="utf-8")
 
-    session = await LocalSandbox().open(
-        root=workspace,
-        resources=(SandboxResource("skill", files={"script.py": source}),),
-    )
+    session = LocalWorkspaceBackend(workspace, resources=(WorkspaceResource("skill", files={"script.py": source}),))
+    await session.working_dir()
     try:
         assert session.resource_path("skill") is None
     finally:
@@ -128,11 +111,10 @@ def _python_command(code: str) -> str:
 
 
 async def test_read_only_policy_rejects_command_status(tmp_path: Path) -> None:
-    session = await LocalSandbox(
-        read_policy=ReadOnlySandboxPolicy(("**",))
-    ).open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path, read_policy=WorkspaceReadPolicy(("**",)))
+    await session.working_dir()
     try:
-        with pytest.raises(SandboxOperationRejected) as raised:
+        with pytest.raises(WorkspaceOperationRejected) as raised:
             await session.check_command("command")
         assert raised.value.code is ErrorCode.AUTHORIZATION_DENIED
     finally:
@@ -140,7 +122,8 @@ async def test_read_only_policy_rejects_command_status(tmp_path: Path) -> None:
 
 
 async def test_local_sandbox_bounds_command_output(tmp_path: Path) -> None:
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     command = _python_command("print('x' * 60000)")
     try:
         result = await session.run_command(command, timeout_seconds=None)
@@ -152,7 +135,8 @@ async def test_local_sandbox_bounds_command_output(tmp_path: Path) -> None:
 
 
 async def test_local_sandbox_preserves_stdout_and_stderr(tmp_path: Path) -> None:
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     command = _python_command(
         "import sys;print('stdout-value');print('stderr-value',file=sys.stderr)"
     )
@@ -168,7 +152,8 @@ async def test_local_sandbox_preserves_stdout_and_stderr(tmp_path: Path) -> None
 async def test_local_sandbox_truncation_preserves_stderr_and_status(
     tmp_path: Path,
 ) -> None:
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     command = _python_command(
         "import sys;sys.stdout.write('x' * 60000);sys.stderr.write('stderr-tail')"
     )
@@ -195,7 +180,8 @@ async def test_local_sandbox_reaps_background_process_after_shell_exit(
         f"pathlib.Path({str(marker)!r}).write_text('alive')"
     )
     command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)} &"
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         await session.run_command(command, timeout_seconds=5)
         await asyncio.sleep(2.2)
@@ -206,7 +192,8 @@ async def test_local_sandbox_reaps_background_process_after_shell_exit(
 
 
 async def test_local_sandbox_rejects_remote_commands(tmp_path: Path) -> None:
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         with pytest.raises(AIError) as raised:
             await session.run_command("ssh example.invalid")
@@ -217,11 +204,8 @@ async def test_local_sandbox_rejects_remote_commands(tmp_path: Path) -> None:
 
 
 async def test_worker_session_uses_shared_command_policy(tmp_path: Path) -> None:
-    session = _LocalSandboxSession(
-        tmp_path,
-        (),
-        lock_root=tmp_path / "locks",
-    )
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         with pytest.raises(AIError) as raised:
             await session.run_command("ssh example.invalid")
@@ -232,11 +216,8 @@ async def test_worker_session_uses_shared_command_policy(tmp_path: Path) -> None
 
 
 async def test_worker_session_rejects_invalid_command_input(tmp_path: Path) -> None:
-    session = _LocalSandboxSession(
-        tmp_path,
-        (),
-        lock_root=tmp_path / "locks",
-    )
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         with pytest.raises(AIError) as raised:
             await session.run_command("printf\x00invalid")
@@ -247,11 +228,8 @@ async def test_worker_session_rejects_invalid_command_input(tmp_path: Path) -> N
 
 
 async def test_worker_session_rejects_invalid_background_command(tmp_path: Path) -> None:
-    session = _LocalSandboxSession(
-        tmp_path,
-        (),
-        lock_root=tmp_path / "locks",
-    )
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         with pytest.raises(AIError) as raised:
             await session.start_command("printf\x00invalid")
@@ -265,7 +243,8 @@ async def test_local_sandbox_reads_empty_file_with_complete_hash(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "empty.txt").write_bytes(b"")
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         result = await session.read_file("empty.txt")
     finally:
@@ -280,10 +259,8 @@ async def test_local_sandbox_allows_explicit_skill_resource_under_storage(
 ) -> None:
     source = tmp_path / ".linktools" / "skills" / "review"
     source.mkdir(parents=True)
-    session = await LocalSandbox().open(
-        root=tmp_path,
-        resources=(SandboxResource("resource", source),),
-    )
+    session = LocalWorkspaceBackend(tmp_path, resources=(WorkspaceResource("resource", source),))
+    await session.working_dir()
     try:
         assert session.resource_path("resource") == str(source.resolve())
     finally:
@@ -293,7 +270,8 @@ async def test_local_sandbox_allows_explicit_skill_resource_under_storage(
 async def test_local_sandbox_search_continues_after_large_file(tmp_path: Path) -> None:
     (tmp_path / "a-large.txt").write_text("x" * 70_000, encoding="utf-8")
     (tmp_path / "b-target.txt").write_text("needle\n", encoding="utf-8")
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         result = await session.search_files("needle")
     finally:
@@ -307,7 +285,8 @@ async def test_local_sandbox_search_reads_beyond_old_file_prefix(tmp_path: Path)
         "x" * 70_000 + "\nneedle-after-prefix\n",
         encoding="utf-8",
     )
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         result = await session.search_files("needle-after-prefix")
     finally:
@@ -318,7 +297,8 @@ async def test_local_sandbox_search_reads_beyond_old_file_prefix(tmp_path: Path)
 
 async def test_local_sandbox_search_accepts_single_file_path(tmp_path: Path) -> None:
     (tmp_path / "target.txt").write_text("needle\n", encoding="utf-8")
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         result = await session.search_files("needle", path="target.txt")
     finally:
@@ -330,7 +310,8 @@ async def test_local_sandbox_search_accepts_single_file_path(tmp_path: Path) -> 
 async def test_local_sandbox_read_reports_binary_file(tmp_path: Path) -> None:
     payload = b"\x89PNG\r\n\x1a\n\x00payload"
     (tmp_path / "image.bin").write_bytes(payload)
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         result = await session.read_file("image.bin")
     finally:
@@ -341,7 +322,8 @@ async def test_local_sandbox_read_reports_binary_file(tmp_path: Path) -> None:
 
 async def test_local_sandbox_read_replaces_invalid_utf8(tmp_path: Path) -> None:
     (tmp_path / "mixed.txt").write_bytes(b"before-\xff-after\n")
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         result = await session.read_file("mixed.txt")
     finally:
@@ -352,7 +334,8 @@ async def test_local_sandbox_read_replaces_invalid_utf8(tmp_path: Path) -> None:
 
 async def test_local_sandbox_listing_includes_regular_file_size(tmp_path: Path) -> None:
     (tmp_path / "sample.txt").write_bytes(b"abc")
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         result = await session.list_directory()
     finally:
@@ -370,11 +353,9 @@ async def test_local_sandbox_read_policy_filters_descendants_and_writes(
     allowed.mkdir()
     (allowed / "visible.py").write_text("print('ok')\n", encoding="utf-8")
     (allowed / "hidden.txt").write_text("secret\n", encoding="utf-8")
-    policy = ReadOnlySandboxPolicy(("allowed/*.py",))
-    session = await LocalSandbox(
-        read_policy=policy,
-        allow_host_stdio_with_read_policy=allow_stdio,
-    ).open(root=tmp_path)
+    policy = WorkspaceReadPolicy(("allowed/*.py",))
+    session = LocalWorkspaceBackend(tmp_path, read_policy=policy, allow_host_stdio_with_read_policy=allow_stdio)
+    await session.working_dir()
     try:
         assert "visible.py" in await session.list_directory("allowed")
         assert "hidden.txt" not in await session.list_directory("allowed")
@@ -383,7 +364,7 @@ async def test_local_sandbox_read_policy_filters_descendants_and_writes(
         with pytest.raises(AIError) as denied:
             await session.read_file("allowed/hidden.txt")
         assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
-        with pytest.raises(SandboxOperationRejected) as rejected:
+        with pytest.raises(WorkspaceOperationRejected) as rejected:
             await session.write_file("allowed/new.py", "blocked")
         assert rejected.value.code is ErrorCode.AUTHORIZATION_DENIED
     finally:
@@ -401,9 +382,8 @@ async def test_local_sandbox_read_policy_filters_before_listing_limit(
             "secret\n",
             encoding="utf-8",
         )
-    session = await LocalSandbox(
-        read_policy=ReadOnlySandboxPolicy(("allowed/*.py",)),
-    ).open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path, read_policy=WorkspaceReadPolicy(("allowed/*.py",)))
+    await session.working_dir()
     try:
         result = await session.list_directory("allowed")
     finally:
@@ -415,7 +395,8 @@ async def test_local_sandbox_read_policy_filters_before_listing_limit(
 async def test_local_sandbox_file_info_includes_text_metadata(tmp_path: Path) -> None:
     content = "first\nsecond\n"
     (tmp_path / "sample.txt").write_text(content, encoding="utf-8")
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         result = await session.file_info("sample.txt")
     finally:
@@ -470,7 +451,8 @@ async def test_local_sandbox_reaps_descendants_when_shell_is_already_reaped(
         return process
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_after_reaping)
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         if operation == "cancel_spawn":
             command_task = asyncio.create_task(session.run_command(command))

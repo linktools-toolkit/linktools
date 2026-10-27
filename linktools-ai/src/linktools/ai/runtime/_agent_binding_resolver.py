@@ -3,6 +3,7 @@
 """Resolve execution-owned Agent binding dependencies to immutable Asset versions."""
 
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from ..agent import (
     AgentBinding,
@@ -14,7 +15,10 @@ from ..agent import (
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding
 from ..spec import MCPServerSpecCodec
-from ..workspace import Sandbox
+
+
+if TYPE_CHECKING:
+    from pydantic_ai.workspaces import WorkspaceBackend
 
 
 class _AgentBindingResolver:
@@ -25,7 +29,7 @@ class _AgentBindingResolver:
         catalog: AgentCatalog,
         compiler: AgentCompiler,
         *,
-        sandbox: Sandbox | None = None,
+        workspace_backend: "WorkspaceBackend | None" = None,
     ) -> None:
         if not isinstance(catalog, AgentCatalog):
             raise TypeError("catalog must be AgentCatalog")
@@ -33,7 +37,7 @@ class _AgentBindingResolver:
             raise TypeError("compiler must be AgentCompiler")
         self._catalog = catalog
         self._compiler = compiler
-        self._sandbox = sandbox
+        self._workspace_backend = workspace_backend
 
     @property
     def root_ids(self) -> tuple[str, ...]:
@@ -109,7 +113,7 @@ class _AgentBindingResolver:
             )
             from ._mcp import _mcp_execution_policy
 
-            current_policy = dict(_mcp_execution_policy(server, self._sandbox))
+            current_policy = dict(_mcp_execution_policy(server, self._workspace_backend))
             bound_policy = pin.contract.get("execution_policy")
             if bound_policy is not None and dict(bound_policy) != current_policy:
                 raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)

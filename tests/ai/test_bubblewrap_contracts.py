@@ -8,9 +8,9 @@ import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.workspace import (
-    BubblewrapSandbox,
-    ReadOnlySandboxPolicy,
-    SandboxResource,
+    BubblewrapWorkspaceBackend,
+    WorkspaceReadPolicy,
+    WorkspaceResource,
     normalize_workspace_input_path,
 )
 from linktools.ai.workspace import _bubblewrap
@@ -31,7 +31,7 @@ def test_workspace_read_policy_matches_logical_paths(tmp_path: Path) -> None:
     assert _bubblewrap._read_workspace_bytes(
         workspace,
         path,
-        read_policy=ReadOnlySandboxPolicy(("allowed/**",)),
+        read_policy=WorkspaceReadPolicy(("allowed/**",)),
         hidden_paths=(".linktools",),
         max_bytes=None,
     ) == b"evidence"
@@ -39,7 +39,7 @@ def test_workspace_read_policy_matches_logical_paths(tmp_path: Path) -> None:
         _bubblewrap._read_workspace_bytes(
             workspace,
             ".linktools/secret.bin",
-            read_policy=ReadOnlySandboxPolicy(("allowed/**",)),
+            read_policy=WorkspaceReadPolicy(("allowed/**",)),
             hidden_paths=(".linktools",),
             max_bytes=None,
         )
@@ -50,20 +50,16 @@ def test_workspace_read_policy_matches_logical_paths(tmp_path: Path) -> None:
     ("read_policy", "workspace_access"),
     (
         (None, "read_write"),
-        (ReadOnlySandboxPolicy(readable_paths=("**",)), "read"),
-        (ReadOnlySandboxPolicy(readable_paths=()), "none"),
+        (WorkspaceReadPolicy(readable_paths=("**",)), "read"),
+        (WorkspaceReadPolicy(readable_paths=()), "none"),
     ),
 )
 def test_stdio_policy_reports_supported_workspace_access(
-    read_policy: ReadOnlySandboxPolicy | None,
+    read_policy: WorkspaceReadPolicy | None,
     workspace_access: str,
     tmp_path: Path,
 ) -> None:
-    sandbox = BubblewrapSandbox(
-        runtime_root=tmp_path / "runtime",
-        bwrap_executable=tmp_path / "bwrap",
-        read_policy=read_policy,
-    )
+    sandbox = BubblewrapWorkspaceBackend(tmp_path, runtime_root=tmp_path / "runtime", bwrap_executable=tmp_path / "bwrap", read_policy=read_policy)
     policy = sandbox.stdio_execution_policy()
     assert policy["workspace_access"] == workspace_access
     assert policy["boundary"] == "workspace-stdio"
@@ -71,11 +67,7 @@ def test_stdio_policy_reports_supported_workspace_access(
 
 
 def test_stdio_policy_rejects_narrow_read_globs(tmp_path: Path) -> None:
-    sandbox = BubblewrapSandbox(
-        runtime_root=tmp_path / "runtime",
-        bwrap_executable=tmp_path / "bwrap",
-        read_policy=ReadOnlySandboxPolicy(readable_paths=("src/**",)),
-    )
+    sandbox = BubblewrapWorkspaceBackend(tmp_path, runtime_root=tmp_path / "runtime", bwrap_executable=tmp_path / "bwrap", read_policy=WorkspaceReadPolicy(readable_paths=("src/**",)))
     with pytest.raises(AIError) as error:
         sandbox.stdio_execution_policy()
     assert error.value.code is ErrorCode.SANDBOX_UNAVAILABLE
@@ -85,11 +77,7 @@ def test_stdio_policy_rejects_narrow_read_globs(tmp_path: Path) -> None:
 def test_stdio_policy_is_read_only_and_returns_detached_values(
     tmp_path: Path,
 ) -> None:
-    sandbox = BubblewrapSandbox(
-        runtime_root=tmp_path / "runtime",
-        bwrap_executable=tmp_path / "bwrap",
-        hidden_paths=("private", "tmp/cache"),
-    )
+    sandbox = BubblewrapWorkspaceBackend(tmp_path, runtime_root=tmp_path / "runtime", bwrap_executable=tmp_path / "bwrap", hidden_paths=("private", "tmp/cache"))
     policy = sandbox.stdio_execution_policy()
     hidden_paths = policy["hidden_paths"]
     assert isinstance(hidden_paths, list)
@@ -132,7 +120,7 @@ def test_stdio_resources_are_not_mounted_into_worker_session(
     resource_root = tmp_path / "mcp"
     for path in (workspace, runtime, locks, resource_root):
         path.mkdir()
-    resource = SandboxResource("mcp", resource_root)
+    resource = WorkspaceResource("mcp", resource_root)
 
     worker_args = _bubblewrap._build_bwrap_args(
         root=workspace,
@@ -175,7 +163,7 @@ def test_stdio_asset_files_bind_without_exposing_sibling_files(
     script.write_text("print('ready')\n", encoding="utf-8")
     sibling = source / "private.txt"
     sibling.write_text("private", encoding="utf-8")
-    resource = SandboxResource("mcp", files={"tools/run.py": script})
+    resource = WorkspaceResource("mcp", files={"tools/run.py": script})
 
     args = _bubblewrap._build_bwrap_args(
         root=workspace,

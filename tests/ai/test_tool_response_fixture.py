@@ -94,7 +94,7 @@ async def _capabilities(
     return await materialize_mcp_capabilities(
         (server,),
         selectors or (mcp_server_selector("server"),),
-        sandbox=object(), sandbox_session=None, host_cwd=None,
+        workspace_backend=None, host_cwd=None,
         bindings={"server": _MCPBinding(None, None, {"boundary": "saved-stdio"})},
         projections={}, tool_operations=bridge, tool_metrics=None,
         response_fixture=manifest,
@@ -369,7 +369,7 @@ async def test_native_runtime_consumes_fixture_through_durable_mcp_operation(
     from linktools.ai.runtime import Runtime
     from linktools.ai.persistence import PersistenceStorage
     from linktools.ai.runtime._mcp import _MCPModelToolset, prepare_mcp_projections
-    from linktools.ai.workspace import SandboxResource
+    from linktools.ai.workspace import WorkspaceResource
 
     from ._runtime_test_helpers import _UsageFunctionModel
     from .test_live_history_readback_integration import _Models
@@ -389,7 +389,7 @@ async def test_native_runtime_consumes_fixture_through_durable_mcp_operation(
     for name in ("_create_mcp_transport", "_MCPDiscoveryToolset"):
         monkeypatch.setattr(f"linktools.ai.runtime._mcp.{name}", forbidden_transport)
     monkeypatch.setattr(MCPToolset, "__aenter__", forbidden_live_path)
-    monkeypatch.setattr(SandboxResource, "from_asset_versions", forbidden_live_path)
+    monkeypatch.setattr(WorkspaceResource, "from_asset_versions", forbidden_live_path)
     monkeypatch.setattr(AssetMaterializer, "materialize", forbidden_live_path)
     monkeypatch.setattr(
         "linktools.ai.runtime._mcp.prepare_mcp_projections", no_live_projection,

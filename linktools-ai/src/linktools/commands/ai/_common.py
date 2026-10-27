@@ -233,7 +233,7 @@ async def _open_local_runtime(
     *,
     model: "ModelBinding | None" = None,
 ) -> "AsyncIterator[Runtime]":
-    from linktools.ai.capability import AssetCapability, WorkspaceCapability
+    from linktools.ai.capability import AssetCapability, FileSystem
     from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
     from linktools.ai.runtime import Runtime
@@ -244,7 +244,9 @@ async def _open_local_runtime(
         features = RuntimeFeatures("workspace")
         features.model("default", _local_model(workspace) if model is None else model)
         features.capability(AssetCapability(assets))
-        features.capability(WorkspaceCapability(workspace))
+        features.capability(FileSystem(workspace))
+        from linktools.ai.capability import ShellCapability
+        features.capability(ShellCapability())
         features.capability(ExecutionCapability(retain_history=True))
         features.capability(CheckpointCapability())
         features.capability(TraceCapability())

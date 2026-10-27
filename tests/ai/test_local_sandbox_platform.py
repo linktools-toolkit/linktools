@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Cross-platform LocalSandbox acceptance coverage."""
+"""Cross-platform LocalWorkspaceBackend acceptance coverage."""
 
 import shlex
 import subprocess
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.workspace import LocalSandbox
+from linktools.ai.workspace import LocalWorkspaceBackend
 
 pytestmark = pytest.mark.asyncio
 
@@ -29,7 +29,8 @@ async def test_local_sandbox_runs_python_in_shared_workspace(tmp_path: Path) -> 
         encoding="utf-8",
     )
     command = _command([sys.executable, script.name])
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         result = await session.run_command(command, timeout_seconds=10)
     finally:

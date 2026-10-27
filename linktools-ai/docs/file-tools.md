@@ -62,7 +62,7 @@ rejects attachments; ordinary prompt text is unaffected. The names `image`,
 `audio`, `document`, and `video` expand to the corresponding SDK Literal MIME
 sets. Use `mime:` for exact MIME types or `type/*` families. There is no `text`
 category; a text file can use `mime:text/plain`. Unmatched attachments are
-rejected. A match does not bypass SDK encoding, Sandbox authorization, resource
+rejected. A match does not bypass SDK encoding, workspace-provider authorization, resource
 limits, or permissions.
 
 The `vision` API argument and CLI flag are removed. Legacy environment or
@@ -292,7 +292,7 @@ chunks and same-filesystem staging, still requiring O(N) IO and temporary disk.
 * `find_files("*.png")` becomes `list_files(include_glob="**/*.png")` for its old
   recursive basename intent. Old search `*.py` recursive intent likewise becomes
   `**/*.py`; directory prefixes must be rebased to the supplied path.
-* Sandbox host `read_file`, `search_files`, `find_files`, `attach_files` tool and
+* Workspace host `read_file`, `search_files`, `find_files`, `attach_files` tool and
   `edit_file` remain available under their current contracts. New bounded
   host APIs are `read_text`, `inspect_file`, `list_files`, and `search_text`.
 * Captured `attach_files` source/IDs and original messages are never rewritten.

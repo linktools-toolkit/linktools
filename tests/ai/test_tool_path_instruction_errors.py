@@ -8,6 +8,7 @@ from ._runtime_test_helpers import is_tool_retry, model_features
 from ._runtime_test_helpers import workspace_features
 
 from contextlib import nullcontext
+from functools import partial
 from pathlib import Path
 from linktools.ai.capability import TraceCapability
 
@@ -21,8 +22,8 @@ from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
 from linktools.ai.workspace import (
-    LocalSandbox,
-    ReadOnlySandboxPolicy,
+    LocalWorkspaceBackend,
+    WorkspaceReadPolicy,
     Workspace,
     WorkspaceInstructionResolver,
     WorkspacePolicy,
@@ -64,7 +65,7 @@ async def test_runtime_path_retry_rechecks_allowed_target(tmp_path: Path, bad_ta
         return ModelResponse(parts=[TextPart("finished")])
 
     group = workspace_features("paths", workspace=Workspace.load(tmp_path),
-        sandbox=LocalSandbox(read_policy=ReadOnlySandboxPolicy(("allowed.txt", "missing.txt"))))
+        workspace_factory=partial(LocalWorkspaceBackend, read_policy=WorkspaceReadPolicy(("allowed.txt", "missing.txt"))))
     group.capability(TraceCapability(), scope="runtime")
     group.agent("reader", model="default", allow_tools=("read_file",))
     async with Persistence.open('paths', storage=PersistenceStorage.in_memory()) as persistence_61, Runtime.attach(persistence=persistence_61, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:

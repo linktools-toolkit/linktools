@@ -24,7 +24,7 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import StorageLayer, StorageOverlay
-from linktools.ai.workspace import SandboxResource
+from linktools.ai.workspace import WorkspaceResource
 
 
 _DECLARATION = "---\nname: review\ndescription: Review files\n---\nReview.\n"
@@ -120,7 +120,7 @@ async def test_sandbox_asset_skill_uses_contained_file_symlink(
             "run.sh",
             "shared/run.sh",
         }
-        resource = await SandboxResource.from_asset_versions(
+        resource = await WorkspaceResource.from_asset_versions(
             "review",
             store,
             {

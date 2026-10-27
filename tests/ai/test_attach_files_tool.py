@@ -7,6 +7,8 @@ from ._runtime_test_helpers import workspace_features
 
 from pathlib import Path
 
+from ._runtime_test_helpers import FileToolsStub
+
 import pytest
 from pydantic_ai.messages import BinaryContent, ToolReturn
 
@@ -14,7 +16,7 @@ from ._runtime_test_helpers import tool_run_context
 
 from linktools.ai.capability import (
     ToolCallRetry,
-    workspace_capabilities,
+    filesystem_capabilities,
 )
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.model import ModelBinding
@@ -32,7 +34,7 @@ def _workspace_tool_contributions(workspace: Workspace):
     )
 
 
-class _AttachmentSession:
+class _AttachmentSession(FileToolsStub):
     def __init__(self, values: dict[str, bytes]) -> None:
         self.values = values
         self.canonicalized: list[str] = []
@@ -82,10 +84,10 @@ async def _boundary(
     *,
     model_binding: ModelBinding | None = None,
 ) -> tuple[BoundaryToolset, object]:
-    capability = workspace_capabilities(
+    capability = filesystem_capabilities(
         workspace,
         ("attach_files",),
-        session=session,  # type: ignore[arg-type]
+        backend=session,  # type: ignore[arg-type]
         model_binding=model_binding,
     )[0]
     boundary = BoundaryToolset(
@@ -100,7 +102,7 @@ async def _boundary(
         },
         id="workspace-boundary",
         permission_policy=workspace.policy.tool_permissions,
-        sandbox_session=session,  # type: ignore[arg-type]
+        workspace_backend=session,  # type: ignore[arg-type]
         repository_boundary=repository,
     )
     tools = await boundary.get_tools(tool_run_context())  # type: ignore[arg-type]

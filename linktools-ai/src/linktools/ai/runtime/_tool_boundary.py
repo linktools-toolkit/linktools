@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
+from copy import copy
 from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol, TYPE_CHECKING
 
@@ -35,7 +36,7 @@ from ..capability import (
 from ..core import canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..observe import Observation
-from ..workspace import SandboxSession, ToolPermissionPolicy
+from ..workspace import SupportsFileTools, ToolPermissionPolicy
 from ._handoff import ToolEntryStopped, execution_handoff_scope
 from ._budget import RunBudgetContext
 from ..model.messages import bind_tool_return_attachments
@@ -122,7 +123,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         id: str,
         descriptor: ManagedToolDescriptor | None = None,
         permission_policy: ToolPermissionPolicy | None = None,
-        sandbox_session: SandboxSession | None = None,
+        workspace_backend: SupportsFileTools | None = None,
         tool_operations: ToolOperationBridge | None = None,
         tool_metrics: ToolMetricContext | None = None,
         budget: RunBudgetContext | None = None,
@@ -136,7 +137,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         self._descriptor = descriptor
         self._id = id
         self._permission_policy = permission_policy
-        self._sandbox_session = sandbox_session
+        self._workspace_backend = workspace_backend
         self._tool_operations = tool_operations
         self._tool_metrics = tool_metrics
         self._budget = budget
@@ -154,6 +155,19 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
     @property
     def id(self) -> str:
         return self._id
+
+    async def for_run(self, ctx: PydanticRunContext[AgentContext[object]]) -> "BoundaryToolset":
+        bound = copy(self)
+        bound._toolsets = tuple([await toolset.for_run(ctx) for toolset in self._toolsets])
+        bound._descriptors = dict(self._descriptors)
+        bound._raw_tools = {}
+        bound._exit_stack = None
+        return bound
+
+    async def for_run_step(self, ctx: PydanticRunContext[AgentContext[object]]) -> "BoundaryToolset":
+        self._toolsets = tuple([await toolset.for_run_step(ctx) for toolset in self._toolsets])
+        self._raw_tools.clear()
+        return self
 
     async def __aenter__(self) -> "BoundaryToolset":
         async with AsyncExitStack() as stack:
@@ -570,7 +584,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
     ) -> dict[str, Any]:
         if not path_fields:
             return dict(args)
-        session = self._sandbox_session
+        session = self._workspace_backend
         if session is None:
             raise AIError(ErrorCode.SANDBOX_SESSION_CLOSED)
         result = dict(args)

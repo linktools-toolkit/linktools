@@ -16,7 +16,7 @@ The main ownership rules are:
 - `Runtime.open` owns application composition and closes its bound domains before its Persistence. Advanced callers can use `Runtime.attach(persistence=...)` to borrow an independently opened Persistence without closing it. Neither requires a filesystem Workspace.
 - `Workspace` owns paths and policy; it is not a persistence identity.
 - `AssetStore` stores raw asset bytes. It does not interpret declarations.
-- `RuntimeFeatures` is the only public registration/discovery composition unit. It can provide a Workspace or Sandbox independently and captures direct registrations and, when store-backed, one declaration view pinned to Asset version references.
+- `RuntimeFeatures` is the only public registration/discovery composition unit. It can provide project Workspace configuration or an execution workspace factory independently and captures direct registrations and, when store-backed, one declaration view pinned to Asset version references.
 - `AgentSpec` is a runtime-independent Agent declaration.
 - `AgentCompiler` is the sole Agent-level selector. It resolves model, tool, Skill, MCP, capability, and Subagent candidates from the captured Runtime candidate set.
 - `Runtime` composes Agent, Task and Evaluation execution through one application lifecycle. `features=None` leaves Agent execution disabled; Task-only applications need no model declarations. TaskEngine, History, Snapshot and Evaluations retain independent advanced entry points.
@@ -254,7 +254,8 @@ security, persisted history and explicit recovery of stopped executors.
 
 ```python
 from linktools.ai import RuntimeFeatures, Runtime, Workspace
-from linktools.ai.capability import WorkspaceCapability
+from linktools.ai.capability import FileSystem
+from linktools.ai.capability import ShellCapability
 from linktools.ai.model import create_model
 from linktools.ai.persistence import PersistenceStorage
 
@@ -263,7 +264,8 @@ binding = create_model(api="openai", model="gpt-4o-mini")
 storage = PersistenceStorage.in_memory()
 features = RuntimeFeatures("workspace")
 features.model("default", binding)
-features.capability(WorkspaceCapability(workspace))
+features.capability(FileSystem(workspace))
+features.capability(ShellCapability())
 
 async with Runtime.open("default", storage=storage,
     features=features,
@@ -358,11 +360,13 @@ Use `RuntimeFeatures` for direct application registrations:
 
 ```python
 from linktools.ai import AgentContext, RuntimeFeatures, Runtime
-from linktools.ai.capability import WorkspaceCapability
+from linktools.ai.capability import FileSystem
+from linktools.ai.capability import ShellCapability
 
 application = RuntimeFeatures[None]("application")
 application.model("default", binding)
-application.capability(WorkspaceCapability(workspace))
+application.capability(FileSystem(workspace))
+application.capability(ShellCapability())
 
 @application.tool
 def lookup_ticket(ctx: AgentContext[None], ticket_id: str) -> str:
@@ -399,9 +403,9 @@ these declarations instead of inferring behavior from Tool names.
 ### Native SDK composition and Runtime hosting
 
 `SkillCapability`, `SubagentCapability`, and the capabilities returned by
-`workspace_capabilities(..., session=...)` can be composed directly with a native
+`filesystem_capabilities(..., backend=...)` can be composed directly with a native
 Pydantic Agent. Supply their public source registry, delegate, or already-opened
-sandbox session, and install the public SDK feedback adapter once:
+workspace backend, and install the public SDK feedback adapter once:
 
 ```python
 from pydantic_ai import Agent
@@ -424,6 +428,30 @@ errors, native SDK controls, and cancellation are not translated. Runtime alread
 installs this same adapter; Runtime users do not register it again. Its public
 `build_model_retry()` and `build_tool_failed()` class methods also serve deferred
 recovery, so normal execution and recovery share one conversion owner.
+
+Native files and commands share one explicitly owned environment:
+
+```python
+from pydantic_ai import Agent
+from linktools.ai.capability import ShellCapability
+from linktools.ai.capability import FileSystem, PydanticToolControlCapability
+from linktools.ai.workspace import LocalWorkspaceBackend, Workspace
+
+project = Workspace.load("./project")
+backend = LocalWorkspaceBackend(project.root)  # Trusted host execution; no OS isolation.
+try:
+    files = FileSystem(project).bind(("read_file", "attach_files"), backend=backend)
+    shell = ShellCapability().bind(("run_command",), backend=backend, policy=project.policy.tool_permissions)
+    agent = Agent(model, capabilities=[PydanticToolControlCapability(), files, shell])
+    result = await agent.run("Inspect the project.", workspace=backend)
+finally:
+    await backend.close()
+```
+
+`ShellCapability` owns the four command tool schemas and policy metadata; the
+single workspace provider owns its command processes and cleanup. Native
+Pydantic AI Workspace remains the execution API, without a separate shell
+workspace or adapter lifecycle.
 
 Native SDK composition does not create Runtime admission, approvals, effect
 journals, receipts, checkpoints, or recovery. Native capabilities may also be
@@ -496,7 +524,7 @@ not turn an unrelated native MCP transport into an OS sandbox or authorize all
 other file-reading tools.
 
 The creator retains resource ownership. Public standalone adapters borrow their
-sources, delegates, and open sessions; they do not close those dependencies.
+sources, delegates, and workspace backends; they do not close those dependencies.
 Runtime drains its own work and closes its owned services without taking ownership
 of application clients. A reference loader cleans up temporary resources it creates
 on success, failure, and cancellation. Neither mode duplicates the SDK's
@@ -607,8 +635,10 @@ unchanged.
 
 ## 3. Workspace and declaration assets
 
-Registering `WorkspaceCapability(workspace)` at Runtime scope contributes the stable
-Workspace tools and sandbox boundary only. It does not discover Agent, Skill, or
+Registering `FileSystem(workspace)` at Runtime scope contributes the stable
+ten file tools, including bounded reads and attachments. Register native
+`ShellCapability()` separately for command tools. Neither
+capability discovers Agent, Skill, or
 MCP declarations from Workspace paths.
 
 Agent, Skill, MCP, and repository rule files use one explicit source: pass a ready
@@ -721,10 +751,10 @@ does not need to be `SKILL.md`. This allows Skill scripts to be invoked by
 absolute path without letting a single file symlink redefine the package root.
 If an overlay mixes resource origins, the declaration view is virtual rather
 than claiming a single native package directory. Bubblewrap can still bind
-its local files individually; LocalSandbox requires one matching native tree.
+its local files individually; LocalWorkspaceBackend requires one matching native tree.
 Durable executions pin Asset version
 references for Skill resources and read them through AssetStore when needed.
-The Sandbox exposes existing local resource files by path after verifying their
+The workspace provider exposes existing local resource files by path after verifying their
 bound Asset versions and executable bits. Resources without native file paths
 remain available through `load_skill` but cannot be executed by file path.
 Skill resource bytes are not copied to a temporary directory or Runtime ObjectStore.
@@ -740,7 +770,7 @@ For Asset backends without native file paths, Runtime materializes the captured
 Asset versions into a private temporary package tree for each run. The process
 closes before that tree is removed on success, failure, or cancellation; runs
 do not share a persistent resource cache. Materialization preserves the
-configured host-stdio or Sandbox execution boundary and does not copy resource
+configured host-stdio or workspace execution boundary and does not copy resource
 bytes into Runtime ObjectStore. If process cleanup cannot establish safe
 closure, resources remain available rather than being deleted under a live
 process.
@@ -925,76 +955,73 @@ a remote server's implementation.
 Resources/prompts APIs, OAuth, dynamic end-user credentials, mTLS, server
 publishing, and arbitrary third-party configuration import are out of scope.
 
-### Execution sandbox
+### Execution workspace
 
-Workspace filesystem and shell tool effects run through the public `Sandbox` / `SandboxSession` boundary. Inject a custom implementation with `RuntimeFeatures(..., sandbox=...)`; register `WorkspaceCapability(workspace)` and configure Sandbox on that same RuntimeFeatures object. A Sandbox can also be configured without a Workspace for Skill resource paths and MCP stdio.
+Custom FileSystem and ShellCapability share one native `WorkspaceBackend`. Configure
+`RuntimeFeatures(workspace_factory=LocalWorkspaceBackend)` or a callable accepting
+`root` and keyword-only `resources`. The default is `LocalWorkspaceBackend`;
+Factory construction must perform no I/O. Runtime owns each returned environment, so its backend must implement `SupportsClose`; cleanup support is checked before activation.
+`workspace_factory=None` explicitly disables local execution and never falls back
+to the host. A factory may be configured without a project Workspace for Skill
+resources and MCP stdio.
 
-When no Sandbox is configured, LinkTools uses its built-in `LocalSandbox`
-adapter for supervised host processes, including stdio MCP without a Workspace.
-This does not provide OS isolation. LinkTools owns the stable model-visible workspace
-tool signatures, descriptions, metadata, and durable capability pins.
+Providers are constructed without I/O and initialize on their first operation.
+Runtime owns one provider per execution and closes it after success, failure or
+cancellation. Native Agent callers pass that same provider directly through
+`agent.run(..., workspace=backend)` and own its `close()`. There is no separate
+Sandbox/session/adapter lifecycle. LinkTools `Workspace` remains the project
+configuration and instruction context, while native Pydantic AI Workspace owns
+execution path and text helpers.
 
-A run opens a `SandboxSession` when it needs a selected Workspace filesystem/shell tool, a local Skill resource path, or a stdio MCP server assigned to that Sandbox. Workspace tool commands share that session, which is closed when the model run succeeds, fails, or is cancelled. Resource-backed stdio uses its package directory as its process working directory; other stdio uses the Workspace execution root, or the host current directory captured when Runtime opens if no Workspace is present. Streamable HTTP and SSE MCP connections use the `host-network` boundary,
-regardless of the configured Sandbox. A remote-only Agent with no selected
-local capabilities or Skill resources does not open a Sandbox session and
-needs no Workspace or working directory. In a mixed run, stdio remains in
-its configured `host-stdio` or `workspace-stdio` boundary while HTTP remains
-in the Runtime process network. Here "host" means the environment where
-Runtime actually runs: in a container, `localhost` refers to that container.
-A Bubblewrap network restriction does not revoke an Agent's explicitly
-selected remote capabilities. Use capability sources and `allow_tools` to
-withhold them. Remote tools receive explicit arguments, not automatic access
-to Workspace files, roots, mounts, or host resources.
+`LocalWorkspaceBackend` is trusted host execution, not OS isolation. On Linux,
+`BubblewrapWorkspaceBackend` provides the restricted persistent worker, resource
+mounts and MCP stdio boundary. It requires a non-root user, usable unprivileged
+namespaces, `bwrap >= 0.12.0`, and a trusted read-only runtime rootfs with the same
+LinkTools build and Python >= 3.11. It never falls back to Local. File-only backends
+do not acquire command or stdio support implicitly. Restricted Local providers
+reject stdio unless trusted host stdio is explicitly permitted.
 
-Use `DisabledSandbox` to keep workspace tool declarations and historical binding recovery available while making runtime workspace tool materialization fail with `SANDBOX_UNAVAILABLE`. A custom Sandbox failure does not fall back to the local host environment.
+ShellCapability exposes command jobs; the workspace provider owns their process state and teardown
+must establish process-tree quiescence. Runtime does not offer those jobs as
+cross-execution services. FileSystem uses the provider's bounded read and
+content-state operations rather than a command fallback or whole-file reads.
 
-`LocalSandbox` runs Workspace commands with the selected execution root as its current directory; a resource-backed MCP process uses its own package root.
-It is an execution boundary, not an operating-system security boundary. On Linux,
-`BubblewrapSandbox` is an explicit deployment choice. It requires a non-root
-user, usable unprivileged namespaces, `bwrap >= 0.12.0`, and a trusted
-read-only runtime rootfs containing the same LinkTools build and Python >=
-3.11. It has no automatic Local fallback. Bubblewrap isolates Session
-file/command execution and sandboxed MCP stdio. The host Agent, model
-requests, and Python custom tools remain outside it. A restricted MCP process
-sees the selected execution root under its configured read policy and its own
-declared resources as read-only, with no external network route. LocalSandbox provides supervised trusted host stdio and is the Runtime default
-when no Sandbox is explicitly selected; it does not claim OS isolation.
-Read-policy-restricted LocalSandbox sessions reject stdio rather than bypassing
-their policy. DisabledSandbox and file-only custom sessions still reject MCP
-stdio.
-
-Selected local Skills are exposed at `/resources/r<hash>` in Bubblewrap through
-read-only file mounts and at their original package location in Local sessions.
-The mapping is derived for the current run and is not persisted into Skill
-declarations. Background command state is ephemeral and is cleaned up
-with the Session; it is not a cross-run service.
+HTTP/SSE MCP remains in the Runtime process network, independently of local
+workspace isolation. A remote-only Agent does not initialize a local workspace.
+A mixed run keeps stdio in its configured `host-stdio` or `workspace-stdio`
+boundary. Remote tools receive explicit arguments, never automatic access to
+workspace roots or mounted resources. Skills retain explicit read-only resource
+membership; resource-backed stdio starts in that resource's package directory.
 
 For a read-only Runtime session, configure the supported backend with one
 immutable policy. Rules are root-relative POSIX patterns; an empty rule set
-denies reads, and resource rules are keyed by `SandboxResource.id`:
+denies reads, and resource rules are keyed by `WorkspaceResource.id`:
 
 ```python
 from linktools.ai import RuntimeFeatures, Workspace
-from linktools.ai.capability import WorkspaceCapability
-from linktools.ai.workspace import LocalSandbox, ReadOnlySandboxPolicy
+from linktools.ai.capability import FileSystem
+from linktools.ai.capability import ShellCapability
+from functools import partial
+from linktools.ai.workspace import LocalWorkspaceBackend, WorkspaceReadPolicy
 
-readonly = ReadOnlySandboxPolicy(
+readonly = WorkspaceReadPolicy(
     readable_paths=("src/**", "README.md"),
     resource_paths={"review": ("**",)},
 )
 workspace = Workspace.load("/workspace/project")
 group = RuntimeFeatures(
     "workspace",
-    sandbox=LocalSandbox(read_policy=readonly),
+    workspace_factory=partial(LocalWorkspaceBackend, read_policy=readonly),
 )
-group.capability(WorkspaceCapability(workspace))
+group.capability(FileSystem(workspace))
+group.capability(ShellCapability())
 ```
 
-When a `SandboxResource` declares `files`, file operations expose only those
+When a `WorkspaceResource` declares `files`, file operations expose only those
 members permitted by the read policy, and directory listings expose only their
 permitted ancestors. A simultaneous `source` locates that set; it does not grant
 the neighboring files. A source-only resource still declares the directory.
-This constrains Sandbox file APIs, not trusted Local host processes. Applications
+This constrains workspace file APIs, not trusted Local host processes. Applications
 needing additional resource files must declare them explicitly. Independent
 Workspace-relative grants retain their own policy.
 
@@ -1226,7 +1253,7 @@ result = (await agent.run(
 
 The Sandbox canonicalizes logical paths before reading them and preserves every input occurrence. Passing the same path twice therefore produces two attachment occurrences with distinct execution-local `attachment_id` values, while their content digests may be identical. The initial model request receives each file as `BinaryContent` together with its canonical Workspace path, and the captured bytes are recovered from Runtime storage rather than reread from the Workspace during retry or recovery. After a complete model response consumes that binary input, Runtime keeps only lightweight file/path context in the active model context, so later agent-loop requests, Session turns, and forks do not repeatedly resend the bytes. The raw transcript remains lossless.
 
-For new Agent configurations, select `read_file` to preview text or attach supported files (`read_file(path=[...])`; use `as_file=True` for whole-text input). See [file tools and model input](docs/file-tools.md) for format capabilities, bounded reads, exact edits, minimal toolsets and migration. The legacy `attach_files(paths=[...])` entry point remains a normal `filesystem.read` Workspace tool: it applies the existing Sandbox, path, approval, and repository-instruction boundaries, preserves duplicate occurrences, reads the current Workspace contents, and sends those files only to the next model request. Runtime binds those occurrences to the originating tool call before the content enters model history, so parallel tool calls do not require transcript-order inference. A later complete model response consumes them under the same transient rule. Agent-backed Task nodes use `Task.from_agent(...)` and `AgentTaskInput`; place workspace paths in its `files` field and prompt content in `prompt`. TaskEngine materializes those inputs through the bound Agent execution port at graph admission, or when accepting a dynamically expanded batch, before dependent nodes run. Replaying an accepted graph does not reread the source files; graph state retains the captured input objects. Delegated subagents use the same explicit execution-input rules.
+For new Agent configurations, select `read_file` to preview text or attach supported files (`read_file(path=[...])`; use `as_file=True` for whole-text input). See [file tools and model input](docs/file-tools.md) for format capabilities, bounded reads, exact edits, minimal toolsets and migration. The legacy `attach_files(paths=[...])` entry point remains a normal `filesystem.read` Workspace tool: it applies the existing workspace, path, approval, and repository-instruction boundaries, preserves duplicate occurrences, reads the current Workspace contents, and sends those files only to the next model request. Runtime binds those occurrences to the originating tool call before the content enters model history, so parallel tool calls do not require transcript-order inference. A later complete model response consumes them under the same transient rule. Agent-backed Task nodes use `Task.from_agent(...)` and `AgentTaskInput`; place workspace paths in its `files` field and prompt content in `prompt`. TaskEngine materializes those inputs through the bound Agent execution port at graph admission, or when accepting a dynamically expanded batch, before dependent nodes run. Replaying an accepted graph does not reread the source files; graph state retains the captured input objects. Delegated subagents use the same explicit execution-input rules.
 
 Attachment delivery evidence is available through `runtime.history.attachment_facts(...)` and `History.open(...)`. The structured facts distinguish `accepted` from `included_in_request`, expose known media type/size/digest, request association, and the optional opaque `input_identifier` originally supplied by the caller. Runtime does not interpret or synthesize that identifier for Workspace or `attach_files` inputs, and keeps `processing_status="unknown"` unless it has verifiable provider-specific evidence. External URL references are not downloaded just to manufacture size or digest facts.
 

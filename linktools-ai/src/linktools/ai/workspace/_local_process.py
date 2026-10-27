@@ -252,6 +252,7 @@ class _ProcessState:
         self.stdout_chars = 0
         self.stderr_chars = 0
         self.output_incomplete = False
+        self.output_truncated = False
         self.stdout_decoder = codecs.getincrementaldecoder("utf-8")(
             errors="replace"
         )
@@ -337,6 +338,7 @@ def _append_process_output(state: _ProcessState, channel: str, text: str) -> Non
             output.appendleft(removed[excess:])
             chars -= excess
         state.output_incomplete = True
+        state.output_truncated = True
     if channel == "stdout":
         state.stdout_chars = chars
     else:

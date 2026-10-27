@@ -151,16 +151,18 @@ async def test_native_error_recovery_is_not_a_raw_success_projection():
 @pytest.mark.asyncio
 async def test_bound_workspace_enforces_its_policy_without_a_runtime(tmp_path):
     from pydantic_ai import DeferredToolRequests, DeferredToolResults
-    from linktools.ai.capability import PydanticToolControlCapability, WorkspaceCapability
+    from linktools.ai.capability import PydanticToolControlCapability, FileSystem, ShellCapability
+
     from linktools.ai.workspace import (
-        LocalSandbox, ToolPermissionPolicy, ToolPermissionRule, Workspace, WorkspacePolicy,
+        LocalWorkspaceBackend, ToolPermissionPolicy, ToolPermissionRule, Workspace, WorkspacePolicy,
     )
 
     workspace = Workspace(tmp_path, {}, WorkspacePolicy(tool_permissions=ToolPermissionPolicy(
         rules=(ToolPermissionRule("ask", tool_class="filesystem.write"),
                ToolPermissionRule("deny", tool_class="shell")),
     )))
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     calls = [
         ToolCallPart("write_file", {"path": "approved.txt", "content": "approved"}, tool_call_id="write"),
         ToolCallPart("run_command", {"command": "printf forbidden > denied.txt"}, tool_call_id="shell"),
@@ -182,16 +184,18 @@ async def test_bound_workspace_enforces_its_policy_without_a_runtime(tmp_path):
         return ModelResponse(parts=[TextPart("done")])
 
     try:
-        cap = WorkspaceCapability(workspace).bind(("write_file", "run_command"), session=session)
+        cap = FileSystem(workspace).bind(("write_file",), backend=session)
+        shell_cap = ShellCapability().bind(("run_command",), backend=session, policy=workspace.policy.tool_permissions)
+        backend = session
         agent = Agent(model=FunctionModel(respond), tools=[business_echo],
-                      capabilities=[PydanticToolControlCapability(), cap],
+                      capabilities=[PydanticToolControlCapability(), cap, shell_cap],
                       output_type=[str, DeferredToolRequests])
-        first = await agent.run("Write, then try shell", deps=_context("first"))
+        first = await agent.run("Write, then try shell", deps=_context("first"), workspace=backend)
         assert isinstance(first.output, DeferredToolRequests)
         assert not (tmp_path / "approved.txt").exists()
         second = await agent.run(message_history=first.all_messages(),
                                  deferred_tool_results=DeferredToolResults(approvals={"write": True}),
-                                 deps=_context("resumed"))
+                                 deps=_context("resumed"), workspace=backend)
         assert second.output == "done"
         assert (tmp_path / "approved.txt").read_text() == "approved"
         assert not (tmp_path / "denied.txt").exists()
@@ -595,7 +599,7 @@ async def test_skill_resources_and_delegated_child_execute_with_independent_nati
 @pytest.mark.asyncio
 async def test_native_projection_cancellation_drains_the_owned_resource(tmp_path):
     from pydantic_ai.toolsets import FunctionToolset
-    from linktools.ai.workspace import LocalSandbox
+    from linktools.ai.workspace import LocalWorkspaceBackend
 
     entered, cleaned, sessions = asyncio.Event(), [], []
     class Owned(AbstractCapability):
@@ -604,7 +608,7 @@ async def test_native_projection_cancellation_drains_the_owned_resource(tmp_path
         async def for_run(self, ctx):
             return type(self)(ctx.deps.execution_id)
         async def wrap_run(self, ctx, *, handler):
-            self.session = await LocalSandbox().open(root=tmp_path)
+            self.session = LocalWorkspaceBackend(tmp_path)
             sessions.append(self.session)
             try:
                 return await handler()

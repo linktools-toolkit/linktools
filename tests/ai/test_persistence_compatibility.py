@@ -12,7 +12,7 @@ from typing import cast
 
 import pytest
 from linktools.ai.agent import AgentBindingContract, AgentCompiler, CapabilityPin, bind_output, restore_output
-from linktools.ai.capability import workspace_capabilities
+from linktools.ai.capability import filesystem_capabilities
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import (
     IdempotencyStatus,
@@ -37,7 +37,7 @@ from linktools.ai.persistence.contracts import (
 )
 from linktools.ai.spec import AgentSpec
 from linktools.ai.task import TaskNode, TaskRef
-from linktools.ai.workspace import DisabledSandbox, Workspace
+from linktools.ai.workspace import Workspace
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 
@@ -280,7 +280,6 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.load(tmp_path)
-    sandbox = DisabledSandbox()
     candidates = _workspace_tool_contributions(workspace)
     spec = AgentSpec(
         "workspace-persistence-v1",
@@ -314,11 +313,8 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
     assert restored.binding_contract == binding.binding_contract
     selected = tuple(candidate.id for candidate in restored.compiled_agent.selected_tools)
     with pytest.raises(AIError) as missing_session:
-        workspace_capabilities(workspace, selected)
+        filesystem_capabilities(workspace, selected)
     assert missing_session.value.code is ErrorCode.SANDBOX_SESSION_CLOSED
-    with pytest.raises(AIError) as raised:
-        await sandbox.open(root=workspace.root)
-    assert raised.value.code is ErrorCode.SANDBOX_UNAVAILABLE
 
 
 def test_binding_contract_has_no_workspace_identity() -> None:

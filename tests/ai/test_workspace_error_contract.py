@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.workspace import LocalSandbox
+from linktools.ai.workspace import LocalWorkspaceBackend
 from linktools.ai.workspace._sandbox_protocol import validate_request_params
 
 pytestmark = pytest.mark.asyncio
@@ -26,7 +26,8 @@ async def test_sandbox_protocol_rejects_unknown_or_missing_fields() -> None:
 
 
 async def test_missing_file_is_reported_as_not_found(tmp_path: Path) -> None:
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         with pytest.raises(AIError) as raised:
             await session.read_file("missing.json")
@@ -37,7 +38,8 @@ async def test_missing_file_is_reported_as_not_found(tmp_path: Path) -> None:
 
 
 async def test_missing_write_parent_is_reported_as_not_found(tmp_path: Path) -> None:
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         with pytest.raises(AIError) as raised:
             await session.write_file(

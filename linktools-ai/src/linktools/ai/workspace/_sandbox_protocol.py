@@ -29,6 +29,15 @@ MAX_ACTIVE_REQUESTS = 256
 MAX_SAFE_DETAILS_BYTES = 8 * 1024
 MAX_FRAME_BYTES = 8 * 1024 * 1024
 _REQUEST_FIELDS = {
+    "run_command": (
+        frozenset({"command"}),
+        frozenset({"timeout_seconds"}),
+    ),
+    "start_command": (frozenset({"command"}), frozenset()),
+    "check_command": (frozenset({"command_id"}), frozenset()),
+    "stop_command": (frozenset({"command_id"}), frozenset()),
+    "raw_filesystem": (frozenset({"operation", "path"}), frozenset({"data"})),
+    "execute_command": (frozenset({"command"}), frozenset({"environment", "timeout_seconds"})),
     "inspect_file": (frozenset({"path"}), frozenset({"max_bytes"})),
     "read_text": (
         frozenset({"path"}),
@@ -59,15 +68,10 @@ _REQUEST_FIELDS = {
     ),
     "create_directory": (frozenset({"path"}), frozenset()),
     "file_info": (frozenset({"path"}), frozenset()),
-    "run_command": (
-        frozenset({"command"}),
-        frozenset({"timeout_seconds"}),
-    ),
-    "start_command": (frozenset({"command"}), frozenset()),
-    "check_command": (frozenset({"command_id"}), frozenset()),
-    "stop_command": (frozenset({"command_id"}), frozenset()),
+
 }
 _REQUEST_VALUE_TYPES = {
+    "operation": (str,), "data": (str, type(None)), "environment": (dict, type(None)),
     "path": (str,),
     "pattern": (str,),
     "include_glob": (str, type(None)),

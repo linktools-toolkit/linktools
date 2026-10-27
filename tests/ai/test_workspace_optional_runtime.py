@@ -26,10 +26,9 @@ from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime import _factory as runtime_factory
 from linktools.ai.storage import StorageOverlay
 from linktools.ai.workspace import (
-    DisabledSandbox,
-    LocalSandbox,
-    SandboxResource,
-    SandboxSession,
+    LocalWorkspaceBackend,
+    WorkspaceResource,
+    SupportsFileTools,
     Workspace,
 )
 
@@ -38,17 +37,17 @@ from ._runtime_test_helpers import RuntimeUsageModels
 
 class _RecordingLocalSandbox:
     def __init__(self) -> None:
-        self.opened: list[tuple[Path, tuple[SandboxResource, ...]]] = []
-        self.sessions: list[SandboxSession] = []
+        self.opened: list[tuple[Path, tuple[WorkspaceResource, ...]]] = []
+        self.sessions: list[SupportsFileTools] = []
 
-    async def open(
+    def __call__(
         self,
-        *,
         root: Path,
-        resources: tuple[SandboxResource, ...] = (),
-    ) -> SandboxSession:
+        *,
+        resources: tuple[WorkspaceResource, ...] = (),
+    ) -> SupportsFileTools:
         self.opened.append((root, resources))
-        session = await LocalSandbox().open(root=root, resources=resources)
+        session = LocalWorkspaceBackend(root, resources=resources)
         self.sessions.append(session)
         return session
 
@@ -103,7 +102,7 @@ async def test_workspace_group_sandbox_controls_input_reads(tmp_path: Path) -> N
     group = workspace_features(
         "workspace",
         workspace=workspace,
-        sandbox=DisabledSandbox(),
+        workspace_factory=None,
     )
 
     async with Persistence.open('workspace-sandbox', storage=PersistenceStorage.in_memory()) as persistence_114, Runtime.attach(persistence=persistence_114, features=model_features(RuntimeUsageModels(), group)) as runtime:
@@ -118,11 +117,11 @@ async def test_workspace_group_sandbox_controls_input_reads(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_sandbox_group_can_be_composed_without_workspace() -> None:
-    sandbox = DisabledSandbox()
-    group = RuntimeFeatures("sandbox", sandbox=sandbox)
+    sandbox = None
+    group = RuntimeFeatures("sandbox", workspace_factory=sandbox)
     snapshot = await group.capture()
     assert snapshot.workspace is None
-    assert snapshot.sandbox is sandbox
+    assert snapshot.workspace_factory is sandbox
 
     async with Persistence.open('sandbox-only', storage=PersistenceStorage.in_memory()) as persistence_136, Runtime.attach(persistence=persistence_136, features=model_features(RuntimeUsageModels(), group)) as runtime:
         result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
@@ -156,7 +155,7 @@ async def test_sandbox_without_workspace_exposes_local_skill_resources(
     sandbox = _RecordingLocalSandbox()
     monkeypatch.chdir(tmp_path)
     try:
-        asset_features = RuntimeFeatures("assets", sandbox=sandbox)
+        asset_features = RuntimeFeatures("assets", workspace_factory=sandbox)
         asset_features.capability(AssetCapability(store), scope="runtime")
         async with Persistence.open('sandbox-skill', storage=PersistenceStorage.in_memory()) as persistence_174, Runtime.attach(persistence=persistence_174, features=model_features(RuntimeUsageModels(), asset_features)) as runtime:
             result = (await runtime.agents.get("default").run(
@@ -164,14 +163,16 @@ async def test_sandbox_without_workspace_exposes_local_skill_resources(
                 timeout_seconds=10,
             )).result
         assert result.status is ExecutionStatus.SUCCEEDED
-        assert len(sandbox.opened) == 1
-        root, resources = sandbox.opened[0]
+        activated = [(opened, backend) for opened, backend in zip(sandbox.opened, sandbox.sessions)
+                     if backend.ref is not None]
+        assert len(activated) == 1
+        (root, resources), execution_backend = activated[0]
         assert root == tmp_path.resolve()
         assert len(resources) == 1
         assert resources[0].files is not None
         assert resources[0].files["run.sh"] == script.resolve()
         with pytest.raises(AIError) as closed:
-            await sandbox.sessions[0].read_text("anything.txt")
+            await execution_backend.read_text("anything.txt")
         assert closed.value.code is ErrorCode.SANDBOX_SESSION_CLOSED
     finally:
         await store.close()
@@ -182,7 +183,7 @@ async def test_explicit_sandbox_controls_workspace_input_reads(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "evidence.txt").write_text("evidence", encoding="utf-8")
-    async with Persistence.open('separate-sandbox', storage=PersistenceStorage.in_memory()) as persistence_202, Runtime.attach(persistence=persistence_202, features=model_features(RuntimeUsageModels(), workspace_features('workspace', workspace=Workspace.load(tmp_path), sandbox=DisabledSandbox()))) as runtime:
+    async with Persistence.open('separate-sandbox', storage=PersistenceStorage.in_memory()) as persistence_202, Runtime.attach(persistence=persistence_202, features=model_features(RuntimeUsageModels(), workspace_features('workspace', workspace=Workspace.load(tmp_path), workspace_factory=None))) as runtime:
         with pytest.raises(AIError) as error:
             await runtime.agents.get("default").run(
                 "inspect",
@@ -195,7 +196,7 @@ async def test_explicit_sandbox_controls_workspace_input_reads(
 async def test_runtime_features_rejects_multiple_sources() -> None:
     # A single RuntimeFeatures owns sandbox selection; arrays are no longer an API.
     with pytest.raises(TypeError, match="features"):
-        async with Persistence.open('sandbox-conflict', storage=PersistenceStorage.in_memory()) as persistence_219, Runtime.attach(persistence=persistence_219, features=(RuntimeFeatures('first', sandbox=DisabledSandbox()), RuntimeFeatures('second', sandbox=DisabledSandbox()))):
+        async with Persistence.open('sandbox-conflict', storage=PersistenceStorage.in_memory()) as persistence_219, Runtime.attach(persistence=persistence_219, features=(RuntimeFeatures('first', workspace_factory=None), RuntimeFeatures('second', workspace_factory=None))):
             pytest.fail("multiple feature sources were accepted")
 
 

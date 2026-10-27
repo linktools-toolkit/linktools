@@ -4,10 +4,12 @@
 
 The local backend provides the sandbox contract and lifecycle guarantees; it
 is deliberately not a security sandbox.  Agent code still only receives the
-logical file and command operations exposed by ``SandboxSession``.
+logical file and command operations exposed by the native workspace backend.
 """
 
 import asyncio
+import shlex
+import shutil
 import codecs
 import ctypes
 import fnmatch
@@ -16,7 +18,6 @@ import hashlib
 import mimetypes
 import os
 import re
-import shlex
 import stat
 import sys
 import time
@@ -32,13 +33,13 @@ from linktools.core import environ
 
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
+from ._native import _NativeWorkspaceOperations
 from ._sandbox import (
-    SandboxOperationRejected,
-    ReadOnlySandboxPolicy,
-    SandboxResource,
-    SandboxResourcePath,
-    SandboxStdioProcess,
-    StdioSandboxSession,
+    WorkspaceOperationRejected,
+    WorkspaceReadPolicy,
+    WorkspaceResource,
+    WorkspaceResourcePath,
+    WorkspaceStdioProcess,
     _normalize_stdio_environment,
     _stdio_resource_root,
     normalize_workspace_input_path,
@@ -86,6 +87,8 @@ _WINDOWS_RESERVED_NAMES = frozenset(
         *(f"LPT{index}" for index in range(1, 10)),
     }
 )
+
+
 _DANGEROUS_COMMANDS = frozenset(
     {
         "rm",
@@ -102,89 +105,36 @@ _DANGEROUS_COMMANDS = frozenset(
 )
 
 
-class LocalSandbox:
-    """Open local sessions rooted at the caller-provided directory.
-
-    ``allow_host_stdio_with_read_policy`` explicitly permits trusted host stdio
-    processes alongside restricted file APIs. The read policy does not constrain
-    those processes' OS access; this backend does not provide OS isolation.
-    """
-
+class LocalWorkspaceBackend(_NativeWorkspaceOperations):
     def __init__(
         self,
+        root: Path,
         *,
-        read_policy: ReadOnlySandboxPolicy | None = None,
+        resources: tuple[WorkspaceResource, ...] = (),
+        read_policy: WorkspaceReadPolicy | None = None,
         allow_host_stdio_with_read_policy: bool = False,
     ) -> None:
-        if read_policy is not None and not isinstance(
-            read_policy,
-            ReadOnlySandboxPolicy,
-        ):
-            raise TypeError("read_policy must be ReadOnlySandboxPolicy")
+        if not isinstance(root, Path):
+            raise TypeError("root must be a Path")
+        if read_policy is not None and not isinstance(read_policy, WorkspaceReadPolicy):
+            raise TypeError("read_policy must be WorkspaceReadPolicy")
         if not isinstance(allow_host_stdio_with_read_policy, bool):
             raise TypeError("allow_host_stdio_with_read_policy must be bool")
-        self._read_policy = read_policy
-        self._allow_host_stdio_with_read_policy = allow_host_stdio_with_read_policy
-
-    def stdio_execution_policy(self) -> Mapping[str, JsonValue]:
-        """Describe LocalSandbox stdio as an explicit host process boundary."""
-        if self._read_policy is not None and not self._allow_host_stdio_with_read_policy:
-            raise AIError(
-                ErrorCode.SANDBOX_UNAVAILABLE,
-                safe_details={"reason": "local_stdio_read_policy_unsupported"},
-            )
-        return {"version": 1, "boundary": "host-stdio"}
-
-    async def open(
-        self,
-        *,
-        root: Path,
-        resources: tuple[SandboxResource, ...] = (),
-    ) -> StdioSandboxSession:
-        policy = self._read_policy
-        normalized_root = _normalize_root(root)
-        workspace = Workspace(normalized_root, {})
-        normalized_resources = _validate_resources(workspace, resources)
-        _logger.debug(
-            "opening local sandbox session: root=%s resources=%s",
-            normalized_root,
-            tuple(resource.id for resource in normalized_resources),
-        )
-        lock_root = workspace.locks_root
-        return _LocalSandboxSession(
-            normalized_root,
-            normalized_resources,
-            lock_root=lock_root,
-            read_policy=policy,
-            allow_host_stdio_with_read_policy=self._allow_host_stdio_with_read_policy,
-            workspace=workspace,
-        )
-
-
-
-
-class _LocalSandboxSession:
-    def __init__(
-        self,
-        root: Path,
-        resources: tuple[SandboxResource, ...],
-        *,
-        lock_root: Path | None = None,
-        read_policy: ReadOnlySandboxPolicy | None = None,
-        allow_host_stdio_with_read_policy: bool = False,
-        workspace: Workspace | None = None,
-    ) -> None:
-        self._root = root
-        self._workspace = workspace if workspace is not None else Workspace(root, {})
+        self._root = root.absolute()
+        self._ref_id: str | None = None
+        self._initialize_lock = asyncio.Lock()
+        self._initialized = False
+        self._resource_config = resources
+        self._workspace: Workspace
         self._resources = {
-            resource.id: (resource.source.resolve() if resource.source is not None else None, resource)
+            resource.id: (resource.source if resource.source is not None else None, resource)
             for resource in resources
         }
-        self._lock_root = lock_root or self._workspace.locks_root
+        self._lock_root: Path | None = None
         self._read_policy = read_policy
         self._allow_host_stdio_with_read_policy = allow_host_stdio_with_read_policy
         self._environment = _command_environment()
-        self._state = "OPEN"
+        self._state = "NEW"
         self._state_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
         self._processes: dict[str, _ProcessState] = {}
@@ -196,6 +146,149 @@ class _LocalSandboxSession:
         self._starting_operations: set[asyncio.Future[None]] = set()
         self._starting_background = 0
         self._process_lock = asyncio.Lock()
+
+    async def _initialize(self) -> None:
+        async with self._initialize_lock:
+            if self._initialized:
+                return
+            if self._state != "NEW":
+                raise AIError(_session_state_error(self._state))
+            self._ref_id = uuid.uuid4().hex
+            try:
+                self._root = _normalize_root(self._root)
+                self._workspace = Workspace(self._root, {})
+                resources = _validate_resources(self._workspace, self._resource_config)
+                self._resources = {resource.id: (resource.source, resource) for resource in resources}
+                if self._lock_root is None:
+                    self._lock_root = self._workspace.locks_root
+                self._state = "OPEN"
+                self._initialized = True
+            except BaseException:
+                self._state = "LOST"
+                raise
+
+    def stdio_execution_policy(self) -> Mapping[str, JsonValue]:
+        if self._read_policy is not None and not self._allow_host_stdio_with_read_policy:
+            raise AIError(ErrorCode.SANDBOX_UNAVAILABLE,
+                          safe_details={"reason": "local_stdio_read_policy_unsupported"})
+        return {"version": 1, "boundary": "host-stdio"}
+
+    @property
+    def execution_root(self) -> str:
+        return self._root.as_posix()
+
+    async def raw_filesystem(
+        self, operation: str, path: str, *, data: bytes | None = None,
+    ) -> Mapping[str, JsonValue]:
+        """Execute raw file primitives under the same path and resource authority."""
+        def perform() -> Mapping[str, JsonValue]:
+            selected_path = path
+            if operation == "realpath":
+                try:
+                    selected_path = (self._root / path).resolve(strict=False).as_posix()
+                except (OSError, RuntimeError) as error:
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED) from error
+            mutation = operation in {"write", "mkdir", "remove"}
+            if mutation:
+                self._reject_read_only()
+                normalized = _normalize_path(path)
+                if _is_protected(self._workspace, normalized):
+                    raise WorkspaceOperationRejected(ErrorCode.AUTHORIZATION_DENIED)
+                target = self._resolve_path(normalized, allow_missing=True)
+                if _is_protected(self._workspace, _relative(self._root, target.resolve())):
+                    raise WorkspaceOperationRejected(ErrorCode.AUTHORIZATION_DENIED)
+            else:
+                target, normalized, resource = self._read_target(
+                    selected_path, allow_missing=True, directory=None,
+                )
+            if operation == "realpath":
+                return {"path": target.resolve(strict=False).as_posix()}
+            if operation == "exists":
+                return {"exists": target.exists()}
+            if operation == "write":
+                if not isinstance(data, bytes):
+                    raise WorkspaceOperationRejected(ErrorCode.REQUEST_FIELD_INVALID)
+                if target.exists() and not target.is_file():
+                    raise WorkspaceOperationRejected(ErrorCode.REQUEST_FIELD_INVALID)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+                return {}
+            if operation == "mkdir":
+                target.mkdir(parents=True, exist_ok=True)
+                return {}
+            if operation == "remove":
+                if target == self._root or _inside_or_equal(target, self._root):
+                    raise WorkspaceOperationRejected(ErrorCode.AUTHORIZATION_DENIED)
+                original = self._root / normalized
+                if original.is_symlink():
+                    original.unlink()
+                elif target.is_dir():
+                    for child in target.rglob("*"):
+                        if _is_protected(self._workspace, _relative(self._root, child)):
+                            raise WorkspaceOperationRejected(ErrorCode.AUTHORIZATION_DENIED)
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+                return {}
+            if operation == "stat":
+                return self._raw_entry(target)
+            if operation == "list":
+                items = []
+                for child in target.iterdir():
+                    relative = (PurePosixPath(normalized) / child.name).as_posix()
+                    if self._visible_read_path(relative, resource_key=resource, directory=child.is_dir()):
+                        # Resolve each child before exposing metadata through a symlink.
+                        self._read_target(child.as_posix(), directory=None)
+                        items.append(self._raw_entry(child))
+                return {"entries": items}
+            raise WorkspaceOperationRejected(ErrorCode.REQUEST_FIELD_INVALID)
+        try:
+            return await self._run_sync(perform)
+        except FileNotFoundError as error:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
+        except (IsADirectoryError, NotADirectoryError) as error:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+
+    def _raw_entry(self, path: Path) -> dict[str, JsonValue]:
+        info = path.stat()
+        return {"name": path.name, "path": path.as_posix(),
+                "is_dir": stat.S_ISDIR(info.st_mode), "size": info.st_size}
+
+    async def execute_command(
+        self, command: str, *, environment: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> Mapping[str, JsonValue]:
+        """Execute an authorized backend command and preserve structured output."""
+        self._reject_read_only()
+        try:
+            environment = _normalize_stdio_environment(environment)
+            _validate_command_input(command)
+        except AIError as error:
+            raise WorkspaceOperationRejected.from_error(error) from error
+        await self._ensure_open()
+        process = await self._start_process(command, environment=environment)
+        timed_out = False
+        cleanup_succeeded = True
+        try:
+            await asyncio.wait_for(asyncio.shield(process.wait_task), timeout_seconds)
+        except asyncio.TimeoutError:
+            timed_out = True
+            cleanup_succeeded = False
+            await _stop_process(process, force=True)
+            cleanup_succeeded = True
+        except BaseException:
+            try:
+                await _finish_task(asyncio.create_task(_stop_process(process, force=True)))
+            except BaseException:
+                cleanup_succeeded = False
+                raise
+            raise
+        finally:
+            if cleanup_succeeded:
+                await self._forget_process(process.command_id)
+        return {"exit_code": process.process.returncode, "stdout": "".join(process.stdout),
+                "stderr": "".join(process.stderr), "timed_out": timed_out,
+                "output_truncated": process.output_truncated}
 
     def resource_path(self, resource_id: str) -> "str | None":
         self._ensure_open_sync()
@@ -236,12 +329,12 @@ class _LocalSandboxSession:
     async def open_stdio_process(
         self,
         command: str,
-        args: "Sequence[str | SandboxResourcePath]" = (),
+        args: "Sequence[str | WorkspaceResourcePath]" = (),
         *,
-        resources: "Sequence[SandboxResource]" = (),
+        resources: "Sequence[WorkspaceResource]" = (),
         environment: "Mapping[str, str] | None" = None,
         cwd_resource_id: str | None = None,
-    ) -> SandboxStdioProcess:
+    ) -> WorkspaceStdioProcess:
         """Open a trusted host process outside the file API's read policy."""
         if self._read_policy is not None and not self._allow_host_stdio_with_read_policy:
             raise AIError(
@@ -257,6 +350,10 @@ class _LocalSandboxSession:
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
+        if os.name != "posix":
+            raise WorkspaceOperationRejected(ErrorCode.SANDBOX_UNAVAILABLE,
+                                              safe_details={"reason": "posix_execution_required"})
+        await self._ensure_open()
         selected_resources = _validate_resources(
             self._workspace,
             tuple(resources),
@@ -363,7 +460,7 @@ class _LocalSandboxSession:
 
         return await self._run_sync(operation)
 
-    async def read_bytes(
+    async def _read_bytes(
         self,
         path: str,
         *,
@@ -520,20 +617,20 @@ class _LocalSandboxSession:
             )
             _validate_text(content)
         except AIError as error:
-            raise SandboxOperationRejected.from_error(error) from error
+            raise WorkspaceOperationRejected.from_error(error) from error
 
         def operation() -> str:
             try:
                 target = self._file_path(normalized, write=True)
             except AIError as error:
-                raise SandboxOperationRejected.from_error(error) from error
+                raise WorkspaceOperationRejected.from_error(error) from error
             with _file_lock(self._lock_root, _relative(self._root, target)):
                 if expected is not None:
                     try:
                         current_hash = _read_optional_hash(target, normalized)
                         _check_expected_digest(current_hash, expected)
                     except AIError as error:
-                        raise SandboxOperationRejected.from_error(error) from error
+                        raise WorkspaceOperationRejected.from_error(error) from error
                 _atomic_write(self._root, target, content)
             digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
             return _write_result(normalized, digest)
@@ -566,13 +663,13 @@ class _LocalSandboxSession:
             _validate_text(old_text)
             _validate_text(new_text)
         except AIError as error:
-            raise SandboxOperationRejected.from_error(error) from error
+            raise WorkspaceOperationRejected.from_error(error) from error
 
         def operation() -> str:
             try:
                 target = self._file_path(normalized, write=True)
             except AIError as error:
-                raise SandboxOperationRejected.from_error(error) from error
+                raise WorkspaceOperationRejected.from_error(error) from error
             with _file_lock(self._lock_root, _relative(self._root, target)):
                 digest = _stream_edit(
                     self._root, target, normalized, old_text, new_text, expected,
@@ -939,7 +1036,7 @@ class _LocalSandboxSession:
             normalized = _normalize_path(path)
             validate_request_size("create_directory", {"path": path})
         except AIError as error:
-            raise SandboxOperationRejected.from_error(error) from error
+            raise WorkspaceOperationRejected.from_error(error) from error
 
         def operation() -> str:
             try:
@@ -953,7 +1050,7 @@ class _LocalSandboxSession:
                     return _write_result(normalized, "directory", status="exists")
                 _check_parent_chain(self._root, target.parent)
             except AIError as error:
-                raise SandboxOperationRejected.from_error(error) from error
+                raise WorkspaceOperationRejected.from_error(error) from error
             with _file_lock(self._lock_root, relative):
                 try:
                     target.mkdir(parents=True, exist_ok=True)
@@ -1033,7 +1130,7 @@ class _LocalSandboxSession:
             _validate_command(command)
             timeout = _command_timeout(timeout_seconds)
         except AIError as error:
-            raise SandboxOperationRejected.from_error(error) from error
+            raise WorkspaceOperationRejected.from_error(error) from error
         await self._ensure_open()
         process = await self._start_process(command)
         cleanup_succeeded = True
@@ -1078,11 +1175,11 @@ class _LocalSandboxSession:
             _validate_command_input(command)
             _validate_command(command)
         except AIError as error:
-            raise SandboxOperationRejected.from_error(error) from error
+            raise WorkspaceOperationRejected.from_error(error) from error
         await self._ensure_open()
         async with self._process_lock:
             if len(self._processes) + self._starting_background >= 256:
-                raise SandboxOperationRejected(ErrorCode.TOO_MANY_PENDING_OPERATIONS)
+                raise WorkspaceOperationRejected(ErrorCode.TOO_MANY_PENDING_OPERATIONS)
             self._starting_background += 1
         try:
             process = await self._start_process(command)
@@ -1111,10 +1208,10 @@ class _LocalSandboxSession:
             if not command_id:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         except AIError as error:
-            raise SandboxOperationRejected.from_error(error) from error
+            raise WorkspaceOperationRejected.from_error(error) from error
         process = await self._get_process(command_id)
         if process is None:
-            raise SandboxOperationRejected(ErrorCode.REQUEST_FIELD_INVALID)
+            raise WorkspaceOperationRejected(ErrorCode.REQUEST_FIELD_INVALID)
         await _stop_process(process, force=False)
         return _command_result(process)
 
@@ -1205,6 +1302,7 @@ class _LocalSandboxSession:
         )
 
     async def _ensure_open(self) -> None:
+        await self._initialize()
         async with self._state_lock:
             if self._state != "OPEN":
                 code = (
@@ -1216,7 +1314,7 @@ class _LocalSandboxSession:
 
     def _reject_read_only(self) -> None:
         if self._read_policy is not None:
-            raise SandboxOperationRejected(ErrorCode.AUTHORIZATION_DENIED)
+            raise WorkspaceOperationRejected(ErrorCode.AUTHORIZATION_DENIED)
 
     def _authorize_read(
         self,
@@ -1225,7 +1323,7 @@ class _LocalSandboxSession:
         resource_key: str | None = None,
         directory: bool | None = False,
     ) -> None:
-        if self._read_policy is None:
+        if self._read_policy is None and resource_key is None:
             return
         if directory is None:
             allowed = self._visible_read_path(
@@ -1287,8 +1385,7 @@ class _LocalSandboxSession:
         resource_key: str | None = None
         base = self._root
         if (
-            self._read_policy is not None
-            and isinstance(path, str)
+            isinstance(path, str)
             and Path(path).is_absolute()
         ):
             candidate = Path(path)
@@ -1342,6 +1439,7 @@ class _LocalSandboxSession:
             raise AIError(code)
 
     async def _run_sync(self, operation: Callable[[], _SyncResult]) -> _SyncResult:
+        await self._ensure_open()
         async with self._state_lock:
             if self._state != "OPEN":
                 code = (
@@ -1424,28 +1522,26 @@ class _LocalSandboxSession:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return candidate
 
-    async def _start_process(self, command: str) -> "_ProcessState":
+    async def _start_process(self, command: str, *, environment: Mapping[str, str] | None = None) -> "_ProcessState":
         started = asyncio.get_running_loop().create_future()
         async with self._process_lock:
             if self._state != "OPEN":
                 raise AIError(_session_state_error(self._state))
             self._starting_operations.add(started)
         try:
-            return await self._spawn_process(command)
+            return await self._spawn_process(command, environment=environment)
         finally:
             started.set_result(None)
             self._starting_operations.discard(started)
 
-    async def _spawn_process(self, command: str) -> "_ProcessState":
+    async def _spawn_process(self, command: str, *, environment: Mapping[str, str] | None = None) -> "_ProcessState":
+        if os.name != "posix":
+            raise WorkspaceOperationRejected(ErrorCode.SANDBOX_UNAVAILABLE,
+                                              safe_details={"reason": "posix_execution_required"})
         await self._ensure_open()
-        environment = dict(self._environment)
+        environment = {**self._environment, **(environment or {})}
         job: _WindowsJob | None = None
-        if os.name == "nt":
-            job = _WindowsJob.create()
-        if os.name == "nt":
-            executable = self._environment.get("COMSPEC", "cmd.exe")
-        else:
-            executable = "/bin/sh"
+        executable = "/bin/sh"
         process_kwargs: dict[str, object] = {
             "cwd": str(self._root),
             "env": environment,
@@ -1459,14 +1555,6 @@ class _LocalSandboxSession:
             process_kwargs["start_new_session"] = True
 
         async def create_process() -> asyncio.subprocess.Process:
-            if os.name == "nt":
-                return await asyncio.create_subprocess_exec(
-                    executable,
-                    "/d",
-                    "/c",
-                    command,
-                    **process_kwargs,
-                )
             return await asyncio.create_subprocess_exec(
                 executable,
                 "-c",
@@ -1718,8 +1806,8 @@ class _LocalStdioProcess:
 
 
 def _local_stdio_command_args(
-    args: Sequence[str | SandboxResourcePath],
-    resources: Sequence[SandboxResource],
+    args: Sequence[str | WorkspaceResourcePath],
+    resources: Sequence[WorkspaceResource],
 ) -> tuple[str, ...]:
     by_id = {resource.id: resource for resource in resources}
     result: list[str] = []
@@ -1729,7 +1817,7 @@ def _local_stdio_command_args(
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             result.append(argument)
             continue
-        if not isinstance(argument, SandboxResourcePath):
+        if not isinstance(argument, WorkspaceResourcePath):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         resource = by_id.get(argument.resource_id)
         if resource is None:
@@ -1776,16 +1864,16 @@ def _session_state_error(state: str) -> ErrorCode:
 
 def _validate_resources(
     workspace: Workspace,
-    resources: tuple[SandboxResource, ...],
-) -> tuple[SandboxResource, ...]:
+    resources: tuple[WorkspaceResource, ...],
+) -> tuple[WorkspaceResource, ...]:
     if not isinstance(resources, tuple):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     seen: set[str] = set()
-    values: list[SandboxResource] = []
+    values: list[WorkspaceResource] = []
     root = workspace.root
     storage_root = workspace.storage_root
     for resource in resources:
-        if not isinstance(resource, SandboxResource) or resource.id in seen:
+        if not isinstance(resource, WorkspaceResource) or resource.id in seen:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         source = resource.source
         if source is None:
@@ -2251,20 +2339,20 @@ def _stream_edit(
                 _check_state(path, logical, source, source_state)
         except FileNotFoundError as error:
             code = ErrorCode.STORAGE_CONFLICT if expected_hash is not None else ErrorCode.STORAGE_NOT_FOUND
-            raise SandboxOperationRejected(code) from error
+            raise WorkspaceOperationRejected(code) from error
         except UnicodeDecodeError as error:
-            raise SandboxOperationRejected(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "invalid_utf8"}) from error
+            raise WorkspaceOperationRejected(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "invalid_utf8"}) from error
         except AIError as error:
-            raise SandboxOperationRejected.from_error(error) from error
+            raise WorkspaceOperationRejected.from_error(error) from error
         except OSError as error:
-            raise SandboxOperationRejected(ErrorCode.STORAGE_UNAVAILABLE) from error
+            raise WorkspaceOperationRejected(ErrorCode.STORAGE_UNAVAILABLE) from error
 
     def check_before_publish() -> None:
         try:
             if source_state is None or _state(logical, path.stat()) != source_state:
-                raise SandboxOperationRejected(ErrorCode.STORAGE_CONFLICT, safe_details={"reason": "file_changed"})
+                raise WorkspaceOperationRejected(ErrorCode.STORAGE_CONFLICT, safe_details={"reason": "file_changed"})
         except FileNotFoundError as error:
-            raise SandboxOperationRejected(ErrorCode.STORAGE_CONFLICT) from error
+            raise WorkspaceOperationRejected(ErrorCode.STORAGE_CONFLICT) from error
 
     _atomic_stream_write(root, path, prepare, before_publish=check_before_publish)
     return updated.hexdigest()
@@ -2634,4 +2722,4 @@ def _secret_environment_key(key: str) -> bool:
 
 
 
-__all__ = ["LocalSandbox"]
+__all__ = ["LocalWorkspaceBackend"]

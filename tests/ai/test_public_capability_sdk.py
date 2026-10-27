@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from ._runtime_test_helpers import FileToolsStub
+
 import pytest
 from pydantic_ai import Agent, RunContext, Tool
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability
@@ -16,7 +18,7 @@ from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.capability import (
     AgentContext, PydanticToolControlCapability, SkillCapability, SkillSourceRegistry,
-    SubagentCapability, ToolCallFailed, ToolCallRetry, workspace_capabilities,
+    SubagentCapability, ToolCallFailed, ToolCallRetry, filesystem_capabilities,
 )
 from linktools.ai.core import Principal
 from linktools.ai.errors import AIError, ErrorCode
@@ -35,7 +37,7 @@ def test_public_capability_import_does_not_load_runtime() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ("skill", "subagent", "workspace"))
 async def test_public_capabilities_allow_model_correction_without_runtime(kind: str, tmp_path: Path) -> None:
-    class BorrowedSession:
+    class BorrowedSession(FileToolsStub):
         closed = 0
 
         async def list_directory(self, path: str = ".") -> list[object]:
@@ -60,8 +62,8 @@ async def test_public_capabilities_allow_model_correction_without_runtime(kind: 
                                    tool_call_id="missing")
         corrected_call = ToolCallPart("list_subagents", {}, tool_call_id="corrected")
     else:
-        capability = workspace_capabilities(
-            Workspace.load(tmp_path), ("list_directory",), session=session,  # type: ignore[arg-type]
+        capability = filesystem_capabilities(
+            Workspace.load(tmp_path), ("list_directory",), backend=session,  # type: ignore[arg-type]
         )[0]
         failed_call = ToolCallPart("list_directory", {"path": "missing"}, tool_call_id="missing")
         corrected_call = ToolCallPart("list_directory", {"path": "."}, tool_call_id="corrected")

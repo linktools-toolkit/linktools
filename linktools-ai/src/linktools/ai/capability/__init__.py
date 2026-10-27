@@ -51,11 +51,12 @@ from ._tool_metadata import (
     tool_metadata,
     validate_tool_metadata,
 )
-from ._workspace import (
-    WorkspaceCapability,
-    WorkspaceToolDeclaration,
-    workspace_capabilities,
-    workspace_tool_declarations,
+from ._shell import ShellCapability
+from ._filesystem import (
+    FileSystem,
+    FileSystemToolDeclaration,
+    filesystem_capabilities,
+    filesystem_tool_declarations,
 )
 from ..spec import mcp_server_selector, mcp_tool_selector
 
@@ -72,7 +73,8 @@ __all__ = [
     "ToolResultsCapability",
     "RunCallbacks", "RunCallbackScope", "bind_run_callbacks",
     "AssetCapability",
-    "WorkspaceCapability",
+    "FileSystem",
+    "ShellCapability",
     "ToolClass",
     "ToolEffectPolicy",
     "is_tool_class",
@@ -94,7 +96,7 @@ __all__ = [
     "TOOL_EFFECT_POLICY_METADATA_KEY",
     "TOOL_PATH_FIELDS_METADATA_KEY",
     "TOOL_PLAN_SAFE_METADATA_KEY",
-    "WorkspaceToolDeclaration",
+    "FileSystemToolDeclaration",
     "SkillDefinition",
     "SkillLocation",
     "SkillSource",
@@ -109,8 +111,8 @@ __all__ = [
     "mcp_resource_path",
     "mcp_server_selector",
     "mcp_tool_selector",
-    "workspace_capabilities",
-    "workspace_tool_declarations",
+    "filesystem_capabilities",
+    "filesystem_tool_declarations",
     "validate_resource_path",
     "validate_resource_tree",
     "tool_class_from_metadata",

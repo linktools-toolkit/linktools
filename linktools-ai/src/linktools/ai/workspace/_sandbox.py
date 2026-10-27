@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from ..asset import AssetMaterializer
 
 
-class SandboxOperationRejected(AIError):
+class WorkspaceOperationRejected(AIError):
     """Prove that one sandbox operation was rejected before external effect."""
 
     def __init__(
@@ -38,7 +38,7 @@ class SandboxOperationRejected(AIError):
         )
 
     @classmethod
-    def from_error(cls, error: AIError) -> "SandboxOperationRejected":
+    def from_error(cls, error: AIError) -> "WorkspaceOperationRejected":
         if isinstance(error, cls):
             return error
         return cls(
@@ -50,7 +50,7 @@ class SandboxOperationRejected(AIError):
 
 
 @dataclass(frozen=True, slots=True)
-class SandboxResource:
+class WorkspaceResource:
     """One read-only directory or set of existing files exposed to a session.
 
     When files is supplied, source locates that set; it does not grant access
@@ -121,7 +121,7 @@ class SandboxResource:
         *,
         executable_bits: Mapping[str, int] | None = None,
         materializer: "AssetMaterializer | None" = None,
-    ) -> "SandboxResource | None":
+    ) -> "WorkspaceResource | None":
         """Expose pinned files, optionally materializing a non-native package."""
         if not files:
             return None
@@ -196,7 +196,7 @@ class SandboxResource:
 
 
 @dataclass(frozen=True, slots=True)
-class ReadOnlySandboxPolicy:
+class WorkspaceReadPolicy:
     """Root-relative read rules shared by supported sandbox backends."""
 
     readable_paths: tuple[str, ...]
@@ -241,24 +241,9 @@ class ReadOnlySandboxPolicy:
         )
 
 
-class Sandbox(Protocol):
-    async def open(
-        self,
-        *,
-        root: Path,
-        resources: tuple[SandboxResource, ...] = (),
-    ) -> "SandboxSession": ...
-
-
-class SandboxSession(Protocol):
-    """Sandbox operation contract.
-
-    Effectful implementations may raise ``SandboxOperationRejected`` only when
-    they can prove that the rejected operation produced no external effect.
-    Ordinary ``AIError`` values carry no effect-certainty guarantee.
-    """
-
-    def resource_path(self, resource_id: str) -> "str | None": ...
+@runtime_checkable
+class SupportsFileTools(Protocol):
+    """Optional bounded and structured operations used by the custom file tools."""
 
     async def canonicalize_path(self, path: str) -> str: ...
 
@@ -333,24 +318,10 @@ class SandboxSession(Protocol):
 
     async def file_info(self, path: str) -> str: ...
 
-    async def run_command(
-        self,
-        command: str,
-        *,
-        timeout_seconds: "float | None" = None,
-    ) -> str: ...
-
-    async def start_command(self, command: str) -> str: ...
-
-    async def check_command(self, command_id: str) -> str: ...
-
-    async def stop_command(self, command_id: str) -> str: ...
-
-    async def close(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
-class SandboxResourcePath:
+class WorkspaceResourcePath:
     """One file path inside a resource explicitly granted to a process."""
 
     resource_id: str
@@ -367,7 +338,7 @@ class SandboxResourcePath:
             raise ValueError("sandbox resource path must name a file")
 
 
-class SandboxStdioProcess(Protocol):
+class WorkspaceStdioProcess(Protocol):
     async def write_stdin(self, data: bytes) -> None: ...
 
     async def read_stdout(self, max_bytes: int = 65536) -> bytes: ...
@@ -378,15 +349,23 @@ class SandboxStdioProcess(Protocol):
 
 
 @runtime_checkable
-class StdioSandbox(Sandbox, Protocol):
-    async def open(
-        self,
-        *,
-        root: Path,
-        resources: tuple[SandboxResource, ...] = (),
-    ) -> "StdioSandboxSession": ...
+class SupportsCommandJobs(Protocol):
+    """Command jobs owned and closed by the same workspace environment."""
 
-    def stdio_execution_policy(self) -> Mapping[str, JsonValue]: ...
+    async def run_command(self, command: str, *, timeout_seconds: float | None = None) -> str: ...
+    async def start_command(self, command: str) -> str: ...
+    async def check_command(self, command_id: str) -> str: ...
+    async def stop_command(self, command_id: str) -> str: ...
+
+
+@runtime_checkable
+class SupportsResources(Protocol):
+    def resource_path(self, resource_id: str) -> str | None: ...
+
+
+@runtime_checkable
+class SupportsClose(Protocol):
+    async def close(self) -> None: ...
 
 
 def _normalize_stdio_environment(
@@ -413,7 +392,7 @@ def _normalize_stdio_environment(
 
 def _stdio_resource_root(
     resource_id: str | None,
-    resources: Sequence[SandboxResource],
+    resources: Sequence[WorkspaceResource],
 ) -> Path | None:
     if resource_id is None:
         return None
@@ -444,16 +423,18 @@ def _stdio_resource_root(
 
 
 @runtime_checkable
-class StdioSandboxSession(SandboxSession, Protocol):
+class SupportsStdio(Protocol):
+    def stdio_execution_policy(self) -> Mapping[str, JsonValue]: ...
+
     async def open_stdio_process(
         self,
         command: str,
-        args: "Sequence[str | SandboxResourcePath]" = (),
+        args: "Sequence[str | WorkspaceResourcePath]" = (),
         *,
-        resources: "Sequence[SandboxResource]" = (),
+        resources: "Sequence[WorkspaceResource]" = (),
         environment: "Mapping[str, str] | None" = None,
         cwd_resource_id: str | None = None,
-    ) -> SandboxStdioProcess:
+    ) -> WorkspaceStdioProcess:
         """Start in the Workspace or one explicitly granted resource root."""
         ...
 
@@ -485,16 +466,6 @@ def normalize_workspace_input_path(path: str) -> str:
     except ValueError as error:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
-
-class DisabledSandbox:
-    async def open(
-        self,
-        *,
-        root: Path,
-        resources: tuple[SandboxResource, ...] = (),
-    ) -> SandboxSession:
-        del root, resources
-        raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
 
 
 def _normalize_read_pattern(value: str) -> str:
@@ -569,15 +540,7 @@ def _match_segment(pattern: str, value: str) -> bool:
 
 
 __all__ = [
-    "DisabledSandbox",
-    "Sandbox",
-    "SandboxOperationRejected",
-    "SandboxResource",
-    "SandboxResourcePath",
-    "SandboxSession",
-    "SandboxStdioProcess",
-    "StdioSandbox",
-    "StdioSandboxSession",
-    "ReadOnlySandboxPolicy",
-    "normalize_workspace_input_path",
+    "WorkspaceOperationRejected", "WorkspaceResource", "WorkspaceResourcePath",
+    "WorkspaceReadPolicy", "WorkspaceStdioProcess", "SupportsFileTools", "SupportsStdio",
+    "SupportsResources", "SupportsClose", "SupportsCommandJobs", "normalize_workspace_input_path",
 ]

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import base64
 import asyncio
 import errno
 import hashlib
@@ -25,14 +26,13 @@ from linktools.core import environ
 from ..core import ImmutableJsonMapping, JsonValue
 from ..errors import AIError, ErrorCode
 from ._local_process import _finish_task
+from ._native import _NativeWorkspaceOperations
 from ._sandbox import (
-    SandboxOperationRejected,
-    ReadOnlySandboxPolicy,
-    SandboxResource,
-    SandboxResourcePath,
-    SandboxStdioProcess,
-    StdioSandbox,
-    StdioSandboxSession,
+    WorkspaceOperationRejected,
+    WorkspaceReadPolicy,
+    WorkspaceResource,
+    WorkspaceResourcePath,
+    WorkspaceStdioProcess,
     _normalize_stdio_environment,
     _stdio_resource_root,
     normalize_workspace_input_path,
@@ -82,16 +82,18 @@ _TMPFS_SIZES = (
 _VERSION_PATTERN = re.compile(r"(?:^|\s)(\d+)\.(\d+)\.(\d+)(?:\s|$)")
 
 
-class BubblewrapSandbox:
+class BubblewrapWorkspaceBackend(_NativeWorkspaceOperations):
     """Open a worker in a fixed Linux namespace and mount layout."""
 
     def __init__(
         self,
+        root: Path,
         *,
+        resources: tuple[WorkspaceResource, ...] = (),
         runtime_root: Path,
         bwrap_executable: Path,
         hidden_paths: tuple[str, ...] = (),
-        read_policy: ReadOnlySandboxPolicy | None = None,
+        read_policy: WorkspaceReadPolicy | None = None,
     ) -> None:
         if not isinstance(runtime_root, Path) or not runtime_root.is_absolute():
             raise ValueError("runtime_root must be an absolute Path")
@@ -99,26 +101,44 @@ class BubblewrapSandbox:
             raise ValueError("bwrap_executable must be an absolute Path")
         if not isinstance(hidden_paths, tuple):
             raise TypeError("hidden_paths must be a tuple")
+        self._root_config = root
+        self._resource_config = resources
+        self._process: asyncio.subprocess.Process | None = None
+        self._ref_id: str | None = None
+        self._initialize_lock = asyncio.Lock()
+        self._initialized = False
+        self._state = "NEW"
+        self._state_lock = asyncio.Lock()
         self._runtime_root = runtime_root
         self._bwrap_executable = bwrap_executable
         self._hidden_paths = _normalize_hidden_paths(hidden_paths)
         if read_policy is not None and not isinstance(
             read_policy,
-            ReadOnlySandboxPolicy,
+            WorkspaceReadPolicy,
         ):
-            raise TypeError("read_policy must be ReadOnlySandboxPolicy")
+            raise TypeError("read_policy must be WorkspaceReadPolicy")
         self._read_policy = read_policy
 
     def stdio_execution_policy(self) -> Mapping[str, JsonValue]:
         """Describe the configured stdio boundary without opening a session."""
         return _stdio_execution_policy(self._read_policy, self._hidden_paths)
 
-    async def open(
-        self,
-        *,
-        root: Path,
-        resources: tuple[SandboxResource, ...] = (),
-    ) -> StdioSandboxSession:
+    async def _initialize(self) -> None:
+        async with self._initialize_lock:
+            if self._initialized:
+                return
+            if self._state != "NEW":
+                raise AIError(_session_state_error(self._state))
+            self._ref_id = uuid.uuid4().hex
+            try:
+                await self._open_environment()
+                self._initialized = True
+            except BaseException:
+                self._state = "LOST"
+                raise
+
+    async def _open_environment(self) -> None:
+        root, resources = self._root_config, self._resource_config
         if sys.platform != "linux" or os.geteuid() == 0:
             raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
         if not hasattr(os, "pidfd_open"):
@@ -140,6 +160,7 @@ class BubblewrapSandbox:
         runtime_pidfd = -1
         process: asyncio.subprocess.Process | None = None
         session_transferred = False
+        cleanup_complete = False
         try:
             _prepare_directory(lock_root)
             _validate_rootfs(runtime_root, normalized_root)
@@ -160,13 +181,7 @@ class BubblewrapSandbox:
                 read_policy=policy,
             )
             process, control_fd = await _spawn_guardian(config, runtime_pidfd)
-            if control_fd >= 0:
-                _close_fd(control_fd)
-                await _abort_guardian(process)
-                raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
-            _close_fd(runtime_pidfd)
-            runtime_pidfd = -1
-            session = _BubblewrapSandboxSession(
+            self._initialize_process(
                 process,
                 {
                     resource.id: _resource_guest_path(resource.id)
@@ -185,10 +200,16 @@ class BubblewrapSandbox:
                 lock_root=lock_root if cleanup_lock_root else None,
                 workspace=workspace,
             )
+            if control_fd >= 0:
+                _close_fd(control_fd)
+                await _abort_guardian(process)
+                raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
+            _close_fd(runtime_pidfd)
+            runtime_pidfd = -1
             try:
-                await session._open_handshake()
+                await self._open_handshake()
             except BaseException:
-                await session._stop_background_tasks()
+                await self._stop_background_tasks()
                 raise
             session_transferred = True
             _logger.info(
@@ -196,28 +217,29 @@ class BubblewrapSandbox:
                 normalized_root,
                 tuple(resource.id for resource in normalized_resources),
             )
-            return session
+            return
         except asyncio.CancelledError:
             if process is not None:
-                await _finish_task(asyncio.create_task(_abort_guardian_logged(process)))
+                cleanup_complete = await _finish_task(asyncio.create_task(_abort_guardian_logged(process)))
             raise
         except AIError:
             if process is not None:
-                await _abort_guardian_logged(process)
+                cleanup_complete = await _abort_guardian_logged(process)
             raise
         except (OSError, ValueError, RuntimeError, SandboxProtocolError) as error:
             if process is not None:
-                await _abort_guardian_logged(process)
+                cleanup_complete = await _abort_guardian_logged(process)
             raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
         finally:
             if runtime_pidfd >= 0:
                 _close_fd(runtime_pidfd)
-            if cleanup_lock_root and not session_transferred:
-                shutil.rmtree(lock_root, ignore_errors=True)
+            if not session_transferred and (process is None or cleanup_complete):
+                self._process = None
+                if cleanup_lock_root:
+                    shutil.rmtree(lock_root, ignore_errors=True)
 
 
-class _BubblewrapSandboxSession:
-    def __init__(
+    def _initialize_process(
         self,
         process: asyncio.subprocess.Process,
         resources: Mapping[str, str],
@@ -227,7 +249,7 @@ class _BubblewrapSandboxSession:
         runtime_root: Path | None = None,
         bwrap: Path | None = None,
         hidden_paths: tuple[str, ...] = (),
-        read_policy: ReadOnlySandboxPolicy | None = None,
+        read_policy: WorkspaceReadPolicy | None = None,
         lock_root: Path | None = None,
         workspace: Workspace | None = None,
     ) -> None:
@@ -285,6 +307,22 @@ class _BubblewrapSandboxSession:
             name="bubblewrap-sandbox-reader",
         )
 
+    @property
+    def execution_root(self) -> str:
+        return "/workspace"
+
+    async def raw_filesystem(self, operation: str, path: str, *, data: bytes | None = None) -> Mapping[str, JsonValue]:
+        return await self._file_result("raw_filesystem", {
+            "operation": operation, "path": path,
+            "data": None if data is None else base64.b64encode(data).decode("ascii"),
+        })
+
+    async def execute_command(self, command: str, *, environment: Mapping[str, str] | None = None,
+                              timeout_seconds: float | None = None) -> Mapping[str, JsonValue]:
+        return await self._file_result("execute_command", {
+            "command": command, "environment": dict(environment or {}), "timeout_seconds": timeout_seconds,
+        })
+
     def resource_path(self, resource_id: str) -> "str | None":
         self._ensure_open_sync()
         if not isinstance(resource_id, str):
@@ -295,17 +333,17 @@ class _BubblewrapSandboxSession:
 
     async def canonicalize_path(self, path: str) -> str:
         """Normalize one logical Workspace path without applying operation policy."""
-        self._ensure_open_sync()
+        await self._ensure_open()
         return normalize_workspace_input_path(path)
 
-    async def read_bytes(
+    async def _read_bytes(
         self,
         path: str,
         *,
         max_bytes: int | None = None,
         expected_state: str | None = None,
     ) -> bytes:
-        self._ensure_open_sync()
+        await self._ensure_open()
         if max_bytes is not None and (
             not isinstance(max_bytes, int)
             or isinstance(max_bytes, bool)
@@ -317,16 +355,43 @@ class _BubblewrapSandboxSession:
         root = self._workspace_root
         if root is None:
             raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
+        state_path = path
+        policy = self._read_policy
+        hidden = self._hidden_paths
+        if path == "/workspace" or path.startswith("/workspace/"):
+            path = path.removeprefix("/workspace").lstrip("/") or "."
+            state_path = path
+        elif path.startswith("/"):
+            matched = next((resource for resource in self._resource_config
+                            if path.startswith(_resource_guest_path(resource.id) + "/")), None)
+            if matched is None:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            relative = normalize_workspace_input_path(path[len(_resource_guest_path(matched.id)) + 1:])
+            if policy is not None and not policy.allows(relative, resource_key=matched.id):
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            if matched.files is not None:
+                target = matched.files.get(relative)
+                if target is None:
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                root, path = target.parent, target.name
+            elif matched.source is not None:
+                root, path = matched.source, relative
+            else:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            state_path, policy, hidden = relative, None, ()
+        else:
+            state_path = path
         normalized = normalize_workspace_input_path(path)
         task = asyncio.create_task(
             asyncio.to_thread(
                 _read_workspace_bytes,
                 root,
                 normalized,
-                read_policy=self._read_policy,
-                hidden_paths=self._hidden_paths,
+                read_policy=policy,
+                hidden_paths=hidden,
                 max_bytes=max_bytes,
                 expected_state=expected_state,
+                state_path=state_path,
             ),
             name="bubblewrap-sandbox-read-bytes",
         )
@@ -345,12 +410,13 @@ class _BubblewrapSandboxSession:
     async def open_stdio_process(
         self,
         command: str,
-        args: "Sequence[str | SandboxResourcePath]" = (),
+        args: "Sequence[str | WorkspaceResourcePath]" = (),
         *,
-        resources: "Sequence[SandboxResource]" = (),
+        resources: "Sequence[WorkspaceResource]" = (),
         environment: "Mapping[str, str] | None" = None,
         cwd_resource_id: str | None = None,
-    ) -> SandboxStdioProcess:
+    ) -> WorkspaceStdioProcess:
+        await self._ensure_open()
         async with self._stdio_lock:
             self._ensure_open_sync()
             if not isinstance(command, str) or not command or "\x00" in command:
@@ -552,6 +618,7 @@ class _BubblewrapSandboxSession:
         return await self._call("check_command", {"command_id": command_id})
 
     async def stop_command(self, command_id: str) -> str:
+        await self._ensure_open()
         async with self._stop_lock:
             sent = asyncio.Event()
             task = asyncio.create_task(
@@ -582,6 +649,10 @@ class _BubblewrapSandboxSession:
                 raise cancellation
 
     async def close(self) -> None:
+        async with self._initialize_lock:
+            if self._process is None:
+                self._state = "CLOSED"
+                return
         async with self._state_lock:
             if self._state == "CLOSED":
                 return
@@ -619,10 +690,11 @@ class _BubblewrapSandboxSession:
         business: bool = True,
         sent_event: asyncio.Event | None = None,
     ) -> str:
+        await self._ensure_open()
         try:
             validate_request_params(method, params)
         except AIError as error:
-            raise SandboxOperationRejected.from_error(error) from error
+            raise WorkspaceOperationRejected.from_error(error) from error
         frame_id = uuid.uuid4().hex
         try:
             frame = encode_frame(
@@ -634,7 +706,7 @@ class _BubblewrapSandboxSession:
                 }
             )
         except AIError as error:
-            raise SandboxOperationRejected.from_error(error) from error
+            raise WorkspaceOperationRejected.from_error(error) from error
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         future.add_done_callback(_consume_future_exception)
         async with self._state_lock:
@@ -645,7 +717,7 @@ class _BubblewrapSandboxSession:
                 if business and pending_business >= MAX_ACTIVE_REQUESTS:
                     raise AIError(ErrorCode.SANDBOX_BUSY)
                 self._pending[frame_id] = (future, business)
-                if method in {"read_text", "inspect_file"}:
+                if method in {"read_text", "inspect_file", "raw_filesystem", "execute_command"}:
                     self._structured_requests.add(frame_id)
         sent = False
         try:
@@ -755,7 +827,7 @@ class _BubblewrapSandboxSession:
             self._structured_requests.discard(request_id)
         exception: AIError
         if effect == ERROR_EFFECT_NOT_APPLIED:
-            exception = SandboxOperationRejected(code, safe_details=dict(details))
+            exception = WorkspaceOperationRejected(code, safe_details=dict(details))
         else:
             exception = AIError(code, safe_details=dict(details))
         if code in {
@@ -890,6 +962,7 @@ class _BubblewrapSandboxSession:
             )
 
     async def _ensure_open(self) -> None:
+        await self._initialize()
         if self._state != "OPEN":
             raise AIError(_session_state_error(self._state))
 
@@ -990,16 +1063,16 @@ def _validate_bwrap(executable: Path) -> None:
 def _validate_resources(
     workspace: Workspace,
     runtime_root: Path,
-    resources: tuple[SandboxResource, ...],
-) -> tuple[SandboxResource, ...]:
+    resources: tuple[WorkspaceResource, ...],
+) -> tuple[WorkspaceResource, ...]:
     if not isinstance(resources, tuple):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     seen: set[str] = set()
-    values: list[SandboxResource] = []
+    values: list[WorkspaceResource] = []
     workspace_root = workspace.root
     storage_root = workspace.storage_root
     for resource in resources:
-        if not isinstance(resource, SandboxResource) or resource.id in seen:
+        if not isinstance(resource, WorkspaceResource) or resource.id in seen:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         source = resource.source
         resolved: Path | None = None
@@ -1032,7 +1105,7 @@ def _validate_resources(
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
                 files[relative] = selected
         seen.add(resource.id)
-        values.append(SandboxResource(resource.id, resolved, files))
+        values.append(WorkspaceResource(resource.id, resolved, files))
     return tuple(values)
 
 
@@ -1062,11 +1135,13 @@ def _read_workspace_bytes(
     root: Path,
     path: str,
     *,
-    read_policy: ReadOnlySandboxPolicy | None,
+    read_policy: WorkspaceReadPolicy | None,
     hidden_paths: tuple[str, ...],
     max_bytes: int | None,
     expected_state: str | None = None,
+    state_path: str | None = None,
 ) -> bytes:
+    state_path = path if state_path is None else state_path
     if path == "." or _hidden_path_covers(hidden_paths, path):
         raise AIError(ErrorCode.AUTHORIZATION_DENIED)
     if read_policy is not None:
@@ -1118,13 +1193,13 @@ def _read_workspace_bytes(
         with os.fdopen(descriptor, "rb") as stream:
             descriptor = -1
             info = os.fstat(stream.fileno())
-            state = _state(path, info)
+            state = _state(state_path, info)
             if expected_state is not None and expected_state != state:
                 raise AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"reason": "file_changed"})
             if max_bytes is not None and info.st_size > max_bytes:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "file_byte_limit"})
             value = stream.read() if max_bytes is None else stream.read(max_bytes + 1)
-            _check_state(root.joinpath(*PurePosixPath(relative).parts), path, stream, state)
+            _check_state(root.joinpath(*PurePosixPath(relative).parts), state_path, stream, state)
         if max_bytes is not None and len(value) > max_bytes:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return value
@@ -1141,7 +1216,7 @@ def _read_workspace_bytes(
 
 
 def _stdio_execution_policy(
-    read_policy: ReadOnlySandboxPolicy | None,
+    read_policy: WorkspaceReadPolicy | None,
     hidden_paths: tuple[str, ...],
 ) -> Mapping[str, JsonValue]:
     if read_policy is None:
@@ -1167,8 +1242,8 @@ def _stdio_execution_policy(
 
 
 def _stdio_command_args(
-    args: Sequence[str | SandboxResourcePath],
-    resources: Sequence[SandboxResource],
+    args: Sequence[str | WorkspaceResourcePath],
+    resources: Sequence[WorkspaceResource],
 ) -> tuple[str, ...]:
     if isinstance(args, (str, bytes, bytearray)):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -1180,7 +1255,7 @@ def _stdio_command_args(
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             result.append(argument)
             continue
-        if not isinstance(argument, SandboxResourcePath):
+        if not isinstance(argument, WorkspaceResourcePath):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         resource = by_id.get(argument.resource_id)
         if resource is None:
@@ -1405,9 +1480,9 @@ def _guardian_config(
     runtime_root: Path,
     bwrap: Path,
     lock_root: Path,
-    resources: tuple[SandboxResource, ...],
+    resources: tuple[WorkspaceResource, ...],
     hidden_paths: tuple[str, ...],
-    read_policy: ReadOnlySandboxPolicy | None,
+    read_policy: WorkspaceReadPolicy | None,
     mode: str = "worker",
     command: str | None = None,
     command_args: tuple[str, ...] = (),
@@ -1446,10 +1521,10 @@ def _build_bwrap_args(
     runtime_root: Path,
     bwrap: Path,
     lock_root: Path,
-    resources: tuple[SandboxResource, ...],
+    resources: tuple[WorkspaceResource, ...],
     hidden_paths: tuple[str, ...],
     worker_resources: list[dict[str, str]],
-    read_policy: ReadOnlySandboxPolicy | None = None,
+    read_policy: WorkspaceReadPolicy | None = None,
     mode: str = "worker",
     command: str | None = None,
     command_args: tuple[str, ...] = (),
@@ -1808,14 +1883,16 @@ def _request_guardian_shutdown(process: asyncio.subprocess.Process) -> None:
 
 async def _abort_guardian_logged(
     process: asyncio.subprocess.Process,
-) -> None:
+) -> bool:
     try:
         await _abort_guardian(process)
+        return True
     except BaseException as error:
         _logger.exception(
             "Bubblewrap guardian cleanup after open failure failed",
             exc_info=error,
         )
+        return False
 
 
 async def _write_pipe(fd: int, payload: memoryview) -> None:
@@ -2028,4 +2105,4 @@ def _close_fd(value: int) -> None:
         pass
 
 
-__all__ = ["BubblewrapSandbox"]
+__all__ = ["BubblewrapWorkspaceBackend"]

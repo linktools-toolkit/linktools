@@ -10,15 +10,16 @@ import hashlib
 import json
 from pathlib import Path
 
+
 import pytest
 from pydantic_ai.messages import BinaryContent, ToolReturn
 
-from linktools.ai.capability import ToolCallRetry, workspace_capabilities
+from linktools.ai.capability import ToolCallRetry, filesystem_capabilities
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
 
-from linktools.ai.workspace import LocalSandbox, ReadOnlySandboxPolicy, Workspace
+from linktools.ai.workspace import LocalWorkspaceBackend, WorkspaceReadPolicy, Workspace
 
 _PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6"
@@ -38,9 +39,9 @@ def _binding():
 
 
 def _tools(root: Path, session, *, limits=None, binding=None, names=None):
-    capability = workspace_capabilities(
+    capability = filesystem_capabilities(
         Workspace.load(root), names or ("read_file", "write_file", "list_files", "search_files"),
-        session=session, limits=limits, model_binding=binding or _binding(),
+        backend=session, limits=limits, model_binding=binding or _binding(),
     )[0]
     return capability.get_toolset().tools
 
@@ -49,7 +50,8 @@ def _tools(root: Path, session, *, limits=None, binding=None, names=None):
 async def test_unified_read_mixed_batch_preserves_input_order_and_duplicate_occurrences(tmp_path: Path) -> None:
     (tmp_path / "notes.txt").write_text("alpha\nbeta\n", encoding="utf-8")
     (tmp_path / "image.png").write_bytes(_PNG)
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         tools = _tools(tmp_path, session)
         result = await tools["read_file"].function(["image.png", "notes.txt", "image.png"])
@@ -73,7 +75,8 @@ async def test_unified_read_mixed_batch_preserves_input_order_and_duplicate_occu
 async def test_unified_read_singleton_array_and_cursor_preserve_text(tmp_path: Path) -> None:
     body = "\n".join(f"line-{n}" for n in range(250))
     (tmp_path / "notes.txt").write_text(body, encoding="utf-8")
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         read = _tools(tmp_path, session)["read_file"].function
         first = (await read(["notes.txt"], limit=2)).return_value["texts"][0]
@@ -92,7 +95,8 @@ async def test_unified_read_singleton_array_and_cursor_preserve_text(tmp_path: P
 @pytest.mark.asyncio
 async def test_unified_read_explicit_text_attachment_preserves_mime_type(tmp_path: Path) -> None:
     (tmp_path / "notes.txt").write_text("whole text", encoding="utf-8")
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         result = await _tools(tmp_path, session)["read_file"].function("notes.txt", as_file=True)
         assert result.return_value[0]["texts"] == []
@@ -115,7 +119,8 @@ async def test_unified_read_explicit_text_attachment_preserves_mime_type(tmp_pat
 async def test_unified_read_rejects_invalid_conditional_arguments(tmp_path: Path, paths, kwargs) -> None:
     (tmp_path / "notes.txt").write_text("text", encoding="utf-8")
     (tmp_path / "image.png").write_bytes(_PNG)
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         with pytest.raises(ToolCallRetry):
             await _tools(tmp_path, session)["read_file"].function(paths, **kwargs)
@@ -127,7 +132,8 @@ async def test_unified_read_rejects_invalid_conditional_arguments(tmp_path: Path
 async def test_unified_read_later_failure_returns_no_partial_batch(tmp_path: Path) -> None:
     (tmp_path / "notes.txt").write_text("private preview", encoding="utf-8")
     (tmp_path / "image.png").write_bytes(_PNG)
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         denied = create_model(api='openai', model="no-inputs", input_types=())
         with pytest.raises(ToolCallRetry) as rejected:
@@ -145,7 +151,8 @@ async def test_unified_read_later_failure_returns_no_partial_batch(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_unified_read_counts_texts_against_batch_limits(tmp_path: Path) -> None:
     (tmp_path / "notes.txt").write_text("text", encoding="utf-8")
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         tools = _tools(tmp_path, session, limits=PromptLimits(max_binary_input_parts=1))
         with pytest.raises(ToolCallRetry):
@@ -156,7 +163,8 @@ async def test_unified_read_counts_texts_against_batch_limits(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_unified_write_optional_hash_and_exact_replacement(tmp_path: Path) -> None:
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         write = _tools(tmp_path, session)["write_file"].function
         await write("notes.txt", "before target after")
@@ -179,7 +187,8 @@ async def test_unified_write_optional_hash_and_exact_replacement(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_unified_file_selection_keeps_scenarios_minimal(tmp_path: Path) -> None:
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         for names in (("read_file", "search_files"), ("read_file", "search_files", "list_files"),
                       ("read_file", "search_files", "list_files", "write_file")):
@@ -205,7 +214,8 @@ def test_workspace_tools_use_initial_behavior_revision(tmp_path: Path) -> None:
 async def test_legacy_attach_obeys_explicit_model_route_before_publication(tmp_path: Path) -> None:
     (tmp_path / "report.pdf").write_bytes(b"%PDF-1.7\n")
     binding = create_model(api='openai', model="no-files", input_types=())
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         with pytest.raises(ToolCallRetry):
             await _tools(tmp_path, session, binding=binding, names=("attach_files",))["attach_files"].function(["report.pdf"])
@@ -250,14 +260,12 @@ async def test_explicit_skill_cli_converts_new_format_without_core_parser(tmp_pa
     assert "authorized" in str(loaded)
     (tmp_path / "extract_email.py").write_bytes((example / "extract_email.py").read_bytes())
     (tmp_path / "message.eml").write_text("From: sender@example.test\nSubject: Example\nContent-Type: text/plain; charset=utf-8\n\nEvidence body", encoding="utf-8")
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         with pytest.raises(ToolCallRetry):
             await _tools(tmp_path, session)["read_file"].function("message.eml")
-        result = await session.run_command(
-            f"{shlex.quote(sys.executable)} extract_email.py message.eml preview.txt",
-            timeout_seconds=5,
-        )
+        result = await session.run_command(f"{shlex.quote(sys.executable)} extract_email.py message.eml preview.txt", timeout_seconds=5)
         assert (tmp_path / "preview.txt").exists(), result
         preview = await _tools(tmp_path, session)["read_file"].function("preview.txt")
         assert preview.return_value["texts"][0]["content"] == "Evidence body"
@@ -269,7 +277,8 @@ async def test_explicit_skill_cli_converts_new_format_without_core_parser(tmp_pa
         assert not (tmp_path / "bad.txt").exists()
     finally:
         await session.close()
-    restricted = await LocalSandbox(read_policy=ReadOnlySandboxPolicy(("*.eml",))).open(root=tmp_path)
+    restricted = LocalWorkspaceBackend(tmp_path, read_policy=WorkspaceReadPolicy(("*.eml",)))
+    await restricted.working_dir()
     try:
         with pytest.raises(AIError) as rejected:
             await restricted.run_command("python extract_email.py message.eml blocked.txt", timeout_seconds=5)
@@ -292,7 +301,10 @@ async def test_read_errors_explain_the_actual_recovery_step(tmp_path: Path, reas
     from types import SimpleNamespace
     async def reject(*args, **kwargs):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": reason})
-    tools = _tools(tmp_path, SimpleNamespace(inspect_file=reject))
+    from ._runtime_test_helpers import FileToolsStub
+    backend = FileToolsStub()
+    backend.inspect_file = reject
+    tools = _tools(tmp_path, backend)
     with pytest.raises(ToolCallRetry, match=expected):
         await tools["read_file"].function("file.txt")
 
@@ -315,7 +327,8 @@ async def test_generic_text_detection_keeps_structured_text_attachment_hint(tmp_
     mimetypes.add_type(mime, Path(name).suffix)
     (tmp_path / name).write_text("key,value\none,two\n", encoding="utf-8")
     binding = create_model(api='openai', model="known-text", input_types=(f"mime:{mime}",))
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         value = (await _tools(tmp_path, session, binding=binding)["read_file"].function(name, as_file=True)).return_value[0]
         assert value["files"][0]["mime_type"] == mime
@@ -339,7 +352,8 @@ async def test_unsupported_attachment_reports_facts_without_content_or_native_de
     from linktools.ai.workspace import _file_io
     monkeypatch.setattr(_file_io, "_magic_available", False)
     (tmp_path / name).write_bytes(body)
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         denied = create_model(api='openai', model="no-inputs")
         with pytest.raises(ToolCallRetry) as rejected:
@@ -355,7 +369,8 @@ async def test_unsupported_attachment_reports_facts_without_content_or_native_de
 @pytest.mark.asyncio
 async def test_default_attachment_deny_keeps_bounded_text_preview_available(tmp_path: Path) -> None:
     (tmp_path / "large.txt").write_text("line\n" * 10000, encoding="utf-8")
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     try:
         denied = create_model(api='openai', model="no-inputs")
         result = await _tools(tmp_path, session, binding=denied)["read_file"].function("large.txt", offset=1, limit=2)

@@ -81,7 +81,7 @@ from linktools.ai.storage import (
     StorageEntryRevision,
     StorageOverlay,
 )
-from linktools.ai.workspace import SandboxResourcePath
+from linktools.ai.workspace import WorkspaceResourcePath
 
 
 def _expected_mcp_tool_name(server_id: str, tool_name: str) -> str:
@@ -1159,7 +1159,7 @@ async def test_mcp_resource_paths_use_original_local_files(tmp_path: Path) -> No
             sandboxed=True,
         )
         assert sandboxed[server.id].args == (
-            SandboxResourcePath(server.id, "script.py"),
+            WorkspaceResourcePath(server.id, "script.py"),
         )
         assert sandboxed[server.id].resources[0].files == {
             "script.py": script.resolve()

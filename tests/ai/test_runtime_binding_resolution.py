@@ -7,6 +7,7 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -77,7 +78,7 @@ from linktools.ai.task import (
     TaskNodeContext,
     TaskRef,
 )
-from linktools.ai.workspace import BubblewrapSandbox, LocalSandbox, ReadOnlySandboxPolicy
+from linktools.ai.workspace import BubblewrapWorkspaceBackend, LocalWorkspaceBackend, WorkspaceReadPolicy
 
 
 @dataclass(frozen=True)
@@ -429,7 +430,7 @@ async def test_execution_binding_uses_selected_child_asset_versions() -> None:
 
 
 @pytest.mark.asyncio
-async def test_binding_resolution_restores_mcp_execution_contract() -> None:
+async def test_binding_resolution_restores_mcp_execution_contract(tmp_path: Path) -> None:
     server = MCPServerSpec(
         "server",
         "python",
@@ -453,6 +454,7 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
     resolver = _AgentBindingResolver(
         catalog,
         compiler,
+        workspace_backend=LocalWorkspaceBackend(tmp_path),
     )
 
     resolved = await resolver.resolve(
@@ -506,22 +508,14 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
         {specification.id: compiler.compile(specification)}
     )
     if backend == "bubblewrap":
-        sandbox = BubblewrapSandbox(
-            runtime_root=tmp_path,
-            bwrap_executable=tmp_path / "bwrap",
-        )
+        sandbox = partial(BubblewrapWorkspaceBackend, runtime_root=tmp_path, bwrap_executable=tmp_path / "bwrap")
     else:
-        sandbox = LocalSandbox(
-            read_policy=(
-                ReadOnlySandboxPolicy(("visible.txt",))
-                if backend == "local_read_policy" else None
-            ),
-            allow_host_stdio_with_read_policy=backend == "local_read_policy",
-        )
+        sandbox = partial(LocalWorkspaceBackend, read_policy=WorkspaceReadPolicy(("visible.txt",))
+                if backend == "local_read_policy" else None, allow_host_stdio_with_read_policy=backend == "local_read_policy")
     resolver = _AgentBindingResolver(
         catalog,
         compiler,
-        sandbox=sandbox,
+        workspace_backend=sandbox(tmp_path),
     )
 
     resolved = await resolver.resolve(
@@ -529,7 +523,7 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
     )
 
     pin = next(item for item in resolved.binding_contract.selected if item.kind == "mcp")
-    assert pin.contract["execution_policy"] == sandbox.stdio_execution_policy()
+    assert pin.contract["execution_policy"] == sandbox(tmp_path).stdio_execution_policy()
     if backend != "bubblewrap":
         assert pin.contract["execution_policy"] == {"version": 1, "boundary": "host-stdio"}
 
@@ -538,6 +532,7 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
 @pytest.mark.parametrize("parent_resources", (False, True))
 async def test_existing_child_mcp_resolves_asset_versions(
     parent_resources: bool,
+    tmp_path: Path,
 ) -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
@@ -593,7 +588,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
                 for agent_id, spec in specs.items()
             }
         )
-        resolver = _AgentBindingResolver(catalog, compiler)
+        resolver = _AgentBindingResolver(catalog, compiler, workspace_backend=LocalWorkspaceBackend(tmp_path))
         binding = compiler.bind(catalog.root_agent("parent")).binding_contract
 
         await store.put(resource, b"print('updated')")

@@ -3,12 +3,12 @@
 """Workspace retry policies preserve rejection and external-effect boundaries."""
 
 from pathlib import Path
-from types import SimpleNamespace
+from ._runtime_test_helpers import FileToolsStub
 
 import pytest
-from linktools.ai.capability import ToolCallRetry, workspace_capabilities
+from linktools.ai.capability import ToolCallRetry, filesystem_capabilities, ShellCapability
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.workspace import SandboxOperationRejected, Workspace
+from linktools.ai.workspace import WorkspaceOperationRejected, Workspace
 
 
 _FILE_REJECTIONS = frozenset({
@@ -29,17 +29,17 @@ _COMMAND_ID_REJECTIONS = frozenset({
 })
 _RETRY_MESSAGES = {
     ErrorCode.REQUEST_FIELD_INVALID: "invalid",
-    ErrorCode.STORAGE_NOT_FOUND: "does not exist",
+    ErrorCode.STORAGE_NOT_FOUND: "does not exist|unknown",
     ErrorCode.AUTHORIZATION_DENIED: "not allowed",
     ErrorCode.TOOL_ARGUMENTS_TOO_LARGE: "too large",
     ErrorCode.STORAGE_CONFLICT: "current hash",
-    ErrorCode.TOO_MANY_PENDING_OPERATIONS: "Too many workspace operations",
+    ErrorCode.TOO_MANY_PENDING_OPERATIONS: "Too many",
     ErrorCode.INTERNAL_ERROR: "",
 }
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error_type", (AIError, SandboxOperationRejected))
+@pytest.mark.parametrize("error_type", (AIError, WorkspaceOperationRejected))
 @pytest.mark.parametrize(
     ("name", "arguments", "rejected_codes", "effectful"),
     (
@@ -81,18 +81,18 @@ async def test_workspace_retry_requires_supported_code_and_known_effect(
 
     method = {"attach_files": "read_bytes", "read_file": "inspect_file",
               "search_files": "search_text"}.get(name, name)
-    session = SimpleNamespace(**{method: reject})
-    capability = workspace_capabilities(
-        Workspace.load(tmp_path),
-        (name,),
-        session=session,  # type: ignore[arg-type]
-    )[0]
+    session = FileToolsStub()
+    setattr(session, method, reject)
+    if name.endswith("command"):
+        capability = ShellCapability().bind((name,), backend=session)
+    else:
+        capability = filesystem_capabilities(Workspace.load(tmp_path), (name,), backend=session)[0]
     tool = capability.get_toolset().tools[name]
 
     for code, message in _RETRY_MESSAGES.items():
         error = error_type(code)
         if code in rejected_codes and (
-            not effectful or isinstance(error, SandboxOperationRejected)
+            not effectful or isinstance(error, WorkspaceOperationRejected)
         ):
             with pytest.raises(ToolCallRetry, match=message) as retry:
                 await tool.function(**arguments)
@@ -104,7 +104,7 @@ async def test_workspace_retry_requires_supported_code_and_known_effect(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error_type", (AIError, SandboxOperationRejected))
+@pytest.mark.parametrize("error_type", (AIError, WorkspaceOperationRejected))
 @pytest.mark.parametrize(
     ("name", "arguments"),
     (
@@ -123,16 +123,18 @@ async def test_workspace_conflict_retry_is_scoped_to_each_guarded_write(
     async def reject(*args: object, **kwargs: object) -> str:
         raise error
 
-    session = SimpleNamespace(**{name: reject, "inspect_file": reject})
-    capability = workspace_capabilities(
+    session = FileToolsStub()
+    setattr(session, name, reject)
+    session.inspect_file = reject
+    capability = filesystem_capabilities(
         Workspace.load(tmp_path),
         (name, "read_file"),
-        session=session,  # type: ignore[arg-type]
+        backend=session,  # type: ignore[arg-type]
     )[0]
     tools = capability.get_toolset().tools
 
     for expected_hash in ("", "current-hash", None):
-        if expected_hash is not None and isinstance(error, SandboxOperationRejected):
+        if expected_hash is not None and isinstance(error, WorkspaceOperationRejected):
             with pytest.raises(ToolCallRetry, match="current hash") as retry:
                 await tools[name].function(**arguments, expected_hash=expected_hash)
             assert retry.value.__cause__ is error

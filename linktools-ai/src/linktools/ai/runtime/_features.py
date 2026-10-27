@@ -14,6 +14,7 @@ from linktools.core import environ
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
+from pydantic_ai.workspaces import WorkspaceBackend
 
 from ..asset import AssetStoreReader
 from ..core import ImmutableJsonMapping, JsonValue, PromptLimits
@@ -29,7 +30,7 @@ from ..spec import (
     parse_mcp_tool_selector,
 )
 from ..storage import StorageRevision
-from ..workspace import Sandbox, Workspace
+from ..workspace import LocalWorkspaceBackend, Workspace
 from ..capability import (
     AgentContext,
     AssetCapability,
@@ -38,11 +39,12 @@ from ..capability import (
     ToolEffectPolicy,
     ToolResponsesCapability,
     ReferencedInputsCapability,
-    WorkspaceCapability,
+    FileSystem,
     capture_contributions,
     is_tool_effect_policy,
     tool_metadata,
-    workspace_tool_declarations,
+    filesystem_tool_declarations,
+    ShellCapability,
 )
 
 AppT = TypeVar("AppT")
@@ -65,7 +67,7 @@ class RuntimeFeaturesCapture(Generic[AppT]):
     models: Mapping[str, ModelBinding | Callable[[], ModelBinding]] = field(
         default_factory=lambda: MappingProxyType({}), repr=False, compare=False,
     )
-    sandbox: "Sandbox | None" = field(default=None, repr=False, compare=False)
+    workspace_factory: "Callable[..., WorkspaceBackend] | None" = field(default=LocalWorkspaceBackend, repr=False, compare=False)
     limits: PromptLimits = field(default_factory=PromptLimits)
     defaults: Mapping[str, JsonValue] = field(default_factory=dict)
     filter: Callable[[AgentSpec, CapabilityContribution[object]], bool] | None = field(
@@ -119,7 +121,7 @@ class RuntimeFeatures(Generic[AppT]):
         self,
         group_id: str = "default",
         *,
-        sandbox: "Sandbox | None" = None,
+        workspace_factory: "Callable[..., WorkspaceBackend] | None" = LocalWorkspaceBackend,
         limits: PromptLimits | None = None,
         defaults: Mapping[str, JsonValue] | None = None,
         filter: Callable[[AgentSpec, CapabilityContribution[object]], bool] | None = None,
@@ -136,7 +138,7 @@ class RuntimeFeatures(Generic[AppT]):
         self._asset_capability: AssetCapability[AppT] | None = None
         self._tool_responses_registered = False
         self._workspace: Workspace | None = None
-        self._sandbox = sandbox
+        self._workspace_factory = workspace_factory
         self._contributions: list[CapabilityContribution[AppT]] = []
         self._models: dict[str, ModelBinding | Callable[[], ModelBinding]] = {}
 
@@ -154,8 +156,8 @@ class RuntimeFeatures(Generic[AppT]):
         return self._workspace
 
     @property
-    def sandbox(self) -> "Sandbox | None":
-        return self._sandbox
+    def workspace_factory(self) -> "Callable[..., WorkspaceBackend] | None":
+        return self._workspace_factory
 
     def model(self, name: str, binding: ModelBinding | Callable[[], ModelBinding]) -> None:
         """Declare a route; synchronous loaders resolve one binding for each agent run."""
@@ -216,7 +218,8 @@ class RuntimeFeatures(Generic[AppT]):
             "capability", capability_id, capability, revision=revision,
             config=config, scope=scope,
         )
-        workspace_capabilities: list[WorkspaceCapability] = []
+        filesystem_capabilities: list[FileSystem] = []
+        shells: list[ShellCapability] = []
         asset_capabilities: list[AssetCapability[AppT]] = []
         response_capabilities: list[ToolResponsesCapability[AppT]] = []
 
@@ -230,8 +233,10 @@ class RuntimeFeatures(Generic[AppT]):
                 response_capabilities.append(value)
             elif isinstance(value, AssetCapability):
                 asset_capabilities.append(value)
-            elif isinstance(value, WorkspaceCapability):
-                workspace_capabilities.append(value)
+            elif isinstance(value, ShellCapability):
+                shells.append(value)
+            elif isinstance(value, FileSystem):
+                filesystem_capabilities.append(value)
             else:
                 def collect_leaf(leaf: AbstractCapability[object]) -> None:
                     if isinstance(leaf, ReferencedInputsCapability) and scope != "agent":
@@ -239,8 +244,10 @@ class RuntimeFeatures(Generic[AppT]):
                                       "ReferencedInputsCapability requires Agent scope")
                     if isinstance(leaf, ToolResponsesCapability):
                         response_capabilities.append(leaf)
-                    elif isinstance(leaf, WorkspaceCapability):
-                        workspace_capabilities.append(leaf)
+                    elif isinstance(leaf, ShellCapability):
+                        shells.append(leaf)
+                    elif isinstance(leaf, FileSystem):
+                        filesystem_capabilities.append(leaf)
                     elif isinstance(leaf, AssetCapability):
                         asset_capabilities.append(leaf)
 
@@ -258,14 +265,23 @@ class RuntimeFeatures(Generic[AppT]):
                               "AssetCapability requires Runtime scope")
             if self._asset_capability is not None or len(asset_capabilities) != 1:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        if workspace_capabilities:
+        workspace_tools: list[CapabilityContribution[AppT]] = []
+        if shells:
+            if scope != "runtime":
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "ShellCapability requires Runtime scope")
+            for shell in shells:
+                workspace_tools.extend(
+                    CapabilityContribution.from_opaque("tool", tool.name, tool)
+                    for tool in shell.tool_definitions()
+                )
+        if filesystem_capabilities:
             if scope != "runtime":
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-                              "WorkspaceCapability requires Runtime scope")
-            if self._workspace is not None or len(workspace_capabilities) != 1:
+                              "FileSystem requires Runtime scope")
+            if self._workspace is not None or len(filesystem_capabilities) != 1:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            workspace_capability = workspace_capabilities[0]
-            declarations = {item.name: item for item in workspace_tool_declarations()}
+            workspace_capability = filesystem_capabilities[0]
+            declarations = {item.name: item for item in filesystem_tool_declarations()}
             tools = tuple(
                 CapabilityContribution.from_opaque(
                     "tool", tool.name, tool, revision=declarations[tool.name].revision,
@@ -273,7 +289,8 @@ class RuntimeFeatures(Generic[AppT]):
                 for tool in workspace_capability.tool_definitions()
             )
             self._workspace = workspace_capability.workspace
-            self._contributions.extend(tools)
+            workspace_tools.extend(tools)
+        self._contributions.extend(workspace_tools)
         if asset_capabilities:
             self._asset_capability = asset_capabilities[0]
         self._tool_responses_registered |= bool(response_capabilities)
@@ -360,7 +377,7 @@ class RuntimeFeatures(Generic[AppT]):
             RepositoryInstructions(tuple(instruction_documents)),
             asset_reader,
             models=models,
-            sandbox=self._sandbox,
+            workspace_factory=self._workspace_factory,
             limits=limits,
             defaults=self._defaults,
             filter=self._filter,

@@ -18,7 +18,7 @@ from linktools.ai.inputs import (
     task_prompt_draft,
 )
 from linktools.ai.model import validate_user_content
-from linktools.ai.workspace import SandboxResource, SandboxSession, WorkspaceAccess
+from linktools.ai.workspace import WorkspaceAccess
 
 
 class _CountingSession:
@@ -40,23 +40,12 @@ class _CountingSession:
         return None
 
 
-class _CountingSandbox:
-    def __init__(self, session: _CountingSession) -> None:
-        self.session = session
 
-    async def open(
-        self,
-        *,
-        root: Path,
-        resources: tuple[SandboxResource, ...] = (),
-    ) -> SandboxSession:
-        del root, resources
-        return self.session  # type: ignore[return-value]
 
 
 def _materializer(values: dict[str, bytes]) -> tuple[ExecutionInputMaterializer, _CountingSession]:
     session = _CountingSession(values)
-    access = WorkspaceAccess(_CountingSandbox(session), root=Path(".").resolve())
+    access = WorkspaceAccess(session)
     return ExecutionInputMaterializer(access, PromptLimits()), session
 
 

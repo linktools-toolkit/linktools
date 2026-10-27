@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Bubblewrap worker for the fixed SandboxSession protocol."""
+"""Bubblewrap worker for the native Workspace backend protocol."""
 
 from __future__ import annotations
 
+import base64
 import argparse
 import asyncio
 import ctypes
@@ -18,11 +19,11 @@ from pathlib import Path
 from typing import Any
 
 from ..errors import AIError, ErrorCode
-from ._local_sandbox import _LocalSandboxSession
+from ._local_sandbox import LocalWorkspaceBackend
 from ._sandbox import (
-    ReadOnlySandboxPolicy,
-    SandboxOperationRejected,
-    SandboxResource,
+    WorkspaceReadPolicy,
+    WorkspaceOperationRejected,
+    WorkspaceResource,
 )
 from ._sandbox_protocol import (
     ERROR_EFFECT_NOT_APPLIED,
@@ -48,12 +49,13 @@ async def main_async(arguments: argparse.Namespace) -> int:
     _validate_worker()
     resources = _resources(arguments.resources_json)
     read_policy = _read_policy(arguments.read_policy_json)
-    session = _LocalSandboxSession(
+    session = LocalWorkspaceBackend(
         Path("/workspace"),
-        resources,
-        lock_root=Path(arguments.lock_root),
+        resources=resources,
         read_policy=read_policy,
     )
+    session._lock_root = Path(arguments.lock_root)
+    await session.working_dir()
     reader, writer = await _stdio_streams()
     write_lock = asyncio.Lock()
     tasks: set[asyncio.Task[None]] = set()
@@ -130,7 +132,7 @@ async def main_async(arguments: argparse.Namespace) -> int:
 
 
 async def _reap_children(
-    session: _LocalSandboxSession,
+    session: LocalWorkspaceBackend,
     stop_event: asyncio.Event,
     failure_event: asyncio.Event | None = None,
 ) -> None:
@@ -148,7 +150,7 @@ async def _reap_children(
             continue
 
 
-def _reap_adopted_children(session: _LocalSandboxSession) -> None:
+def _reap_adopted_children(session: LocalWorkspaceBackend) -> None:
     waitid = getattr(os, "waitid", None)
     if waitid is None or not hasattr(os, "P_PID"):
         return
@@ -198,7 +200,7 @@ async def _receive_requests(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     write_lock: asyncio.Lock,
-    session: _LocalSandboxSession,
+    session: LocalWorkspaceBackend,
     tasks: set[asyncio.Task[None]],
     stop_event: asyncio.Event,
     failure_event: asyncio.Event | None = None,
@@ -276,7 +278,7 @@ async def _handle_request(
     params: Mapping[str, Any],
     writer: asyncio.StreamWriter,
     write_lock: asyncio.Lock,
-    session: _LocalSandboxSession,
+    session: LocalWorkspaceBackend,
     active: set[str],
     active_group: set[str],
     stop_event: asyncio.Event,
@@ -299,7 +301,7 @@ async def _handle_request(
                 error.safe_details,
                 effect=(
                     ERROR_EFFECT_NOT_APPLIED
-                    if isinstance(error, SandboxOperationRejected)
+                    if isinstance(error, WorkspaceOperationRejected)
                     else ERROR_EFFECT_UNKNOWN
                 ),
             )
@@ -351,10 +353,21 @@ async def _handle_request(
 
 
 async def _dispatch(
-    session: _LocalSandboxSession,
+    session: LocalWorkspaceBackend,
     method: str,
     params: Mapping[str, Any],
 ) -> str:
+    if method == "raw_filesystem":
+        data = params.get("data")
+        return json.dumps(await session.raw_filesystem(
+            params["operation"], params["path"],
+            data=None if data is None else base64.b64decode(data, validate=True),
+        ), ensure_ascii=False)
+    if method == "execute_command":
+        return json.dumps(await session.execute_command(
+            params["command"], environment=params.get("environment"),
+            timeout_seconds=params.get("timeout_seconds"),
+        ), ensure_ascii=False)
     if method == "inspect_file":
         return json.dumps(await session.inspect_file(params["path"], max_bytes=params.get("max_bytes")), ensure_ascii=False)
     if method == "read_text":
@@ -477,14 +490,14 @@ async def _stdio_streams() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     return reader, writer
 
 
-def _resources(value: str) -> tuple[SandboxResource, ...]:
+def _resources(value: str) -> tuple[WorkspaceResource, ...]:
     try:
         raw = json.loads(value)
     except (TypeError, json.JSONDecodeError) as error:
         raise RuntimeError("worker resources are invalid") from error
     if not isinstance(raw, list):
         raise RuntimeError("worker resources are invalid")
-    resources: list[SandboxResource] = []
+    resources: list[WorkspaceResource] = []
     seen: set[str] = set()
     for item in raw:
         if not isinstance(item, Mapping):
@@ -502,12 +515,12 @@ def _resources(value: str) -> tuple[SandboxResource, ...]:
         digest = hashlib.sha256(resource_id.encode("utf-8")).hexdigest()[:24]
         if path != f"/resources/r{digest}":
             raise RuntimeError("worker resource is invalid")
-        resources.append(SandboxResource(resource_id, Path(path)))
+        resources.append(WorkspaceResource(resource_id, Path(path)))
         seen.add(resource_id)
     return tuple(resources)
 
 
-def _read_policy(value: str | None) -> ReadOnlySandboxPolicy | None:
+def _read_policy(value: str | None) -> WorkspaceReadPolicy | None:
     if value is None:
         return None
     try:
@@ -523,7 +536,7 @@ def _read_policy(value: str | None) -> ReadOnlySandboxPolicy | None:
             for key, values in resources.items()
         ):
             raise ValueError
-        return ReadOnlySandboxPolicy(
+        return WorkspaceReadPolicy(
             tuple(readable),
             {key: tuple(values) for key, values in resources.items()},
         )

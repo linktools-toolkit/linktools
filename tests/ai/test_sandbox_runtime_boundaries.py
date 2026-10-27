@@ -4,22 +4,22 @@
 
 import asyncio
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from linktools.ai.capability import workspace_capabilities
+from linktools.ai.capability import ShellCapability
 from linktools.ai.core import PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._compaction import (
     CompactionCapability,
     CompactionPolicy,
 )
-from linktools.ai.workspace import SandboxOperationRejected, SandboxResource, Workspace
-from linktools.ai.workspace import BubblewrapSandbox, ReadOnlySandboxPolicy
+from linktools.ai.workspace import WorkspaceOperationRejected, WorkspaceResource, Workspace
+from linktools.ai.workspace import BubblewrapWorkspaceBackend, WorkspaceReadPolicy
 from linktools.ai.workspace import _bubblewrap
 from linktools.ai.workspace._bubblewrap import (
-    _BubblewrapSandboxSession,
     _build_bwrap_args,
 )
 from linktools.ai.workspace._sandbox_protocol import (
@@ -68,14 +68,9 @@ async def test_read_only_sandbox_cleans_locks_after_validation_failure(
     monkeypatch.setattr(_bubblewrap.os, "pidfd_open", lambda pid: -1, raising=False)
     monkeypatch.setattr(_bubblewrap.tempfile, "mkdtemp", create_locks)
     monkeypatch.setattr(_bubblewrap, "_validate_rootfs", reject_rootfs)
-    sandbox = BubblewrapSandbox(
-        runtime_root=runtime_root,
-        bwrap_executable=Path(sys.executable).resolve(),
-        hidden_paths=hidden_paths,
-        read_policy=ReadOnlySandboxPolicy(("**",)),
-    )
+    sandbox = partial(BubblewrapWorkspaceBackend, runtime_root=runtime_root, bwrap_executable=Path(sys.executable).resolve(), hidden_paths=hidden_paths, read_policy=WorkspaceReadPolicy(("**",)))
     with pytest.raises(AIError) as raised:
-        await sandbox.open(root=root)
+        await sandbox(root=root).working_dir()
     assert raised.value.code is ErrorCode.SANDBOX_UNAVAILABLE
     assert not lock_root.exists()
     assert tuple(root.iterdir()) == (root / ".linktools",)
@@ -86,7 +81,7 @@ def test_read_only_bubblewrap_mounts_workspace_read_only(tmp_path: Path) -> None
         root=tmp_path, runtime_root=tmp_path / "runtime",
         bwrap=Path("/usr/bin/bwrap"), lock_root=tmp_path / "locks",
         resources=(), hidden_paths=(), worker_resources=[],
-        read_policy=ReadOnlySandboxPolicy(("**",)),
+        read_policy=WorkspaceReadPolicy(("**",)),
     )
     workspace_mount = arguments.index("/workspace")
     assert arguments[workspace_mount - 2] == "--ro-bind"
@@ -96,15 +91,18 @@ class _FakeSession:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    async def run_command(
-        self,
-        command: str,
-        *,
-        timeout_seconds: float | None = None,
-    ) -> str:
-        del timeout_seconds
+    async def run_command(self, command: str, *, timeout_seconds=None):
         self.calls.append(command)
         return "ok"
+
+    async def start_command(self, command: str):
+        raise NotImplementedError
+
+    async def check_command(self, command_id: str):
+        raise NotImplementedError
+
+    async def stop_command(self, command_id: str):
+        raise NotImplementedError
 
 
 class _BufferWriter:
@@ -123,22 +121,14 @@ async def test_workspace_capability_adapts_the_caller_owned_session(
     tmp_path: Path,
 ) -> None:
     session = _FakeSession()
-    capability = workspace_capabilities(
-        Workspace.load(tmp_path),
-        ("run_command",),
-        session=session,  # type: ignore[arg-type]
-    )[0]
-    toolset = capability.get_toolset()
-    tools = await toolset.get_tools(_context())
-    result = await toolset.call_tool(
-        "run_command",
-        {"command": "echo ok"},
-        _context(),
-        tools["run_command"],
-    )
+    toolset = ShellCapability().bind(("run_command",), backend=session).get_toolset()
+    context = _context()
+    tools = await toolset.get_tools(context)
+    result = await toolset.call_tool("run_command", {"command": "echo ok"}, context, tools["run_command"])
 
-    assert result == "ok"
-    assert session.calls == ["echo ok"]
+    assert "ok" in result
+    assert len(session.calls) == 1
+    assert session.calls[0] == "echo ok"
 
 
 class _CancellingCloseSession:
@@ -165,7 +155,7 @@ async def test_cancelled_close_propagates_without_primary_failure(tmp_path: Path
 @pytest.mark.parametrize(
     ("effect", "expected_type"),
     (
-        (ERROR_EFFECT_NOT_APPLIED, SandboxOperationRejected),
+        (ERROR_EFFECT_NOT_APPLIED, WorkspaceOperationRejected),
         (ERROR_EFFECT_UNKNOWN, AIError),
     ),
 )
@@ -173,8 +163,13 @@ async def test_cancelled_close_propagates_without_primary_failure(tmp_path: Path
 async def test_bubblewrap_error_frame_preserves_effect_certainty(
     effect: str,
     expected_type: type[AIError],
+    tmp_path: Path,
 ) -> None:
-    session = _BubblewrapSandboxSession(cast(Any, object()), {})
+    session = BubblewrapWorkspaceBackend(tmp_path, runtime_root=tmp_path,
+                                        bwrap_executable=Path("/usr/bin/bwrap"))
+    session._pending = {}
+    session._pending_lock = asyncio.Lock()
+    session._structured_requests = set()
     future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
     session._pending["request"] = (future, True)
 
@@ -246,7 +241,7 @@ def test_bubblewrap_hidden_mount_overrides_workspace_resource_bind(
     source = workspace / "package"
     source.mkdir()
     (source / "private").mkdir()
-    resource = SandboxResource("resource", source)
+    resource = WorkspaceResource("resource", source)
 
     arguments = _build_bwrap_args(
         root=workspace,
@@ -270,7 +265,7 @@ def test_bubblewrap_allows_explicit_skill_resource_under_hidden_storage(
     workspace.mkdir()
     source = workspace / ".linktools" / "skills" / "review"
     source.mkdir(parents=True)
-    resource = SandboxResource("resource", source)
+    resource = WorkspaceResource("resource", source)
 
     arguments = _build_bwrap_args(
         root=workspace,

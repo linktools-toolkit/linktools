@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from linktools.core import environ
 from pydantic import ValidationError
+from pydantic_ai.workspaces import WorkspaceBackend
 from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai import TextOutput, Tool
 from pydantic_ai.capabilities import (
@@ -84,7 +85,8 @@ from ..capability import (
     tool_context_dedupe_from_metadata,
     tool_plan_safe_from_metadata,
     validate_tool_metadata,
-    WorkspaceCapability,
+    FileSystem,
+    ShellCapability,
 )
 from ..core import (
     ExecutionDeltaType,
@@ -103,9 +105,9 @@ from ..model import FallbackBinding, ModelBinding, model_binding_error, validate
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ..spec import CapabilityRef, MCPServerSpecCodec, RepositoryInstructions
 from ..workspace import (
-    Sandbox,
-    SandboxResource,
-    SandboxSession,
+    WorkspaceResource,
+    SupportsClose,
+    SupportsResources,
     Workspace,
 )
 
@@ -203,7 +205,7 @@ class _AgentRunScope:
     plan_store_resolver: (
         Callable[[PydanticRunContext[object]], RuntimePlanStore] | None
     ) = None
-    sandbox_session: "SandboxSession | None" = None
+    workspace_backend: "WorkspaceBackend | None" = None
     skill_resource_paths: Mapping[str, "str | None"] = field(default_factory=dict)
     mcp_bindings: Mapping[str, _MCPBinding] = field(
         default_factory=dict
@@ -253,7 +255,7 @@ class AgentExecutor:
         runtime_capabilities: Sequence[AbstractCapability[AgentContext[object]]] = (),
         asset_sources: "Mapping[str, AssetStoreReader] | None" = None,
         metrics: MetricRecorder | None = None,
-        sandbox: Sandbox | None = None,
+        workspace_factory: Callable[..., WorkspaceBackend] | None = None,
         tool_responses: ToolResponseFixture | None = None,
     ) -> None:
         if not isinstance(skill_sources, SkillSourceRegistry):
@@ -262,7 +264,7 @@ class AgentExecutor:
         self._runtime_capabilities = tuple(runtime_capabilities)
         self._asset_sources = dict(asset_sources or {})
         self._metrics = metrics
-        self._sandbox = sandbox
+        self._workspace_factory = workspace_factory
         self._tool_responses = tool_responses
 
     async def validate_recovery_inputs(
@@ -331,7 +333,7 @@ class AgentExecutor:
         metric_id = uuid.uuid4().hex if self._metrics is not None else None
         try:
             try:
-                result = await self._execute_with_sandbox(
+                result = await self._execute_with_workspace(
                     scope,
                     run_usage=run_usage,
                     usage_limits=usage_limits,
@@ -451,7 +453,7 @@ class AgentExecutor:
         except Exception:
             _logger.exception("agent metric observation rejected")
 
-    async def _execute_with_sandbox(
+    async def _execute_with_workspace(
         self,
         scope: _AgentRunScope,
         *,
@@ -466,7 +468,7 @@ class AgentExecutor:
             in {"filesystem.read", "filesystem.write", "shell"}
         )
         workspace = scope.workspace
-        backend = self._sandbox
+        factory = self._workspace_factory
         mcp_bindings = _mcp_bindings(scope.binding)
         response_fixture = await self._load_tool_responses(
             scope.binding, scope.tool_response_ref,
@@ -480,11 +482,11 @@ class AgentExecutor:
             for server in live_mcp_servers
         )
         materializer = AssetMaterializer()
-        session: SandboxSession | None = None
+        session: WorkspaceBackend | None = None
         primary_error: BaseException | None = None
         try:
-            if backend is None:
-                skill_resources: tuple[SandboxResource, ...] = ()
+            if factory is None:
+                skill_resources: tuple[WorkspaceResource, ...] = ()
                 resource_keys: Mapping[str, "str | None"] = {
                     skill.id: None
                     for skill in scope.binding.compiled_agent.skill_definitions
@@ -502,14 +504,14 @@ class AgentExecutor:
                     live_mcp_servers,
                     mcp_bindings,
                     asset_readers=self._asset_sources,
-                    sandboxed=backend is not None,
+                    sandboxed=factory is not None,
                     materializer=materializer,
                 )
 
-            if backend is None and selected:
+            if factory is None and selected:
                 raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
             if (
-                backend is None
+                factory is None
                 or (
                     not selected
                     and not skill_resources
@@ -540,10 +542,14 @@ class AgentExecutor:
                 root = Path(scope.execution_cwd)
             else:
                 root = workspace.root
-            session = await backend.open(
-                root=root,
-                resources=skill_resources,
-            )
+            candidate_backend = factory(root, resources=skill_resources)
+            if not isinstance(candidate_backend, SupportsClose):
+                raise AIError(ErrorCode.SANDBOX_UNAVAILABLE,
+                              safe_details={"reason": "workspace_cleanup_required"})
+            session = candidate_backend
+            await session.working_dir()
+            if any(resource_id is not None for resource_id in resource_keys.values()) and not isinstance(session, SupportsResources):
+                raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
             resource_paths = {
                 skill_id: None
                 if resource_id is None
@@ -560,7 +566,7 @@ class AgentExecutor:
             return await self._execute(
                 replace(
                     scope,
-                    sandbox_session=session,
+                    workspace_backend=session,
                     skill_resource_paths=resource_paths,
                     mcp_bindings=mcp_bindings,
                     mcp_projections=mcp_projections,
@@ -652,7 +658,6 @@ class AgentExecutor:
                         runtime_capabilities=self._runtime_capabilities,
                         callbacks=callbacks,
                         model_journal=model_journal,
-                        sandbox=self._sandbox,
                     )
                     if scope.thinking is not None:
                         capabilities = (*capabilities, _thinking_capability(scope.thinking))
@@ -691,6 +696,7 @@ class AgentExecutor:
                             usage_limits=usage_limits,
                             usage=run_usage,
                             capabilities=capabilities,
+                            workspace=scope.workspace_backend,
                             **deferred_kwargs,
                         )
                         output = final_result.output
@@ -818,8 +824,10 @@ def _mcp_bindings(
     return result
 
 
-async def _close_sandbox_session(session: SandboxSession) -> None:
+async def _close_workspace_backend(session: WorkspaceBackend) -> None:
     try:
+        if not isinstance(session, SupportsClose):
+            raise AIError(ErrorCode.SANDBOX_CLEANUP_FAILED)
         await session.close()
     except asyncio.CancelledError:
         raise
@@ -835,10 +843,10 @@ async def _skill_sandbox_resources(
     compiled_agent: CompiledAgent,
     asset_readers: Mapping[str, AssetStoreReader],
 ) -> tuple[
-    tuple[SandboxResource, ...],
+    tuple[WorkspaceResource, ...],
     Mapping[str, "str | None"],
 ]:
-    resources: dict[str, SandboxResource] = {}
+    resources: dict[str, WorkspaceResource] = {}
     resource_keys: dict[str, str | None] = {}
     for skill in compiled_agent.skill_definitions:
         source_ref = skill.source_ref
@@ -854,7 +862,7 @@ async def _skill_sandbox_resources(
                     "source_id": source_ref.source_id,
                 },
             )
-        resource = await SandboxResource.from_asset_versions(
+        resource = await WorkspaceResource.from_asset_versions(
             skill.id,
             reader,
             {item.path: item.asset for item in source_ref.resources},
@@ -875,7 +883,7 @@ async def _skill_sandbox_resources(
 
 
 async def _cleanup_agent_run_resources(
-    session: "SandboxSession | None",
+    session: "WorkspaceBackend | None",
     primary_error: BaseException | None,
     *,
     materializer: AssetMaterializer | None = None,
@@ -883,7 +891,7 @@ async def _cleanup_agent_run_resources(
     cleanup_error: BaseException | None = None
     if session is not None:
         try:
-            await _close_sandbox_session(session)
+            await _close_workspace_backend(session)
         except BaseException as error:
             cleanup_error = error
     if (
@@ -940,7 +948,6 @@ async def _materialize_agent(
     callbacks: RunCallbacks,
     runtime_capabilities: Sequence[AbstractCapability[AgentContext[object]]],
     model_journal: ModelRequestJournal,
-    sandbox: Sandbox | None,
 ) -> tuple[
     PydanticAgent[AgentContext[object], object],
     tuple[AbstractCapability[AgentContext[object]], ...],
@@ -989,7 +996,8 @@ async def _materialize_agent(
         )
         capabilities.append(skill_capability)
 
-    if workspace_names and scope.workspace is None:
+    if any(tool_class_from_metadata(_bound_tool_metadata(candidate)) != "shell"
+           for candidate in compiled_agent.selected_tools if candidate.id in workspace_names) and scope.workspace is None:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     if repository_boundary is not None or scope.repository_instructions is not None:
         capabilities.append(
@@ -1078,7 +1086,7 @@ async def _materialize_agent(
         return BoundaryToolset(
             (toolset,), workspace_descriptors, id="linktools.workspace",
             permission_policy=None if scope.workspace is None else scope.workspace.policy.tool_permissions,
-            sandbox_session=scope.sandbox_session,
+            workspace_backend=scope.workspace_backend,
             tool_operations=scope.tool_operations, tool_metrics=tool_metrics,
             budget=scope.budget, repository_boundary=repository_boundary,
             result_callbacks=callbacks,
@@ -1086,17 +1094,25 @@ async def _materialize_agent(
 
     def bind_workspace(
         capability: AbstractCapability[AgentContext[object]],
-    ) -> AbstractCapability[AgentContext[object]]:
+    ) -> AbstractCapability[AgentContext[object]] | None:
         if isinstance(capability, WrapperCapability):
             wrapped = capability.wrapped.visit_and_replace(bind_workspace)
+            if wrapped is None:
+                return None
             if wrapped is capability.wrapped:
                 return capability
             rebound = copy(capability)
             rebound.wrapped = wrapped
             return rebound
-        if isinstance(capability, WorkspaceCapability):
+        if isinstance(capability, ShellCapability):
             return capability.bind(
-                workspace_names, session=scope.sandbox_session, limits=scope.limits,
+                [name for name in workspace_names if name in {tool.name for tool in capability.tool_definitions()}],
+                backend=scope.workspace_backend, wrap_toolset=wrap_workspace_toolset,
+            )
+        if isinstance(capability, FileSystem):
+            return capability.bind(
+                [name for name in workspace_names if name in {tool.name for tool in capability.tool_definitions()}],
+                backend=scope.workspace_backend, limits=scope.limits,
                 model_binding=compiled_agent.model, wrap_toolset=wrap_workspace_toolset,
             )
         return capability
@@ -1112,9 +1128,8 @@ async def _materialize_agent(
             await materialize_mcp_capabilities(
                 compiled_agent.mcp_servers,
                 compiled_agent.mcp_policy,
-                sandbox=sandbox,
-                sandbox_session=scope.sandbox_session,
-                host_cwd=(scope.execution_cwd if sandbox is None else None),
+                workspace_backend=scope.workspace_backend,
+                host_cwd=None,
                 bindings=scope.mcp_bindings,
                 projections=scope.mcp_projections,
                 tool_operations=scope.tool_operations,

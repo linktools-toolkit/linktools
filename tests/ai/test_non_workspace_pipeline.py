@@ -17,16 +17,25 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.workspace import (
-    DisabledSandbox,
     ToolPermissionRule,
     ToolPermissionPolicy,
 )
 
 
 @pytest.mark.asyncio
-async def test_disabled_sandbox_is_fail_closed() -> None:
-    with pytest.raises(AIError) as error:
-        await DisabledSandbox().open(root=Path("."))
+async def test_disabled_workspace_factory_is_fail_closed(tmp_path: Path) -> None:
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+    from linktools.ai.persistence import PersistenceStorage
+    from linktools.ai.capability import FileSystem
+    from linktools.ai.workspace import Workspace
+    from ._runtime_test_helpers import RuntimeUsageModels, model_features
+
+    features = RuntimeFeatures("disabled", workspace_factory=None)
+    features.capability(FileSystem(Workspace.load(tmp_path)))
+    (tmp_path / "evidence.txt").write_text("private evidence")
+    async with Runtime.open("disabled", storage=PersistenceStorage.in_memory(), features=model_features(RuntimeUsageModels(), features)) as runtime:
+        with pytest.raises(AIError) as error:
+            await runtime.agents.get().run("inspect", files=("evidence.txt",))
     assert error.value.code is ErrorCode.SANDBOX_UNAVAILABLE
 
 

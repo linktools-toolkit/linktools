@@ -7,10 +7,7 @@ from pathlib import Path
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.workspace import (
-    DisabledSandbox,
-    SandboxResource,
-    SandboxSession,
-    LocalSandbox,
+    LocalWorkspaceBackend,
     Workspace,
     WorkspaceAccess,
 )
@@ -33,32 +30,14 @@ class _ByteSession:
         self.closed += 1
 
 
-class _ByteSandbox:
-    def __init__(self, session: _ByteSession) -> None:
-        self._session = session
-        self.opens = 0
-
-    async def open(
-        self,
-        *,
-        root: Path,
-        resources: tuple[SandboxResource, ...] = (),
-    ) -> SandboxSession:
-        del root, resources
-        self.opens += 1
-        return self._session  # type: ignore[return-value]
-
-
 @pytest.mark.asyncio
-async def test_workspace_access_lazily_opens_one_custom_session(tmp_path: Path) -> None:
+async def test_workspace_access_reuses_one_owned_backend(tmp_path: Path) -> None:
     session = _ByteSession({"a.bin": b"a", "b.bin": b"b"})
-    sandbox = _ByteSandbox(session)
-    access = WorkspaceAccess(sandbox, root=tmp_path)
+    access = WorkspaceAccess(session, owns_backend=True)
 
-    assert sandbox.opens == 0
+    assert session.reads == []
     assert await access.read_bytes("a.bin") == b"a"
     assert await access.read_bytes("b.bin") == b"b"
-    assert sandbox.opens == 1
     assert session.reads == ["a.bin", "b.bin"]
 
     await access.close()
@@ -79,7 +58,7 @@ async def test_workspace_access_retries_failed_session_cleanup(tmp_path: Path) -
                 raise AIError(ErrorCode.SANDBOX_CLEANUP_FAILED)
 
     session = FailingSession({"a": b"a"})
-    access = WorkspaceAccess(_ByteSandbox(session), root=tmp_path)
+    access = WorkspaceAccess(session, owns_backend=True)
     assert await access.read_bytes("a") == b"a"
     with pytest.raises(AIError):
         await access.close()
@@ -102,7 +81,7 @@ async def test_workspace_access_close_calls_share_cleanup_completion(tmp_path: P
             await release.wait()
 
     session = WaitingSession({"a": b"a"})
-    access = WorkspaceAccess(_ByteSandbox(session), root=tmp_path)
+    access = WorkspaceAccess(session, owns_backend=True)
     assert await access.read_bytes("a") == b"a"
     first = asyncio.create_task(access.close())
     await entered.wait()
@@ -121,7 +100,7 @@ async def test_workspace_access_uses_local_workspace_boundary(tmp_path: Path) ->
     (tmp_path / "evidence.bin").write_bytes(b"evidence")
     access = WorkspaceAccess.for_workspace(
         Workspace.load(tmp_path),
-        sandbox=LocalSandbox(),
+        backend=LocalWorkspaceBackend(tmp_path), owns_backend=True,
     )
     try:
         assert await access.read_bytes("evidence.bin") == b"evidence"
@@ -131,10 +110,10 @@ async def test_workspace_access_uses_local_workspace_boundary(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_workspace_access_does_not_fallback_from_disabled_sandbox(tmp_path: Path) -> None:
-    access = WorkspaceAccess.for_workspace(
-        Workspace.load(tmp_path),
-        sandbox=DisabledSandbox(),
-    )
+    class Unavailable(_ByteSession):
+        async def read_bytes(self, path, *, max_bytes=None):
+            raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
+    access = WorkspaceAccess(Unavailable({}), owns_backend=True)
     with pytest.raises(AIError) as raised:
         await access.read_bytes("evidence.bin")
     assert raised.value.code is ErrorCode.SANDBOX_UNAVAILABLE

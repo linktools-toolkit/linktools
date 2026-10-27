@@ -4,19 +4,21 @@
 
 from pathlib import Path
 
+from ._runtime_test_helpers import FileToolsStub
+
 import pytest
 from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from linktools.ai.capability import AgentContext, workspace_capabilities
+from linktools.ai.capability import AgentContext, filesystem_capabilities
 from linktools.ai.core import Principal, PromptLimits
 from linktools.ai.runtime._compaction import CompactionCapability
 from linktools.ai.model.messages import binary_content_usage
 from linktools.ai.workspace import Workspace
 
 
-class _Session:
+class _Session(FileToolsStub):
     async def canonicalize_path(self, path: str) -> str:
         return path
 
@@ -71,10 +73,10 @@ class _Session:
 async def test_attach_files_is_visible_for_one_model_request_only(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
     session = _Session()
-    toolset = workspace_capabilities(
+    toolset = filesystem_capabilities(
         workspace,
         ("attach_files", "read_file"),
-        session=session,  # type: ignore[arg-type]
+        backend=session,  # type: ignore[arg-type]
     )[0].get_toolset()
     observed_binary: list[tuple[int, int]] = []
 
@@ -136,10 +138,10 @@ async def test_sequential_attach_files_do_not_accumulate_binary_context(
 ) -> None:
     workspace = Workspace.load(tmp_path)
     session = _Session()
-    toolset = workspace_capabilities(
+    toolset = filesystem_capabilities(
         workspace,
         ("attach_files",),
-        session=session,  # type: ignore[arg-type]
+        backend=session,  # type: ignore[arg-type]
     )[0].get_toolset()
     observed_binary: list[tuple[int, int]] = []
 

@@ -8,6 +8,7 @@ from ._runtime_test_helpers import model_features
 from linktools.ai.capability import TraceCapability
 
 import asyncio
+from functools import partial
 import json
 import os
 import sys
@@ -33,13 +34,13 @@ from linktools.ai.asset import (
 from linktools.ai.capability import AssetCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue
-from linktools.ai.errors import ErrorCode
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_asset_database
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.spec import mcp_tool_selector
 from linktools.ai.storage import StorageOverlay
-from linktools.ai.workspace import BubblewrapSandbox, LocalSandbox, Sandbox
+from linktools.ai.workspace import BubblewrapWorkspaceBackend, LocalWorkspaceBackend
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -269,18 +270,12 @@ async def _put_package(store: AssetStore, files: Mapping[str, bytes]) -> None:
         await store.put(AssetKey("mcp", f"probe/{path}"), content)
 
 
-def _sandbox(kind: str, monkeypatch: pytest.MonkeyPatch) -> Sandbox | None:
-    if kind == "injected-no-session":
-        from linktools.ai.runtime import _factory
-
-        # Runtime defaults to managed host processes; exercise the executor's
-        # lower-level no-session boundary without adding a public opt-out API.
-        monkeypatch.setattr(_factory, "LocalSandbox", lambda: None)
-    return LocalSandbox() if kind == "local" else None
+def _workspace_factory(kind: str):
+    return LocalWorkspaceBackend
 
 
-def _group(store: AssetStore, sandbox: Sandbox | None) -> RuntimeFeatures[object]:
-    group = RuntimeFeatures[object]("assets", sandbox=sandbox)
+def _group(store: AssetStore, workspace_factory) -> RuntimeFeatures[object]:
+    group = RuntimeFeatures[object]("assets", workspace_factory=workspace_factory)
     group_assets = AssetCapability(store)
     group.capability(group_assets, scope="runtime")
     group.agent("default", allow_tools=(mcp_tool_selector("probe", "probe"),))
@@ -314,7 +309,6 @@ def _assert_closed(log: Path, root: Path, *, retained: bool = False) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("backend_kind", "sandbox_kind"), (
     ("memory", "default"),
-    ("memory", "injected-no-session"),
     ("memory", "local"),
     ("filesystem", "local"),
     ("sqlite", "local"),
@@ -329,7 +323,7 @@ async def test_plain_filename_uses_pinned_asset_package_and_preserves_history(
     monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
     log = tmp_path / "processes"
     log.mkdir()
-    sandbox = _sandbox(sandbox_kind, monkeypatch)
+    sandbox = _workspace_factory(sandbox_kind)
     async with _store(backend_kind, tmp_path) as store:
         await _put_package(store, _package(log=log))
         features = _group(store, sandbox)
@@ -365,10 +359,10 @@ async def test_resource_arguments_use_the_package_working_directory(
 ) -> None:
     if sandbox_kind == "bubblewrap":
         runtime_root, executable = _sandbox_configuration()
-        sandbox = BubblewrapSandbox(runtime_root=runtime_root, bwrap_executable=executable)
+        sandbox = partial(BubblewrapWorkspaceBackend, runtime_root=runtime_root, bwrap_executable=executable)
         command = "/usr/bin/python3"
     else:
-        sandbox = _sandbox(sandbox_kind, monkeypatch)
+        sandbox = _workspace_factory(sandbox_kind)
         command = sys.executable
     async with _store("memory", tmp_path) as store:
         await _put_package(store, _package(command=command, argument=argument))
@@ -380,7 +374,7 @@ async def test_resource_arguments_use_the_package_working_directory(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("sandbox_kind", ("local", "injected-no-session"))
+@pytest.mark.parametrize("sandbox_kind", ("local",))
 async def test_concurrent_runs_own_independent_trees_until_their_processes_close(
     sandbox_kind: str,
     tmp_path: Path,
@@ -399,7 +393,7 @@ async def test_concurrent_runs_own_independent_trees_until_their_processes_close
 
     log = tmp_path / "processes"
     log.mkdir()
-    sandbox = _sandbox(sandbox_kind, monkeypatch)
+    sandbox = _workspace_factory(sandbox_kind)
     async with _store("memory", tmp_path) as store:
         await _put_package(store, _package(command=sys.executable, log=log))
         async with Persistence.open('asset-concurrency', storage=PersistenceStorage.in_memory()) as persistence_408, Runtime.attach(persistence=persistence_408, features=model_features(_ProbeModels(hold), _group(store, sandbox))) as runtime:
@@ -443,7 +437,7 @@ async def _wait_started(log: Path) -> dict[str, JsonValue]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("sandbox_kind", ("local", "injected-no-session"))
+@pytest.mark.parametrize("sandbox_kind", ("local",))
 @pytest.mark.parametrize("mode", ("fail-init", "hang-init"))
 async def test_startup_outcomes_keep_process_and_resource_lifetimes_ordered(
     sandbox_kind: str,
@@ -454,7 +448,7 @@ async def test_startup_outcomes_keep_process_and_resource_lifetimes_ordered(
 ) -> None:
     log = tmp_path / "processes"
     log.mkdir()
-    sandbox = _sandbox(sandbox_kind, monkeypatch)
+    sandbox = _workspace_factory(sandbox_kind)
     async with _store("memory", tmp_path) as store:
         await _put_package(store, _package(command=sys.executable, log=log, mode=mode))
         async with Persistence.open('asset-init-failure', storage=PersistenceStorage.in_memory()) as persistence_466, Runtime.attach(persistence=persistence_466, features=model_features(_ProbeModels(), _group(store, sandbox))) as runtime:
@@ -466,19 +460,11 @@ async def test_startup_outcomes_keep_process_and_resource_lifetimes_ordered(
             result = (await execution.wait(timeout_seconds=15)).result
             if mode == "fail-init":
                 assert result.status is ExecutionStatus.FAILED
-                expected = (
-                    ErrorCode.MCP_CONNECTION_FAILED if sandbox_kind == "injected-no-session"
-                    else ErrorCode.SANDBOX_SESSION_LOST
-                )
-                assert result.error_code == expected.value
+                assert result.error_code == ErrorCode.SANDBOX_SESSION_LOST.value
             else:
                 assert result.status is ExecutionStatus.CANCELLED
-            retained = mode == "fail-init" and sandbox_kind == "injected-no-session"
-            if retained:
-                # Native SDK close re-raises its failed startup runner. Without
-                # a managed session proving quiescence, resources stay owned.
-                assert result.safe_error_details["secondary_error_code"] == ErrorCode.MCP_CLEANUP_FAILED.value
-        _assert_closed(log, temporary_root, retained=retained)
+        _assert_closed(log, temporary_root)
+
 
 
 @pytest.mark.asyncio
@@ -494,7 +480,7 @@ async def test_native_directory_package_keeps_original_files(
         path.write_bytes(content)
     store = AssetStore(StorageOverlay(DirectoryAssetBackend(str(root), kinds=("mcp",))))
     await store.initialize()
-    sandbox = LocalSandbox()
+    sandbox = LocalWorkspaceBackend
     try:
         async with Persistence.open('native-asset-stdio', storage=PersistenceStorage.in_memory()) as persistence_508, Runtime.attach(persistence=persistence_508, features=model_features(_ProbeModels(), _group(store, sandbox))) as runtime:
             result = (await runtime.agents.get("default").run("probe", timeout_seconds=15)).result
@@ -506,3 +492,19 @@ async def test_native_directory_package_keeps_original_files(
         assert not tuple(temporary_root.iterdir())
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_disabled_workspace_never_falls_back_to_host_stdio(tmp_path: Path) -> None:
+    log = tmp_path / "processes"
+    log.mkdir()
+    async with _store("memory", tmp_path) as store:
+        await _put_package(store, _package(command=sys.executable, log=log))
+        async with Persistence.open("disabled-stdio", storage=PersistenceStorage.in_memory()) as persistence:
+            async with Runtime.attach(
+                persistence=persistence, features=model_features(_ProbeModels(), _group(store, None)),
+            ) as runtime:
+                with pytest.raises(AIError) as denied:
+                    await runtime.agents.get("default").start("probe")
+                assert denied.value.code is ErrorCode.SANDBOX_UNAVAILABLE
+        assert not tuple(log.iterdir())

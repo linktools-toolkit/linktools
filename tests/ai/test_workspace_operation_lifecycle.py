@@ -16,7 +16,7 @@ from typing import BinaryIO, TextIO
 import pytest
 
 from linktools.ai.errors import AIError
-from linktools.ai.workspace import LocalSandbox, StdioSandboxSession
+from linktools.ai.workspace import LocalWorkspaceBackend, SupportsStdio
 from linktools.ai.workspace import _bubblewrap
 from linktools.ai.workspace._sandbox_protocol import PROTOCOL_VERSION
 
@@ -34,7 +34,8 @@ async def test_close_does_not_wait_for_caller_after_read_finishes(
     caller_release = asyncio.Event()
     close_waiting = asyncio.Event()
     open_file = Path.open
-    session = await LocalSandbox().open(root=tmp_path)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
     wait_operations = session._wait_operations
 
     def delayed_open(
@@ -93,8 +94,9 @@ async def test_close_waits_for_process_start_cleanup_not_caller_lifetime(
     close_waiting = asyncio.Event()
     create_process = asyncio.create_subprocess_exec
     processes: list[asyncio.subprocess.Process] = []
-    session = await LocalSandbox().open(root=tmp_path)
-    assert isinstance(session, StdioSandboxSession)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
+    assert isinstance(session, SupportsStdio)
     wait_starting = session._wait_operations
 
     async def delayed_start(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
@@ -150,8 +152,9 @@ async def test_stdio_close_terminates_child_with_full_unread_input(
     monkeypatch: pytest.MonkeyPatch,
     unread_output: bool,
 ) -> None:
-    session = await LocalSandbox().open(root=tmp_path)
-    assert isinstance(session, StdioSandboxSession)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
+    assert isinstance(session, SupportsStdio)
     try:
         process = await session.open_stdio_process(
             sys.executable,
@@ -209,8 +212,9 @@ async def test_stdio_close_does_not_wait_for_detached_stdin_reader(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    session = await LocalSandbox().open(root=tmp_path)
-    assert isinstance(session, StdioSandboxSession)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
+    assert isinstance(session, SupportsStdio)
     reader_pid: int | None = None
     writing: asyncio.Task[None] | None = None
     closing: asyncio.Task[None] | None = None
@@ -281,8 +285,9 @@ async def test_repeated_cancel_during_local_start_waits_for_child_cleanup(
         return process
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_start)
-    session = await LocalSandbox().open(root=tmp_path)
-    assert isinstance(session, StdioSandboxSession)
+    session = LocalWorkspaceBackend(tmp_path)
+    await session.working_dir()
+    assert isinstance(session, SupportsStdio)
     arguments = [sys.executable, "-c", "import time; time.sleep(60)"]
     if stdio:
         opening = asyncio.create_task(session.open_stdio_process(arguments[0], arguments[1:]))
