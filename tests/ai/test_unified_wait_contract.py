@@ -8,6 +8,7 @@ import ast
 import asyncio
 import inspect
 import time
+from collections import deque
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -156,6 +157,8 @@ class _Evaluations(Evaluations):
 
     def __init__(self) -> None:
         self._closed = False
+        self._notifying_closed = False
+        self._close_callbacks = deque()
         self._accepting = True
         self._active_controls = 0
         self._controls_idle = asyncio.Event()
@@ -217,6 +220,8 @@ class _Bundle:
         self.engine._persistence = persistence
         self.engine._owner = self.engine
         self.engine._closed = False
+        self.engine._notifying_closed = False
+        self.engine._close_callbacks = deque()
         self.engine._closing = False
         self.engine._close_task = None
         self.engine._observation_sessions = set()
