@@ -356,4 +356,13 @@ async def test_pending_host_stdio_cleanup_failure_retains_ownership_and_cause(
     assert reading.value.code is ErrorCode.SANDBOX_SESSION_LOST
     with pytest.raises(AIError) as repeated:
         await session.close()
-    assert repeated.value is closing.value
+    assert repeated.value.code is ErrorCode.SANDBOX_CLEANUP_FAILED
+    assert repeated.value.__cause__ is failure
+    assert session.managed_process_ids() == frozenset({process.pid})
+
+    async def recover(*args: object) -> None:
+        process.returncode = -15
+
+    stop.side_effect = recover
+    await session.close()
+    assert session.managed_process_ids() == frozenset()

@@ -625,11 +625,11 @@ class BubblewrapWorkspaceBackend(_NativeWorkspaceOperations):
                     )
                 raise cancellation from cleanup_error
             raise cancellation
-        except BaseException:
-            async with self._state_lock:
-                if self._close_task is task:
-                    self._close_task = None
-            raise
+        finally:
+            if task.done() and (task.cancelled() or task.exception() is not None):
+                async with self._state_lock:
+                    if self._close_task is task:
+                        self._close_task = None
 
     async def _call(
         self,
@@ -1312,12 +1312,12 @@ class _BubblewrapStdioProcess:
             except BaseException as cleanup_error:
                 raise cancellation from cleanup_error
             raise cancellation
-        except BaseException:
-            async with self._lock:
-                if self._close_task is task:
-                    self._close_task = None
-                self._state = "OPEN"
-            raise
+        finally:
+            if task.done() and (task.cancelled() or task.exception() is not None):
+                async with self._lock:
+                    if self._close_task is task:
+                        self._close_task = None
+                        self._state = "OPEN"
 
     async def _close_impl(self) -> None:
         drain_task: asyncio.Task[None] | None = None

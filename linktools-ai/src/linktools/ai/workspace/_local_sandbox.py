@@ -870,6 +870,11 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
                     )
                 raise cancellation from cleanup_error
             raise cancellation
+        finally:
+            if task.done() and (task.cancelled() or task.exception() is not None):
+                async with self._state_lock:
+                    if self._close_task is task:
+                        self._close_task = None
 
     async def _close_impl(self) -> None:
         cleanup_error: BaseException | None = None
@@ -1378,12 +1383,12 @@ class _LocalStdioProcess:
             except BaseException as cleanup_error:
                 raise cancellation from cleanup_error
             raise cancellation
-        except BaseException:
-            async with self._lock:
-                if self._close_task is task:
-                    self._close_task = None
-                self._state = "OPEN"
-            raise
+        finally:
+            if task.done() and (task.cancelled() or task.exception() is not None):
+                async with self._lock:
+                    if self._close_task is task:
+                        self._close_task = None
+                        self._state = "OPEN"
 
     async def _close_impl(self) -> None:
         await self.close_stdin()

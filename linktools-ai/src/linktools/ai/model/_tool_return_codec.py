@@ -74,20 +74,16 @@ def _encode_node(
             _reject_nested_references(value.content)
         native_items = value.return_value if isinstance(value.return_value, list) else [value.return_value]
         extra_items = value.content if value.content is not None and not isinstance(value.content, str) else ()
-        if any(isinstance(item, ReferencedContent) or is_multi_modal_content(item) for item in native_items) or any(
-            isinstance(item, ReferencedContent) for item in extra_items
-        ):
-            if value.tools and any(isinstance(item, ReferencedContent) for item in (*native_items, *extra_items)):
-                raise ValueError("referenced tool content cannot persist new executable tools")
-            return {
-                "type": "tool-return",
-                "return_value": _encode_node(value.return_value, tool_return_allowed=False),
-                "content": (value.content if value.content is None or isinstance(value.content, str)
-                            else [encode_user_content_item(item) for item in value.content]),
-                "metadata": normalize_json_value(value.metadata),
-                "tools": None if value.tools is None else list(value.tools),
-            }
-        _reject_nested_references(value.return_value)
+        if value.tools and any(isinstance(item, ReferencedContent) for item in (*native_items, *extra_items)):
+            raise ValueError("referenced tool content cannot persist new executable tools")
+        return {
+            "type": "tool-return",
+            "return_value": _encode_node(value.return_value, tool_return_allowed=False),
+            "content": (value.content if value.content is None or isinstance(value.content, str)
+                        else [encode_user_content_item(item) for item in value.content]),
+            "metadata": stable_json_snapshot(value.metadata),
+            "tools": None if value.tools is None else list(value.tools),
+        }
     if is_multi_modal_content(value):
         return {
             "type": "multimodal",

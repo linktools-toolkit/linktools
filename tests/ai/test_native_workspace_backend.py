@@ -468,3 +468,90 @@ def test_worker_write_supports_creation_and_exact_replacement(tmp_path: Path) ->
         finally:
             await backend.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("owner_kind", ("local", "bubblewrap", "local_stdio", "bubblewrap_stdio"))
+@pytest.mark.parametrize("cancel_caller", (False, True))
+def test_failed_workspace_cleanup_can_be_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner_kind: str, cancel_caller: bool,
+) -> None:
+    from linktools.ai.workspace import _bubblewrap, _local_sandbox
+
+    async def run() -> None:
+        # Fault injection isolates close-task ownership from OS process teardown.
+        owner_type = {
+            "local": _local_sandbox.LocalWorkspaceBackend,
+            "bubblewrap": _bubblewrap.BubblewrapWorkspaceBackend,
+            "local_stdio": _local_sandbox._LocalStdioProcess,
+            "bubblewrap_stdio": _bubblewrap._BubblewrapStdioProcess,
+        }[owner_kind]
+        owner = object.__new__(owner_type)
+        owner._state = "OPEN"
+        owner._state_lock = asyncio.Lock()
+        owner._lock = asyncio.Lock()
+        owner._initialize_lock = asyncio.Lock()
+        owner._process = object()
+        owner._close_task = None
+        started, release = asyncio.Event(), asyncio.Event()
+        owned = {"process"}
+        failure = AIError(ErrorCode.SANDBOX_CLEANUP_FAILED)
+        fail = True
+
+        async def cleanup() -> None:
+            started.set()
+            await release.wait()
+            if fail:
+                raise failure
+            owned.clear()
+            owner._state = "CLOSED"
+
+        monkeypatch.setattr(owner, "_close_impl", cleanup)
+        first = asyncio.create_task(owner.close())
+        await started.wait()
+        follower = asyncio.create_task(owner.close())
+        await asyncio.sleep(0)
+        if cancel_caller:
+            first.cancel()
+            await asyncio.sleep(0)
+        release.set()
+        error_type = asyncio.CancelledError if cancel_caller else AIError
+        with pytest.raises(error_type) as raised:
+            await first
+        if cancel_caller:
+            assert raised.value.__cause__ is failure
+        else:
+            assert raised.value is failure
+        with pytest.raises(AIError) as follower_error:
+            await follower
+        assert follower_error.value is failure
+        assert owned == {"process"}
+        fail = False
+        await owner.close()
+        assert not owned
+        await owner.close()
+
+    asyncio.run(run())
+
+
+def test_local_provider_retries_retained_stdio_cleanup(tmp_path: Path) -> None:
+    async def run() -> None:
+        backend = LocalWorkspaceBackend(tmp_path)
+        await backend.working_dir()
+        failed = True
+
+        class Handle:
+            async def close(self) -> None:
+                if failed:
+                    raise AIError(ErrorCode.SANDBOX_CLEANUP_FAILED)
+                backend._stdio_processes.discard(self)
+
+        handle = Handle()
+        backend._stdio_processes.add(handle)
+        with pytest.raises(AIError):
+            await backend.close()
+        assert handle in backend._stdio_processes
+        failed = False
+        await backend.close()
+        assert not backend._stdio_processes
+
+    asyncio.run(run())
