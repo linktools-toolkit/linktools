@@ -66,6 +66,34 @@ references restored from storage retain `JsonValue` unless the application has
 the corresponding typed definition. Existing `Task[AppT]` annotations keep that
 default. Type parameters add no fields to persisted references or graph identity.
 
+## Agent input projection recovery
+
+`Task.from_agent(..., build_input=...)` projects declared, durable predecessor
+results before preparing the consumer prompt. A temporary callback failure stops
+the original graph in `RECOVERY_REQUIRED` with error code
+`TASK_INPUT_PROJECTION_FAILED`, phase `task_input_projection`, and a safe
+`cause_code`. After the dependency becomes available, reopen the same persistence,
+bind the same Task definitions, obtain the original run, and call
+`await run.recover(idempotency_key=...)`. Successful predecessors keep their
+execution IDs and results; recovery does not call their models again. A sustained
+outage can be recovered explicitly again without resubmitting the graph.
+
+Only retryable availability errors (`STORAGE_UNAVAILABLE`,
+`STORAGE_DEPENDENCY_NOT_READY`, `RUNTIME_DEPENDENCY_NOT_READY`,
+`SERVICE_NOT_READY`, `MODEL_UNAVAILABLE`), `MODEL_RATE_LIMITED`, `MODEL_TIMEOUT`,
+and `WAIT_TIMEOUT` qualify at this callback boundary. A retryable flag alone
+does not make schema, authorization, integrity, owner or fence errors temporary.
+Other projection errors fail normally. Existing terminal `FAILED` graphs are
+not reopened by this behavior.
+
+Projection callbacks must be read-only or idempotent under a fixed application
+identity: a crash after the callback returns but before its prepared input is
+published can replay the callback. Once prepared input is durably published,
+recovery restores that prompt and its source references instead of projecting
+again. A bound or uncertain consumer execution follows the existing execution
+recovery rules; it does not authorize another projection. Cancellation and lease
+fences continue to govern recovery and publication.
+
 ## Conditional batch expansion and collection
 
 The runnable [batch example](../../examples/task_graph.py) uses only public APIs
