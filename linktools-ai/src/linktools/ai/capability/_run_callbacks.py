@@ -7,7 +7,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from copy import copy
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, cast
 
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability, CapabilityOrdering
 from pydantic_ai.toolsets import AbstractToolset, ToolsetTool, WrapperToolset
@@ -153,6 +153,33 @@ class _CallbackAdapter(WrapperCapability[Any]):
         return await super().wrap_tool_execute(ctx, call=call, tool_def=tool_def, args=args, handler=handler)
 
 
+class _DeferredCallbacks(WrapperCapability[Any]):
+    """Keep native deferred dispatch separate from transparent registration."""
+
+    wrapped: CombinedCapability[Any]
+
+    def __init__(self, adapter: _CallbackAdapter) -> None:
+        super().__init__(CombinedCapability([adapter]))
+
+    @property
+    def adapter(self) -> _CallbackAdapter:
+        return cast(_CallbackAdapter, self.wrapped.capabilities[0])
+
+    def apply(self, visitor: Callable[[AbstractCapability[Any]], None]) -> None:
+        self.wrapped.apply(visitor)
+
+    def visit_and_replace(self, visitor: Callable[[AbstractCapability[Any]], AbstractCapability[Any] | None]
+                          ) -> AbstractCapability[Any] | None:
+        replacement = self.adapter.visit_and_replace(visitor)
+        return self if replacement is self.adapter else replacement
+
+    def for_agent(self, agent: AbstractAgent[Any, Any]) -> AbstractCapability[Any]:
+        return self.adapter.for_agent(agent)
+
+    async def for_run(self, ctx: RunContext[Any]) -> AbstractCapability[Any]:
+        return await self.adapter.for_run(ctx)
+
+
 
 def bind_run_callbacks(capability: AbstractCapability[Any], source: CapabilityRef, callbacks: RunCallbacks | None,
                        *, bound: bool = False) -> AbstractCapability[Any]:
@@ -169,7 +196,8 @@ def bind_run_callbacks(capability: AbstractCapability[Any], source: CapabilityRe
     if isinstance(leaf, (ToolResultsCapability, ReferencedInputsCapability)):
         if bound and callbacks is not None and isinstance(leaf, ReferencedInputsCapability):
             callbacks.bind_input(source, capability, leaf)
-        return _CallbackAdapter(capability, source, callbacks, bound=bound)
+        adapter = _CallbackAdapter(capability, source, callbacks, bound=bound)
+        return _DeferredCallbacks(adapter) if adapter.defer_loading is True else adapter
     return capability
 
 
