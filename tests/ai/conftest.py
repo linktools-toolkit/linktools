@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import signal
+import sys
 from collections.abc import Generator
 from types import FrameType
 
@@ -27,6 +28,9 @@ def pytest_runtest_protocol(
     nextitem: pytest.Item | None,
 ) -> Generator[None, None, None]:
     del item, nextitem
+    if sys.platform == "win32":
+        yield
+        return
     previous = signal.signal(signal.SIGALRM, _raise_timeout)
     signal.alarm(_TIMEOUT_SECONDS)
     try:
