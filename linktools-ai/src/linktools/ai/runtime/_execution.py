@@ -76,6 +76,7 @@ from ..core import (
     idempotency_key_digest as compute_idempotency_key_digest,
 )
 from ..asset import AssetVersionRef
+from ..session import SessionAdmission
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..task import TaskBindingContract, TaskEffectResolution
 from ..storage import (
@@ -584,6 +585,79 @@ class DefaultExecutionService(TaskExecutionService):
             request=replace(request, user_prompt=canonical, files=()),
             stored_user_input=stored,
         )
+
+    async def lookup_session_admission(
+        self, session_id: str, *, principal: Principal, idempotency_key: str,
+    ) -> SessionAdmission | None:
+        """Read one session request without changing pending execution ownership."""
+        key = compute_idempotency_key_digest(validate_idempotency_key(idempotency_key))
+        scope = "session.resume"
+        pending_turns = self._runtime_bridge.pending_turns
+        pending = pending_turns.peek_request(
+            tenant_id=principal.tenant_id, scope=scope, idempotency_key_digest=key,
+        )
+        identity = await self._state.idempotency.get(scope, key, tenant_id=principal.tenant_id)
+        record = None
+        if identity is None:
+            if pending is not None:
+                if pending.uncertain or pending.failure is not None:
+                    raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
+                record = pending.execution
+            elif pending_turns.coordination is not None:
+                record = await pending_turns.coordination.read_request_execution(
+                    f"{scope}:{key}", tenant_id=principal.tenant_id,
+                )
+                if record is None:
+                    # The owner may have committed and released between reads.
+                    identity = await self._state.idempotency.get(scope, key, tenant_id=principal.tenant_id)
+        if identity is not None:
+            if (identity.resource_kind is not ResourceKind.EXECUTION
+                    or identity.scope != scope or identity.idempotency_key_digest != key
+                    or (pending is not None and pending.execution.execution_id != identity.resource_id)):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if identity.status in {IdempotencyStatus.RESERVED, IdempotencyStatus.START_UNKNOWN}:
+                raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
+            record = await self.load_source_execution(identity.resource_id, tenant_id=principal.tenant_id)
+            if record is None:
+                if identity.status in {IdempotencyStatus.FAILED, IdempotencyStatus.CANCELLED}:
+                    fallback = (ErrorCode.EXECUTION_START_PERSISTENCE_FAILED
+                                if identity.status is IdempotencyStatus.FAILED else ErrorCode.EXECUTION_CANCELLED)
+                    raise _stable_idempotency_error(identity.error_code, fallback)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if identity.resource_id != record.execution_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if record is None:
+            return None
+        await self._authorization.authorize(
+            principal, AuthorizationAction.EXECUTION_READ,
+            ResourceRef(ResourceKind.EXECUTION, record.execution_id, principal.tenant_id, record.principal_id),
+        )
+        if record.session_id != session_id:
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        if record.started_at is None:
+            if identity is not None and identity.status in {IdempotencyStatus.FAILED, IdempotencyStatus.CANCELLED}:
+                fallback = (ErrorCode.EXECUTION_START_PERSISTENCE_FAILED
+                            if identity.status is IdempotencyStatus.FAILED else ErrorCode.EXECUTION_CANCELLED)
+                raise _stable_idempotency_error(identity.error_code, fallback)
+            raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
+        if identity is not None and record.status in {
+            ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+        }:
+            if identity.status is IdempotencyStatus.STARTED:
+                # The first identity read may precede the atomic terminal commit.
+                refreshed = await self._state.idempotency.get(scope, key, tenant_id=principal.tenant_id)
+                if (refreshed is None or refreshed.request_digest != identity.request_digest
+                        or refreshed.scope != scope or refreshed.idempotency_key_digest != key):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                identity = refreshed
+            if not _terminal_idempotency_matches(identity, record):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if record.stored_user_input is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if self._input_materializer is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        prompt = await self._input_materializer.restore(record.stored_user_input)
+        return SessionAdmission(record.execution_id, prompt)
 
     async def _request_for_execution(
         self,

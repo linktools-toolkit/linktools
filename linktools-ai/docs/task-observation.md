@@ -140,6 +140,26 @@ integrity failures propagate. A callback's ordinary exception, including AIError
 or TimeoutError, becomes `ObservationError(origin="callback")` with its cause
 and previous ACK. Cancellation is not translated.
 
+For long-running work, `wait(on_event=..., raise_on_stream_error=True)` opts into
+early notification when the observation source fails. After closing this one
+observer, the wait raises the existing `ObservationError(origin="stream")` with
+the last successfully acknowledged `cursor`; it does not cancel the execution,
+graph, or evaluation. The host may resume the same handle with
+`wait(on_event=..., cursor=error.cursor, raise_on_stream_error=True)`. Keep these
+calls serial: do not start a separate `watch()` alongside the wait, and do not
+restart the business work merely because observation failed. Retry decisions
+and backoff belong to the caller; the SDK does not reconnect automatically.
+
+The flag defaults to False, preserving the ordinary authoritative wait. Without
+`on_event` there is no observation source, so the flag has no effect. An already
+available authoritative result remains a `WaitResult` with its observation
+diagnostic; authoritative failures and caller cancellation still propagate.
+The flag does not reclassify callback, model, business, authorization, cursor,
+or durable-data errors. A cleanup failure takes precedence over this optional
+source fault: `phase="cleanup", cleanup_pending=True` means the observer has
+not stopped, so the host must finish owner cleanup before reconnecting. A
+stream-error exception is not a terminal business result.
+
 Simultaneous failure priority is cancellation, authoritative waiter failure,
 watch contract failure, callback failure, SDK deadline, then cleanup failure.
 Local cleanup has its own close budget. Runtime retains unfinished tasks and

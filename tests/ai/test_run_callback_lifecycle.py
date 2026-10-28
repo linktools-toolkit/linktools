@@ -158,13 +158,15 @@ async def test_two_concurrent_runs_use_their_initialized_instance_through_close(
 
 
 @pytest.mark.asyncio
-async def test_native_ordering_type_requirements_and_duplicate_merge_remain_transparent() -> None:
+@pytest.mark.parametrize("deferred", (False, True))
+async def test_native_ordering_type_requirements_and_duplicate_merge_remain_transparent(deferred: bool) -> None:
     async def execute(adapt: bool):
         events = []
         @dataclass
         class Project(ToolResultsCapability):
             label: str
             id = "same-project"
+            defer_loading = deferred
             async def for_run(self, ctx):
                 events.append(("bind", self.label))
                 return type(self)(self.label + "-bound")
@@ -222,6 +224,30 @@ async def test_native_replacement_and_removal_refresh_the_bound_source() -> None
     assert callbacks.referenced_inputs() == {_SOURCE: replacement}
     assert changed.visit_and_replace(lambda value: None) is None
     assert callbacks.referenced_inputs() == {}
+
+
+@pytest.mark.asyncio
+async def test_deferred_source_replacement_preserves_native_identity_and_releases_binding() -> None:
+    from ._runtime_test_helpers import tool_run_context
+
+    async def load(context, content):
+        return _BODY
+
+    original, replacement = ReferencedInputsCapability(load), ReferencedInputsCapability(load)
+    original.id = replacement.id = "source"
+    original.defer_loading = replacement.defer_loading = True
+    callbacks, context = RunCallbacks(), tool_run_context()
+    bound = await bind_run_callbacks(original, _SOURCE, callbacks).for_run(context)
+    visited = []
+    bound.apply(visited.append)
+    assert len(visited) == 1 and visited[0] is original
+
+    changed = bound.visit_and_replace(lambda value: replacement if value is original else value)
+    visited.clear()
+    changed.apply(visited.append)
+    assert len(visited) == 1 and visited[0] is replacement
+    assert changed.visit_and_replace(lambda value: None) is None
+    await bind_run_callbacks(original, _SOURCE, callbacks).for_run(context)
 
 
 @pytest.mark.asyncio

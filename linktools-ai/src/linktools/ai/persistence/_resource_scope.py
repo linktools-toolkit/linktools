@@ -270,7 +270,7 @@ def _cleanup_sqlite_temporary(path: Path) -> None:
 
 
 def _sync_file(path: Path) -> None:
-    with path.open("rb") as handle:
+    with path.open("r+b") as handle:
         os.fsync(handle.fileno())
 
 

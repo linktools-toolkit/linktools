@@ -100,6 +100,7 @@ _TERMINAL_TASK_STATUSES = frozenset(
 )
 _RECOVERY_REQUIRED_CODES = frozenset(
     {
+        ErrorCode.TASK_INPUT_PROJECTION_FAILED.value,
         ErrorCode.TASK_EFFECT_UNKNOWN.value,
         ErrorCode.TOOL_EFFECT_UNKNOWN.value,
         ErrorCode.STORAGE_COMMIT_UNKNOWN.value,
@@ -2248,6 +2249,17 @@ class TaskRepositoryImpl(RepositoryBase):
                 if definition is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if node.status is TaskStatus.RECOVERY_REQUIRED:
+                    if (
+                        node.execution_id is None
+                        and node.error_origin == "node"
+                        and node.error_code == ErrorCode.TASK_INPUT_PROJECTION_FAILED.value
+                    ):
+                        next_values.append(replace(
+                            node, status=TaskStatus.CANCELLED,
+                            error_code=None, error_digest=None, error_origin=None,
+                            safe_error_details={},
+                        ))
+                        continue
                     next_values.append(node)
                     continue
                 if node.status in _TERMINAL_TASK_STATUSES:

@@ -49,6 +49,16 @@ if TYPE_CHECKING:
 
 AppT = TypeVar("AppT")
 _DEADLINE_CANCEL_TIMEOUT_SECONDS = 5.0
+_TRANSIENT_INPUT_CODES = frozenset({
+    ErrorCode.STORAGE_UNAVAILABLE,
+    ErrorCode.STORAGE_DEPENDENCY_NOT_READY,
+    ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+    ErrorCode.SERVICE_NOT_READY,
+    ErrorCode.MODEL_RATE_LIMITED,
+    ErrorCode.MODEL_TIMEOUT,
+    ErrorCode.MODEL_UNAVAILABLE,
+    ErrorCode.WAIT_TIMEOUT,
+})
 
 
 class AgentTaskRunner(Generic[AppT]):
@@ -245,17 +255,19 @@ class AgentTaskRunner(Generic[AppT]):
                 except AgentTaskContextError as error:
                     cause = error.__cause__
                     if isinstance(cause, AIError):
+                        if cause.retryable and cause.code in _TRANSIENT_INPUT_CODES:
+                            raise _input_projection_error(cause) from cause
                         raise cause
                     raise
                 except AIError as error:
-                    raise AIError(
-                        ErrorCode.TASK_INPUT_PROJECTION_FAILED,
-                        safe_details={"cause_code": error.code.value},
-                    ) from error
+                    raise _input_projection_error(error) from error
                 except Exception as error:  # noqa: BLE001
                     raise AIError(
                         ErrorCode.TASK_INPUT_PROJECTION_FAILED,
-                        safe_details={"cause_type": type(error).__name__},
+                        safe_details={
+                            "phase": "task_input_projection",
+                            "cause_type": type(error).__name__,
+                        },
                     ) from error
                 prompt = _append_captured_files(prompt, task_input)
                 stored = await self._store_prepared_prompt(
@@ -585,6 +597,19 @@ class AgentTaskRunner(Generic[AppT]):
             return
         execution = await self._get_execution(execution_id, invocation.principal)
         await execution.cancel()
+
+
+def _input_projection_error(error: AIError) -> AIError:
+    # Retryability alone does not establish that a callback failure is temporary:
+    # owner, schema, authorization and integrity failures must remain terminal.
+    return AIError(
+        ErrorCode.TASK_INPUT_PROJECTION_FAILED,
+        retryable=error.retryable and error.code in _TRANSIENT_INPUT_CODES,
+        safe_details={
+            "phase": "task_input_projection",
+            "cause_code": error.code.value,
+        },
+    )
 
 
 def _append_captured_files(prompt: CanonicalUserInput, task_input: AgentTaskInput) -> CanonicalUserInput:

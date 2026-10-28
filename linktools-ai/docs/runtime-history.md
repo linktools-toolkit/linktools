@@ -733,3 +733,36 @@ Agent Runtime. Both expose the same read types, but availability is scoped to
 the selected reader, so a consumer must not promote a partial view to complete
 history. `runtime.executions.capture_input(...)` captures Agent-owned execution inputs;
 `engine.inputs` is the public capture and replay facade for a `TaskEngine`.
+
+### Recover an accepted request after a lost response
+
+When the host builds input from mutable context, rebuilding that input before
+retrying can conflict with the original idempotency key. Read the accepted
+admission before rebuilding it:
+
+```python
+admission = await runtime.sessions.lookup_admission(
+    session_id, principal=principal, idempotency_key=request_key,
+)
+if admission is not None:
+    # Compare the caller's stable request with admission.user_input before reuse.
+    execution = await runtime.executions.get(
+        admission.execution_id, principal=principal,
+    )
+```
+
+`SessionAdmission` contains only the execution ID and accepted canonical user
+input. The query requires session and execution read authorization. It does not
+start a model, reconcile a pending commit, create an input capture, or scan
+session history. `None` means no retained admission was found, not permission
+to bypass ordinary admission. A competing admission after this read is still
+resolved by the original key's atomic admission checks.
+
+An unresolved reservation or unavailable live admission view raises
+`EXECUTION_START_UNKNOWN`; keep the original key rather than starting a new
+request. Reusing a key belonging to another session conflicts. Applications must
+also reject changed caller input instead of treating every use of the same key
+as a valid retry. Terminal-commit runtimes query their existing live request
+index; a shared coordination backend must implement `TurnAdmissionReader` for
+this query. An unsupported backend reports `admission_lookup_not_supported`
+without changing its existing execution capabilities.

@@ -206,6 +206,12 @@ class _PendingExecutionTurns:
         if not turn.uncertain:
             self._release_admission(turn)
 
+    def peek_request(
+        self, *, tenant_id: str, scope: str, idempotency_key_digest: str,
+    ) -> _PendingExecutionTurn | None:
+        """Observe local admission without settling a possibly unknown commit."""
+        return self._requests.get((tenant_id, scope, idempotency_key_digest))
+
     async def lookup(
         self, *, tenant_id: str, scope: str, idempotency_key_digest: str,
         request_digest: str,

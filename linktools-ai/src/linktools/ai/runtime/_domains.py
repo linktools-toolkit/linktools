@@ -5,6 +5,7 @@
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
 
+from ..session import SessionAdmission
 from ..agent import AgentBindingContract
 from ..core import BudgetUsage, Principal
 from ..observe import WaitResult, RuntimeMetricsControl
@@ -86,6 +87,7 @@ class RuntimeExecutions(Generic[AppT]):
         on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
         cursor: str | None = None, include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        raise_on_stream_error: bool = False,
         include_model_interactions: Literal[False] = False,
     ) -> WaitResult[ExecutionResult]: ...
 
@@ -95,6 +97,7 @@ class RuntimeExecutions(Generic[AppT]):
         on_event: Callable[[ExecutionObservationEvent], Awaitable[None]] | None = None,
         cursor: str | None = None, include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        raise_on_stream_error: bool = False,
         include_model_interactions: Literal[True],
     ) -> WaitResult[ExecutionResult]: ...
 
@@ -104,6 +107,7 @@ class RuntimeExecutions(Generic[AppT]):
         on_event: Callable[[ExecutionTreeEvent | ExecutionObservationEvent], Awaitable[None]] | None = None,
         cursor: str | None = None, include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        raise_on_stream_error: bool = False,
         include_model_interactions: bool,
     ) -> WaitResult[ExecutionResult]: ...
 
@@ -112,12 +116,14 @@ class RuntimeExecutions(Generic[AppT]):
         on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | Callable[[ExecutionObservationEvent], Awaitable[None]] | None = None,
         cursor: str | None = None, include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        raise_on_stream_error: bool = False,
         include_model_interactions: bool = False,
     ) -> WaitResult[ExecutionResult]:
         execution = await self.get(execution_id, principal=principal)
         return await execution.wait(
             on_event=on_event, cursor=cursor, include_event_content=include_event_content,
             timeout_seconds=timeout_seconds, close_timeout_seconds=close_timeout_seconds,
+            raise_on_stream_error=raise_on_stream_error,
             include_model_interactions=include_model_interactions,
         )
 
@@ -251,6 +257,20 @@ class RuntimeSessions(Generic[AppT]):
 
     async def get(self, session_id: str, *, principal: Principal | None = None) -> "Session[AppT]":
         return await self._get_session(session_id, principal)
+
+    async def lookup_admission(
+        self, session_id: str, *, principal: Principal, idempotency_key: str,
+    ) -> SessionAdmission | None:
+        """Read an accepted request without starting or reconciling execution.
+
+        None means no retained admission. An uncertain admission raises
+        EXECUTION_START_UNKNOWN; retry with the same key, never a fresh key.
+        Callers must still compare their original request with the frozen input.
+        """
+        self._ensure_open()
+        return await self._service.lookup_admission(
+            session_id, principal=principal, idempotency_key=idempotency_key,
+        )
 
     async def create(self, agent_id: str, request: CreateSessionRequest) -> SessionView:
         self._ensure_open()

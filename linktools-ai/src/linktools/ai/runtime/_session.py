@@ -47,7 +47,7 @@ from ..execution import (
     SessionView,
 )
 from ..persistence.objects import runtime_object_source_reads
-from ..session import ConversationCursor, SessionRecord
+from ..session import ConversationCursor, SessionRecord, SessionAdmission
 from ..persistence.contracts import ConversationRepositories, ExecutionRepository
 from ..execution import ExecutionRecord
 from ..persistence.repositories import SessionRepositoryImpl
@@ -59,6 +59,10 @@ from ..persistence.state import active_state_scope
 
 
 class _SessionExecutionService(ExecutionService, Protocol):
+    async def lookup_session_admission(
+        self, session_id: str, *, principal: Principal, idempotency_key: str,
+    ) -> SessionAdmission | None: ...
+
     async def start_for_session(
         self,
         agent_id: str,
@@ -137,6 +141,15 @@ class _SessionExecutionAdapter:
 class RuntimeSessionService(SessionManager[ExecutionHandle]):
     """Enforce session ownership, Agent identity immutability, and revision CAS."""
 
+    async def lookup_admission(
+        self, session_id: str, *, principal: Principal, idempotency_key: str,
+    ) -> SessionAdmission | None:
+        self.require_available()
+        await self.read_authorized(session_id, principal, AuthorizationAction.SESSION_READ)
+        return await self._admission_execution.lookup_session_admission(
+            session_id, principal=principal, idempotency_key=idempotency_key,
+        )
+
     def __init__(
         self,
         conversation: ConversationRepositories,
@@ -153,6 +166,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         cache: CacheBackend | None = None,
         pending_session_execution: SessionPendingExecutionLookup[ExecutionRecord] | None = None,
     ) -> None:
+        self._admission_execution = execution
         self._runtime_conversation = conversation
         self._runtime_executions = executions
         self._runtime_authorization = authorization

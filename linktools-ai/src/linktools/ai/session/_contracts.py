@@ -31,7 +31,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload
-from ..model import StoredUserInput, UserPromptInput, normalize_input_files, validate_user_input
+from ..model import CanonicalUserInput, StoredUserInput, UserPromptInput, normalize_input_files, validate_user_input
 from ..workspace import validate_workspace_path
 
 
@@ -189,6 +189,14 @@ class SessionTurnItem:
     def __post_init__(self) -> None:
         if self.ordinal < 1 or not self.item_kind:
             raise ValueError("session timeline item is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class SessionAdmission:
+    """An accepted request and its original model-visible input."""
+
+    execution_id: str
+    user_input: CanonicalUserInput
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,6 +465,7 @@ __all__ = [
     "SessionHistoryItem",
     "SessionTurnItem",
     "SessionTurn",
+    "SessionAdmission",
     "SessionHistoryReader",
     "CreateSessionRequest",
     "ListSessionRequest",

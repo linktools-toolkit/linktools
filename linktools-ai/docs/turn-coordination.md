@@ -85,3 +85,28 @@ Live ownership metadata is separate from `max_bytes` and `max_size`: content
 pressure and pending writes never evict it. Metadata is reclaimed after lease
 expiry on coordination calls, or immediately on successful release. No task,
 connection, or background timer is created by this capability.
+
+## Read-only admission lookup
+
+A coordination backend may also implement the independent `TurnAdmissionReader`
+capability for indexed request lookup:
+
+```python
+async def read_turn_by_request(scope: str, request_key: str) -> TurnCoordination | None: ...
+```
+
+This reads the request index already maintained by `claim_turn`. It returns the
+live owner's token-free identity, or `None` when no live claim exists. It does
+not claim, renew, release, or persist anything. The same scope isolation,
+nonempty key validation, failure propagation, and expiry rules apply.
+
+The capability is optional: existing coordination backends remain usable for
+execution without it. Admission lookup on such a backend fails explicitly with
+`REQUEST_FIELD_INVALID` and reason `admission_lookup_not_supported`, rather than
+silently disabling coordination or treating the request as absent.
+
+A live claim can precede publication of its readable execution view. The
+persistence admission reader reports `EXECUTION_START_UNKNOWN` if the claim
+exists but its view is missing, invalid, or loses ownership while being read.
+Callers must not interpret that outcome as permission to start with a new key.
+`InMemoryCacheBackend` supports both capability groups.

@@ -431,6 +431,7 @@ def test_graph_wait_overloads_preserve_content_selected_result_type() -> None:
     {"timeout_seconds": True}, {"timeout_seconds": -1}, {"timeout_seconds": float("nan")},
     {"timeout_seconds": float("inf")}, {"close_timeout_seconds": 0},
     {"close_timeout_seconds": True}, {"include_event_content": 1}, {"on_event": object()},
+    {"raise_on_stream_error": "yes"},
 ])
 async def test_convenience_wait_arguments_are_validated_before_start(owner, method, invalid) -> None:
     starts = []
@@ -469,11 +470,13 @@ async def test_convenience_wait_preserves_container_and_all_options(owner, metho
     callback = _ignore if observe else None
     result = await getattr(handle, method)(
         "prompt", on_event=callback, include_event_content=True, timeout_seconds=0.25, close_timeout_seconds=0.5,
+        raise_on_stream_error=True,
     )
     assert result is expected
     assert starts[0]["mode"] == method
     assert waits == [{
         "on_event": callback, "include_event_content": True, "timeout_seconds": 0.25, "close_timeout_seconds": 0.5,
+        "raise_on_stream_error": True,
     }]
 
 
@@ -527,6 +530,7 @@ async def test_terminal_owner_validates_cursor_membership_before_authoritative_w
 @pytest.mark.parametrize("options", [
     {"timeout_seconds": True}, {"timeout_seconds": float("nan")},
     {"close_timeout_seconds": 0}, {"include_event_content": 1}, {"on_event": 1},
+    {"raise_on_stream_error": "yes"},
 ])
 async def test_invalid_wait_options_start_no_work_for_any_owner(owner, options) -> None:
     bundle = await _Bundle.create()
@@ -620,7 +624,8 @@ async def test_authoritative_timeout_error_is_never_reclassified_as_sdk_deadline
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["authority", "contract", "callback"])
-async def test_failure_revealed_during_deadline_cleanup_keeps_its_source_priority(failure) -> None:
+@pytest.mark.parametrize("raise_on_stream_error", [False, True])
+async def test_failure_revealed_during_deadline_cleanup_keeps_its_source_priority(failure, raise_on_stream_error) -> None:
     bundle = await _Bundle.create()
     bundle.execution.release.clear()
     cause = TimeoutError("callback timeout") if failure == "callback" else AIError(ErrorCode.STORAGE_UNAVAILABLE)
@@ -654,7 +659,8 @@ async def test_failure_revealed_during_deadline_cleanup_keeps_its_source_priorit
     run = Execution(bundle.runtime._execution_binding, "execution", _PRINCIPAL, tree)
     try:
         with pytest.raises(ObservationError if failure == "callback" else AIError) as raised:
-            await run.wait(on_event=callback, timeout_seconds=0.01, close_timeout_seconds=0.2)
+            await run.wait(on_event=callback, timeout_seconds=0.01, close_timeout_seconds=0.2,
+                           raise_on_stream_error=raise_on_stream_error)
         if failure == "callback":
             assert raised.value.origin == "callback"
             assert raised.value.__cause__ is cause
@@ -666,7 +672,8 @@ async def test_failure_revealed_during_deadline_cleanup_keeps_its_source_priorit
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("winner", ["authority", "contract"])
-async def test_execution_failure_outranks_simultaneous_callback_failure(winner) -> None:
+@pytest.mark.parametrize("raise_on_stream_error", [False, True])
+async def test_execution_failure_outranks_simultaneous_callback_failure(winner, raise_on_stream_error) -> None:
     bundle = await _Bundle.create()
     bundle.execution.release.clear()
     cause = AIError(ErrorCode.AUTHORIZATION_DENIED)
@@ -690,7 +697,7 @@ async def test_execution_failure_outranks_simultaneous_callback_failure(winner) 
     run = Execution(bundle.runtime._execution_binding, "execution", _PRINCIPAL, tree)
     try:
         with pytest.raises(AIError) as raised:
-            await run.wait(on_event=callback)
+            await run.wait(on_event=callback, raise_on_stream_error=raise_on_stream_error)
         assert raised.value is cause
     finally:
         await bundle.close()

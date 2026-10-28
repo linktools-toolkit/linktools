@@ -96,9 +96,11 @@ class Session(Generic[AppT]):
         on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
         include_event_content: bool = False,
         close_timeout_seconds: float = 5.0,
+        raise_on_stream_error: bool = False,
     ) -> WaitResult[ExecutionResult]:
         """Run and wait; planning enables a capability, while include_event_content only controls observation."""
-        validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds)
+        validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds,
+                      raise_on_stream_error=raise_on_stream_error)
         execution = await self.start(
             user_prompt,
             files=files,
@@ -114,6 +116,7 @@ class Session(Generic[AppT]):
         return await execution.wait(
             timeout_seconds=timeout_seconds, on_event=on_event, include_event_content=include_event_content,
             close_timeout_seconds=close_timeout_seconds,
+            raise_on_stream_error=raise_on_stream_error,
         )
 
     async def plan(
@@ -132,9 +135,11 @@ class Session(Generic[AppT]):
         on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
         include_event_content: bool = False,
         close_timeout_seconds: float = 5.0,
+        raise_on_stream_error: bool = False,
     ) -> WaitResult[ExecutionResult]:
         """Execute plan mode with plan-safe tools and wait. This can call models and tools; it is not a dry run."""
-        validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds)
+        validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds,
+                      raise_on_stream_error=raise_on_stream_error)
         if self._agent_revision is None:
             return await self._runtime.agents.get(self.agent_id).plan(
                 user_prompt,
@@ -149,6 +154,7 @@ class Session(Generic[AppT]):
                 correlation=correlation,
                 timeout_seconds=timeout_seconds, on_event=on_event, include_event_content=include_event_content,
                 close_timeout_seconds=close_timeout_seconds,
+                raise_on_stream_error=raise_on_stream_error,
             )
         execution = await self._runtime._start_for_agent(
             self.agent_id,
@@ -170,6 +176,7 @@ class Session(Generic[AppT]):
         return await execution.wait(
             timeout_seconds=timeout_seconds, on_event=on_event, include_event_content=include_event_content,
             close_timeout_seconds=close_timeout_seconds,
+            raise_on_stream_error=raise_on_stream_error,
         )
 
     async def history(
@@ -371,9 +378,11 @@ class Agent(Generic[AppT]):
         on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
         include_event_content: bool = False,
         close_timeout_seconds: float = 5.0,
+        raise_on_stream_error: bool = False,
     ) -> WaitResult[ExecutionResult]:
         """Run and wait; planning enables a capability, while include_event_content only controls observation."""
-        validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds)
+        validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds,
+                      raise_on_stream_error=raise_on_stream_error)
         execution = await self.start(
             user_prompt,
             files=files,
@@ -391,6 +400,7 @@ class Agent(Generic[AppT]):
         return await execution.wait(
             timeout_seconds=timeout_seconds, on_event=on_event, include_event_content=include_event_content,
             close_timeout_seconds=close_timeout_seconds,
+            raise_on_stream_error=raise_on_stream_error,
         )
 
     async def plan(
@@ -410,9 +420,11 @@ class Agent(Generic[AppT]):
         on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
         include_event_content: bool = False,
         close_timeout_seconds: float = 5.0,
+        raise_on_stream_error: bool = False,
     ) -> WaitResult[ExecutionResult]:
         """Execute plan mode with plan-safe tools and wait. This can call models and tools; it is not a dry run."""
-        validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds)
+        validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds,
+                      raise_on_stream_error=raise_on_stream_error)
         execution = await self._runtime._start_for_agent(
             self.id,
             self._agent_revision,
@@ -433,6 +445,7 @@ class Agent(Generic[AppT]):
         return await execution.wait(
             timeout_seconds=timeout_seconds, on_event=on_event, include_event_content=include_event_content,
             close_timeout_seconds=close_timeout_seconds,
+            raise_on_stream_error=raise_on_stream_error,
         )
 
     def session(

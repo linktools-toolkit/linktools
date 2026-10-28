@@ -78,6 +78,7 @@ class Execution(Generic[AppT]):
         self, *, on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
         cursor: str | None = None, include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        raise_on_stream_error: bool = False,
         include_model_interactions: Literal[False] = False,
     ) -> WaitResult[ExecutionResult]: ...
 
@@ -86,6 +87,7 @@ class Execution(Generic[AppT]):
         self, *, on_event: Callable[[ExecutionObservationEvent], Awaitable[None]] | None = None,
         cursor: str | None = None, include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        raise_on_stream_error: bool = False,
         include_model_interactions: Literal[True],
     ) -> WaitResult[ExecutionResult]: ...
 
@@ -94,6 +96,7 @@ class Execution(Generic[AppT]):
         self, *, on_event: Callable[[ExecutionTreeEvent | ExecutionObservationEvent], Awaitable[None]] | None = None,
         cursor: str | None = None, include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        raise_on_stream_error: bool = False,
         include_model_interactions: bool,
     ) -> WaitResult[ExecutionResult]: ...
 
@@ -101,10 +104,12 @@ class Execution(Generic[AppT]):
         self, *, on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | Callable[[ExecutionObservationEvent], Awaitable[None]] | None = None,
         cursor: str | None = None, include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        raise_on_stream_error: bool = False,
         include_model_interactions: bool = False,
     ) -> WaitResult[ExecutionResult]:
         """Wait for the full execution result; include_event_content only selects callback payloads."""
-        validate_wait(on_event, cursor, include_event_content, timeout_seconds, close_timeout_seconds)
+        validate_wait(on_event, cursor, include_event_content, timeout_seconds, close_timeout_seconds,
+                      raise_on_stream_error=raise_on_stream_error)
         if not isinstance(include_model_interactions, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if include_model_interactions:
@@ -115,6 +120,7 @@ class Execution(Generic[AppT]):
                 watch=lambda ready: self._watch_models(cursor, include_event_content, ready),
                 on_event=on_event, cursor=cursor, timeout_seconds=timeout_seconds,
                 close_timeout_seconds=close_timeout_seconds,
+                raise_on_stream_error=raise_on_stream_error,
                 register=self._binding.register_observation, release=self._binding.release_observation,
                 finalize=lambda result, acknowledged: _ExecutionModelObservation(
                     self._binding, self.execution_id, self._principal, self._watch_tree,
@@ -146,6 +152,7 @@ class Execution(Generic[AppT]):
             watch=lambda ready: self._watch_prepared(cursor, include_event_content, ready),
             on_event=on_event, cursor=cursor, timeout_seconds=timeout_seconds,
             close_timeout_seconds=close_timeout_seconds,
+            raise_on_stream_error=raise_on_stream_error,
             register=self._binding.register_observation, release=self._binding.release_observation,
             finalize=finalize, drain_live=True,
         )

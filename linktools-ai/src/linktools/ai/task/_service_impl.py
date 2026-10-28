@@ -948,11 +948,21 @@ class DefaultTaskGraphService(TaskGraphService):
             view = current
 
         if view.status is TaskStatus.RECOVERY_REQUIRED:
-            view = await self._persistence.tasks.recover_graph(
-                graph_id,
-                tenant_id=tenant_id,
-                cancel_requested=cancel_requested,
-            )
+            try:
+                view = await self._persistence.tasks.recover_graph(
+                    graph_id,
+                    tenant_id=tenant_id,
+                    cancel_requested=cancel_requested,
+                )
+            except AIError as error:
+                if error.code is not ErrorCode.TASK_NOT_READY:
+                    raise
+                # A concurrent recover can clear the recovery state after our
+                # validated read. Observe that transition instead of replaying it.
+                current = await self._persistence.tasks.get_graph(graph_id, tenant_id=tenant_id)
+                if current is None or current.status is TaskStatus.RECOVERY_REQUIRED:
+                    raise
+                view = current
         if view.status is TaskStatus.RECOVERY_REQUIRED:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
 

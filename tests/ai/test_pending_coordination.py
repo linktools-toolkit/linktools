@@ -444,3 +444,98 @@ async def test_promotion_authority_recheck_failure_cannot_confirm_the_hint(
     cache.read_continue.set()
     with pytest.raises(OSError, match="authority unavailable"):
         await pending
+
+
+@pytest.mark.asyncio
+async def test_request_lookup_requires_published_view_without_writing_or_claiming(monkeypatch) -> None:
+    cache = _ObservedCache()
+    writer, reader = _helper(cache), _helper(cache)
+    assert await reader.read_request_execution("request", tenant_id="tenant") is None
+    owner = await _claim(writer)
+    with pytest.raises(AIError) as unknown:
+        await reader.read_request_execution("request", tenant_id="tenant")
+    assert unknown.value.code is ErrorCode.EXECUTION_START_UNKNOWN
+    record = replace(_record(ExecutionStatus.STARTED, 1), session_id="session")
+    await writer.publish(record, owner)
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail("admission reads must not mutate or claim ownership")
+
+    for method in ("put", "delete", "claim_turn", "renew_turn", "release_turn"):
+        monkeypatch.setattr(cache, method, forbidden)
+    assert await reader.read_request_execution("request", tenant_id="tenant") == record
+    assert await reader.read_request_execution("request", tenant_id="other") is None
+
+
+@pytest.mark.asyncio
+async def test_request_lookup_keeps_lost_view_distinct_from_missing_request() -> None:
+    cache = _ObservedCache()
+    helper = _helper(cache)
+    owner = await _claim(helper)
+    record = replace(_record(ExecutionStatus.STARTED, 1), session_id="session")
+    await helper.publish(record, owner)
+    await cache.delete(cache.record_key())
+    with pytest.raises(AIError) as unknown:
+        await helper.read_request_execution("request", tenant_id="tenant")
+    assert unknown.value.code is ErrorCode.EXECUTION_START_UNKNOWN
+    assert await helper.read_request_execution("missing", tenant_id="tenant") is None
+
+
+@pytest.mark.asyncio
+async def test_request_lookup_does_not_report_absent_when_owner_changes_during_read() -> None:
+    cache = _ObservedCache()
+    helper = _helper(cache)
+    owner = await _claim(helper)
+    record = replace(_record(ExecutionStatus.STARTED, 1), session_id="session")
+    await helper.publish(record, owner)
+    cache.paused_key = cache.record_key()
+    read = asyncio.create_task(helper.read_request_execution("request", tenant_id="tenant"))
+    await cache.read_started.wait()
+    assert owner.lease is not None
+    await helper.release(owner.lease)
+    await _claim(helper, execution_id="next", owner_id="next-owner")
+    cache.read_continue.set()
+    with pytest.raises(AIError) as unknown:
+        await read
+    assert unknown.value.code is ErrorCode.EXECUTION_START_UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_request_lookup_backend_failure_propagates(monkeypatch) -> None:
+    cache = _ObservedCache()
+    helper = _helper(cache)
+
+    async def unavailable(scope, request_key):
+        raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+
+    monkeypatch.setattr(cache, "read_turn_by_request", unavailable)
+    with pytest.raises(AIError) as unavailable_error:
+        await helper.read_request_execution("request", tenant_id="tenant")
+    assert unavailable_error.value.code is ErrorCode.STORAGE_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_existing_coordination_backend_remains_selected_without_admission_reader() -> None:
+    class OwnershipCache(_ContentOnly):
+        async def claim_turn(self, *args, **kwargs):
+            raise NotImplementedError
+
+        async def read_turn(self, *args, **kwargs):
+            raise NotImplementedError
+
+        async def renew_turn(self, *args, **kwargs):
+            raise NotImplementedError
+
+        async def release_turn(self, *args, **kwargs):
+            raise NotImplementedError
+
+        async def cancel_turn(self, *args, **kwargs):
+            raise NotImplementedError
+
+    cache = OwnershipCache()
+    helper = PendingTurnCoordination.select(cache, namespace="runtime", tenant_id="tenant")
+    assert helper is not None
+    with pytest.raises(AIError) as unsupported:
+        await helper.read_request_execution("request", tenant_id="tenant")
+    assert unsupported.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    assert unsupported.value.safe_details == {"reason": "admission_lookup_not_supported"}
