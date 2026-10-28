@@ -1908,6 +1908,15 @@ class LocalTaskGraphLauncher:
                         type(error).__name__,
                         exc_info=True,
                     )
+                if (
+                    isinstance(error, AIError)
+                    and error.code is ErrorCode.TASK_INPUT_PROJECTION_FAILED
+                    and error.retryable
+                    and error.safe_details.get("phase") == "task_input_projection"
+                    and control.execution_id is None
+                ):
+                    await self._defer_recovery(run, node, lease_state, cause=error)
+                    return
                 if isinstance(error, AIError) and error.code in _RECOVERY_UNKNOWN_CODES:
                     await self._defer_recovery(
                         run,
@@ -2184,6 +2193,7 @@ class LocalTaskGraphLauncher:
         recovery_code = (
             cause.code
             if cause.code in _RECOVERY_UNKNOWN_CODES
+            or cause.code is ErrorCode.TASK_INPUT_PROJECTION_FAILED
             else ErrorCode.STORAGE_RECOVERY_REQUIRED
         )
         digest = canonical_sha256(
