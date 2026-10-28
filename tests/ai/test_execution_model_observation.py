@@ -502,14 +502,27 @@ async def test_standalone_final_drain_and_close_budgets_retain_noncooperative_ca
 async def test_standalone_drain_does_not_start_another_read_after_deadline(monkeypatch) -> None:
     from linktools.ai.observe import stream as _observation
 
-    monkeypatch.setattr(_observation, "_FINAL_DRAIN_TIMEOUT", 0.01)
+    expire = asyncio.Event()
+    deadline_started = asyncio.get_running_loop().create_future()
+
+    async def sleep_until_expired(delay: float) -> None:
+        assert delay == _observation._FINAL_DRAIN_TIMEOUT
+        deadline_started.set_result(asyncio.current_task())
+        await expire.wait()
+
+    # Expire the drain only after the consumer is paused, independent of setup speed.
+    monkeypatch.setattr(
+        _observation, "asyncio", SimpleNamespace(**(vars(asyncio) | {"sleep": sleep_until_expired})),
+    )
     bundle = await _bundle()
     try:
         bundle.runtime.history.rows.append(replace(bundle.runtime.history.rows[0], model_request_seq=2))
         stream = bundle.execution_run.watch(include_model_interactions=True)
         for _ in range(3):
             await anext(stream)
-        await asyncio.sleep(0.03)
+        deadline = await asyncio.wait_for(deadline_started, 1)
+        expire.set()
+        await asyncio.wait_for(asyncio.shield(deadline), 1)
         with pytest.raises(ObservationError) as caught:
             await anext(stream)
         assert caught.value.safe_details["phase"] == "drain"
