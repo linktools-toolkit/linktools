@@ -7,7 +7,7 @@ import math
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable
 from contextvars import ContextVar
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol, TypeGuard, TypeVar
 
 from linktools.core import environ
 
@@ -45,6 +45,13 @@ def is_observation_cleanup(error: BaseException | None) -> bool:
         isinstance(error, asyncio.CancelledError)
         and len(error.args) == 1
         and error.args[0] is _CLEANUP_CANCEL
+    )
+
+
+def _is_stream_error(error: BaseException | None) -> TypeGuard[ObservationError]:
+    return (
+        isinstance(error, ObservationError) and error.origin == "stream"
+        and error.safe_details.get("phase") != "cleanup"
     )
 
 
@@ -136,11 +143,13 @@ class ObservationSession:
         self, scope: str, resource_id: str, cursor: str | None, close_timeout: float,
         release: Callable[["ObservationSession"], None],
         on_stop: Callable[[], None] | None = None,
+        *, raise_on_stream_error: bool = False,
     ) -> None:
         self.scope = scope
         self.resource_id = resource_id
         self.cursor = cursor
         self.close_timeout = close_timeout
+        self.raise_on_stream_error = raise_on_stream_error
         self.closing = False
         self.stream_error: ObservationError | None = None
         self.observer_error: BaseException | None = None
@@ -164,10 +173,11 @@ class ObservationSession:
             )
             projected.__cause__ = cause
             error = projected
-        if (isinstance(error, ObservationError) and error.origin == "stream"
-                and error.safe_details.get("phase") != "cleanup"):
+        if _is_stream_error(error):
             if self.stream_error is None:
                 self.stream_error = error
+            if self.raise_on_stream_error and not self._error_ready.done():
+                self._error_ready.set_result(None)
             return
         if (self.observer_error is None
                 or _error_priority(error, authoritative=False)
@@ -272,14 +282,17 @@ class ObservationSession:
                 remaining = None if deadline is None else max(0.0, deadline - loop.time())
                 done, _ = await asyncio.wait(active, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
                 if self._error_ready in done:
-                    assert self.observer_error is not None
-                    raise self.observer_error
+                    if self.observer_error is not None:
+                        raise self.observer_error
+                    if not waiter.done():
+                        assert self.stream_error is not None
+                        raise self.stream_error
                 if observer is not None and observer in done:
                     active.discard(observer)
                     try:
                         observer.result()
                     except ObservationError as error:
-                        if error.origin != "stream" or error.safe_details.get("phase") == "cleanup":
+                        if not _is_stream_error(error) or self.raise_on_stream_error and not waiter.done():
                             raise
                         observation_error = error
                 if waiter in done:
@@ -303,8 +316,9 @@ class ObservationSession:
                                 return_when=asyncio.FIRST_COMPLETED,
                             )
                             if self._error_ready in drained:
-                                assert self.observer_error is not None
-                                raise self.observer_error
+                                if self.observer_error is not None:
+                                    raise self.observer_error
+                                break
                     break
                 if not done or (deadline is not None and loop.time() >= deadline):
                     deadline_error = AIError(ErrorCode.WAIT_TIMEOUT, safe_details={"scope": self.scope, "resource_id": self.resource_id, "cursor": self.cursor})
@@ -321,9 +335,12 @@ class ObservationSession:
         # Inspect both tasks after bounded cleanup so a simultaneous authoritative
         # failure cannot be hidden by observer completion or a successful wait.
         errors: list[tuple[int, BaseException]] = []
+        authority_available = waiter.done() and not waiter.cancelled()
         if self.observer_error is not None:
             errors.append((_error_priority(self.observer_error, authoritative=False), self.observer_error))
-        if primary is not None:
+        if primary is not None and not (
+            self.raise_on_stream_error and authority_available and _is_stream_error(primary)
+        ):
             errors.append((_error_priority(primary, authoritative=False), primary))
         for task, authoritative in ((waiter, True), (observer, False)):
             if task is None or not task.done() or (task.cancelled() and task in self.cancelled_by_owner):
@@ -331,7 +348,7 @@ class ObservationSession:
             try:
                 task.result()
             except ObservationError as error:
-                if not authoritative and error.origin == "stream" and error.safe_details.get("phase") != "cleanup":
+                if not authoritative and _is_stream_error(error):
                     observation_error = error
                 else:
                     errors.append((_error_priority(error, authoritative=authoritative), error))
@@ -339,6 +356,10 @@ class ObservationSession:
                 errors.append((_error_priority(error, authoritative=authoritative), error))
         if cleanup_error is not None:
             errors.append((0 if isinstance(cleanup_error, asyncio.CancelledError) else 5, cleanup_error))
+        elif self.raise_on_stream_error and not authority_available:
+            stream_error = self.stream_error or observation_error
+            if stream_error is not None:
+                errors.append((_error_priority(stream_error, authoritative=False), stream_error))
         if any(priority == 5 for priority, _ in errors) and any(priority < 5 for priority, _ in errors):
             _logger.warning("observation cleanup failed: resource_id=%s", self.resource_id)
         if errors:
@@ -369,6 +390,8 @@ def _error_priority(error: BaseException, *, authoritative: bool) -> int:
             return 3
         if error.safe_details.get("phase") == "cleanup":
             return 5
+        if error.origin == "stream":
+            return 6
     if isinstance(error, AIError) and error.code is ErrorCode.WAIT_TIMEOUT:
         return 4
     return 2
@@ -386,10 +409,11 @@ def validate_wait(
     on_event: Callable[[EventT], Awaitable[None]] | None,
     cursor: str | None, include_event_content: bool,
     timeout_seconds: float | None, close_timeout_seconds: float,
+    raise_on_stream_error: bool = False,
 ) -> None:
     validate_timeout(timeout_seconds)
     validate_timeout(close_timeout_seconds, positive=True)
-    if (not isinstance(include_event_content, bool)
+    if (not isinstance(include_event_content, bool) or not isinstance(raise_on_stream_error, bool)
             or on_event is not None and not callable(on_event)
             or cursor is not None and (not isinstance(cursor, str) or not cursor)
             or on_event is None and cursor is not None):
@@ -458,6 +482,7 @@ async def wait_for_result(
     finalize: "Callable[[T, str | None], Awaitable[AsyncIterator[EventT]]] | None" = None,
     drain_live: bool = False,
     handover_ready: asyncio.Event | None = None,
+    raise_on_stream_error: bool = False,
 ) -> WaitResult[T]:
     if on_event is None:
         session = ObservationSession(scope, resource_id, None, close_timeout_seconds, release)
@@ -470,7 +495,8 @@ async def wait_for_result(
         return WaitResult(result, None, error)
     ready = asyncio.Event()
     events = watch(ready)
-    session = ObservationSession(scope, resource_id, cursor, close_timeout_seconds, release)
+    session = ObservationSession(scope, resource_id, cursor, close_timeout_seconds, release,
+                                 raise_on_stream_error=raise_on_stream_error)
     register(session)
     finish: asyncio.Future[T] | None = None
     if finalize is not None:
@@ -527,7 +553,7 @@ async def consume_finalized_events(
                     ready.set()
                     break
                 except ObservationError as error:
-                    if error.origin != "stream" or error.safe_details.get("phase") == "cleanup":
+                    if not _is_stream_error(error) or session.raise_on_stream_error:
                         raise
                     stream_error = error
                     ready.set()

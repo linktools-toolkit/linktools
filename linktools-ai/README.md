@@ -1675,6 +1675,10 @@ Execution, TaskGraphRun and EvaluationRun expose `watch()` and
 `watch` retains its `include_content` option. Graph wait additionally uses
 `include_content` to choose whether its authoritative result includes raw node
 inputs. Node outputs are read with `result()` or `results()`.
+Use `raise_on_stream_error=True` to stop an observed wait promptly on a source
+failure, then resume the same handle serially from `ObservationError.cursor`
+after cleanup. The default still waits for the authoritative result; neither
+mode cancels business work.
 See [operation observation and migration](docs/task-observation.md)
 for recursive execution trees, evaluation graphs, cleanup guarantees, and the
 breaking SDK and StepEvent durable-wire changes. Existing development data is

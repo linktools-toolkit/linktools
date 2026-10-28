@@ -79,6 +79,7 @@ class TaskGraphRun(Generic[AppT]):
         cursor: str | None = None, include_content: Literal[False] = False,
         include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        raise_on_stream_error: bool = False,
     ) -> WaitResult[TaskGraphInfo]: ...
 
     @overload
@@ -87,6 +88,7 @@ class TaskGraphRun(Generic[AppT]):
         cursor: str | None = None, include_content: Literal[True],
         include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        raise_on_stream_error: bool = False,
     ) -> WaitResult[TaskGraphState]: ...
 
     @overload
@@ -95,6 +97,7 @@ class TaskGraphRun(Generic[AppT]):
         cursor: str | None = None, include_content: bool,
         include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        raise_on_stream_error: bool = False,
     ) -> WaitResult[TaskGraphInfo | TaskGraphState]: ...
 
     async def wait(
@@ -102,6 +105,7 @@ class TaskGraphRun(Generic[AppT]):
         cursor: str | None = None, include_content: bool = False,
         include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        raise_on_stream_error: bool = False,
     ) -> WaitResult[TaskGraphInfo | TaskGraphState]:
         """Wait for an authoritative graph snapshot, optionally observing events.
 
@@ -110,7 +114,8 @@ class TaskGraphRun(Generic[AppT]):
         """
         if not isinstance(include_content, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        validate_wait(on_event, cursor, include_event_content, timeout_seconds, close_timeout_seconds)
+        validate_wait(on_event, cursor, include_event_content, timeout_seconds, close_timeout_seconds,
+                      raise_on_stream_error=raise_on_stream_error)
         initial_ready = asyncio.Event()
         outcome = await wait_for_result(
             scope="task_graph", resource_id=self.graph_id,
@@ -118,6 +123,7 @@ class TaskGraphRun(Generic[AppT]):
             watch=lambda ready: self._watch_prepared(cursor, include_event_content, ready, initial_ready),
             on_event=on_event, cursor=cursor, timeout_seconds=timeout_seconds,
             close_timeout_seconds=close_timeout_seconds,
+            raise_on_stream_error=raise_on_stream_error,
             register=self._engine._register_observation, release=self._engine._release_observation,
             finalize=lambda result, acknowledged: self._final_projection(acknowledged, include_event_content),
             handover_ready=initial_ready,

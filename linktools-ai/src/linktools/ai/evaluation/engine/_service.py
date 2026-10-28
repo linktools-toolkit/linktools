@@ -1879,8 +1879,10 @@ class EvaluationRun:
         self, *, on_event: Callable[[TaskGraphRunEvent], Awaitable[None]] | None = None,
         cursor: str | None = None, include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        raise_on_stream_error: bool = False,
     ) -> WaitResult[EvaluationView]:
-        validate_wait(on_event, cursor, include_event_content, timeout_seconds, close_timeout_seconds)
+        validate_wait(on_event, cursor, include_event_content, timeout_seconds, close_timeout_seconds,
+                      raise_on_stream_error=raise_on_stream_error)
 
         async def authoritative() -> EvaluationView:
             while True:
@@ -1894,6 +1896,7 @@ class EvaluationRun:
             watch=lambda ready: self._watch_prepared(cursor, include_event_content, ready),
             on_event=on_event, cursor=cursor, timeout_seconds=timeout_seconds,
             close_timeout_seconds=close_timeout_seconds,
+            raise_on_stream_error=raise_on_stream_error,
             register=self._evaluations._register_observation,
             release=self._evaluations._release_observation,
         )
