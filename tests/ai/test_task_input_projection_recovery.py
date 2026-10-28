@@ -55,10 +55,12 @@ async def test_projection_outage_recovers_original_graph_after_restart(
     monkeypatch.setattr(TestModel, "_request", count)
     available = False
     builds = 0
+    leases = []
 
     async def build(context: AgentTaskInputContext) -> str:
         nonlocal builds
         builds += 1
+        leases.append(context._invocation.task_lease)
         result = await context.result("a")
         if not available and failure_source != "declared_result":
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE, "private diagnostic")
@@ -141,6 +143,15 @@ async def test_projection_outage_recovers_original_graph_after_restart(
         assert await persistence.task.admissions.get("a-to-b", tenant_id=runtime.tenant_id) == admitted
         await run.recover(idempotency_key="resume")
         assert requests == 2
+        with pytest.raises(AIError) as stale:
+            await persistence.task.tasks.mark_recovery_required(
+                leases[0], tenant_id=runtime.tenant_id,
+                error_code=first_b.error_code, error_digest=first_b.error_digest,
+                safe_error_details=first_b.safe_error_details,
+                expected_fence=first_b.fence,
+            )
+        assert stale.value.code is ErrorCode.TASK_FENCE_STALE
+        assert (await run.wait(timeout_seconds=10)).result.node_states == completed.node_states
 
 
 @pytest.mark.asyncio
