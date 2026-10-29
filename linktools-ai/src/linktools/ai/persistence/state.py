@@ -11,9 +11,9 @@ import hashlib
 import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Generic, Protocol, TypeVar, runtime_checkable
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
+from typing import Generic, Literal, Protocol, TypeVar, runtime_checkable
 
 from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes
 from ._archive_read import ArchiveFrontierReader, ArchiveNodeRead
@@ -526,6 +526,59 @@ class OperationQuery:
         _validate_limit(self.limit)
 
 
+@dataclass(frozen=True, slots=True)
+class RecordLeaseTransition:
+    """Conditional lease change using the backend's current time.
+
+    Acquire requires an available lease and advances the expected fence once.
+    Renew and release require the matching live owner and fence. Ordinary record
+    reads are snapshots, not authorization to execute work. The returned expiry
+    may already have passed when a transaction commits or its response arrives;
+    callers still need fencing/idempotency at their effect boundary.
+    """
+
+    operation: Literal["acquire", "renew", "release"]
+    owner: str
+    fence: int
+    lease_seconds: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.operation not in ("acquire", "renew", "release"):
+            raise ValueError("invalid lease operation")
+        if not isinstance(self.owner, str) or not self.owner.strip():
+            raise ValueError("lease owner is required")
+        _require_nonnegative_int(self.fence, "fence")
+        if self.operation == "release":
+            if self.lease_seconds is not None:
+                raise ValueError("release does not accept a lease duration")
+        elif (isinstance(self.lease_seconds, bool)
+              or not isinstance(self.lease_seconds, int) or self.lease_seconds <= 0):
+            raise ValueError("lease_seconds must be a positive integer")
+
+    def apply(self, record: StoredRecord, now: datetime) -> StoredRecord | None:
+        """Calculate a candidate while the backend protects the record's revision."""
+        if now.tzinfo is None:
+            raise ValueError("lease time must be timezone aware")
+        if record.lease_fence != self.fence:
+            return None
+        live = (record.lease_owner is not None
+                and (record.lease_expires_at is None or record.lease_expires_at > now))
+        if self.operation == "acquire":
+            if live:
+                return None
+        elif (not live or record.lease_owner != self.owner
+              or record.lease_expires_at is None):
+            return None
+        return replace(
+            record,
+            storage_revision=record.storage_revision + 1,
+            lease_owner=None if self.operation == "release" else self.owner,
+            lease_fence=self.fence + (self.operation == "acquire"),
+            lease_expires_at=(None if self.lease_seconds is None
+                              else now + timedelta(seconds=self.lease_seconds)),
+        )
+
+
 class StateTransaction(Protocol):
     async def now(self) -> datetime: ...
 
@@ -541,6 +594,22 @@ class StateTransaction(Protocol):
     ) -> StoredRecord | None: ...
     async def replace_record(self, record: StoredRecord, *, expected_storage_revision: int) -> bool: ...
     async def replace_records(self, replacements: Sequence["RecordReplacement"]) -> None: ...
+    async def transition_record_lease(
+        self,
+        key: bytes,
+        *,
+        expected_storage_revision: int,
+        transition: RecordLeaseTransition,
+    ) -> StoredRecord | None:
+        """CAS a lease using fresh backend time after obtaining write protection.
+
+        A condition mismatch returns None. SQL may instead abort the mutation
+        with STORAGE_CONFLICT when a condition stops holding during the CAS
+        wait; even a caught conflict must roll back that mutation. Successful
+        physical revision increments are backend owned, not domain revisions.
+        """
+        ...
+
     async def update_record_lease(
         self,
         key: bytes,
@@ -747,6 +816,17 @@ class _ReadOnlyStateTransaction(StateTransaction):
     async def replace_records(self, replacements: Sequence[RecordReplacement]) -> None:
         del replacements
         self._reject("replace_records")
+
+    async def transition_record_lease(
+        self,
+        key: bytes,
+        *,
+        expected_storage_revision: int,
+        transition: RecordLeaseTransition,
+    ) -> StoredRecord | None:
+        del key, expected_storage_revision, transition
+        self._reject("transition_record_lease")
+        return None
 
     async def update_record_lease(
         self,
@@ -1093,4 +1173,4 @@ def _validate_limit(limit: int | None) -> None:
         raise ValueError("limit must be between 1 and 1000")
 
 
-__all__ = ['FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sequence_key', 'sortable_id', 'sortable_identity', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'subject_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+__all__ = ['FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sequence_key', 'sortable_id', 'sortable_identity', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'subject_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

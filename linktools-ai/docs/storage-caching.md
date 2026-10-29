@@ -757,3 +757,42 @@ requested content keys. Existing object bytes are still verified outside the
 metadata callback, and publication checks source records again inside the owner
 mutation. This observation is separate from prepared writes and verified-body
 receipts and is discarded after consumption or preparation failure.
+
+
+## Conditional record leases
+
+`StateTransaction.transition_record_lease(key, expected_storage_revision=...,
+transition=RecordLeaseTransition(...))` changes the existing record's lease
+without changing its data or physical identity. `RecordLeaseTransition` is
+exported by `linktools.ai.persistence.state`:
+
+- `RecordLeaseTransition("acquire", owner, fence, lease_seconds)` requires no live
+  lease and advances the expected fence once.
+- `RecordLeaseTransition("renew", owner, fence, lease_seconds)` requires the same
+  live owner and fence, and preserves the fence.
+- `RecordLeaseTransition("release", owner, fence)` requires the same live owner
+  and fence, clears owner/expiry, and preserves the fence.
+
+The backend computes expiry from its current time and returns the actual
+`StoredRecord`, including expiry and physical revision. Missing records, stale
+revisions and unmet conditions return `None`. The operation does not create a
+record; an initial empty lease record can be inserted in the same mutation.
+Physical revision increments belong to the backend, not to a domain revision.
+
+SQL first checks the candidate, obtains the existing optimistic revision CAS
+write protection, then samples current database time in a separate statement
+and checks again. This avoids accepting an expired owner after waiting for the
+CAS. PostgreSQL uses `clock_timestamp()` for this operation; `tx.now()` retains
+its transaction-fixed semantics. A condition that stops holding during the CAS
+wait aborts the mutation with `STORAGE_CONFLICT`, including when the callback
+catches it. Existing transaction retry, cancellation and unknown-commit behavior
+remain in effect; an unknown commit is not a confirmed acquisition or failure.
+The primitive introduces no schema change or explicit lock read.
+
+The condition decision occurs after write protection is obtained, not at commit
+or response delivery. A returned lease may already be expired when received.
+Ordinary record reads remain snapshots and cannot grant authority to execute;
+competing ownership changes must use the conditional operation, and external
+effects still require their own fence/idempotency enforcement. Keep mutation
+callbacks free of external effects and short. Task and Tool renewal use this
+operation; other domain transitions retain their existing authorization checks.

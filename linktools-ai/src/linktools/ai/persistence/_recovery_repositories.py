@@ -32,6 +32,7 @@ from .contracts import (
 )
 from ._plan import PersistenceDomain
 from .state import (
+    RecordLeaseTransition,
     RecordReplacement,
     StateStore,
     StateTransaction,
@@ -1040,19 +1041,21 @@ class ToolRepositoryImpl(_RepositoryBase):
             current = await self._decode(record, ToolOperationRecord)
             now = await transaction.now()
             _require_live_tool_lease(current, owner=owner, fence=fence, now=now)
-            expires = now + timedelta(seconds=lease_seconds)
-            if not await transaction.update_record_lease(
+            renewed = await transaction.transition_record_lease(
                 record.key_digest,
                 expected_storage_revision=record.storage_revision,
-                lease_owner=current.owner,
-                lease_fence=current.fence,
-                lease_expires_at=expires,
-            ):
+                transition=RecordLeaseTransition("renew", owner, fence, lease_seconds),
+            )
+            if renewed is None:
                 raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-            value = replace(current, lease_expires_at=expires)
-            return value
+            return replace(current, lease_expires_at=renewed.lease_expires_at)
 
-        return await self._store.mutate(mutate)
+        try:
+            return await self._store.mutate(mutate)
+        except AIError as error:
+            if error.code is ErrorCode.STORAGE_CONFLICT:
+                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT) from error
+            raise
 
     async def complete_payload(
         self,
