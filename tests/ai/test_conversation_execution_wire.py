@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from linktools.ai.persistence import Persistence
-"""Execution conversation promises are explicit in the durable wire."""
+"""Explicit execution conversation values survive durable wire defaults."""
 from ._runtime_test_helpers import model_features
 
 from dataclasses import replace
@@ -28,7 +28,7 @@ from .test_explicit_runtime_features import _FeatureModels, _features
 @pytest.mark.asyncio
 @pytest.mark.parametrize("persisted", (False, True), ids=("domain", "persisted"))
 @pytest.mark.parametrize("conversation", (False, True), ids=("minimal", "conversation"))
-async def test_execution_writer_requires_explicit_conversation(
+async def test_execution_writer_preserves_conversation_and_reader_applies_default(
     persisted: bool, conversation: bool,
 ) -> None:
     storage = PersistenceStorage.in_memory()
@@ -51,9 +51,7 @@ async def test_execution_writer_requires_explicit_conversation(
 
         assert decode(payload) == record
         missing = {key: value for key, value in payload["fields"].items() if key != "conversation"}
-        with pytest.raises(AIError) as rejected:
-            decode({**payload, "fields": missing})
-        assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert decode({**payload, "fields": missing}) == replace(record, conversation=True)
         for invalid in (None, 0, "true"):
             with pytest.raises(TypeError, match="persistence guarantees"):
                 replace(record, conversation=invalid)

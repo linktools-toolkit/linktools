@@ -1,0 +1,42 @@
+{
+  "v": 1,
+  "value": {
+    "type": "session_record",
+    "payload": {
+      "$dataclass": "session_record",
+      "schema": 1,
+      "fields": {
+        "session_id": "synthetic-session",
+        "owner_principal_id": "synthetic-owner",
+        "status": {
+          "$enum": "session_status",
+          "value": "OPEN"
+        },
+        "revision": 1,
+        "cwd": "src",
+        "metadata": {
+          "$mapping": [
+            [
+              "purpose",
+              "compatibility-fixture"
+            ]
+          ]
+        },
+        "created_at": {
+          "$datetime": "2026-10-30T00:00:00+00:00"
+        },
+        "updated_at": {
+          "$datetime": "2026-10-30T00:00:00+00:00"
+        },
+        "closed_at": null,
+        "active_execution_id": null,
+        "agent_id": "synthetic-agent",
+        "continuation": null,
+        "history_quality": "complete",
+        "history_id": "synthetic-history",
+        "timeline_parent_session_id": null,
+        "timeline_parent_turn_seq": 0
+      }
+    }
+  }
+}

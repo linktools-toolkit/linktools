@@ -12,9 +12,12 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
 - Runtime dependencies must remain acyclic; annotation-only back-references belong under `TYPE_CHECKING`.
 - Keep lower-level infrastructure independent from higher-level composition and SDK semantics. Do not introduce duplicate abstractions that compete for the same ownership.
 - Keep vendor-specific behavior out of vendor-neutral core abstractions.
-- Keep authoring adapters separate from durable codecs. Fill defaults before
-  canonical decoding; explicit values always win, and persistence stores
-  resolved execution meaning.
+- Keep authoring adapters separate from durable codecs. Dataclass field
+  decoding uses declared constructor defaults and default factories for omitted
+  init fields; fields without defaults and non-init fields remain required.
+  Explicit values always undergo normal validation and are never replaced by defaults.
+  Protocol discriminators and durable correlation identities remain explicit;
+  an authoring constructor's generated identity is not a persisted identity.
 - Capture a RuntimeFeatures declaration once and reuse it for host
   inspection and Runtime composition. Bind cross-source reads to the captured
   revision or an immutable reference.
@@ -45,7 +48,7 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
 - Digests are reserved for anonymous/composite values, byte integrity, and request/idempotency contracts. Define each digest from one explicit minimal projection owned by that contract. Non-contract additions and default fields must not change it; whole-object reflection, incidental wire payloads and dependency serialization must not define it.
 - Separate named identity from contract validation, byte integrity, and storage addressing. Physical locators, credentials, transport tuning and pure display/diagnostic data do not enter named identity. Complete stored bytes still require complete integrity checks. Preserve logical scope, effect policy, model-visible instructions/schema and provenance when the specific contract needs them.
 - Use stable protocol discriminators, not Python class/module names or dependency/build versions. Normalize only equivalences established by the owning contract; preserve ordered inputs and effective business parameters. Named identity comparisons use the explicit reference directly; digest comparisons use the owning digest projection.
-- Every current writer output must be accepted by its matching reader. Required fields and intentional omissions are defined by the current contract, not constructor defaults. Preserve semantically meaningful optional fields and compact encodings; do not invent zero/None values that change budgets or authorization. Require earlier-writer defaults and old-format recovery coverage only for published or explicitly committed compatibility obligations. Reject corrupt or unsupported durable data with typed errors; never guess, silently repair or reinterpret unknown execution semantics. Verify original stored bytes before adapting decoded values.
+- Every current writer output must be accepted by its matching reader. Generic dataclass defaults are part of the wire omission contract; keep their meaning in the model declaration rather than duplicating defaults or field-name exceptions in the codec. Custom codecs retain format-specific projections and compact encodings; ordinary dataclass fields use the same declared-default rule. Preserve explicit values, constructor invariants and derived-field consistency; never use defaults to replace malformed data. A default is declared missing-value semantics, not reconstruction of an unknown historical fact. Reject unknown versions/types and verify original stored bytes before decoding; applying defaults must not rewrite source records automatically.
 
 ### Persistence and concurrency
 

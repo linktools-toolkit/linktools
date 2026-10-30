@@ -62,7 +62,7 @@ def _execution_without_fixture() -> ExecutionRecord:
     return _decode_enveloped_domain(payload, ExecutionRecord)
 
 
-def test_fixture_reference_is_optional_with_explicit_persistence_flags() -> None:
+def test_fixture_reference_uses_declared_default_and_validates_explicit_values() -> None:
     accepted = _execution_without_fixture()
     assert accepted.tool_response_ref is None
     for reference in (None, _reference()):
@@ -70,9 +70,7 @@ def test_fixture_reference_is_optional_with_explicit_persistence_flags() -> None
         assert decode_domain(encode_domain(current), ExecutionRecord) == current
     wire = encode_domain(accepted)
     wire["fields"].pop("tool_response_ref")
-    with pytest.raises(AIError) as missing:
-        decode_domain(wire, ExecutionRecord)
-    assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert decode_domain(wire, ExecutionRecord) == accepted
     wire["fields"]["tool_response_ref"] = "not-an-asset-version"
     with pytest.raises(AIError) as invalid:
         decode_domain(wire, ExecutionRecord)

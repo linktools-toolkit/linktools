@@ -734,6 +734,85 @@ the selected reader, so a consumer must not promote a partial view to complete
 history. `runtime.executions.capture_input(...)` captures Agent-owned execution inputs;
 `engine.inputs` is the public capture and replay facade for a `TaskEngine`.
 
+### Dataclass defaults and existing-session compatibility
+
+Generic dataclass decoding follows the model's constructor declaration for both
+canonical and persisted wire values. A missing `init=True` field with a declared
+`default` or `default_factory` is omitted from constructor arguments, so the
+constructor supplies its normal value. Fields without defaults and `init=False`
+derived fields remain required. Explicit values still undergo the original type,
+constructor and derived-value checks; an invalid explicit value never falls back
+to a default. Wire types and schema versions are unchanged. Format-specific
+adapters retain their projections and compact encodings; ordinary dataclass
+fields use the same declared-default rule. Writers retain their existing field
+sets. Reads do not rewrite or migrate source records.
+
+Defaults mean what the model declares, not a recovered historical value. For
+example, omitted budget counts use their declared zero, an omitted optional
+resource owner uses `None`, and a time-dependent default factory runs at read
+construction time. The codec cannot distinguish a genuinely older omission from
+a field removed from a current record; preserve original byte-integrity checks
+and do not edit payloads to suppress errors. Mutable factories create a fresh
+value for each decoded object, and cross-field constructor invariants still apply.
+
+For model interactions, omitted `attachments` means the declared empty tuple,
+while omitted `client_requests` means uncaptured (`None`), not an observed empty
+attempt list. Client-request omissions use the declared `capture_error=None`,
+`response=None` and `record_http_bodies=True`. That last default is missing-value
+metadata, not evidence that bodies were historically captured: resolution never
+recreates absent body bytes. Explicit `False` remains `False`, and a body reference
+with explicit recording disabled is still rejected. Task-node views use the same
+default rule for ordinary fields while retaining their existing durable projection:
+lease ownership and resolved dependencies remain outside that projection.
+Format-specific TaskNode input semantics and explicit dependency/failure policies
+retain their custom required-field contracts.
+
+The owned model-message v1 codec follows the same constructor-default rule for
+mapped message, part, retry, instruction and usage fields, including the explicit
+conversation-ID and attempt-duration wire mappings. Wire `version`, `kind` and
+`part_kind` discriminators remain explicit. Durable tool call/result/retry IDs
+also remain required: generating independent authoring IDs on restore would break
+call/result correlation. An omitted clock factory runs at read time; it is not
+proof of a historical timestamp. Exact pending continuation still fails closed
+when a missing clock value prevents proving that the recorded part is unchanged.
+
+Archive byte checks use the original verified canonical leaf bytes, not a
+serialization with defaults filled in. The message codec owns canonical singleton-array
+validation and composition, framing verified fragments without reserializing SDK
+objects. Its typed read uses the same parsed leaves. Accepted input contexts retain their
+original history bytes and digest. A newly prepared context made from decoded
+messages uses current writer output and may therefore need a new archive root;
+a reuse hint always describes the original root bytes. Pending-part comparison
+retains an immutable exact-content proof after original stored-byte validation,
+without changing source payloads or accepting changed part IDs, content, metadata
+or explicit part timestamps.
+
+Ordinary user-content items use that same default mechanism, including metadata,
+identifiers, vendor metadata, optional URL media/download settings and cache-point
+TTL. SDK public constructor aliases are consulted only where there is no matching
+dataclass field declaration. Required content bytes/media type, URL, uploaded-file
+identity/provider and wire discriminators are not guessed. Explicit values retain
+their original validation, and ordinary content keeps its existing tolerance for
+extra fields.
+
+An omitted identifier uses the SDK's deterministic content/URL/file default; it
+cannot recover a discarded custom identifier. Missing URL media type retains the
+SDK's deferred inference behavior, which can still fail for an opaque URL. A
+referenced-content descriptor keeps its separate ref/source/revision/provenance
+validation. Removing retired-reference metadata yields ordinary text, not a
+fabricated reference; an explicit malformed descriptor is still rejected.
+
+For an existing `SessionRecord` v1 without `repository_instruction_scopes`, this
+same generic rule uses the field's existing empty-tuple default. The earlier
+writer fixture captured from commit
+`c947aa1393b335ba2e19a973634c2938f06da3e5` is retained in
+`tests/ai/fixtures/persistence/session_record_without_scope_memory_v1.json`.
+An older writer may ignore new fields and omit them on a later rewrite; defaults
+do not reconstruct discarded scope memory. Drain and upgrade writers sharing a
+store/namespace together before using new persistent semantics. Mixed-version
+writers and a write-enabled downgrade are not supported; preserve the store
+rather than deleting sessions or hand-modifying their payloads.
+
 ### Observe session inactivity without consuming a result
 
 ```python
