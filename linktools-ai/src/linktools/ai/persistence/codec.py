@@ -1245,10 +1245,38 @@ def _decode_v1_model_interaction(
     })
 
 
+def _encode_v1_session_record(
+    value: SessionRecord, codec: "_VersionCodec", persisted: bool,
+) -> Mapping[str, JsonValue]:
+    return {
+        name: _encode_domain(attrgetter(name)(value), codec, persisted=persisted)
+        for name in _dataclass_fields(SessionRecord)
+    }
+
+
+def _decode_v1_session_record(
+    raw_fields: Mapping[str, object], codec: "_VersionCodec", persisted: bool,
+) -> SessionRecord:
+    declared = _dataclass_fields(SessionRecord)
+    missing = sorted(
+        name for name in declared if name not in raw_fields
+        and (name != "repository_instruction_scopes" or not persisted)
+    )
+    if missing:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR,
+                      safe_details={"wire_type": "session_record", "missing_fields": missing})
+    return SessionRecord(**{
+        name: (() if name == "repository_instruction_scopes" and name not in raw_fields
+               else _decode_domain(raw_fields[name], field_type, codec, persisted=persisted))
+        for name, (field_type, _init) in declared.items()
+    })
+
+
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
     {
         "error_diagnostics": _encode_v1_error_diagnostics,
         "model_interaction": _encode_v1_model_interaction,
+        "session_record": _encode_v1_session_record,
         "model_client_request_ref": _encode_v1_model_client_request_ref,
         "object_ref": _encode_v1_object_ref,
         "stored_payload": _encode_v1_stored_payload,
@@ -1265,6 +1293,7 @@ _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
     {
         "error_diagnostics": _decode_v1_error_diagnostics,
         "model_interaction": _decode_v1_model_interaction,
+        "session_record": _decode_v1_session_record,
         "model_client_request_ref": _decode_v1_model_client_request_ref,
         "object_ref": _decode_v1_object_ref,
         "stored_payload": _decode_v1_stored_payload,
