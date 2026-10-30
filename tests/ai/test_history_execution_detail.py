@@ -33,7 +33,7 @@ def _reader(state, *, authorization=None, executions=None, pending_execution=Non
     )
 
 
-async def _seed(state, status=ExecutionStatus.SUCCEEDED, *, committed=True):
+async def _seed(state, status=ExecutionStatus.SUCCEEDED, *, admitted=True, committed=True):
     await state.conversation.sessions.create(_session())
     error_code = (
         ErrorCode.EXECUTION_CANCELLED.value if status is ExecutionStatus.CANCELLED
@@ -44,6 +44,11 @@ async def _seed(state, status=ExecutionStatus.SUCCEEDED, *, committed=True):
     record = _execution("execution", status=status, prompt="question", error_code=error_code)
     record = replace(record, started_at=record.created_at)
     await state.execution.executions.create_with_history_head(record)
+    if admitted:
+        await state.conversation.sessions.admit_execution(
+            record.session_id, tenant_id="tenant",
+            execution_id=record.execution_id, expected=None,
+        )
     if committed and status in _TERMINAL:
         await _commit_empty_turn(state, record)
     return record
@@ -169,14 +174,20 @@ async def test_execution_detail_uses_the_post_authorization_terminal_record() ->
         await state.close()
 
 
-async def test_execution_detail_preserves_retained_turn_integrity() -> None:
+@pytest.mark.parametrize("admitted, expected_error", (
+    (False, ErrorCode.STORAGE_INTEGRITY_ERROR),
+    (True, ErrorCode.STORAGE_RECOVERY_REQUIRED),
+))
+async def test_execution_detail_preserves_retained_turn_integrity(
+    admitted: bool, expected_error: ErrorCode,
+) -> None:
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="execution-detail", tenant_id="tenant")
     try:
-        await _seed(state, committed=False)
+        await _seed(state, admitted=admitted, committed=False)
         with pytest.raises(AIError) as error:
             await _reader(state).execution_detail("execution", session_id="session", principal=_OWNER)
-        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert error.value.code is expected_error
     finally:
         await state.close()
 
