@@ -3,7 +3,7 @@
 """Low-level durable codec for Pydantic user-content items."""
 
 import base64
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import cast
 
 from pydantic_ai.messages import (
@@ -21,6 +21,7 @@ from pydantic_ai.messages import (
 from ..core import JsonValue, normalize_json_value
 from ..errors import AIError, ErrorCode
 from . import ReferencedContent
+from ._wire_fields import decode_fields
 
 
 class RetiredReferencedContent(TextContent):
@@ -115,33 +116,24 @@ def decode_user_content_item(value: object) -> UserContent:
             raise ValueError("text content is invalid")
         return text
     if kind == "text-content":
-        content = value.get("content")
-        if not isinstance(content, str) or "metadata" not in value:
-            raise ValueError("text content is invalid")
-        metadata = value["metadata"]
+        kwargs = _content_fields(value, TextContent, {
+            "content": _required_string,
+            "metadata": lambda raw: raw,
+        })
+        metadata = kwargs.get("metadata")
         if isinstance(metadata, Mapping) and set(metadata) == {"referenced_content"}:
             reference = decode_user_content_item(metadata["referenced_content"])
             if not isinstance(reference, ReferencedContent):
                 raise ValueError("retired reference descriptor is invalid")
-            return RetiredReferencedContent(reference, content)
-        return TextContent(content, metadata=metadata)
+            return RetiredReferencedContent(reference, kwargs["content"])
+        return TextContent(**kwargs)
     if kind == "binary":
-        data = value.get("data")
-        media_type = value.get("media_type")
-        if (
-            not isinstance(data, str)
-            or not isinstance(media_type, str)
-            or not media_type
-            or "identifier" not in value
-            or "vendor_metadata" not in value
-        ):
-            raise ValueError("binary content is invalid")
-        return BinaryContent(
-            base64.b64decode(data, validate=True),
-            media_type=media_type,
-            identifier=_optional_string(value["identifier"]),
-            vendor_metadata=value["vendor_metadata"],
-        )
+        return BinaryContent(**_content_fields(value, BinaryContent, {
+            "data": lambda raw: base64.b64decode(_required_string(raw), validate=True),
+            "media_type": _media_type,
+            "identifier": _optional_string,
+            "vendor_metadata": lambda raw: raw,
+        }))
     url_types = {
         "image-url": ImageUrl,
         "audio-url": AudioUrl,
@@ -150,51 +142,59 @@ def decode_user_content_item(value: object) -> UserContent:
     }
     url_type = url_types.get(kind)
     if url_type is not None:
-        url = value.get("url")
-        media_type = value.get("media_type")
-        force_download = value.get("force_download")
-        if (
-            not isinstance(url, str)
-            or media_type is not None
-            and not isinstance(media_type, str)
-            or force_download not in {False, True, "allow-local"}
-            or "identifier" not in value
-            or "vendor_metadata" not in value
-        ):
-            raise ValueError("URL content is invalid")
-        return url_type(
-            url,
-            media_type=media_type,
-            identifier=_optional_string(value["identifier"]),
-            force_download=force_download,
-            vendor_metadata=value["vendor_metadata"],
-        )
+        return url_type(**_content_fields(value, url_type, {
+            "url": _required_string,
+            "media_type": _optional_string,
+            "force_download": _force_download,
+            "identifier": _optional_string,
+            "vendor_metadata": lambda raw: raw,
+        }))
     if kind == "uploaded-file":
-        file_id = value.get("file_id")
-        provider_name = value.get("provider_name")
-        media_type = value.get("media_type")
-        if (
-            not isinstance(file_id, str)
-            or not isinstance(provider_name, str)
-            or media_type is not None
-            and not isinstance(media_type, str)
-            or "identifier" not in value
-            or "vendor_metadata" not in value
-        ):
-            raise ValueError("uploaded file is invalid")
-        return UploadedFile(
-            file_id,
-            provider_name,
-            media_type=media_type,
-            identifier=_optional_string(value["identifier"]),
-            vendor_metadata=value["vendor_metadata"],
-        )
+        return UploadedFile(**_content_fields(value, UploadedFile, {
+            "file_id": _required_string,
+            "provider_name": _required_string,
+            "media_type": _optional_string,
+            "identifier": _optional_string,
+            "vendor_metadata": lambda raw: raw,
+        }))
     if kind == "cache-point":
-        ttl = value.get("ttl")
-        if ttl not in {"5m", "1h"}:
-            raise ValueError("cache point is invalid")
-        return CachePoint(ttl=cast(str, ttl))
+        return CachePoint(**_content_fields(value, CachePoint, {"ttl": _cache_ttl}))
     raise UnsupportedUserContentKind("unknown user content kind")
+
+
+def _content_fields(
+    value: Mapping[str, object],
+    target: type,
+    decoders: Mapping[str, Callable[[object], object]],
+) -> dict[str, object]:
+    # Ordinary content historically tolerates extra keys, unlike reference descriptors.
+    selected = {key: raw for key, raw in value.items() if key == "kind" or key in decoders}
+    return decode_fields(selected, target, decoders, required={"kind"})
+
+
+def _required_string(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("user content string is invalid")
+    return value
+
+
+def _media_type(value: object) -> str:
+    result = _required_string(value)
+    if not result:
+        raise ValueError("binary content media type is invalid")
+    return result
+
+
+def _force_download(value: object) -> object:
+    if value not in {False, True, "allow-local"}:
+        raise ValueError("URL download mode is invalid")
+    return value
+
+
+def _cache_ttl(value: object) -> str:
+    if value not in {"5m", "1h"}:
+        raise ValueError("cache point is invalid")
+    return cast(str, value)
 
 
 class UnsupportedUserContentKind(ValueError):

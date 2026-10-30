@@ -6,7 +6,7 @@ import binascii
 import json
 import math
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import MISSING, dataclass, fields, replace
+from dataclasses import dataclass, fields, replace
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import cast
@@ -58,6 +58,7 @@ from ..errors import AIError, ErrorCode
 from . import model_input_content, ReferencedContent, project_model_attempts, project_model_response_attempts
 from ._attachment import binary_attachment_text, has_binary_attachment_metadata
 from ._user_content_codec import RetiredReferencedContent, decode_user_content_item, encode_user_content_item
+from ._wire_fields import decode_fields
 from ._json_snapshot import stable_json_snapshot
 from ._tool_return_codec import decode_tool_return_content, encode_tool_return_content
 
@@ -337,7 +338,7 @@ def _decode_message(value: object) -> ModelMessage:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     kind = value.get("kind")
     if kind == "request":
-        return ModelRequest(**_decode_fields(value, ModelRequest, {
+        return ModelRequest(**decode_fields(value, ModelRequest, {
             "state": lambda raw: _choice(raw, _REQUEST_STATES),
             "parts": lambda raw: _decode_list(raw, _decode_request_part),
             "timestamp": _decode_optional_datetime,
@@ -347,7 +348,7 @@ def _decode_message(value: object) -> ModelMessage:
             "metadata": _decode_optional_mapping,
         }, required={"version", "kind"}, aliases={"agent_conversation_id": "conversation_id"}))
     if kind == "response":
-        return ModelResponse(**_decode_fields(value, ModelResponse, {
+        return ModelResponse(**decode_fields(value, ModelResponse, {
             "state": lambda raw: _choice(raw, _RESPONSE_STATES),
             "finish_reason": lambda raw: None if raw is None else _choice(raw, _FINISH_REASONS),
             "timestamp": _required_datetime,
@@ -445,20 +446,20 @@ def _decode_request_part(value: object) -> object:
     kind = part.get("part_kind")
     if kind in {"system-prompt", "runtime-summary-prompt"}:
         part_type = SummaryPromptPart if kind == "runtime-summary-prompt" else SystemPromptPart
-        return part_type(**_decode_fields(part, part_type, {
+        return part_type(**decode_fields(part, part_type, {
             "content": _required_string,
             "timestamp": _required_datetime,
             "dynamic_ref": _optional_string,
         }, required={"part_kind"}))
     if kind == "user-prompt":
-        return UserPromptPart(**_decode_fields(part, UserPromptPart, {
+        return UserPromptPart(**decode_fields(part, UserPromptPart, {
             "content": _decode_prompt_content,
             "timestamp": _required_datetime,
         }, required={"part_kind"}))
     if kind == "tool-return":
         return _decode_tool_return_part(part, native=False)
     if kind == "retry-prompt":
-        return RetryPromptPart(**_decode_fields(part, RetryPromptPart, {
+        return RetryPromptPart(**decode_fields(part, RetryPromptPart, {
             "content": _retry_content,
             "tool_name": _optional_string,
             "tool_call_id": _required_string,
@@ -468,13 +469,13 @@ def _decode_request_part(value: object) -> object:
         if RetryFeedbackPart is None:
             _require_keys(part, {"part_kind", "content", "retry", "timestamp"})
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        return RetryFeedbackPart(**_decode_fields(part, RetryFeedbackPart, {
+        return RetryFeedbackPart(**decode_fields(part, RetryFeedbackPart, {
             "content": _retry_content,
             "retry": lambda raw: _decode_retry_info(raw, feedback=True),
             "timestamp": _required_datetime,
         }, required={"part_kind"}))
     if kind == "tool-availability-delta":
-        return ToolAvailabilityDeltaPart(**_decode_fields(part, ToolAvailabilityDeltaPart, {
+        return ToolAvailabilityDeltaPart(**decode_fields(part, ToolAvailabilityDeltaPart, {
             "tools_added": lambda raw: _decode_list(raw, _required_string),
             "tool_call_id": _optional_string,
         }, required={"part_kind"}))
@@ -482,16 +483,16 @@ def _decode_request_part(value: object) -> object:
         if ModelSettingsDeltaPart is None:
             _require_keys(part, {"part_kind", "settings", "top_level"})
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        return ModelSettingsDeltaPart(**_decode_fields(part, ModelSettingsDeltaPart, {
+        return ModelSettingsDeltaPart(**decode_fields(part, ModelSettingsDeltaPart, {
             "settings": _recorded_model_settings,
             "top_level": _settings_top_level,
         }, required={"part_kind"}))
     if kind == "instruction-baseline":
-        return InstructionBaselinePart(**_decode_fields(part, InstructionBaselinePart, {
+        return InstructionBaselinePart(**decode_fields(part, InstructionBaselinePart, {
             "instructions": lambda raw: _decode_list(raw, _decode_instruction_block),
         }, required={"part_kind"}))
     if kind == "instruction-delta":
-        return InstructionDeltaPart(**_decode_fields(part, InstructionDeltaPart, {
+        return InstructionDeltaPart(**decode_fields(part, InstructionDeltaPart, {
             "id": _decode_instruction_id,
             "content": _optional_string,
             "base_hash": lambda raw: None if raw is None else _instruction_hash(raw),
@@ -558,7 +559,7 @@ def _decode_instruction_block(value: object) -> object:
     block = _part_mapping(value)
     kind = block.get("part_kind")
     if kind == "instruction":
-        return InstructionPart(**_decode_fields(block, InstructionPart, {
+        return InstructionPart(**decode_fields(block, InstructionPart, {
             "content": _required_string,
             "id": _decode_instruction_id,
             "dynamic": _instruction_dynamic,
@@ -566,7 +567,7 @@ def _decode_instruction_block(value: object) -> object:
             "name": _optional_string,
         }, required={"part_kind"}))
     if kind == "instruction-digest":
-        return InstructionDigest(**_decode_fields(block, InstructionDigest, {
+        return InstructionDigest(**decode_fields(block, InstructionDigest, {
             "id": _decode_instruction_id,
             "dynamic": _instruction_dynamic,
             "content_hash": _instruction_hash,
@@ -664,7 +665,7 @@ def _decode_response_part(value: object) -> object:
     part = _part_mapping(value)
     kind = part.get("part_kind")
     if kind == "text":
-        return TextPart(**_decode_fields(part, TextPart, {
+        return TextPart(**decode_fields(part, TextPart, {
             "content": _required_string,
             "id": _optional_string,
             "provider_name": _optional_string,
@@ -677,7 +678,7 @@ def _decode_response_part(value: object) -> object:
     if kind == "builtin-tool-return":
         return _decode_tool_return_part(part, native=True)
     if kind == "thinking":
-        return ThinkingPart(**_decode_fields(part, ThinkingPart, {
+        return ThinkingPart(**decode_fields(part, ThinkingPart, {
             "content": _required_string,
             "id": _optional_string,
             "signature": _optional_string,
@@ -696,9 +697,9 @@ def _decode_response_part(value: object) -> object:
         }
         if hasattr(CompactionPart, "metadata"):
             decoders["metadata"] = _decode_optional_mapping
-        return CompactionPart(**_decode_fields(part, CompactionPart, decoders, required={"part_kind"}))
+        return CompactionPart(**decode_fields(part, CompactionPart, decoders, required={"part_kind"}))
     if kind == "file":
-        return FilePart(**_decode_fields(part, FilePart, {
+        return FilePart(**decode_fields(part, FilePart, {
             "content": _decode_binary_content,
             "id": _optional_string,
             "provider_name": _optional_string,
@@ -743,7 +744,7 @@ def _decode_tool_call_part(
     native: bool,
 ) -> object:
     part_type = NativeToolCallPart if native else ToolCallPart
-    value = part_type(**_decode_fields(part, part_type, {
+    value = part_type(**decode_fields(part, part_type, {
         "tool_kind": _decode_tool_kind,
         "args": _decode_tool_args,
         "tool_name": _required_string,
@@ -811,7 +812,7 @@ def _decode_tool_return_part(
         decoders.update(provider_name=_optional_string, provider_details=_decode_optional_mapping)
     elif "retry" in part or RetryInfo is not None:
         decoders["retry"] = lambda raw: None if raw is None else _decode_retry_info(raw, feedback=False)
-    kwargs = _decode_fields(part, part_type, decoders, required={"part_kind", "tool_call_id"})
+    kwargs = decode_fields(part, part_type, decoders, required={"part_kind", "tool_call_id"})
     if kwargs.get("retry") is None and not any(field.name == "retry" for field in fields(part_type)):
         kwargs.pop("retry", None)
     value = part_type(**kwargs)
@@ -849,7 +850,7 @@ def _decode_retry_info(value: object, *, feedback: bool) -> "RetryInfo":
     if RetryInfo is None:
         _require_keys(raw, {"cause", "attempt", "max_retries"})
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    retry = RetryInfo(**_decode_fields(raw, RetryInfo, {
+    retry = RetryInfo(**decode_fields(raw, RetryInfo, {
         "cause": lambda item: item,
         "attempt": lambda item: item,
         "max_retries": lambda item: item,
@@ -876,7 +877,7 @@ def _encode_speech_part(part: SpeechPart) -> dict[str, JsonValue]:
 
 
 def _decode_speech_part(part: Mapping[str, object]) -> SpeechPart:
-    return SpeechPart(**_decode_fields(part, SpeechPart, {
+    return SpeechPart(**decode_fields(part, SpeechPart, {
         "speaker": lambda raw: _choice(raw, frozenset({"user", "assistant"})),
         "transcript": _optional_string,
         "audio": lambda raw: None if raw is None else _decode_binary_content(raw),
@@ -917,7 +918,7 @@ def _decode_model_attempts(value: object) -> list[object]:
     for item in value:
         if not isinstance(item, Mapping):
             raise ValueError("model request attempt must be an object")
-        attempts.append(ModelRequestAttempt(**_decode_fields(item, ModelRequestAttempt, {
+        attempts.append(ModelRequestAttempt(**decode_fields(item, ModelRequestAttempt, {
             "model_name": _required_string,
             "provider_name": _optional_string,
             "outcome": lambda raw: _choice(raw, frozenset({"error", "rejected"})),
@@ -976,7 +977,7 @@ def _decode_usage(value: object) -> RequestUsage:
         name: _nonnegative_integer for name in numeric_names
     }
     decoders.update(details=_usage_details, cost=_usage_cost)
-    kwargs = _decode_fields(value, RequestUsage, decoders, required={"extensions"})
+    kwargs = decode_fields(value, RequestUsage, decoders, required={"extensions"})
     extensions = value["extensions"]
     if not isinstance(extensions, Mapping) or any(not isinstance(key, str) for key in extensions):
         raise ValueError("usage extensions are invalid")
@@ -1089,28 +1090,6 @@ def _part_mapping(value: object) -> Mapping[str, object]:
         raise ValueError("message part must be an object")
     return cast(Mapping[str, object], value)
 
-
-def _decode_fields(
-    value: Mapping[str, object],
-    target: type,
-    decoders: Mapping[str, Callable[[object], object]],
-    *,
-    required: set[str] | frozenset[str] = frozenset(),
-    aliases: Mapping[str, str] | None = None,
-) -> dict[str, object]:
-    if not required.issubset(value) or set(value) - set(decoders) - required:
-        raise ValueError("durable message shape is invalid")
-    declared = {field.name: field for field in fields(target)}
-    names = {name: name if aliases is None else aliases.get(name, name) for name in decoders}
-    for wire_name, name in names.items():
-        if wire_name not in value:
-            field = declared[name]
-            if not field.init or field.default is MISSING and field.default_factory is MISSING:
-                raise ValueError("durable message required field is missing")
-    return {
-        names[name]: decode(value[name])
-        for name, decode in decoders.items() if name in value
-    }
 
 
 def _decode_list(value: object, decode: Callable[[object], object]) -> list[object]:

@@ -785,6 +785,21 @@ retains an immutable exact-content proof after original stored-byte validation,
 without changing source payloads or accepting changed part IDs, content, metadata
 or explicit part timestamps.
 
+Ordinary user-content items use that same default mechanism, including metadata,
+identifiers, vendor metadata, optional URL media/download settings and cache-point
+TTL. SDK public constructor aliases are consulted only where there is no matching
+dataclass field declaration. Required content bytes/media type, URL, uploaded-file
+identity/provider and wire discriminators are not guessed. Explicit values retain
+their original validation, and ordinary content keeps its existing tolerance for
+extra fields.
+
+An omitted identifier uses the SDK's deterministic content/URL/file default; it
+cannot recover a discarded custom identifier. Missing URL media type retains the
+SDK's deferred inference behavior, which can still fail for an opaque URL. A
+referenced-content descriptor keeps its separate ref/source/revision/provenance
+validation. Removing retired-reference metadata yields ordinary text, not a
+fabricated reference; an explicit malformed descriptor is still rejected.
+
 For an existing `SessionRecord` v1 without `repository_instruction_scopes`, this
 same generic rule uses the field's existing empty-tuple default. The earlier
 writer fixture captured from commit
