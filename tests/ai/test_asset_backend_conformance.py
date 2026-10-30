@@ -10,20 +10,18 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from linktools.ai.asset import AssetKey, AssetStore, AssetVersionRef, FilesystemAssetBackend, InMemoryAssetBackend, SqlAssetBackend
+from linktools.ai.asset import AssetKey, AssetStore, AssetVersionRef, InMemoryAssetBackend, SqlAssetBackend
 from linktools.ai.capability import CapabilityLoadContext, CapabilityLoadEntry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_asset_database
-from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy, StorageChange, StorageOperation, StorageOverlay, read_object
+from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, PayloadPolicy, StorageChange, StorageOperation, StorageOverlay, read_object
 
 
-@pytest_asyncio.fixture(params=("memory", "filesystem", "sqlite-inline", "sqlite-object"))
+@pytest_asyncio.fixture(params=("memory", "sqlite-inline", "sqlite-object", "sqlite-filesystem"))
 async def asset_store(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator[AssetStore]:
     engine = None
     if request.param == "memory":
         backend = InMemoryAssetBackend()
-    elif request.param == "filesystem":
-        backend = FilesystemAssetBackend(tmp_path / "assets")
     else:
         from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -31,7 +29,8 @@ async def asset_store(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIt
         await provision_asset_database(engine)
         backend = SqlAssetBackend(
             engine, namespace="conformance",
-            payload_policy=PayloadPolicy(0) if request.param == "sqlite-object" else None,
+            object_store=FilesystemObjectStore(tmp_path / "objects") if request.param == "sqlite-filesystem" else None,
+            payload_policy=None if request.param == "sqlite-inline" else PayloadPolicy(0),
         )
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()

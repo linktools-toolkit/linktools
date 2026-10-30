@@ -14,7 +14,6 @@ from linktools.ai.asset import (
     AssetRoot,
     AssetStore,
     DirectoryAssetBackend,
-    FilesystemAssetBackend,
     InMemoryAssetBackend,
     SqlAssetBackend,
     StrictConfigReader,
@@ -262,35 +261,6 @@ async def test_sql_dialect_owns_consistent_read_setup() -> None:
         "START TRANSACTION",
     ]
     assert mysql_session.connection_options == []
-
-
-@pytest.mark.asyncio
-async def test_filesystem_asset_batch_receipt_survives_reopen(tmp_path: Path) -> None:
-    root = tmp_path / "asset-receipts"
-    key = AssetKey("prompt", "one")
-    changes = (
-        StorageChange(StorageOperation.PUT, key, b"one", None),
-    )
-
-    first_backend = FilesystemAssetBackend(root)
-    first = AssetStore(StorageOverlay(first_backend, writer=first_backend))
-    await first.initialize()
-    result = await first.apply_batch(changes, idempotency_key="batch-one")
-    await first.close()
-
-    second_backend = FilesystemAssetBackend(root)
-    second = AssetStore(StorageOverlay(second_backend, writer=second_backend))
-    await second.initialize()
-    try:
-        assert await second.batch_result("batch-one") == result
-        assert await second.apply_batch(
-            changes,
-            idempotency_key="batch-one",
-        ) == result
-        await second.put(key, b"two")
-        assert await second.batch_result("batch-one") == result
-    finally:
-        await second.close()
 
 
 @pytest.mark.asyncio
@@ -587,28 +557,6 @@ def test_sql_asset_info_v1_rejects_future_and_coerced_versions() -> None:
     with pytest.raises(AIError) as malformed_error:
         asset_sql._info_from_data(malformed)
     assert malformed_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
-
-@pytest.mark.asyncio
-async def test_filesystem_asset_v1_rejects_generation_two_manifest(tmp_path: Path) -> None:
-    import json
-
-    root = tmp_path / "asset-v1"
-    backend = FilesystemAssetBackend(root)
-    await backend.initialize()
-    await backend.put(AssetKey("sample", "one"), b"value")
-    await backend.close()
-
-    manifest_path = root / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["generation"] == 1
-    manifest["generation"] = 2
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-
-    reopened = FilesystemAssetBackend(root)
-    with pytest.raises(AIError) as raised:
-        await reopened.initialize()
-    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
 def test_asset_receipt_rejects_non_integer_version() -> None:

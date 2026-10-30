@@ -669,6 +669,11 @@ size and digest, so changed or missing content cannot satisfy a version read.
 Declaration format versions and named revisions are separate from Asset
 byte versions.
 
+Persistent versioned assets use SQL metadata, including local SQLite, with
+optional ObjectStore-backed content. See [Asset storage](docs/asset-storage.md)
+for provisioning, directory-reader semantics and the versioned filesystem
+backend replacement boundary.
+
 Repository rules use the `rule` Asset kind and Markdown keys such as
 `AssetKey("rule", "review.md")` or `AssetKey("rule", "python/strict.md")`.
 Rule Markdown is an instruction document at root scope; its content is not
