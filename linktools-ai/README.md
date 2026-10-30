@@ -1080,6 +1080,12 @@ implementations own these limits through `RepositoryInstructionResolver.validate
 Approval recovery reuses only the original call's frozen, model-observed
 instruction frontier; a later sibling discovery still requires reconsideration.
 An approval never bypasses path validation or newly discovered instructions.
+Instruction synchronization reports failed-call feedback without consuming or
+resetting the ordinary tool retry budget; ordinary argument/tool retries keep
+their existing policy. The blocked tool does not execute, and the next model
+request receives the updated instruction overlay. This feedback does not
+override a valid final answer emitted in the same model response: that answer
+may complete the Execution without another model request.
 
 
 The fixed prefix is not appended as a new conversation message on each model call. Lazy Skill bodies/resources, Memory contents, the current-plan reminder, user input, tool and Subagent results, attachments, and retry/error feedback remain dynamic request or conversation context. Memory guidance is fixed only for an Execution that enables Memory; Memory contents stay pull-based through the Memory tools, so updates from another Execution are observed when the Agent reads/searches Memory again rather than being pushed into the standing prompt. Workspace instruction text describes stable usage constraints only; authorization and approval remain Runtime-enforced behavior. Recorded requests may therefore contain the same fixed instruction parts repeatedly without representing repeated historical messages.

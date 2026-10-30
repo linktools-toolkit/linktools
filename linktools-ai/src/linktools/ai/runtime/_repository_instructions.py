@@ -12,7 +12,7 @@ from pydantic_ai.capabilities import Capability
 from pydantic_ai.messages import InstructionPart, ToolCallPart
 
 from ..capability import AgentContext
-from ..capability import ToolCallRetry
+from ..capability import ToolCallFailed
 from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import RepositoryInstructions
@@ -174,7 +174,7 @@ class _RepositoryInstructionBoundary:
                     or permit.tool_name != tool_name
                     or permit.frontier_digest != self._frontier_digest()
                 ):
-                    raise ToolCallRetry(_REPOSITORY_INSTRUCTION_RECONSIDER)
+                    raise ToolCallFailed(_REPOSITORY_INSTRUCTION_RECONSIDER)
                 # The SDK binds approval to the frozen original args through
                 # ToolApproved.override_args; its validators may normalize them.
                 self._checked_approvals[tool_call_id] = permit
@@ -200,7 +200,7 @@ class _RepositoryInstructionBoundary:
             else:
                 self._overlay = next_overlay
             if reconsider:
-                raise ToolCallRetry(_REPOSITORY_INSTRUCTION_RECONSIDER)
+                raise ToolCallFailed(_REPOSITORY_INSTRUCTION_RECONSIDER)
 
 
 class _RepositoryInstructionCapability(Capability[AgentContext[object]]):

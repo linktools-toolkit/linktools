@@ -441,7 +441,7 @@ class _RecoveryCoordinator:
 
         active = _merge_repository_instructions(initial, persisted_overlay)
         excluded = frozenset(
-            () if active is None else document.source for document in active.documents
+            document.source for document in (() if active is None else active.documents)
         )
         discovered: list[object] = []
         discovered_sources = set(excluded)

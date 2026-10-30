@@ -97,6 +97,7 @@ def test_persisted_session_v1_field_set_is_stable() -> None:
         "history_id",
         "timeline_parent_session_id",
         "timeline_parent_turn_seq",
+        "repository_instruction_scopes",
     }
 
 

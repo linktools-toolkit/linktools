@@ -16,7 +16,7 @@ from linktools.ai.runtime._tool_boundary import (
     RepositoryInstructionBoundary,
     BoundaryToolset,
 )
-from linktools.ai.capability import ToolCallRetry
+from linktools.ai.capability import ToolCallFailed
 from linktools.ai.workspace import (
     ToolPermissionPolicy,
 )
@@ -57,7 +57,7 @@ class _Boundary:
             }
         )
         if self.fail:
-            raise ToolCallRetry("repository instructions changed")
+            raise ToolCallFailed("repository instructions changed")
 
 
 async def _read_file(path: str) -> str:
@@ -118,7 +118,7 @@ async def test_repository_instruction_check_precedes_ask_permission() -> None:
     context = _context()
     tools = await toolset.get_tools(context)
 
-    with pytest.raises(ToolCallRetry, match="repository instructions changed"):
+    with pytest.raises(ToolCallFailed, match="repository instructions changed"):
         await toolset.call_tool(
             "_read_file",
             {"path": "pkg/file.txt"},
@@ -137,7 +137,7 @@ async def test_repository_instruction_refresh_can_fence_one_model_call() -> None
     context = _context()
     tools = await toolset.get_tools(context)
 
-    with pytest.raises(ToolCallRetry):
+    with pytest.raises(ToolCallFailed):
         await toolset.call_tool(
             "_read_file",
             {"path": "pkg/file.txt"},
@@ -236,7 +236,7 @@ async def test_recovered_approval_only_reuses_its_observed_instruction_frontier(
         coordinator.overlay = RepositoryInstructions((RepositoryInstructionDocument(
             "agents:pkg/AGENTS.md", "pkg", "new sibling rule",
         ),))
-        with pytest.raises(ToolCallRetry):
+        with pytest.raises(ToolCallFailed):
             await original.check(tool_name="_read_file", tool_call_id="sibling",
                                  arguments={"path": "pkg/file.txt"}, path_fields=("path",))
         assert original.approval_frontiers((call,))["call"] == frontier
@@ -256,7 +256,7 @@ async def test_recovered_approval_only_reuses_its_observed_instruction_frontier(
             "agents:pkg/AGENTS.md", "pkg", "new approved target rule",
         ),))
     if mismatch == "tool":
-        with pytest.raises(ToolCallRetry):
+        with pytest.raises(ToolCallFailed):
             await restored.check(tool_name="another_tool", tool_call_id="call",
                                  arguments={"path": "file.txt"}, path_fields=("path",), approved=True)
     else:
@@ -267,7 +267,7 @@ async def test_recovered_approval_only_reuses_its_observed_instruction_frontier(
             # Approval permits observation replay, not bypassing the path check.
             assert len(coordinator.checked) == checked_before_resume + 1
         else:
-            with pytest.raises(ToolCallRetry):
+            with pytest.raises(ToolCallFailed):
                 await restored_tools.call_tool("_read_file", args, context, tools["_read_file"])
     if mismatch is not None:
         assert len(coordinator.checked) == checked_before_resume + (mismatch == "new_scope")

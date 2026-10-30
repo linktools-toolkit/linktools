@@ -11,12 +11,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExecutionStatus, SessionStatus, WorkspaceFileInput
+from linktools.ai.core import ApprovalDecision, ApprovalStatus, CommitPolicy, ExecutionStatus, SessionStatus, WorkspaceFileInput
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceStorage
@@ -25,7 +25,7 @@ from linktools.ai.runtime import Runtime
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.persistence.contracts import RepositoryInstructionBarrier
 from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
-from linktools.ai.storage import StorageOverlay, StorageRoute
+from linktools.ai.storage import InMemoryCacheBackend, StorageOverlay, StorageRoute
 from linktools.ai.session import SessionRecord
 from linktools.ai.workspace import ToolPermissionPolicy, Workspace, WorkspacePolicy
 
@@ -98,7 +98,8 @@ async def test_session_reloads_known_scopes_before_first_model_request(
                 assert discovery_rule not in instructions
         elif attempts == 2 and discovery_rule is not None:
             assert discovery_rule in instructions
-            assert any(is_tool_retry(part) for part in messages[-1].parts)
+            assert any(isinstance(part, ToolReturnPart) and part.outcome == "failed"
+                       for part in messages[-1].parts)
         else:
             assert not any(is_tool_retry(part) for part in messages[-1].parts)
             assert "contents" in str(messages[-1])
@@ -173,7 +174,8 @@ async def test_session_remembers_initial_cwd_scopes_and_refresh_failure_is_not_c
         async with Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             session = await runtime.agents.get("reader").create_session("session", cwd="pkg")
             assert (await session.run("initial", timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
-            current = await runtime.sessions.get("session", principal=runtime.default_principal)
+            current = await persistence.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
+            assert current is not None
             await session.update(expected_revision=current.revision, metadata={}, cwd=".")
             rules.write_bytes(b"\xff")
             with pytest.raises(AIError) as failed:
@@ -208,10 +210,11 @@ async def test_session_scope_union_is_transactional_and_requires_execution_owner
 
             async def rollback(transaction):
                 await remember(transaction)
-                raise RuntimeError("scope transaction interrupted")
+                raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
-            with pytest.raises(RuntimeError, match="scope transaction interrupted"):
+            with pytest.raises(AIError) as interrupted:
                 await sessions.state_store.mutate(rollback)
+            assert interrupted.value.code is ErrorCode.STORAGE_UNAVAILABLE
             stored = await sessions.get("session", tenant_id="tenant")
             assert stored is not None and stored.repository_instruction_scopes == ()
             await sessions.state_store.mutate(remember)
@@ -277,7 +280,7 @@ async def test_session_execution_recovery_keeps_pinned_instructions_and_permissi
     ))
     features = workspace_features("recover-scopes", workspace=workspace)
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    features.agent("reader", model="default", allow_tools=("read_file",))
+    features.agent("reader", model="default", allow_tools=("read_file",), tool_retries=0, output_retries=0)
     features = model_features(_Models(_UsageFunctionModel(model)), features)
     storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     async with Persistence.open("recover-scopes", storage=storage) as persistence:
@@ -330,11 +333,11 @@ async def test_discovery_scope_commit_precedes_execution_pin_across_storage_grou
             async def store_pin(execution, instructions):
                 del execution, instructions
                 pin_attempts.append(True)
-                raise RuntimeError("pin failed")
+                raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
             async def fail_scope(*args, **kwargs):
                 del args, kwargs
-                raise RuntimeError("scope failed")
+                raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
             if failure == "scope":
                 monkeypatch.setattr(sessions, "remember_repository_instruction_scopes_in_transaction", fail_scope)
@@ -342,13 +345,14 @@ async def test_discovery_scope_commit_precedes_execution_pin_across_storage_grou
                 _tenant_id="tenant", _conversation=persistence.conversation,
                 promote_pending_execution=promote, _store_repository_instructions=store_pin,
             )
-            with pytest.raises(RuntimeError, match=f"{failure} failed"):
+            with pytest.raises(AIError) as interrupted:
                 await LocalExecutionBackend.commit_repository_instruction_barrier(
                     port,
                     SimpleNamespace(execution_id="active", session_id="session"),
                     SimpleNamespace(repository_instruction_barriers=()),
                     overlay, RepositoryInstructionBarrier("run", "call", "a" * 64),
                 )
+            assert interrupted.value.code is ErrorCode.STORAGE_UNAVAILABLE
             stored = await sessions.get("session", tenant_id="tenant")
             assert stored is not None
             assert stored.repository_instruction_scopes == (() if failure == "scope" else ("pkg",))
@@ -527,7 +531,7 @@ async def test_native_and_custom_approvals_restore_observed_frontier_with_valida
     features = workspace_features("native-approval", workspace=Workspace.load(tmp_path))
     source = features.tool(checked, effect_policy="none")
     source.requires_approval = kind == "native"
-    features.agent("reader", model="default", allow_tools=("checked",))
+    features.agent("reader", model="default", allow_tools=("checked",), tool_retries=0, output_retries=0)
     capture = await model_features(_Models(_UsageFunctionModel(model)), features).capture()
     features = replace(capture, contributions=tuple(
         CapabilityContribution.from_opaque("tool", "checked", source)
@@ -569,6 +573,7 @@ async def test_concurrent_runtime_initial_scope_discovery_preserves_same_request
     from linktools.ai.workspace import WorkspaceInstructionResolver
 
     (tmp_path / "AGENTS.md").write_text("INITIAL-RULE", encoding="utf-8")
+    cache = InMemoryCacheBackend(max_bytes=2**20)
     both_resolving = asyncio.Event()
     arrivals = 0
     original_resolve = WorkspaceInstructionResolver.resolve
@@ -592,14 +597,14 @@ async def test_concurrent_runtime_initial_scope_discovery_preserves_same_request
         return ModelResponse(parts=[TextPart("done")])
 
     features = workspace_features("scope-admission", workspace=Workspace.load(tmp_path))
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
     features.agent("reader", model="default", allow_tools=())
     features = await model_features(_Models(_UsageFunctionModel(model)), features).capture()
     async with AsyncExitStack() as stack:
         runtimes = []
         for _ in range(2):
             persistence = await stack.enter_async_context(Persistence.open(
-                "scope-admission", storage=PersistenceStorage.sqlite(tmp_path / "state.db"),
+                "scope-admission", storage=PersistenceStorage.sqlite(tmp_path / "state.db", coordination=cache),
             ))
             runtimes.append(await stack.enter_async_context(Runtime.attach(persistence=persistence, features=features)))
         session = await runtimes[0].agents.get("reader").create_session("session")
