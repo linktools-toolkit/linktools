@@ -88,6 +88,17 @@ class _PendingPart:
     key: str
     source_part: object
     chunk: TranscriptChunk
+    signature_size: int
+    signature_digest: bytes
+
+    @classmethod
+    def from_message(cls, key: str, message: ModelMessage, chunk: TranscriptChunk) -> "_PendingPart":
+        signature = _exact_message_signature(message)
+        return cls(key, message.parts[0], chunk, len(signature), hashlib.sha256(signature).digest())
+
+    def matches(self, message: ModelMessage) -> bool:
+        signature = _exact_message_signature(message)
+        return len(signature) == self.signature_size and hashlib.sha256(signature).digest() == self.signature_digest
 
 
 @dataclass(frozen=True, slots=True)
@@ -496,7 +507,7 @@ class TranscriptRepository:
             values = await self._decode_chunk_messages(chunk)
             if len(values) != 1 or len(values[0].parts) != 1:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            loaded.append(_PendingPart(key, values[0].parts[0], chunk))
+            loaded.append(_PendingPart.from_message(key, values[0], chunk))
         previous = tuple(loaded)
         values = tuple(messages)
         if values and previous:
@@ -505,8 +516,7 @@ class TranscriptRepository:
                 if part.key not in completed_parts:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 final = self._part_message(values[0], completed_parts[part.key])
-                encoded = _exact_message_signature(final)
-                if len(encoded) != part.chunk.raw_size or hashlib.sha256(encoded).hexdigest() != part.chunk.raw_digest:
+                if not part.matches(final):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             previous = ()
         if pending is None:
@@ -545,14 +555,13 @@ class TranscriptRepository:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     if existing.source_part is not part:
                         candidate = self._part_message(pending, part)
-                        encoded = _exact_message_signature(candidate)
-                        if len(encoded) != existing.chunk.raw_size or hashlib.sha256(encoded).hexdigest() != existing.chunk.raw_digest:
+                        if not existing.matches(candidate):
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    next_parts.append(_PendingPart(key, part, existing.chunk))
+                    next_parts.append(replace(existing, source_part=part))
                     continue
                 message = self._part_message(pending, part)
                 chunk = await self._make_chunk(owner_id, target, (message,), TranscriptOrigin.RAW, archive)
-                next_parts.append(_PendingPart(key, part, chunk))
+                next_parts.append(_PendingPart.from_message(key, message, chunk))
                 additions.append(StoredFact(
                     self._pending_stream(owner_id, target), index + 1,
                     self._head_key(owner_id), "transcript_pending_part", None, None,
@@ -651,8 +660,7 @@ class TranscriptRepository:
             for part in prepared.pending_parts:
                 if part.key not in completed:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                raw = _exact_message_signature(self._part_message(messages[0], completed[part.key]))
-                if len(raw) != part.chunk.raw_size or hashlib.sha256(raw).hexdigest() != part.chunk.raw_digest:
+                if not part.matches(self._part_message(messages[0], completed[part.key])):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         elif prepared.pending_parts:
             cut = replace(head, pending_part_count=len(prepared.pending_parts))
@@ -1236,7 +1244,8 @@ class TranscriptRepository:
             if len(messages) != end - start:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if start == 0 and end == chunk.message_count:
-                raw = encode_model_messages(messages)
+                # Each verified leaf is a canonical single-message array.
+                raw = b"[" + b",".join(value[1:-1] for value in group) + b"]"
                 decode_payload_bytes(raw, codec=chunk.codec, raw_digest=chunk.raw_digest, raw_size=chunk.raw_size)
             results.append(messages)
         return tuple(results)
@@ -1619,6 +1628,7 @@ class TranscriptRepository:
             for digest, payload in payloads.items()
         }
         archived_messages: dict[ArchiveRoot, tuple[ModelMessage, ...]] = {}
+        archived_payloads: dict[ArchiveRoot, tuple[bytes, ...]] = {}
         append_frontiers: dict[ArchiveRoot, tuple[StoredRecord, ...]] = {}
         if archive_blocks:
             archive = await self.content_archive()
@@ -1629,10 +1639,11 @@ class TranscriptRepository:
                 if any(len(messages) != 1 for messages in decoded):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 messages = tuple(messages[0] for messages in decoded)
-                raw = encode_model_messages(messages)
+                raw = b"[" + b",".join(body[1:-1] for body in group) + b"]"
                 if len(messages) != block.root.count or len(raw) != block.raw_size or hashlib.sha256(raw).hexdigest() != block.raw_digest:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 archived_messages[block.root] = messages
+                archived_payloads[block.root] = tuple(group)
         resolved_index = 0
         results: list[LoadedModelContext] = []
         for items in projection_items:
@@ -1656,7 +1667,8 @@ class TranscriptRepository:
                 if any(item.root.scope_id != first.scope_id or item.root.content_scope != first.content_scope for item, _refs in items):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 root = ArchiveRoot(first.scope_id, first.content_scope, tuple(span for item, _refs in items for span in item.root.slices))
-                digest = hashlib.sha256(encode_model_messages(tuple(value.message for value in values))).hexdigest()
+                raw = b"[" + b",".join(body[1:-1] for item, _refs in items for body in archived_payloads[item.root]) + b"]"
+                digest = hashlib.sha256(raw).hexdigest()
             frontier = append_frontiers.get(root, ()) if len(items) == 1 else ()
             results.append(LoadedModelContext(tuple(values), root, digest, frontier))
         return tuple(results)

@@ -767,6 +767,24 @@ lease ownership and resolved dependencies remain outside that projection.
 Format-specific TaskNode input semantics and explicit dependency/failure policies
 retain their custom required-field contracts.
 
+The owned model-message v1 codec follows the same constructor-default rule for
+mapped message, part, retry, instruction and usage fields, including the explicit
+conversation-ID and attempt-duration wire mappings. Wire `version`, `kind` and
+`part_kind` discriminators remain explicit. Durable tool call/result/retry IDs
+also remain required: generating independent authoring IDs on restore would break
+call/result correlation. An omitted clock factory runs at read time; it is not
+proof of a historical timestamp. Exact pending continuation still fails closed
+when a missing clock value prevents proving that the recorded part is unchanged.
+
+Archive byte checks use the original verified canonical leaf bytes, not a
+serialization with defaults filled in. Accepted input contexts retain their
+original history bytes and digest. A newly prepared context made from decoded
+messages uses current writer output and may therefore need a new archive root;
+a reuse hint always describes the original root bytes. Pending-part comparison
+retains an immutable exact-content proof after original stored-byte validation,
+without changing source payloads or accepting changed part IDs, content, metadata
+or explicit part timestamps.
+
 For an existing `SessionRecord` v1 without `repository_instruction_scopes`, this
 same generic rule uses the field's existing empty-tuple default. The earlier
 writer fixture captured from commit

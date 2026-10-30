@@ -16,6 +16,8 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
   decoding uses declared constructor defaults and default factories for omitted
   init fields; fields without defaults and non-init fields remain required.
   Explicit values always undergo normal validation and are never replaced by defaults.
+  Protocol discriminators and durable correlation identities remain explicit;
+  an authoring constructor's generated identity is not a persisted identity.
 - Capture a RuntimeFeatures declaration once and reuse it for host
   inspection and Runtime composition. Bind cross-source reads to the captured
   revision or an immutable reference.

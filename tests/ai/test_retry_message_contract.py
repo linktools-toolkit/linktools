@@ -171,8 +171,15 @@ def test_retry_cause_keeps_feedback_and_tool_domains_separate(feedback: bool, ca
 
 
 @_NEW_SDK
-@pytest.mark.parametrize("retry", [None, "retry", {}, {"cause": "model_retry"}, {**_RETRY, "extra": True}])
-def test_feedback_requires_complete_known_retry_shape(retry: object) -> None:
+def test_feedback_retry_uses_declared_optional_defaults() -> None:
+    restored, = decode_model_messages(_wire({**_feedback_wire(), "retry": {"cause": "model_retry"}}))
+    expected = RetryFeedbackPart("fix output", retry=RetryInfo(cause="model_retry"), timestamp=_STAMP)
+    assert restored == ModelRequest(parts=[expected], timestamp=_STAMP)
+
+
+@_NEW_SDK
+@pytest.mark.parametrize("retry", [None, "retry", {}, {**_RETRY, "extra": True}])
+def test_feedback_requires_known_retry_structure(retry: object) -> None:
     with pytest.raises(AIError) as caught:
         decode_model_messages(_wire({**_feedback_wire(), "retry": retry}))
     assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
