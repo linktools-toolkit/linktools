@@ -777,7 +777,9 @@ proof of a historical timestamp. Exact pending continuation still fails closed
 when a missing clock value prevents proving that the recorded part is unchanged.
 
 Archive byte checks use the original verified canonical leaf bytes, not a
-serialization with defaults filled in. Accepted input contexts retain their
+serialization with defaults filled in. The message codec owns canonical singleton-array
+validation and composition, framing verified fragments without reserializing SDK
+objects. Its typed read uses the same parsed leaves. Accepted input contexts retain their
 original history bytes and digest. A newly prepared context made from decoded
 messages uses current writer output and may therefore need a new archive root;
 a reuse hint always describes the original root bytes. Pending-part comparison

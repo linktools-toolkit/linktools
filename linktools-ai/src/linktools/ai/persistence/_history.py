@@ -13,7 +13,7 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, StoredPayload, read_object
 from ._storage_keys import runtime_object_key
-from ..model.messages import decode_model_messages, encode_model_messages
+from ..model.messages import combine_model_message_payloads, decode_model_message_payloads, decode_model_messages, encode_model_messages
 from ._archive import ArchiveRoot, ContentArchive, PreparedArchive
 from .codec import (
     _decode_enveloped_domain,
@@ -561,7 +561,9 @@ class TranscriptRepository:
                     continue
                 message = self._part_message(pending, part)
                 chunk = await self._make_chunk(owner_id, target, (message,), TranscriptOrigin.RAW, archive)
-                next_parts.append(_PendingPart.from_message(key, message, chunk))
+                next_parts.append(_PendingPart(
+                    key, part, chunk, chunk.raw_size, bytes.fromhex(chunk.raw_digest),
+                ))
                 additions.append(StoredFact(
                     self._pending_stream(owner_id, target), index + 1,
                     self._head_key(owner_id), "transcript_pending_part", None, None,
@@ -688,8 +690,8 @@ class TranscriptRepository:
         current_size = 2
         for message in values:
             encoded = encode_model_messages((message,))
-            part = encoded[1:-1]
-            candidate_size = current_size + len(part) + (1 if current else 0)
+            part_size = len(encoded) - 2
+            candidate_size = current_size + part_size + (1 if current else 0)
             split = (
                 current
                 and (
@@ -703,7 +705,7 @@ class TranscriptRepository:
                 )
                 current_start += len(current)
                 current = [message]
-                current_size = len(part) + 2
+                current_size = part_size + 2
             else:
                 current.append(message)
                 current_size = candidate_size
@@ -1237,15 +1239,17 @@ class TranscriptRepository:
         raw_groups = await archive.read_ranges(tuple(roots), codec="model-message")
         results = []
         for (chunk, start, end), group in zip(ranges, raw_groups, strict=True):
-            decoded = tuple(decode_model_messages(value) for value in group)
-            if any(len(messages) != 1 for messages in decoded):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            messages = tuple(messages[0] for messages in decoded)
+            whole_chunk = start == 0 and end == chunk.message_count
+            if whole_chunk:
+                raw, messages = decode_model_message_payloads(group)
+            else:
+                decoded = tuple(decode_model_messages(value) for value in group)
+                if any(len(values) != 1 for values in decoded):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                messages = tuple(values[0] for values in decoded)
             if len(messages) != end - start:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if start == 0 and end == chunk.message_count:
-                # Each verified leaf is a canonical single-message array.
-                raw = b"[" + b",".join(value[1:-1] for value in group) + b"]"
+            if whole_chunk:
                 decode_payload_bytes(raw, codec=chunk.codec, raw_digest=chunk.raw_digest, raw_size=chunk.raw_size)
             results.append(messages)
         return tuple(results)
@@ -1635,11 +1639,7 @@ class TranscriptRepository:
             groups = await archive.read_ranges(tuple(block.root for block in archive_blocks), codec="model-message",
                                                append_frontiers=append_frontiers)
             for block, group in zip(archive_blocks, groups, strict=True):
-                decoded = tuple(decode_model_messages(body) for body in group)
-                if any(len(messages) != 1 for messages in decoded):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                messages = tuple(messages[0] for messages in decoded)
-                raw = b"[" + b",".join(body[1:-1] for body in group) + b"]"
+                raw, messages = decode_model_message_payloads(group)
                 if len(messages) != block.root.count or len(raw) != block.raw_size or hashlib.sha256(raw).hexdigest() != block.raw_digest:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 archived_messages[block.root] = messages
@@ -1663,12 +1663,15 @@ class TranscriptRepository:
             root = None
             digest = None
             if items and all(isinstance(item, ArchivedContextBlock) for item, _refs in items):
-                first = items[0][0].root
-                if any(item.root.scope_id != first.scope_id or item.root.content_scope != first.content_scope for item, _refs in items):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                root = ArchiveRoot(first.scope_id, first.content_scope, tuple(span for item, _refs in items for span in item.root.slices))
-                raw = b"[" + b",".join(body[1:-1] for item, _refs in items for body in archived_payloads[item.root]) + b"]"
-                digest = hashlib.sha256(raw).hexdigest()
+                first = items[0][0]
+                if len(items) == 1:
+                    root, digest = first.root, first.raw_digest
+                else:
+                    if any(item.root.scope_id != first.root.scope_id or item.root.content_scope != first.root.content_scope for item, _refs in items):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    root = ArchiveRoot(first.root.scope_id, first.root.content_scope, tuple(span for item, _refs in items for span in item.root.slices))
+                    raw = combine_model_message_payloads(body for item, _refs in items for body in archived_payloads[item.root])
+                    digest = hashlib.sha256(raw).hexdigest()
             frontier = append_frontiers.get(root, ()) if len(items) == 1 else ()
             results.append(LoadedModelContext(tuple(values), root, digest, frontier))
         return tuple(results)

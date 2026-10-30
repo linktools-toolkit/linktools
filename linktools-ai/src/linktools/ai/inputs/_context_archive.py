@@ -12,7 +12,7 @@ from ..errors import AIError, ErrorCode
 from ..execution import RuntimePayloadRef
 from ..storage import ObjectRef, ObjectStore, StoredPayload
 from ..execution import ExecutionInputContext
-from ..model.messages import decode_model_messages
+from ..model.messages import combine_model_message_payloads
 from ..persistence.runs import ArchiveRoot, ContentArchive, PreparedArchive
 from ..persistence.state import StateStorageGroup, StateStore, active_state_scope
 
@@ -59,7 +59,8 @@ class ExecutionContextArchive:
     ) -> PreparedExecutionContext:
         archive = await self._open(create=True)
         prepared = PreparedArchive()
-        messages = tuple(canonical_json_bytes([message]) for message in json.loads(context.history))
+        semantic = context.to_payload()
+        messages = semantic["history"]
         if (history_root is not None and history_root.scope_id == archive.scope_id
                 and history_root.content_scope == archive.content_scope
                 and history_root.count == len(messages)
@@ -67,9 +68,8 @@ class ExecutionContextArchive:
             history = history_root
         else:
             history = await archive.prepare_append(archive.empty_root(), tuple(
-                ("model-message", message) for message in messages
+                ("model-message", canonical_json_bytes([message])) for message in messages
             ), prepared)
-        semantic = context.to_payload()
         values: list[tuple[str, bytes]] = []
         components: dict[str, object] = {}
         for name in ("session_metadata", "memory"):
@@ -117,9 +117,7 @@ class ExecutionContextArchive:
         try:
             root = ArchiveRoot.from_json(value["history"])
             message_bytes = (await archive.read_ranges((root,), codec="model-message"))[0]
-            decoded = tuple(decode_model_messages(raw) for raw in message_bytes)
-            if any(len(messages) != 1 for messages in decoded):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            history = combine_model_message_payloads(message_bytes)
             references: list[Mapping[str, JsonValue]] = []
             maps: dict[str, list[tuple[str, int]] | None] = {}
             for name in ("session_metadata", "memory"):
@@ -147,7 +145,6 @@ class ExecutionContextArchive:
             bodies = tuple(json.loads(raw) for raw in await archive.read_contents(ids, codec="json"))
             fields = {name: None if items is None else {key: bodies[index] for key, index in items}
                       for name, items in maps.items()}
-            history = b"[" + b",".join(raw[1:-1] for raw in message_bytes) + b"]"
             result = ExecutionInputContext(history,
                 session_metadata=fields["session_metadata"], memory=fields["memory"],
                 repository_instructions=None if instruction_index is None else bodies[instruction_index],

@@ -5,7 +5,7 @@
 import binascii
 import json
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -270,7 +270,7 @@ def freeze_model_messages(
     return decode_model_messages(encode_model_messages(messages))
 
 
-def decode_model_messages(raw: bytes) -> tuple[ModelMessage, ...]:
+def _parse_model_message_payload(raw: bytes) -> list[JsonValue]:
     try:
         value = json.loads(raw.decode("utf-8"))
         if canonical_json_bytes(cast(JsonValue, value)) != raw:
@@ -281,6 +281,50 @@ def decode_model_messages(raw: bytes) -> tuple[ModelMessage, ...]:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     if not isinstance(value, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return cast(list[JsonValue], value)
+
+
+def _read_model_message_payloads(
+    payloads: Iterable[bytes], *, decode: bool,
+) -> tuple[bytes, tuple[ModelMessage, ...]]:
+    fragments: list[bytes | memoryview] = [b"["]
+    messages: list[ModelMessage] = []
+    try:
+        for raw in payloads:
+            leaf = _parse_model_message_payload(raw)
+            if len(leaf) != 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if len(fragments) > 1:
+                fragments.append(b",")
+            fragments.append(memoryview(raw)[1:-1])
+            if decode:
+                messages.append(_decode_message(leaf[0]))
+    except AIError:
+        raise
+    except (TypeError, ValueError, KeyError, binascii.Error) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    fragments.append(b"]")
+    return b"".join(fragments), tuple(messages)
+
+
+def combine_model_message_payloads(payloads: Iterable[bytes]) -> bytes:
+    """Combine validated singleton arrays without materializing SDK defaults.
+
+    Message semantics are checked by the normal decoder when consumed. Original
+    canonical fragments are framed once, without copying each array's contents.
+    """
+    return _read_model_message_payloads(payloads, decode=False)[0]
+
+
+def decode_model_message_payloads(
+    payloads: Iterable[bytes],
+) -> tuple[bytes, tuple[ModelMessage, ...]]:
+    """Read singleton message arrays and retain their original canonical bytes."""
+    return _read_model_message_payloads(payloads, decode=True)
+
+
+def decode_model_messages(raw: bytes) -> tuple[ModelMessage, ...]:
+    value = _parse_model_message_payload(raw)
     try:
         return tuple(_decode_message(item) for item in value)
     except AIError:
@@ -1113,7 +1157,7 @@ def _require_keys(
         raise ValueError("durable message shape is invalid")
 
 
-__all__ = ['RetiredReferencedContent', 'SummaryPromptPart', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'model_input_content', 'model_response_usage', 'project_model_response_attempts', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_return_content_digest', 'without_history_system_prompts']
+__all__ = ['RetiredReferencedContent', 'SummaryPromptPart', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'combine_model_message_payloads', 'decode_model_message_payloads', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'model_input_content', 'model_response_usage', 'project_model_response_attempts', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_return_content_digest', 'without_history_system_prompts']
 
 from ._attachment import (binary_attachment_text, bind_tool_return_attachments, file_tool_result_metadata, has_binary_attachment_metadata, input_attachment_views, is_binary_attachment_text, request_attachment_facts)
 
