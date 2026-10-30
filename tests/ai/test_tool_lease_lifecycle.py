@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Tool leaf lifetime keeps its durable claim live and preserves fencing."""
 
-from linktools.ai.persistence import Persistence
+from linktools.ai.persistence import Persistence, _memory_transaction
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -63,6 +63,10 @@ async def _runtime(
         return clock.current
 
     monkeypatch.setattr(_MemoryTransaction, "now", now)
+    monkeypatch.setattr(
+        _memory_transaction, "datetime",
+        SimpleNamespace(now=lambda tz: clock.current.astimezone(tz)),
+    )
     monkeypatch.setattr(
         boundary_module, "asyncio", SimpleNamespace(**{**vars(asyncio), "sleep": clock.sleep})
     )
