@@ -184,14 +184,13 @@ class _LocalBoundary:
 class _Console:
     def __init__(
         self, runtime: Runtime | None, history: History | None, metrics: Metrics | None,
-        status: Mapping[str, object], capabilities: Sequence[Mapping[str, object]], memory_scope: str,
+        status: Mapping[str, object], capabilities: Sequence[Mapping[str, object]],
     ) -> None:
         self.runtime = runtime
         self.history = runtime.history if runtime is not None else history
         self.metrics = metrics
         self.status = dict(status)
         self.capabilities = tuple(capabilities)
-        self.memory_scope = memory_scope
         self.principal = runtime.default_principal if runtime is not None else Principal(
             "runtime", "default" if history is None else history.tenant_id, PrincipalKind.LOCAL_TRUSTED.value,
         )
@@ -211,7 +210,6 @@ class _Console:
             **self.status,
             "runtime": self.runtime.status() if self.runtime is not None else None,
             "read_only": self.runtime is None,
-            "memory_scope": self.memory_scope,
             "capabilities": self.capabilities,
             "metric_names": _SUMMARY_METRICS,
         })
@@ -265,9 +263,11 @@ class _Console:
         if environ.debug:
             request.state.phase = f"session.{action}"
         if action == "messages":
+            if "memory_scope" in payload:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
+                              safe_details={"reason": "memory_scope_is_runtime_configuration"})
             execution = await session.start(
                 _text(payload, "prompt"), files=payload.get("files", ()), idempotency_key=request_id,
-                memory_scope=_text(payload, "memory_scope", self.memory_scope),
                 planning=payload.get("planning", False), thinking=payload.get("thinking"),
             )
             return _json({"execution_id": execution.execution_id}, 202)
@@ -479,7 +479,7 @@ async def _asset(request: Request) -> Response:
 def create_app(
     *, runtime: Runtime | None = None, history: History | None = None,
     metrics: Metrics | None = None, status: Mapping[str, object] | None = None,
-    capabilities: Sequence[Mapping[str, object]] = (), memory_scope: str = "default",
+    capabilities: Sequence[Mapping[str, object]] = (),
 ) -> "ASGIApp":
     """Build a loopback-only console; the caller owns and closes injected resources.
 
@@ -488,7 +488,7 @@ def create_app(
     restricted; a reverse proxy must enforce authentication and access control.
     The console itself does not authenticate remote users.
     """
-    console = _Console(runtime, history, metrics, status or {}, capabilities, memory_scope)
+    console = _Console(runtime, history, metrics, status or {}, capabilities)
     app = Starlette(routes=[
         Route("/", _asset), Route("/assets/{name}", _asset),
         Route("/api/config", console.config),

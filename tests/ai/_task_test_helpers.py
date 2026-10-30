@@ -199,7 +199,6 @@ def agent_task_node(runtime: Runtime[AppT], node_id: str, prompt: object, **kwar
     input_refs = kwargs.pop("input_refs", None)
     files = kwargs.pop("files", ())
     session_id = kwargs.pop("session_id", None)
-    memory_scope = kwargs.pop("memory_scope", None)
     planning = kwargs.pop("planning", None)
     thinking = kwargs.pop("thinking", None)
     return TaskNode(
@@ -210,7 +209,6 @@ def agent_task_node(runtime: Runtime[AppT], node_id: str, prompt: object, **kwar
             prompt,  # type: ignore[arg-type]
             files=files,  # type: ignore[arg-type]
             session_id=session_id,  # type: ignore[arg-type]
-            memory_scope=memory_scope,  # type: ignore[arg-type]
             planning=planning,  # type: ignore[arg-type]
             thinking=thinking,  # type: ignore[arg-type]
         ),

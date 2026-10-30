@@ -390,7 +390,8 @@ def test_web_command_preserves_runtime_flags_and_validates_port(monkeypatch: pyt
     from linktools.commands.ai.web import command
     from linktools.cli import CommandError
     parser = command.create_parser()
-    assert {"project", "model", "base_url", "api_key", "memory", "port"} <= {action.dest for action in parser._actions}
+    assert {"project", "model", "base_url", "api_key", "port"} <= {action.dest for action in parser._actions}
+    assert "memory" not in {action.dest for action in parser._actions}
     with pytest.raises(CommandError, match="port"):
         command.run(parser.parse_args(["--port", "0"]))
 
@@ -697,3 +698,28 @@ async def test_end_recovery_required_execution_uses_durable_cancel_and_replays_r
             assert (await execution.model_interactions(include_content=True)).items == before.items
     finally:
         release.set()
+
+
+@pytest.mark.asyncio
+async def test_web_memory_uses_runtime_configuration_and_rejects_per_message_scope() -> None:
+    from linktools.ai.capability import MemoryCapability
+
+    features = model_features(RuntimeUsageModels())
+    features.capability(MemoryCapability(scope="host-memory"))
+    async with Runtime.open("web-memory", storage=PersistenceStorage.in_memory(), features=features) as runtime:
+        await runtime.agents.get().create_session("session")
+        async with client(create_app(runtime=runtime)) as http:
+            config = await http.get("/api/config")
+            assert "memory_scope" not in config.json()
+            payload = {"prompt": "hello", "request_id": "message"}
+            for scope in (None, "default", "other"):
+                rejected = await http.post("/api/session/messages?session_id=session",
+                    json={**payload, "memory_scope": scope}, headers=_HEADERS)
+                assert rejected.status_code == 400
+                assert rejected.json()["code"] == "REQUEST_FIELD_INVALID"
+            accepted = await http.post("/api/session/messages?session_id=session", json=payload, headers=_HEADERS)
+            assert accepted.status_code == 202, accepted.text
+            execution = await runtime.executions.get(accepted.json()["execution_id"])
+            await execution.wait()
+            record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+            assert record.memory_scope == "host-memory"

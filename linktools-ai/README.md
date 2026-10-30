@@ -255,7 +255,7 @@ security, persisted history and explicit recovery of stopped executors.
 ```python
 from linktools.ai import RuntimeFeatures, Runtime, Workspace
 from linktools.ai.capability import FileSystem
-from linktools.ai.capability import ShellCapability
+from linktools.ai.capability import MemoryCapability, ShellCapability
 from linktools.ai.model import create_model
 from linktools.ai.persistence import PersistenceStorage
 
@@ -266,16 +266,24 @@ features = RuntimeFeatures("workspace")
 features.model("default", binding)
 features.capability(FileSystem(workspace))
 features.capability(ShellCapability())
+features.capability(MemoryCapability())
 
 async with Runtime.open("default", storage=storage,
     features=features,
 ) as runtime:
     result = (await runtime.agents.get("default").run(
         "review this change",
-        memory_scope="default",
         planning=True,
     )).result
 ```
+
+Memory is selected once through `MemoryCapability(scope="default")` in Runtime features,
+not through Agent, Session or Task invocation arguments. Omitting the declaration disables
+memory for ordinary SDK executions; local CLI commands register the default declaration.
+Admitted executions retain their scope across recovery, while imported input contexts
+use isolated captured memory. Existing durable Task inputs retain their recorded memory
+scope (including disabled memory) on recovery; new Task authoring cannot override the
+capability through an input field.
 
 `Runtime.open()` is the public composition root. The Runtime composition is immutable for the lifetime of the context; registrations are completed before it opens.
 

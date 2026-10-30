@@ -21,8 +21,8 @@ After updating the checkout, rerun the install command in the same virtual envir
 until it is installed again. `--help` only exercises lightweight CLI discovery.
 
 Open `http://127.0.0.1:8765`. `--port` selects another local port, and `--open`
-opens the URL in your browser. The existing `--base-url`, `--api-key`,
-and `--memory` arguments have the same meaning as `ai-run`; prefer environment
+opens the URL in your browser. The existing `--base-url` and `--api-key` arguments have the same meaning
+as `ai-run`; memory is supplied by the Runtime capability. Prefer environment
 configuration for credentials rather than shell history. The console does not
 persist or edit model credentials.
 

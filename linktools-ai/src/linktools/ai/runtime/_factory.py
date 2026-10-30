@@ -18,6 +18,7 @@ from ..agent import AgentCatalog, AgentCompiler
 from ..capability import (
     ToolResponsesCapability,
     SessionCapability,
+    MemoryCapability,
     ExecutionCapability,
     AgentContext,
     AssetCapability,
@@ -118,6 +119,7 @@ class _RuntimeComponents:
     binding_resolver: _AgentBindingResolver
     history: object
     input_captures: InputCaptures
+    memory_scope: str | None
 
 
 class _AgentLifecycle:
@@ -195,6 +197,7 @@ async def compose_runtime_components(
     execution_declared = False
     session_capability = SessionCapability()
     session_declared = False
+    memory_scope: str | None = None
     tool_responses: ToolResponseFixture | None = None
     workspace = None if captured is None else captured.workspace
     workspace_factory = LocalWorkspaceBackend if captured is None else captured.workspace_factory
@@ -229,6 +232,7 @@ async def compose_runtime_components(
                 TraceCapability,
                 ToolResponsesCapability,
                 SessionCapability,
+                MemoryCapability,
                 ExecutionCapability,
             )):
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "Runtime feature capabilities require Runtime scope")
@@ -249,12 +253,17 @@ async def compose_runtime_components(
                 declared_ids.add(leaf.id)
 
         def consume_runtime_declaration(capability: AbstractCapability[AgentContext[AppT]]) -> AbstractCapability[AgentContext[AppT]] | None:
-            nonlocal tool_responses, session_capability, session_declared, execution_capability, execution_declared
+            nonlocal tool_responses, session_capability, session_declared, execution_capability, execution_declared, memory_scope
             if isinstance(capability, ExecutionCapability):
                 if execution_declared:
                     raise AIError(ErrorCode.CAPABILITY_CONFLICT)
                 execution_capability, execution_declared = capability, True
                 return capability
+            if isinstance(capability, MemoryCapability):
+                if memory_scope is not None:
+                    raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+                memory_scope = capability.scope
+                return None
             if isinstance(capability, SessionCapability):
                 if session_declared:
                     raise AIError(ErrorCode.CAPABILITY_CONFLICT)
@@ -453,6 +462,7 @@ async def compose_runtime_components(
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
             input_materializer=input_materializer,
+            memory_scope=memory_scope,
             session_execution_ready=session_capability.enabled,
             auto_recover=auto_recover,
             tool_responses=tool_responses,
@@ -613,6 +623,7 @@ async def _build_local_components(
     object_key_factory: ObjectKeyFactory,
     payload_policy: PayloadPolicy,
     input_materializer: ExecutionInputMaterializer,
+    memory_scope: str | None,
     session_execution_ready: bool,
     auto_recover: bool,
     tool_responses: ToolResponseFixture | None,
@@ -969,6 +980,7 @@ async def _build_local_components(
         binding_resolver=binding_resolver,
         history=history,
         input_captures=input_captures,
+        memory_scope=memory_scope,
     )
 
 

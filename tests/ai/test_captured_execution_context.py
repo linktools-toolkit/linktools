@@ -10,7 +10,7 @@ from ._runtime_test_helpers import model_features
 from ._runtime_test_helpers import workspace_features
 
 from pathlib import Path
-from linktools.ai.capability import ExecutionCapability
+from linktools.ai.capability import ExecutionCapability, MemoryCapability
 
 import pytest
 from pydantic_ai.models.test import TestModel
@@ -77,6 +77,7 @@ async def test_captured_session_context_ignores_later_turns_and_metadata(tmp_pat
 @pytest.mark.asyncio
 async def test_captured_memory_preserves_versions_in_new_execution_scope(tmp_path: Path) -> None:
     group = RuntimeFeatures("context-memory")
+    group.capability(MemoryCapability(scope="production"))
     group.agent("default", model="default", allow_tools=("*",), allow_skills=(), allow_subagents=())
     storage = PersistenceStorage.filesystem(tmp_path)
     async with Persistence.open('captured-memory', storage=storage) as persistence_78, Runtime.attach(persistence=persistence_78, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_78, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
@@ -84,7 +85,7 @@ async def test_captured_memory_preserves_versions_in_new_execution_scope(tmp_pat
         memory = RuntimeMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(PersistenceDomain.MEMORY),
                                     namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id="setup", memory_scope="production")
         original = await memory.write("facts.txt", "old content", expected_version=None)
-        source = await runtime.agents.get().start("question", memory_scope="production", principal=principal)
+        source = await runtime.agents.get().start("question", principal=principal)
         assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
         captured = await runtime_engine.inputs.capture_input(source.execution_id, CaptureInputRequest(principal, "memory-context-0001"))
         value = await runtime_engine.inputs.read_agent(captured, principal=principal)
@@ -266,12 +267,13 @@ async def test_custom_memory_without_consistent_read_view_reports_precise_unavai
     from linktools.ai.errors import AIError, ErrorCode
 
     group = RuntimeFeatures("unsupported-context")
+    group.capability(MemoryCapability(scope="custom"))
     group.agent("default", model="default", allow_tools=("*",), allow_skills=(), allow_subagents=())
     async with Persistence.open('unsupported-context', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_266, Runtime.attach(persistence=persistence_266, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_266, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
         backend = runtime._execution_service.runtime_backend()
         backend._memory_store_factory = lambda *_args: InMemoryStore()
-        source = await runtime.agents.get().start("question", memory_scope="custom", principal=principal)
+        source = await runtime.agents.get().start("question", principal=principal)
         assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
         with pytest.raises(AIError) as raised:
             await runtime_engine.inputs.capture_input(source.execution_id, CaptureInputRequest(principal, "unsupported-context-capture"))
@@ -350,6 +352,7 @@ async def test_model_memory_tool_reads_captured_content_after_production_changes
         pass
 
     group = RuntimeFeatures("model-memory-context")
+    group.capability(MemoryCapability(scope="production"))
     group.agent("default", model="default", allow_tools=("*",), allow_skills=(), allow_subagents=())
     storage = PersistenceStorage.filesystem(tmp_path)
     async with Persistence.open('model-memory-context', storage=storage) as persistence_343, Runtime.attach(persistence=persistence_343, features=model_features(Models(), group)) as runtime, TaskEngine.open(persistence=persistence_343, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
@@ -357,7 +360,7 @@ async def test_model_memory_tool_reads_captured_content_after_production_changes
         memory = RuntimeMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(PersistenceDomain.MEMORY),
             namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id="setup", memory_scope="production")
         original = await memory.write("memory/facts.md", "frozen memory value", expected_version=None)
-        source = await runtime.agents.get().start("read memory", memory_scope="production", principal=principal)
+        source = await runtime.agents.get().start("read memory", principal=principal)
         assert (await source.wait()).result.output == {"text": "read:frozen memory value"}
         ref = await runtime_engine.inputs.capture_input(source.execution_id, CaptureInputRequest(principal, "model-memory-capture"))
         value = await runtime_engine.inputs.read_agent(ref, principal=principal)

@@ -56,11 +56,6 @@ def _add_local_runtime_arguments(parser: "CommandParser") -> None:
     parser.add_argument("--api-key", default=None, help="one-shot selected protocol credential")
     for name, value_type, description in _MODEL_NUMERIC_OPTIONS:
         parser.add_argument("--" + name.replace("_", "-"), type=value_type, default=None, help=description)
-    parser.add_argument(
-        "--memory",
-        default=None,
-        help="caller-owned memory scope (default: default)",
-    )
 
 
 def _load_workspace(root: "Path | None" = None) -> Workspace:
@@ -233,7 +228,7 @@ async def _open_local_runtime(
     *,
     model: "ModelBinding | None" = None,
 ) -> "AsyncIterator[Runtime]":
-    from linktools.ai.capability import AssetCapability, FileSystem
+    from linktools.ai.capability import AssetCapability, FileSystem, MemoryCapability
     from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
     from linktools.ai.runtime import Runtime
@@ -247,6 +242,7 @@ async def _open_local_runtime(
         features.capability(FileSystem(workspace))
         from linktools.ai.capability import ShellCapability
         features.capability(ShellCapability())
+        features.capability(MemoryCapability())
         features.capability(ExecutionCapability(retain_history=True))
         features.capability(CheckpointCapability())
         features.capability(TraceCapability())

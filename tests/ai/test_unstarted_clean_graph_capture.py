@@ -112,7 +112,7 @@ async def test_clean_unstarted_graph_preserves_captured_input_semantics(
         for before, after in ((original.input, clean.input), (original.original_input, clean.original_input)):
             expected = dict(before)
             expected.pop("capture_context", None)
-            expected.update(session_id=None, memory_scope=None)
+            expected.update(session_id=None)
             assert dict(after) == expected
         assert (await runtime_engine.inputs.read_task(task_capture, principal=principal)) == original
 

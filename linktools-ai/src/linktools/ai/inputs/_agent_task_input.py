@@ -33,7 +33,6 @@ _AGENT_TASK_INPUT_FIELDS = (
     "parameters",
     "files",
     "session_id",
-    "memory_scope",
     "planning",
     "thinking",
 )
@@ -56,7 +55,6 @@ class AgentTaskInput(Mapping[str, JsonValue]):
         parameters: Mapping[str, JsonValue] | None = None,
         files: Sequence[str] = (),
         session_id: str | None = None,
-        memory_scope: str | None = None,
         planning: bool | None = None,
         thinking: ThinkingValue | None = None,
         input_context: ExecutionInputContext | None = None,
@@ -65,11 +63,6 @@ class AgentTaskInput(Mapping[str, JsonValue]):
             canonical_prompt = "" if isinstance(prompt, str) and prompt == "" else validate_user_input(prompt)
             parameter_values = normalize_json_value(dict(parameters or {}))
             normalized_files = tuple(files)
-            normalized_scope = (
-                None
-                if memory_scope is None
-                else validate_memory_scope(memory_scope)
-            )
             normalized_thinking = (
                 None if thinking is None else normalize_thinking(thinking)
             )
@@ -90,7 +83,6 @@ class AgentTaskInput(Mapping[str, JsonValue]):
             "parameters": parameter_values,
             "files": list(normalized_files),
             "session_id": session_id,
-            "memory_scope": normalized_scope,
             "planning": planning,
             "thinking": normalized_thinking,
         }
@@ -162,11 +154,16 @@ class AgentTaskInput(Mapping[str, JsonValue]):
                 parameters=parameters,
                 files=files,
                 session_id=value["session_id"],
-                memory_scope=value["memory_scope"],
                 planning=planning,
                 thinking=thinking,
             )
             normalized_values = dict(result._values)
+            if "memory_scope" in value:
+                legacy_scope = value["memory_scope"]
+                if legacy_scope is not None:
+                    if not isinstance(legacy_scope, str):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    validate_memory_scope(legacy_scope)
             if stored_prompt is not None:
                 normalized_values["prompt"] = dict(prompt)
                 object.__setattr__(result, "_stored_prompt", stored_prompt)
@@ -190,6 +187,8 @@ class AgentTaskInput(Mapping[str, JsonValue]):
         if value is None or (isinstance(value, Mapping) and not value):
             return cls()
         if not isinstance(value, Mapping):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if "memory_scope" in value:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if ("kind" in value or "version" in value) and not _AGENT_TASK_INPUT_FIELD_SET.issubset(value):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -215,7 +214,6 @@ class AgentTaskInput(Mapping[str, JsonValue]):
                 parameters=value.get("parameters", {}),
                 files=value.get("files", ()),
                 session_id=value.get("session_id"),
-                memory_scope=value.get("memory_scope"),
                 planning=value.get("planning"),
                 thinking=value.get("thinking"),
             )
@@ -238,6 +236,7 @@ class AgentTaskInput(Mapping[str, JsonValue]):
                 key: self._values[key]
                 for key in (
                     *_AGENT_TASK_INPUT_FIELDS,
+                    *(key for key in ("memory_scope",) if key in self._values),
                     *(key for key in ("capture_context", "capture_files") if key in self._values),
                 )
             }
@@ -276,11 +275,6 @@ class AgentTaskInput(Mapping[str, JsonValue]):
     @property
     def session_id(self) -> str | None:
         value = self._values["session_id"]
-        return value if isinstance(value, str) else None
-
-    @property
-    def memory_scope(self) -> str | None:
-        value = self._values["memory_scope"]
         return value if isinstance(value, str) else None
 
     @property

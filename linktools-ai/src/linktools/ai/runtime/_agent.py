@@ -31,6 +31,13 @@ class Session(Generic[AppT]):
     session_id: str
     _principal: "Principal | None" = None
     _compiled_agent: "CompiledAgent | None" = None
+    _binding_contract: "AgentBindingContract | None" = None
+
+    def _definition(self) -> "Agent[AppT]":
+        if self._agent_revision is None:
+            return self._runtime.agents.get(self.agent_id)
+        return Agent(self._runtime, self.agent_id, self._agent_revision,
+                     self._compiled_agent, self._binding_contract)
 
     async def start(
         self,
@@ -41,42 +48,22 @@ class Session(Generic[AppT]):
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         idempotency_key: "str | None" = None,
-        memory_scope: "str | None" = None,
         planning: "bool | None" = None,
         thinking: "ThinkingValue | None" = None,
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         """Start run mode; planning enables the planning capability without selecting plan mode."""
-        if self._agent_revision is None:
-            return await self._runtime.agents.get(self.agent_id).start(
-                user_prompt,
-                files=files,
-                budget=budget,
-                output=output,
-                principal=principal or self._principal,
-                session_id=self.session_id,
-                idempotency_key=idempotency_key,
-                memory_scope=memory_scope,
-                planning=planning,
-                thinking=thinking,
-                correlation=correlation,
-            )
-        return await self._runtime._start_for_agent(
-            self.agent_id,
-            self._agent_revision,
-            validate_user_input(user_prompt),
+        return await self._definition().start(
+            user_prompt,
             files=files,
             budget=budget,
             output=output,
             principal=principal or self._principal,
             session_id=self.session_id,
             idempotency_key=idempotency_key,
-            memory_scope=memory_scope,
-            mode="run",
             planning=planning,
             thinking=thinking,
             correlation=correlation,
-            compiled_agent=self._compiled_agent,
         )
 
     async def run(
@@ -88,7 +75,6 @@ class Session(Generic[AppT]):
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         idempotency_key: "str | None" = None,
-        memory_scope: "str | None" = None,
         planning: "bool | None" = None,
         thinking: "ThinkingValue | None" = None,
         correlation: "Mapping[str, object] | None" = None,
@@ -108,7 +94,6 @@ class Session(Generic[AppT]):
             output=output,
             principal=principal,
             idempotency_key=idempotency_key,
-            memory_scope=memory_scope,
             planning=planning,
             thinking=thinking,
             correlation=correlation,
@@ -128,7 +113,6 @@ class Session(Generic[AppT]):
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         idempotency_key: "str | None" = None,
-        memory_scope: "str | None" = None,
         thinking: "ThinkingValue | None" = None,
         correlation: "Mapping[str, object] | None" = None,
         timeout_seconds: "float | None" = None,
@@ -140,41 +124,19 @@ class Session(Generic[AppT]):
         """Execute plan mode with plan-safe tools and wait. This can call models and tools; it is not a dry run."""
         validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds,
                       raise_on_stream_error=raise_on_stream_error)
-        if self._agent_revision is None:
-            return await self._runtime.agents.get(self.agent_id).plan(
-                user_prompt,
-                files=files,
-                budget=budget,
-                output=output,
-                principal=principal or self._principal,
-                session_id=self.session_id,
-                idempotency_key=idempotency_key,
-                memory_scope=memory_scope,
-                thinking=thinking,
-                correlation=correlation,
-                timeout_seconds=timeout_seconds, on_event=on_event, include_event_content=include_event_content,
-                close_timeout_seconds=close_timeout_seconds,
-                raise_on_stream_error=raise_on_stream_error,
-            )
-        execution = await self._runtime._start_for_agent(
-            self.agent_id,
-            self._agent_revision,
-            validate_user_input(user_prompt),
+        return await self._definition().plan(
+            user_prompt,
             files=files,
             budget=budget,
             output=output,
             principal=principal or self._principal,
             session_id=self.session_id,
             idempotency_key=idempotency_key,
-            memory_scope=memory_scope,
-            mode="plan",
-            planning=True,
             thinking=thinking,
             correlation=correlation,
-            compiled_agent=self._compiled_agent,
-        )
-        return await execution.wait(
-            timeout_seconds=timeout_seconds, on_event=on_event, include_event_content=include_event_content,
+            timeout_seconds=timeout_seconds,
+            on_event=on_event,
+            include_event_content=include_event_content,
             close_timeout_seconds=close_timeout_seconds,
             raise_on_stream_error=raise_on_stream_error,
         )
@@ -215,28 +177,16 @@ class Session(Generic[AppT]):
         idempotency_key: "str | None" = None,
         cwd: "str | None" = None,
     ) -> "Session[AppT]":
-        if self._agent_revision is None:
-            agent = self._runtime.agents.get(self.agent_id)
-            return await self._runtime._fork_session(
-                agent.id,
-                agent.revision,
-                self.session_id,
-                new_session_id,
-                principal=principal or self._principal,
-                idempotency_key=idempotency_key,
-                cwd=cwd,
-                compiled_agent=agent.compiled,
-            )
-        return await self._runtime._fork_session(
-            self.agent_id,
-            self._agent_revision,
+        agent = self._definition()
+        await self._runtime._fork_session(
+            agent.id,
             self.session_id,
             new_session_id,
             principal=principal or self._principal,
             idempotency_key=idempotency_key,
             cwd=cwd,
-            compiled_agent=self._compiled_agent,
         )
+        return agent.session(new_session_id, principal=principal or self._principal)
 
     async def update(
         self,
@@ -333,29 +283,25 @@ class Agent(Generic[AppT]):
         principal: "Principal | None" = None,
         session_id: "str | None" = None,
         idempotency_key: "str | None" = None,
-        memory_scope: "str | None" = None,
         planning: "bool | None" = None,
         thinking: "ThinkingValue | None" = None,
         correlation: "Mapping[str, object] | None" = None,
         input_context: ExecutionInputContext | None = None,
     ) -> "Execution[AppT]":
         """Start run mode; planning enables the planning capability without selecting plan mode."""
-        return await self._runtime._start_for_agent(
-            self.id,
-            self._agent_revision,
-            validate_user_input(user_prompt),
+        prompt = validate_user_input(user_prompt)
+        return await self.execution_port.start(
+            prompt,
             files=files,
             budget=budget,
             output=output,
             principal=principal,
             session_id=session_id,
             idempotency_key=idempotency_key,
-            memory_scope=memory_scope,
             mode="run",
             planning=planning,
             thinking=thinking,
             correlation=correlation,
-            compiled_agent=self._compiled_agent,
             input_context=input_context,
         )
 
@@ -369,7 +315,6 @@ class Agent(Generic[AppT]):
         principal: "Principal | None" = None,
         session_id: "str | None" = None,
         idempotency_key: "str | None" = None,
-        memory_scope: "str | None" = None,
         planning: "bool | None" = None,
         thinking: "ThinkingValue | None" = None,
         correlation: "Mapping[str, object] | None" = None,
@@ -391,7 +336,6 @@ class Agent(Generic[AppT]):
             principal=principal,
             session_id=session_id,
             idempotency_key=idempotency_key,
-            memory_scope=memory_scope,
             planning=planning,
             thinking=thinking,
             correlation=correlation,
@@ -413,7 +357,6 @@ class Agent(Generic[AppT]):
         principal: "Principal | None" = None,
         session_id: "str | None" = None,
         idempotency_key: "str | None" = None,
-        memory_scope: "str | None" = None,
         thinking: "ThinkingValue | None" = None,
         correlation: "Mapping[str, object] | None" = None,
         timeout_seconds: "float | None" = None,
@@ -425,22 +368,19 @@ class Agent(Generic[AppT]):
         """Execute plan mode with plan-safe tools and wait. This can call models and tools; it is not a dry run."""
         validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds,
                       raise_on_stream_error=raise_on_stream_error)
-        execution = await self._runtime._start_for_agent(
-            self.id,
-            self._agent_revision,
-            validate_user_input(user_prompt),
+        prompt = validate_user_input(user_prompt)
+        execution = await self.execution_port.start(
+            prompt,
             files=files,
             budget=budget,
             output=output,
             principal=principal,
             session_id=session_id,
             idempotency_key=idempotency_key,
-            memory_scope=memory_scope,
             mode="plan",
             planning=True,
             thinking=thinking,
             correlation=correlation,
-            compiled_agent=self._compiled_agent,
         )
         return await execution.wait(
             timeout_seconds=timeout_seconds, on_event=on_event, include_event_content=include_event_content,
@@ -462,6 +402,7 @@ class Agent(Generic[AppT]):
             session_id,
             principal,
             self._compiled_agent,
+            self._binding_contract,
         )
 
     async def create_session(
@@ -481,13 +422,6 @@ class Agent(Generic[AppT]):
             metadata=metadata,
             idempotency_key=idempotency_key,
         )
-        return Session(
-            self._runtime,
-            self.id,
-            self._agent_revision,
-            session_id,
-            principal,
-            self._compiled_agent,
-        )
+        return self.session(session_id, principal=principal)
 
 __all__ = ["Agent", "Session"]

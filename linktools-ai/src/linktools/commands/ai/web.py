@@ -84,7 +84,6 @@ class Command(BaseCommand):
                     metrics=metrics,
                     status=status,
                     capabilities=declarations,
-                    memory_scope=args.memory or "default",
                 )
                 url = f"http://127.0.0.1:{args.port}"
                 _logger.info("AI Web console: %s", url)

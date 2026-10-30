@@ -8,6 +8,7 @@ import asyncio
 import secrets
 import uuid
 from copy import copy
+from dataclasses import replace
 from contextlib import aclosing, asynccontextmanager
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -229,7 +230,6 @@ class TaskEngine(Generic[AppT]):
             *,
             files: Sequence[str],
             session_id: str | None,
-            memory_scope: str | None,
             planning: bool,
             thinking: ThinkingValue,
             idempotency_key: str,
@@ -263,14 +263,19 @@ class TaskEngine(Generic[AppT]):
                 usage = await self._budgets.read(admission.budget_scope_id)
                 if usage.limits != admission.budget:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            execution = await port.start(
+            selected_port = port
+            if "memory_scope" in invocation.node.input:
+                legacy_scope = invocation.node.input["memory_scope"]
+                if legacy_scope is not None and not isinstance(legacy_scope, str):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                selected_port = replace(port, memory_scope=legacy_scope)
+            execution = await selected_port.start(
                 prompt,
                 files=files,
                 output=output_type,
                 principal=invocation.principal,
                 session_id=session_id,
                 idempotency_key=idempotency_key,
-                memory_scope=memory_scope,
                 mode="run",
                 planning=planning,
                 thinking=thinking,

@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from linktools.core import environ
 from ..agent import AgentBinding, AgentBindingContract, AgentCompiler, CompiledAgent, OutputBinding, bind_output
 from ..core import (OperationLedgerInput, ExecutionMode, RunBudget, Principal, SessionStatus, ThinkingValue, normalize_execution_mode,
-                    normalize_thinking, overlay_correlation, validate_idempotency_key, validate_memory_scope)
+                    normalize_thinking, overlay_correlation, validate_idempotency_key)
 from ..errors import AIError, ErrorCode
 from ..execution import Execution, ExecutionInputContext, ExecutionRequest, ResumeSessionRequest, CreateSessionRequest
 from ..execution.handle import ExecutionBinding, ExecutionTreeWatcher
@@ -39,6 +39,7 @@ class AgentExecutionPort(Generic[AppT]):
     default_principal: Principal
     correlation: Mapping[str, object]
     captures: InputCaptures | None
+    memory_scope: str | None = None
     captured: bool = False
 
     @property
@@ -109,7 +110,6 @@ class AgentExecutionPort(Generic[AppT]):
         principal: "Principal | None",
         session_id: "str | None",
         idempotency_key: "str | None",
-        memory_scope: "str | None",
         mode: ExecutionMode,
         planning: "bool | None",
         thinking: "ThinkingValue | None",
@@ -140,7 +140,7 @@ class AgentExecutionPort(Generic[AppT]):
             user_prompt=user_prompt,
             principal=resolved_principal,
             idempotency_key=key,
-            memory_scope=_validate_memory_scope(memory_scope),
+            memory_scope=self.memory_scope if input_context is None else None,
             mode=resolved_mode,
             planning=resolved_planning,
             thinking=resolved_thinking,
@@ -282,12 +282,6 @@ def _execution_policy(
         compiled_agent.spec.thinking if thinking is None else normalize_thinking(thinking)
     )
     return resolved_mode, resolved_planning, resolved_thinking
-
-
-def _validate_memory_scope(value: "str | None") -> "str | None":
-    if value is not None:
-        validate_memory_scope(value)
-    return value
 
 
 __all__ = ["AgentExecutionPort"]
