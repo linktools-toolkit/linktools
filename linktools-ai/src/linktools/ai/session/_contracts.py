@@ -126,6 +126,7 @@ class SessionRecord:
     history_id: str | None = None
     timeline_parent_session_id: str | None = None
     timeline_parent_turn_seq: int = 0
+    repository_instruction_scopes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         try:
@@ -148,6 +149,12 @@ class SessionRecord:
                 ) from error
             if normalized_cwd != self.cwd:
                 raise ValueError("session cwd must be canonical")
+        scopes = self.repository_instruction_scopes
+        if not isinstance(scopes, tuple) or any(
+            not isinstance(scope, str) or validate_workspace_path(scope) != scope
+            for scope in scopes
+        ) or scopes != tuple(sorted(set(scopes))):
+            raise ValueError("repository instruction scopes must be canonical and unique")
         if self.history_quality not in {"complete", "conservative", "unavailable"}:
             raise ValueError("session history quality summary is invalid")
         if self.timeline_parent_session_id is None:

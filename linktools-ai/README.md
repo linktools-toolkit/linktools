@@ -1057,6 +1057,37 @@ model-visible transport names and is not an authoring selector.
 
 Model-visible control text is partitioned by lifecycle. Binding-static Agent instructions, Skill catalog, and Workspace guidance form the most stable prefix. Execution-static capability guidance and the repository instructions already active when the Execution starts follow that prefix and remain fixed for that Execution. Repository sources first discovered later through declared workspace path fields are kept in one refreshable overlay; only that overlay changes when a new scope becomes effective. Provider adapters may serialize these instruction parts as `system`, `developer`, or another supported instruction channel, and the physical request may still carry the same fixed prefix on every model call so provider prompt caching can reuse it.
 
+Sessions remember discovered repository instruction scopes, not instruction text.
+Before a new Execution's first model request, its current cwd and remembered
+scopes, plus canonical `files` and inline `WorkspaceFileInput` targets, are
+resolved again. Workspace `AGENTS.md` changes replace earlier content,
+and deleted documents contribute no instruction; a deleted scope remains known
+so a later recreation is also resolved. Unseen scopes still require the existing
+tool-boundary reconsideration before the tool runs. Remembering a scope grants
+no file or tool permission. Resuming the same Execution instead retains its
+pinned initial documents and durable overlay. Explicit captured input contexts
+also retain their captured instruction set. Scope memory is owned by that
+Session; independent Sessions and subagents do not write into it. A child keeps
+its parent's initial pinned sources, adding only rules for its explicitly supplied
+attachments; a child without attachments keeps the original inherited pin.
+Asset-backed Rule documents still use the RuntimeFeatures capture bound to the Runtime.
+Discovery scopes are persisted before the execution barrier, including with
+separate conversation storage. A failed barrier can leave a discovered scope
+remembered, but cannot execute its tool or change that Execution's pinned text.
+Document and UTF-8 rendered-byte limits apply to the complete deduplicated
+initial-plus-overlay set, not separately to each discovery batch. Resolver
+implementations own these limits through `RepositoryInstructionResolver.validate`.
+Approval recovery reuses only the original call's frozen, model-observed
+instruction frontier; a later sibling discovery still requires reconsideration.
+An approval never bypasses path validation or newly discovered instructions.
+Instruction synchronization reports failed-call feedback without consuming or
+resetting the ordinary tool retry budget; ordinary argument/tool retries keep
+their existing policy. The blocked tool does not execute, and the next model
+request receives the updated instruction overlay. This feedback does not
+override a valid final answer emitted in the same model response: that answer
+may complete the Execution without another model request.
+
+
 The fixed prefix is not appended as a new conversation message on each model call. Lazy Skill bodies/resources, Memory contents, the current-plan reminder, user input, tool and Subagent results, attachments, and retry/error feedback remain dynamic request or conversation context. Memory guidance is fixed only for an Execution that enables Memory; Memory contents stay pull-based through the Memory tools, so updates from another Execution are observed when the Agent reads/searches Memory again rather than being pushed into the standing prompt. Workspace instruction text describes stable usage constraints only; authorization and approval remain Runtime-enforced behavior. Recorded requests may therefore contain the same fixed instruction parts repeatedly without representing repeated historical messages.
 
 `allow_tools` controls ordinary/external model-visible tools. `mode="plan"` selects plan mode for an execution; `planning` controls whether the Agent has the planning capability. Plan mode implies `planning=True`. Runtime infrastructure capabilities such as planning, memory, Skill loading, and Subagent delegation are composed by Runtime according to the resolved execution contract.

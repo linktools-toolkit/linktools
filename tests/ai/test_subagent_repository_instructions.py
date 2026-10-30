@@ -105,6 +105,9 @@ class _Resolver:
         self.instructions = instructions
         self.calls: list[str] = []
 
+    def validate(self, instructions: RepositoryInstructions) -> None:
+        instructions.validate_limits()
+
     async def resolve(self, target: str, *, exclude_sources=frozenset()) -> RepositoryInstructions:
         del exclude_sources
         self.calls.append(target)

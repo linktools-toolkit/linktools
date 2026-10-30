@@ -1913,6 +1913,8 @@ class LocalExecutionBackend:
         source_agent_run_id: str,
         call: ToolCallPart,
         metadata: Mapping[str, object],
+        *,
+        repository_instruction_frontier: str | None = None,
     ) -> PendingDeferredCall:
         try:
             arguments = normalize_json_value(call.args_as_dict())
@@ -1946,6 +1948,17 @@ class LocalExecutionBackend:
                 key: value
                 for key, value in raw_metadata.items()
                 if key != "linktools"
+            }
+        if repository_instruction_frontier is not None:
+            if (
+                len(repository_instruction_frontier) != 64
+                or any(character not in "0123456789abcdef" for character in repository_instruction_frontier)
+            ):
+                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+            # This reserved evidence comes from the runtime's observation point,
+            # never from tool-authored metadata or the later approval decision.
+            raw_metadata["linktools"] = {
+                "repository_instruction_frontier": repository_instruction_frontier,
             }
         arguments_payload = StoredPayload.inline_json(arguments)
         if not payload_fits_inline(arguments_payload, self._payload_policy):
@@ -3502,6 +3515,22 @@ class LocalExecutionBackend:
                     tenant_id=self._tenant_id,
                 )
             )
+            initial_scopes = tuple(sorted({
+                document.scope for document in (
+                    () if initial_repository_instructions is None else initial_repository_instructions.documents
+                )
+            }))
+            if session is not None and not set(initial_scopes).issubset(session.repository_instruction_scopes):
+                # Keep scope knowledge outside admission CAS: concurrent starts
+                # must still converge through the existing idempotency owner.
+                await self.promote_pending_execution(execution_id)
+                sessions = self._conversation.sessions
+                session = await sessions.state_store.mutate(
+                    lambda transaction: sessions.remember_repository_instruction_scopes_in_transaction(
+                        transaction, session.session_id, tenant_id=self._tenant_id,
+                        execution_id=execution_id, scopes=initial_scopes,
+                    )
+                )
             history_id = (
                 None
                 if session is None
@@ -3771,6 +3800,7 @@ class LocalExecutionBackend:
                 initial_repository_instructions,
                 repository_overlay,
                 producer_generation=producer_generation,
+                approved_frontiers=(None if resume is None else resume.repository_instruction_approvals),
             )
             tool_repository = self._tool_operations
             tool_operations = (
@@ -3983,6 +4013,7 @@ class LocalExecutionBackend:
                         agent_run_id=agent_run_id,
                         paused_at=datetime.now(timezone.utc),
                         producer_generation=producer_generation,
+                        repository_instruction_frontiers=repository_boundary.approval_frontiers(result.approvals),
                     )
                 except AIError as error:
                     if error.code is ErrorCode.EXECUTION_CANCELLED:
@@ -5285,6 +5316,18 @@ class LocalExecutionBackend:
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return current
+        if execution.session_id is not None:
+            sessions = self._conversation.sessions
+            # Discovery knowledge can outlive a failed barrier. Persist it first
+            # so a committed execution pin never loses its Session scope memory,
+            # including when conversation and recovery use different stores.
+            await sessions.state_store.mutate(
+                lambda transaction: sessions.remember_repository_instruction_scopes_in_transaction(
+                    transaction, execution.session_id,
+                    tenant_id=self._tenant_id, execution_id=execution.execution_id,
+                    scopes=tuple(sorted({document.scope for document in overlay.documents})),
+                )
+            )
         overlay_reference = await self._store_repository_instructions(
             execution,
             overlay,

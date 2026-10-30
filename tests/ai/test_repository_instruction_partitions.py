@@ -162,3 +162,77 @@ async def test_latest_overlay_must_match_persisted_payload_digest() -> None:
         )
 
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ("initial", "paths", "bytes", "overlay"))
+async def test_dynamic_instruction_union_limits_precede_barrier_commit(tmp_path, kind) -> None:
+    from linktools.ai.workspace import WorkspaceInstructionResolver, WorkspacePolicy
+
+    root = RepositoryInstructionDocument("agents:AGENTS.md", ".", "根规则")
+    child = RepositoryInstructionDocument("agents:pkg/AGENTS.md", "pkg", "子规则")
+    other = RepositoryInstructionDocument("agents:other/AGENTS.md", "other", "其他规则")
+    documents = (child, other) if kind in {"paths", "overlay"} else (root, child)
+    for document in documents:
+        path = tmp_path / document.source.removeprefix("agents:")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(document.content, encoding="utf-8")
+    full = RepositoryInstructions(documents)
+    policy = WorkspacePolicy(
+        max_repository_instruction_documents=1 if kind != "bytes" else 2,
+        max_repository_instruction_bytes=len(full.render().encode("utf-8")) - 1 if kind == "bytes" else 256 * 1024,
+    )
+    checkpoint = SimpleNamespace(
+        state=RecoveryCheckpointState.ACTIVE, agent_run_id="run",
+        repository_instruction_overlay=None, repository_instruction_barriers=(),
+    )
+
+    persisted = None
+    if kind == "overlay":
+        persisted = RepositoryInstructions((child,))
+        checkpoint.repository_instruction_overlay = SimpleNamespace(payload=SimpleNamespace(
+            digest=canonical_sha256(persisted.to_payload()),
+        ))
+        checkpoint.repository_instruction_barriers = (RepositoryInstructionBarrier("earlier", "first", "a" * 64),)
+
+    class Port(_Port):
+        async def commit_repository_instruction_barrier(self, *args, **kwargs):
+            raise AssertionError("over-limit union must not write scopes, payloads or barriers")
+
+    coordinator = _RecoveryCoordinator(
+        Port(checkpoint, persisted),
+        WorkspaceInstructionResolver(tmp_path, policy, RepositoryInstructions()),
+    )
+    arguments = {"path": ["pkg/file.txt", "other/file.txt"]} if kind == "paths" else {
+        "path": "other/file.txt" if kind == "overlay" else "pkg/file.txt",
+    }
+    with pytest.raises(AIError) as raised:
+        await coordinator.check_repository_instructions(
+            execution=SimpleNamespace(execution_id="execution"),
+            initial=None if kind in {"paths", "overlay"} else RepositoryInstructions((root,)),
+            overlay=persisted, tool_name="read_file", tool_call_id="call",
+            arguments=arguments, path_fields=("path",),
+        )
+    assert raised.value.code is ErrorCode.PROMPT_TOO_LARGE
+
+
+@pytest.mark.asyncio
+async def test_pinned_sources_are_not_recounted_or_revalidated_without_discovery(tmp_path) -> None:
+    from linktools.ai.workspace import WorkspaceInstructionResolver, WorkspacePolicy
+
+    initial = RepositoryInstructions((RepositoryInstructionDocument("agents:AGENTS.md", ".", "pinned root"),))
+    (tmp_path / "AGENTS.md").write_bytes(b"\xff")  # A pinned source must not be read again.
+    checkpoint = SimpleNamespace(
+        state=RecoveryCheckpointState.ACTIVE, agent_run_id="run",
+        repository_instruction_overlay=None, repository_instruction_barriers=(),
+    )
+    coordinator = _RecoveryCoordinator(
+        _Port(checkpoint, None),
+        WorkspaceInstructionResolver(tmp_path, WorkspacePolicy(max_repository_instruction_bytes=1), RepositoryInstructions()),
+    )
+    overlay, reconsider = await coordinator.check_repository_instructions(
+        execution=SimpleNamespace(execution_id="execution"), initial=initial,
+        overlay=None, tool_name="read_files", tool_call_id="call",
+        arguments={"paths": ["first.txt", "second.txt"]}, path_fields=("paths",),
+    )
+    assert overlay is None and reconsider is False

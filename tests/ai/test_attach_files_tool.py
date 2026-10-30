@@ -82,6 +82,7 @@ class _RepositoryBoundary:
         tool_call_id: str,
         arguments: dict[str, object],
         path_fields: tuple[str, ...],
+        approved: bool = False,
     ) -> None:
         del tool_name, tool_call_id, arguments
         self.path_fields = path_fields

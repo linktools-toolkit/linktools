@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from linktools.ai.capability import ToolCallRetry, filesystem_capabilities
+from linktools.ai.capability import ToolCallFailed, filesystem_capabilities
 from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai.capabilities import AbstractCapability, Capability
 from linktools.ai.runtime._repository_instructions import _RepositoryInstructionBoundary
@@ -222,7 +222,7 @@ async def test_repository_partition_is_stable_and_fences_same_turn_siblings() ->
     assert boundary.render_overlay() == ""
 
     async def refresh(path: str) -> None:
-        with pytest.raises(ToolCallRetry):
+        with pytest.raises(ToolCallFailed):
             await boundary.check(
                 tool_name="read_file",
                 tool_call_id=f"call-{path}",
