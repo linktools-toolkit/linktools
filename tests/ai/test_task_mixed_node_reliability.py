@@ -4038,7 +4038,7 @@ async def test_task_execution_port_replay_rejects_changed_runtime_memory_scope()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("legacy_scope", (None, "legacy-memory"))
-@pytest.mark.parametrize("phase", ("unknown-admission", "bound"))
+@pytest.mark.parametrize("phase", ("unknown-admission", "bound", "bound-closed"))
 async def test_legacy_task_memory_survives_unknown_and_bound_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_scope: str | None, phase: str,
 ) -> None:
@@ -4048,6 +4048,18 @@ async def test_legacy_task_memory_survives_unknown_and_bound_recovery(
     execution_ids: list[str] = []
     request_keys: list[str] = []
     storage_root = tmp_path / "legacy-task"
+    model_calls: list[None] = []
+    from contextlib import asynccontextmanager
+
+    original_request_stream = TestModel.request_stream
+
+    @asynccontextmanager
+    async def count_request_stream(self, *args, **kwargs):
+        model_calls.append(None)
+        async with original_request_stream(self, *args, **kwargs) as stream:
+            yield stream
+
+    monkeypatch.setattr(TestModel, "request_stream", count_request_stream)
 
     def features(scope: str) -> RuntimeFeatures:
         result = model_features(_TaskTestModels())
@@ -4081,6 +4093,16 @@ async def test_legacy_task_memory_survives_unknown_and_bound_recovery(
 
             async def paused_wait(self, invocation, execution, execution_id, budget_scope):
                 await execution.wait(timeout_seconds=10)
+                if phase == "bound-closed":
+                    # The old producer released this hold after handoff but before
+                    # Task settlement, allowing result consumption to close retention.
+                    await persistence.execution.executions.release_dependency_hold(
+                        execution_id, tenant_id=runtime.tenant_id,
+                        hold_id="task:legacy-graph:agent",
+                    )
+                    assert await persistence.execution.executions.close_retention(
+                        execution_id, tenant_id=runtime.tenant_id,
+                    )
                 entered.set()
                 await asyncio.Event().wait()
                 return await original_wait(self, invocation, execution, execution_id, budget_scope)
@@ -4088,7 +4110,7 @@ async def test_legacy_task_memory_survives_unknown_and_bound_recovery(
             with monkeypatch.context() as patch:
                 patch.setattr(AgentTaskRunner, "normalize", historical_writer)
                 patch.setattr(port_type, "start", paused_start)
-                if phase == "bound":
+                if phase.startswith("bound"):
                     patch.setattr(AgentTaskRunner, "_wait_execution", paused_wait)
                 await runtime_engine.with_definitions(worker).start(
                     TaskGraph("legacy-graph", (TaskNode("agent", task=worker, input=AgentTaskInput("legacy prompt")),)),
@@ -4101,7 +4123,18 @@ async def test_legacy_task_memory_survives_unknown_and_bound_recovery(
                 assert source_input["memory_scope"] == legacy_scope
                 state = source.node_states[0]
                 assert (state.execution_id is None) == (phase == "unknown-admission")
+                admitted_calls = len(model_calls)
+                assert admitted_calls > 0
                 await runtime.close()
+                persisted = await persistence.execution.executions.get(
+                    execution_ids[0], tenant_id=runtime.tenant_id,
+                )
+                assert persisted is not None
+                if phase == "bound":
+                    assert "task:legacy-graph:agent" in persisted.dependency_hold_ids
+                    assert persisted.retention_closed is False
+                elif phase == "bound-closed":
+                    assert persisted.retention_closed is True
 
     expired_at = datetime.now(timezone.utc) + timedelta(seconds=task_local._LEASE_SECONDS + 1)
 
@@ -4136,9 +4169,19 @@ async def test_legacy_task_memory_survives_unknown_and_bound_recovery(
             record = await persistence.execution.executions.get(execution_ids[0], tenant_id=runtime.tenant_id)
             assert record is not None
             assert record.memory_scope == legacy_scope
+            assert len(model_calls) == admitted_calls
+            assert record.dependency_hold_ids == ()
             restored = await persistence.task.tasks.graph_state("legacy-graph", tenant_id=runtime.tenant_id)
             assert restored is not None
             assert dict(restored.nodes[0].input) == source_input
+            # A concurrent launcher finalizer can own the handoff cleanup. Check
+            # its durable closing result after all owned work has quiesced.
+            await runtime.close()
+            repository = persistence.execution.executions
+            closed = await repository.state_store.read(lambda transaction: repository.get_in_transaction(
+                transaction, execution_ids[0], tenant_id=runtime.tenant_id,
+            ))
+            assert closed is not None and closed.retention_closed is True
 
 
 async def _wait_for_input_execution(runtime: Runtime, graph_id: str) -> str:

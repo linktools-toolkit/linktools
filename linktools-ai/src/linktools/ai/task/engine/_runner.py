@@ -1072,6 +1072,21 @@ class TaskNodeExecutor(Generic[AppT]):
             graph_state.nodes,
             tenant_id=tenant_id,
         )
+        if graph_state.status in {
+            TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.CANCELLED,
+        }:
+            for node in graph_state.node_states:
+                if node.execution_id is not None:
+                    try:
+                        await self._execution_reads.release_dependency_hold(
+                            node.execution_id, tenant_id=tenant_id,
+                            hold_id=f"task:{graph_state.graph_id}:{node.node_id}",
+                        )
+                    except AIError as error:
+                        # A separately retained terminal graph can outlive its
+                        # execution store; an absent hold is already released.
+                        if error.code is not ErrorCode.STORAGE_NOT_FOUND:
+                            raise
         self._admitted_binding_captures.pop(graph_state.graph_id, None)
         async with self._definition_lock:
             self._active_definitions.pop(graph_state.graph_id, None)

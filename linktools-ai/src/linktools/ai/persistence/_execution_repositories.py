@@ -1616,7 +1616,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             current = await self._decode(stored, ExecutionRecord)
             if current.retention_closed:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
+                if current.status not in {
+                    ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+                }:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_CONFLICT,
+                              safe_details={"reason": "execution_retention_closed"})
             if hold_id in current.dependency_hold_ids:
                 return False
             next_value = replace(

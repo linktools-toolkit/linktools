@@ -285,6 +285,13 @@ use isolated captured memory. Existing durable Task inputs retain their recorded
 scope (including disabled memory) on recovery; new Task authoring cannot override the
 capability through an input field.
 
+A Task-bound execution retains its result until the Task node is durably settled,
+not merely until an observer finishes or shuts down. Recovery of older, already-closed
+executions can settle an available authorized terminal result; missing or invalid data
+requires recovery instead of rerunning the Agent. Terminal graph access through wait,
+recovery or cancellation also completes any outstanding hold release; this is not a
+background garbage-collection guarantee for graphs that are never accessed again.
+
 `Runtime.open()` is the public composition root. The Runtime composition is immutable for the lifetime of the context; registrations are completed before it opens.
 
 Include the `Runtime` and `PersistenceStorage` imports in startup measurement.

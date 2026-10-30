@@ -80,7 +80,6 @@ class AgentTaskRunner(Generic[AppT]):
         start_execution: Callable[..., Awaitable[object]],
         get_execution: Callable[[str, Principal], Awaitable[object]],
         acquire_execution_hold: Callable[[str, Principal, str], Awaitable[None]],
-        release_execution_hold: Callable[[str, Principal, str], Awaitable[None]],
         result_reader: Callable[[TaskNodeInvocation, str], Awaitable[JsonValue]],
         result_ref_reader: Callable[[TaskNodeInvocation, str], Awaitable[TaskResultRef]],
         get_prepared_input: Callable[
@@ -116,7 +115,6 @@ class AgentTaskRunner(Generic[AppT]):
         self._record_invocation = record_invocation
         self._get_execution = get_execution
         self._acquire_execution_hold = acquire_execution_hold
-        self._release_execution_hold = release_execution_hold
         self._result_reader = result_reader
         self._result_ref_reader = result_ref_reader
         self._get_prepared_input = get_prepared_input
@@ -422,11 +420,6 @@ class AgentTaskRunner(Generic[AppT]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await control.handoff_execution(execution_id)
         await self._capture_invocation(execution, execution_id, invocation)
-        await self._release_execution_hold(
-            execution_id,
-            invocation.principal,
-            hold_id,
-        )
         return execution, execution_id
 
     async def _capture_invocation(
