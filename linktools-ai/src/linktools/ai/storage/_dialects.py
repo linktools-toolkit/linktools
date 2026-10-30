@@ -105,6 +105,8 @@ class SqlAlchemyDialect(Protocol):
 
     async def database_now(self, session: "AsyncSession") -> datetime: ...
 
+    async def database_current_time(self, session: "AsyncSession") -> datetime: ...
+
     async def insert_ignore_conflict(
         self,
         session: "AsyncSession",
@@ -217,10 +219,22 @@ class SQLiteDialect:
         )
 
     async def database_now(self, session: "AsyncSession") -> datetime:
+        return await self._read_database_time(session, self._database_now_expression())
+
+    async def database_current_time(self, session: "AsyncSession") -> datetime:
+        """Read current time independently of transaction-start timestamps."""
+        return await self._read_database_time(session, self._database_current_time_expression())
+
+    def _database_current_time_expression(self) -> "ColumnElement[str] | ColumnElement[datetime]":
+        return self._database_now_expression()
+
+    async def _read_database_time(
+        self, session: "AsyncSession", expression: "ColumnElement[str] | ColumnElement[datetime]",
+    ) -> datetime:
         from sqlalchemy import select
 
         _logger.debug("SQL authoritative time queried: dialect=%s", self.name)
-        value = await session.scalar(select(self._database_now_expression()))
+        value = await session.scalar(select(expression))
         if isinstance(value, str):
             try:
                 value = datetime.fromisoformat(value)
@@ -416,6 +430,11 @@ class PostgreSQLDialect(SQLiteDialect):
         from sqlalchemy import func
 
         return func.now()
+
+    def _database_current_time_expression(self) -> "ColumnElement[datetime]":
+        from sqlalchemy import func
+
+        return func.clock_timestamp()
 
     def _insert(self, table: "Table") -> "PostgreSQLInsert":
         from sqlalchemy.dialects.postgresql import insert

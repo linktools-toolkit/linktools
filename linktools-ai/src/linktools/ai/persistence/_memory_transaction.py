@@ -9,7 +9,7 @@ from typing import Generic, TypeVar
 
 from ..errors import AIError, ErrorCode
 from .state import (
-    FactQuery,
+    RecordLeaseTransition, FactQuery,
     FactScanCursor,
     OperationQuery,
     OperationScanCursor,
@@ -179,6 +179,31 @@ class _MemoryTransaction:
         for record in candidates:
             self.records[record.key_digest] = record
             self.guarded_record_keys.add(record.key_digest)
+
+    async def transition_record_lease(
+        self,
+        key: bytes,
+        *,
+        expected_storage_revision: int,
+        transition: RecordLeaseTransition,
+    ) -> StoredRecord | None:
+        if (isinstance(expected_storage_revision, bool)
+                or not isinstance(expected_storage_revision, int)
+                or expected_storage_revision < 0):
+            raise ValueError("expected_storage_revision must be a non-negative integer")
+        current = await self.get_record(key)
+        if current is None or current.storage_revision != expected_storage_revision:
+            return None
+        candidate = transition.apply(current, datetime.now(timezone.utc))
+        if candidate is None:
+            return None
+        if not await self.update_record_lease(
+            key, expected_storage_revision=expected_storage_revision,
+            lease_owner=candidate.lease_owner, lease_fence=candidate.lease_fence,
+            lease_expires_at=candidate.lease_expires_at,
+        ):
+            return None
+        return candidate
 
     async def update_record_lease(
         self,

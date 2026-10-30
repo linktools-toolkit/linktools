@@ -104,8 +104,12 @@ async def test_disposable_publish_failure_cannot_change_confirmed_source_result(
 
 
 async def test_slow_publisher_is_single_flight_and_late_old_fill_is_locally_invalidated(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Keep old fills fresh while scheduling varies; the waits only bound stalls.
+    captured_at = _write_cache.time()
+    monkeypatch.setattr(_sql, "time", lambda: captured_at)
+    monkeypatch.setattr(_write_cache, "time", lambda: captured_at)
     entered, release = asyncio.Event(), asyncio.Event()
 
     class SlowCache(InMemoryCacheBackend):
@@ -116,16 +120,18 @@ async def test_slow_publisher_is_single_flight_and_late_old_fill_is_locally_inva
 
     async with _store("sql", tmp_path, SlowCache(max_bytes=100000)) as store:
         first = _execution(1)
-        await asyncio.wait_for(store.mutate(lambda tx: tx.insert_record(first)), .5)
-        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(store.mutate(lambda tx: tx.insert_record(first)), 5)
+        await asyncio.wait_for(entered.wait(), 5)
         publisher = store._reads._publisher
+        assert publisher is not None
         second = _execution(2)
         assert await asyncio.wait_for(store.mutate(
             lambda tx: tx.replace_record(second, expected_storage_revision=0),
-        ), .5)
+        ), 5)
         assert store._reads._publisher is publisher
+        assert not publisher.done() and not release.is_set()
         release.set()
-        await publisher
+        await asyncio.wait_for(publisher, 5)
         assert await store.read_record(first.key_digest) == second
 
 

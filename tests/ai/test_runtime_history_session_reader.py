@@ -254,6 +254,7 @@ async def test_runtime_history_session_reader_pending_overlay_and_canonical_boun
             info = await reader.inspect_execution(execution.execution_id, principal=principal, include_usage=False)
             assert info.status is ExecutionStatus.STARTED and info.usage is None
             assert (await reader.list_sessions(principal=principal)).items[0].active_execution_id == execution.execution_id
+            assert (await reader.lookup_session("session", principal=principal)).active_execution_id == execution.execution_id
             detail = await reader.session_detail("session", principal=principal, max_age=3)
             assert detail.session.active_execution_id == execution.execution_id
             assert [turn.execution_id for turn in detail.timeline.items] == [execution.execution_id]
@@ -283,6 +284,8 @@ async def test_runtime_history_session_reader_pending_overlay_and_canonical_boun
             listed = await reader.list_sessions(principal=principal)
             assert listed.items[0].active_execution_id == (execution.execution_id if transition == "promote" else None)
             mutations.clear()
+            looked_up = await reader.lookup_session("session", principal=principal)
+            assert looked_up.active_execution_id == (execution.execution_id if transition == "promote" else None)
             after = await reader.session_detail("session", principal=principal, max_age=3)
             final_info = await reader.inspect_execution(execution.execution_id, principal=principal, include_usage=False)
             assert final_info.status is after.timeline.items[0].status
@@ -396,6 +399,7 @@ async def test_runtime_history_session_reader_independent_terminal_commit_is_aut
             assert (await observer.read_session_execution("session", tenant_id="tenant") is not None) is keep_pending
             listed = await reader.list_sessions(principal=_OWNER)
             assert listed.items[0].active_execution_id is None
+            assert (await reader.lookup_session("session", principal=_OWNER)).active_execution_id is None
             final = await reader.session_detail("session", principal=_OWNER, max_age=30)
             assert final.session.active_execution_id is None
             assert len(final.timeline.items) == 1

@@ -31,7 +31,7 @@ from .state import (
     GroupRecordReader,
     OperationQuery,
     OperationScanCursor,
-    RecordQuery,
+    RecordLeaseTransition, RecordQuery,
     RecordReplacement,
     RecordScanCursor,
     StateCallback,
@@ -1245,6 +1245,48 @@ class _SqlTransaction:
         for replacement in ordered:
             self._guarded_record_keys.add(replacement.record.key_digest)
             self._record_cache[replacement.record.key_digest] = replacement.record
+
+    async def transition_record_lease(
+        self,
+        key: bytes,
+        *,
+        expected_storage_revision: int,
+        transition: RecordLeaseTransition,
+    ) -> StoredRecord | None:
+        if (isinstance(expected_storage_revision, bool)
+                or not isinstance(expected_storage_revision, int)
+                or expected_storage_revision < 0):
+            raise ValueError("expected_storage_revision must be a non-negative integer")
+        current = await self.get_record(key)
+        if current is None or current.storage_revision != expected_storage_revision:
+            return None
+        now = await self._context.run_statement(
+            self._context.dialect.database_current_time(self._session)
+        )
+        if transition.apply(current, now) is None:
+            return None
+        guarded = await self.guard_record(key, expected_storage_revision=expected_storage_revision)
+        if guarded is None:
+            return None
+        try:
+            # The CAS may wait past expiry. Sample time in a separate statement
+            # after its write protection is held, never from tx.now() or the UPDATE.
+            now = await self._context.run_statement(
+                self._context.dialect.database_current_time(self._session)
+            )
+            candidate = transition.apply(guarded, now)
+            if candidate is None:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if not await self.update_record_lease(
+                key, expected_storage_revision=guarded.storage_revision,
+                lease_owner=candidate.lease_owner, lease_fence=candidate.lease_fence,
+                lease_expires_at=candidate.lease_expires_at,
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+        except BaseException as error:
+            self._abort_mutation(error)
+            raise
+        return candidate
 
     async def update_record_lease(
         self,

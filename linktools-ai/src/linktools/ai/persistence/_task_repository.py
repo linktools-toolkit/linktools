@@ -49,6 +49,7 @@ from .repositories import (
     require_repository_tenant,
 )
 from .state import (
+    RecordLeaseTransition,
     FactQuery,
     OperationQuery,
     RecordQuery,
@@ -687,18 +688,21 @@ class TaskRepositoryImpl(RepositoryBase):
             )
             now = await transaction.now()
             _require_live_task_lease(node, lease, now)
-            expires = now + timedelta(seconds=lease_seconds)
-            if not await transaction.update_record_lease(
+            renewed = await transaction.transition_record_lease(
                 node_record.key_digest,
                 expected_storage_revision=node_record.storage_revision,
-                lease_owner=node.owner,
-                lease_fence=node.fence,
-                lease_expires_at=expires,
-            ):
+                transition=RecordLeaseTransition("renew", lease.owner, lease.fence, lease_seconds),
+            )
+            if renewed is None or renewed.lease_expires_at is None:
                 raise AIError(ErrorCode.TASK_FENCE_STALE)
-            return replace(lease, lease_expires_at=expires)
+            return replace(lease, lease_expires_at=renewed.lease_expires_at)
 
-        return await self._store.mutate(mutate)
+        try:
+            return await self._store.mutate(mutate)
+        except AIError as error:
+            if error.code is ErrorCode.STORAGE_CONFLICT:
+                raise AIError(ErrorCode.TASK_FENCE_STALE) from error
+            raise
 
     async def list_nodes(
         self, graph_id: str, *, tenant_id: str
