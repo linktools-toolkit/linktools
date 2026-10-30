@@ -12,7 +12,7 @@ import json
 import math
 import types
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import MISSING, dataclass, fields, is_dataclass
 from datetime import datetime
 from enum import Enum
 from functools import lru_cache
@@ -2307,10 +2307,9 @@ def _decode_dataclass(
         declared = _dataclass_fields(target)
     except (NameError, TypeError) as error:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
-    # Constructor defaults apply only to explicitly supported durable omissions.
     missing_fields = sorted(
-        name for name in declared if name not in raw_fields
-        and not (persisted and target is SessionRecord and name == "repository_instruction_scopes")
+        field.name for field in fields(target) if field.name not in raw_fields
+        and (not field.init or field.default is MISSING and field.default_factory is MISSING)
     )
     if missing_fields:
         raise AIError(

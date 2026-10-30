@@ -734,26 +734,36 @@ the selected reader, so a consumer must not promote a partial view to complete
 history. `runtime.executions.capture_input(...)` captures Agent-owned execution inputs;
 `engine.inputs` is the public capture and replay facade for a `TaskEngine`.
 
-### Session record scope-memory compatibility
+### Dataclass defaults and existing-session compatibility
 
-Persisted `SessionRecord` v1 values written before repository-instruction scope
-memory remain readable. When only `repository_instruction_scopes` is absent,
-the persistence reader treats the record as having no remembered scopes. All
-other required fields, explicit scope values and wire/schema versions retain
-their existing validation. Canonical, non-persisted domain decoding remains
-strict. The current writer always includes the scope field; ordinary reads do
-not rewrite or migrate stored records.
+Generic dataclass decoding follows the model's constructor declaration for both
+canonical and persisted wire values. A missing `init=True` field with a declared
+`default` or `default_factory` is omitted from constructor arguments, so the
+constructor supplies its normal value. Fields without defaults and `init=False`
+derived fields remain required. Explicit values still undergo the original type,
+constructor and derived-value checks; an invalid explicit value never falls back
+to a default. Wire types, schema versions and custom codec protocols are unchanged.
+The current writer still emits the complete current field set. Reads do not
+rewrite or migrate source records.
 
-This compatibility covers the earlier v1 writer shape captured by commit
-`c947aa1393b335ba2e19a973634c2938f06da3e5` in
+Defaults mean what the model declares, not a recovered historical value. For
+example, omitted budget counts use their declared zero, an omitted optional
+resource owner uses `None`, and a time-dependent default factory runs at read
+construction time. The codec cannot distinguish a genuinely older omission from
+a field removed from a current record; preserve original byte-integrity checks
+and do not edit payloads to suppress errors. Mutable factories create a fresh
+value for each decoded object, and cross-field constructor invariants still apply.
+
+For an existing `SessionRecord` v1 without `repository_instruction_scopes`, this
+same generic rule uses the field's existing empty-tuple default. The earlier
+writer fixture captured from commit
+`c947aa1393b335ba2e19a973634c2938f06da3e5` is retained in
 `tests/ai/fixtures/persistence/session_record_without_scope_memory_v1.json`.
-It does not recover scopes that were never recorded or were discarded by an
-older writer. An older reader can ignore the additive scope field and then
-omit it on a normal rewrite. Therefore, all writers sharing a persistence
-store/namespace must be drained and upgraded together before scope memory is
-used; mixed old/new writers and a write-enabled downgrade are not supported.
-Preserve the existing store and use a coordinated same-version cutover rather
-than deleting sessions or modifying their payloads to suppress a diagnostic.
+An older writer may ignore new fields and omit them on a later rewrite; defaults
+do not reconstruct discarded scope memory. Drain and upgrade writers sharing a
+store/namespace together before using new persistent semantics. Mixed-version
+writers and a write-enabled downgrade are not supported; preserve the store
+rather than deleting sessions or hand-modifying their payloads.
 
 ### Observe session inactivity without consuming a result
 

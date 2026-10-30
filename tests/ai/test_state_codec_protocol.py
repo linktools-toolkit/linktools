@@ -337,31 +337,25 @@ def test_golden_step_event_uses_current_event_type_wire() -> None:
 
 
 @pytest.mark.parametrize("persisted", (False, True))
-def test_nullable_wire_fields_are_required(persisted: bool) -> None:
+def test_nullable_wire_fields_use_declared_defaults(persisted: bool) -> None:
     head = TranscriptHeadRecord(TranscriptOwnerDomain.CONVERSATION, "history", 2, 1, HistoryQuality.COMPLETE)
     encode = _encode_persisted_domain if persisted else encode_domain
     payload = encode(head)
     del payload["fields"]["pending"]
     del payload["fields"]["pending_part_count"]
-    with pytest.raises(AIError) as raised:
-        _decode_domain(payload, TranscriptHeadRecord, _CURRENT_CODEC, persisted=persisted)
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert _decode_domain(payload, TranscriptHeadRecord, _CURRENT_CODEC, persisted=persisted) == head
 
 
-@pytest.mark.parametrize("value,field_name", (
-    (ConversationCursor("run"), "message_count"),
-    (UsageMetrics(input_tokens=19), "input_tokens"),
-    (BudgetUsage("scope", RunBudget(), total_tokens=21), "total_tokens"),
+@pytest.mark.parametrize("value,field_name,expected", (
+    (ConversationCursor("run", message_count=4), "message_count", ConversationCursor("run")),
+    (UsageMetrics(input_tokens=19), "input_tokens", UsageMetrics()),
+    (BudgetUsage("scope", RunBudget(), total_tokens=21), "total_tokens", BudgetUsage("scope", RunBudget())),
 ))
-def test_constructor_defaults_do_not_replace_required_durable_facts(value: object, field_name: str) -> None:
+def test_constructor_defaults_define_omitted_wire_fields(value: object, field_name: str, expected: object) -> None:
     payload = _encode_persisted_domain(value)
+    assert _decode_domain(payload, type(value), _CURRENT_CODEC, persisted=True) == value
     del payload["fields"][field_name]
-    with pytest.raises(AIError) as raised:
-        _decode_domain(payload, type(value), _CURRENT_CODEC, persisted=True)
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    assert raised.value.safe_details == {
-        "wire_type": wire_type_id(type(value)), "missing_fields": [field_name],
-    }
+    assert _decode_domain(payload, type(value), _CURRENT_CODEC, persisted=True) == expected
 
 
 @pytest.mark.parametrize("field_name", (
@@ -378,12 +372,12 @@ def test_transcript_head_still_requires_authoritative_fields(field_name: str) ->
 
 def test_nullable_domain_preserves_missing_field_diagnostics() -> None:
     payload = _encode_persisted_domain(ConversationCursor("private-run-id"))
-    del payload["fields"]["message_count"]
+    del payload["fields"]["agent_run_id"]
     with pytest.raises(AIError) as raised:
         _decode_domain(payload, ConversationCursor | None, _CURRENT_CODEC, persisted=True)
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     assert raised.value.safe_details == {
-        "wire_type": wire_type_id(ConversationCursor), "missing_fields": ["message_count"],
+        "wire_type": wire_type_id(ConversationCursor), "missing_fields": ["agent_run_id"],
     }
 
 
@@ -407,14 +401,18 @@ def test_explicit_transcript_defaults_are_validated(field_name: str, value: obje
     (StepEvent("run", "AGENT_RUN_STARTED", 0), "timestamp"),
     (AgentRunRecord("run"), "metadata"),
 ))
-def test_domain_decode_does_not_invoke_missing_field_factories(
+def test_domain_decode_uses_constructor_factories_for_missing_fields(
     value: AgentRunRecord | StepEvent, field_name: str,
 ) -> None:
     payload = _encode_persisted_domain(value)
     del payload["fields"][field_name]
-    with pytest.raises(AIError) as raised:
-        _decode_domain(payload, type(value), _CURRENT_CODEC, persisted=True)
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    restored = _decode_domain(payload, type(value), _CURRENT_CODEC, persisted=True)
+    assert restored.agent_run_id == value.agent_run_id
+    if field_name == "metadata":
+        assert restored.metadata == {}
+    else:
+        timestamp = restored.started_at if isinstance(restored, AgentRunRecord) else restored.timestamp
+        assert isinstance(timestamp, datetime) and timestamp.utcoffset() is not None
 
 
 @pytest.mark.parametrize("value", (None, True, -1, "0"))

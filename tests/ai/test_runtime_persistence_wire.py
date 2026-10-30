@@ -3,6 +3,7 @@
 """Runtime persistence wire contracts."""
 
 import copy
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -68,15 +69,11 @@ def test_persisted_session_allows_additive_unknown_fields() -> None:
     assert _decode_enveloped_domain(envelope, SessionRecord) == session
 
 
-def test_persisted_session_requires_history_id_field() -> None:
+def test_persisted_session_uses_declared_history_id_default() -> None:
     session = _session()
     payload = copy.deepcopy(_encode_persisted_domain(session))
     payload["fields"].pop("history_id")
-
-    with pytest.raises(AIError) as raised:
-        _decode_enveloped_domain(_envelope(payload), SessionRecord)
-
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert _decode_enveloped_domain(_envelope(payload), SessionRecord) == replace(session, history_id=None)
 
 def test_persisted_session_v1_field_set_is_stable() -> None:
     payload = _encode_persisted_domain(_session())
@@ -315,19 +312,16 @@ def test_persisted_task_node_rejects_the_removed_terminal_wire_id() -> None:
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
-def test_dynamic_v1_default_remains_required() -> None:
-    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    run = AgentRunRecord(agent_run_id="run", started_at=now)
-    payload = copy.deepcopy(_encode_persisted_domain(run))
+def test_dynamic_v1_default_uses_the_constructor_factory() -> None:
+    stored = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    run = AgentRunRecord(agent_run_id="run", started_at=stored)
+    payload = _encode_persisted_domain(run)
+    assert _decode_enveloped_domain(_envelope(payload, wire_id="agent_run_record"), AgentRunRecord) == run
     payload["fields"].pop("started_at")
+    restored = _decode_enveloped_domain(_envelope(payload, wire_id="agent_run_record"), AgentRunRecord)
+    assert restored.agent_run_id == run.agent_run_id
+    assert isinstance(restored.started_at, datetime) and restored.started_at.utcoffset() is not None
 
-    with pytest.raises(AIError) as raised:
-        _decode_enveloped_domain(
-            _envelope(payload, wire_id="agent_run_record"),
-            AgentRunRecord,
-        )
-
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 def test_step_persistence_reads_current_payload() -> None:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)

@@ -71,15 +71,10 @@ def test_scope_compatibility_does_not_fill_other_missing_session_fields() -> Non
     assert caught.value.safe_details == {"wire_type": "session_record", "missing_fields": ["agent_id"]}
 
 
-def test_scope_compatibility_does_not_relax_canonical_domain_decoding() -> None:
+def test_canonical_session_decoding_uses_the_same_declared_default() -> None:
     payload = _fixture()["value"]["payload"]
     del payload["schema"]
-    with pytest.raises(AIError) as caught:
-        decode_domain(payload, SessionRecord)
-    assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    assert caught.value.safe_details == {
-        "wire_type": "session_record", "missing_fields": ["repository_instruction_scopes"],
-    }
+    assert decode_domain(payload, SessionRecord) == _session()
 
 
 @pytest.mark.parametrize("scopes", (
