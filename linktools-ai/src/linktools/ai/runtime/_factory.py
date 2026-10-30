@@ -850,6 +850,10 @@ async def _build_local_components(
             transcript_store=run_store.conversation_persistence,
             release_terminal=state.retention.release_session,
             pending_session_execution=runtime_bridge.pending_turns.read_session_execution,
+            observe_local_session=runtime_bridge.pending_turns.observe_session,
+            read_session_owner=(None if runtime_bridge.pending_turns.coordination is None else
+                                runtime_bridge.pending_turns.coordination.read_session_owner),
+            local_waiter=backend,
             workspace_access=input_materializer.access,
         )
         lifecycle.session = session

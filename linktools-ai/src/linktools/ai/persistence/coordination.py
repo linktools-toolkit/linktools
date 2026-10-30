@@ -15,7 +15,7 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import CacheBackend, StreamBackend, Lease, TurnAdmissionReader, TurnCoordination, TurnCoordinationBackend
+from ..storage import CacheBackend, StreamBackend, Lease, TurnAdmissionReader, TurnCoordination, TurnCoordinationBackend, TurnSessionReader
 from .codec import decode_domain, encode_domain
 from ..execution import ExecutionRecord
 
@@ -119,6 +119,23 @@ class PendingTurnCoordination:
         if current is None:
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
         return current[0]
+
+    async def read_session_owner(
+        self, session_id: str, *, tenant_id: str,
+    ) -> TurnCoordination | None:
+        """Read authoritative session admission, never the lossy display pointer.
+
+        A configured backend without this optional capability cannot prove
+        absence. Observation never claims, renews or releases a turn.
+        """
+        if tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if not isinstance(self._backend, TurnSessionReader):
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={"reason": "session_admission_lookup_not_supported"},
+            )
+        return await self._backend.read_turn_by_session(self._scope, f"session:{session_id}")
 
     async def read_execution(
         self, execution_id: str, *, tenant_id: str,

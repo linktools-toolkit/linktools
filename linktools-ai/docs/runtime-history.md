@@ -734,6 +734,52 @@ the selected reader, so a consumer must not promote a partial view to complete
 history. `runtime.executions.capture_input(...)` captures Agent-owned execution inputs;
 `engine.inputs` is the public capture and replay facade for a `TaskEngine`.
 
+### Observe session inactivity without consuming a result
+
+```python
+view = await runtime.sessions.wait_inactive(
+    session_id, principal=principal, timeout_seconds=60,
+)
+assert view.active_execution_id is None
+```
+
+`wait_inactive` observes that the session had no active execution or live pending
+admission at one authoritative observation point. It does not reserve inactivity:
+another request can be admitted immediately afterwards. It never consumes a
+result, performs terminal handoff, reconciles admission, renews a lease or
+cancels an execution. `RECOVERY_REQUIRED`, `PENDING_START` and
+`WAITING_DEFERRED` remain busy, not successful inactivity observations.
+
+Every observation rechecks session permission; observing a canonical execution
+also checks execution-read permission. The session and execution identities remain
+bound to the requested session. Native storage revision receipts on both sides
+of the pending-admission read detect concurrent admission/release, including ABA
+changes that do not alter the session's public semantic revision. Local pending
+membership is also checked without settling an uncertain commit. Unknown local
+outcomes and backend failures remain errors.
+
+The operation requires native session/execution repositories and the Runtime's
+local observation wiring. A configured shared turn backend must additionally
+provide the optional `TurnSessionReader` capability: an atomic, token-free lookup
+of the existing live session ownership index. A missing display-cache pointer is
+not proof of absence. Backends lacking this new capability keep their existing
+operations unchanged, but this new wait fails explicitly rather than guessing.
+The built-in memory backend supports it only within its existing process-local
+scope; it does not become cross-process coordination.
+
+A live owner-local worker completion wakes the observer immediately; it does not
+itself prove inactivity. Remote or no-worker cases use a bounded 30-second
+fallback, and completed workers in recovery/deferred states cannot cause a hot
+loop. No SQL transaction or connection is held while waiting. This does not add
+a cross-process notification transport or promise zero polling.
+
+`timeout_seconds=None` waits without an overall deadline. A finite non-negative
+deadline expires with `WAIT_TIMEOUT`; cancellation or timeout stops only the
+observer. Borrowed persistence and clients remain open. Do not wrap a long wait
+in a short I/O deadline intended for a single repository call, and keep any
+host-owned lease renewal independent of the wait. Calling from inside a state
+transaction is rejected because it would reuse an old snapshot across waiting.
+
 ### Look up a known session
 
 ```python

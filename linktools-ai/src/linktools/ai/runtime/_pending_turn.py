@@ -96,6 +96,7 @@ class _PendingExecutionTurns:
         self._executions: dict[tuple[str, str], _PendingExecutionTurn] = {}
         self._requests: dict[tuple[str, str, str], _PendingExecutionTurn] = {}
         self._sessions: dict[tuple[str, str], _PendingExecutionTurn] = {}
+        self._session_membership_epoch = 0
 
     def bind_coordination(self, coordination: PendingTurnCoordination | None) -> None:
         self.coordination = coordination
@@ -164,7 +165,25 @@ class _PendingExecutionTurns:
         self._requests[request_key] = turn
         if session_key is not None:
             self._sessions[session_key] = turn
+            self._session_membership_epoch += 1
         return turn, True
+
+    def observe_session(
+        self, session_id: str, *, tenant_id: str,
+    ) -> tuple[ExecutionRecord | None, int]:
+        """Capture local admission without settling unknown commits.
+
+        The constant-space epoch detects admission/removal between two absent
+        observations, including changes to unrelated sessions in this Runtime.
+        It is an observation token, not another admission authority.
+        """
+        turn = self._sessions.get((tenant_id, session_id))
+        if turn is not None:
+            if turn.failure is not None:
+                raise turn.failure
+            if turn.uncertain:
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+        return (None if turn is None else turn.execution), self._session_membership_epoch
 
     def get(self, execution_id: str, *, tenant_id: str) -> _PendingExecutionTurn | None:
         return self._executions.get((tenant_id, execution_id))
@@ -240,6 +259,7 @@ class _PendingExecutionTurns:
             session_key = (turn.tenant_id, turn.session.session_id)
             if self._sessions.get(session_key) is turn:
                 self._sessions.pop(session_key)
+                self._session_membership_epoch += 1
 
 
 __all__: list[str] = []

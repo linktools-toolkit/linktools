@@ -120,7 +120,7 @@ from ._payload import PayloadPolicy, StoredPayload, payload_fits_inline
 from ._revision import LayerMetadataView, RevisionSource, StorageRevisionSource
 
 from ._stream import InMemoryStreamBackend, StreamBackend, StreamBatch, StreamWriter
-from ._turn import TurnAdmissionReader, TurnCoordination, TurnCoordinationBackend
+from ._turn import TurnAdmissionReader, TurnCoordination, TurnCoordinationBackend, TurnSessionReader
 
 from ._write_cache import StorageBuffer, StorageReadCache, BatchWriteFlushResult, BatchWriteScope, BatchWriteScopeFactory, BatchWriteStatus
 
@@ -132,6 +132,7 @@ __all__ = [
     "TurnAdmissionReader",
     "TurnCoordination",
     "TurnCoordinationBackend",
+    "TurnSessionReader",
     "StreamBackend",
     "StreamWriter",
     "StreamBatch",

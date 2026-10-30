@@ -104,4 +104,22 @@ class TurnAdmissionReader(Protocol):
         ...
 
 
-__all__ = ["TurnAdmissionReader", "TurnCoordination", "TurnCoordinationBackend"]
+@runtime_checkable
+class TurnSessionReader(Protocol):
+    """Optional authoritative reads of the existing live session admission."""
+
+    async def read_turn_by_session(
+        self, scope: str, session_key: str,
+    ) -> TurnCoordination | None:
+        """Atomically observe a session's token-free live owner, or its absence.
+
+        Read the ownership index, not a disposable display projection. None
+        means no live claim at the observation point; it does not prevent a
+        later claim. Inconsistent indexes and backend failures remain errors.
+        Reads must not claim, renew or release ownership. All identity strings
+        must be nonempty. This capability is independent of request lookup.
+        """
+        ...
+
+
+__all__ = ["TurnAdmissionReader", "TurnCoordination", "TurnCoordinationBackend", "TurnSessionReader"]
