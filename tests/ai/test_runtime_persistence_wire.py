@@ -247,9 +247,8 @@ def test_persisted_model_interaction_requires_attachment_identifier_field() -> N
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-@pytest.mark.parametrize("field_name", ("started_at", "finished_at", "attachments", "client_requests"))
-def test_persisted_model_interaction_requires_current_fields(field_name: str) -> None:
-    interaction = ModelInteractionRecord(
+def _cancelled_interaction() -> ModelInteractionRecord:
+    return ModelInteractionRecord(
         agent_run_id="run",
         step_index=1,
         model_request_seq=1,
@@ -270,6 +269,11 @@ def test_persisted_model_interaction_requires_current_fields(field_name: str) ->
         finished_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         attachments=(),
     )
+
+
+@pytest.mark.parametrize("field_name", ("started_at", "finished_at"))
+def test_persisted_model_interaction_requires_fields_without_defaults(field_name: str) -> None:
+    interaction = _cancelled_interaction()
     payload = copy.deepcopy(_encode_persisted_domain(interaction))
     payload["fields"].pop(field_name)
 
@@ -280,6 +284,16 @@ def test_persisted_model_interaction_requires_current_fields(field_name: str) ->
         )
 
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("field_name", ("attachments", "client_requests"))
+def test_persisted_model_interaction_uses_declared_defaults(field_name: str) -> None:
+    interaction = _cancelled_interaction()
+    payload = copy.deepcopy(_encode_persisted_domain(interaction))
+    del payload["fields"][field_name]
+    assert _decode_enveloped_domain(
+        _envelope(payload, wire_id="model_interaction"), ModelInteractionRecord,
+    ) == interaction
 
 
 @pytest.mark.parametrize("field", ("dependency_policy", "failure_policy"))

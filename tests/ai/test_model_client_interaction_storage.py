@@ -155,10 +155,9 @@ async def test_missing_capture_and_no_dispatch_remain_distinct_on_wire(requests)
         assert await archive.resolve_model_interaction(record, include_client_requests=True) == (None, None, None, requests, None)
         missing_capture_field = _encode_persisted_domain(record)
         del missing_capture_field["fields"]["client_requests"]
-        with pytest.raises(AIError) as missing:
-            _decode_domain(missing_capture_field, ModelInteractionRecord, _CURRENT_CODEC, persisted=True)
-        assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-        assert missing.value.safe_details["missing_fields"] == ["client_requests"]
+        restored = _decode_domain(missing_capture_field, ModelInteractionRecord, _CURRENT_CODEC, persisted=True)
+        assert restored == replace(record, client_requests=None)
+        assert await archive.resolve_model_interaction(restored, include_client_requests=True) == (None, None, None, None, None)
         with pytest.raises(ValueError, match="unfinished"):
             replace(record, status="RUNNING", duration_ns=None, finished_at=None, client_requests=())
     finally:

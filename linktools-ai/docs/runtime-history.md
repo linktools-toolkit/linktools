@@ -742,9 +742,10 @@ canonical and persisted wire values. A missing `init=True` field with a declared
 constructor supplies its normal value. Fields without defaults and `init=False`
 derived fields remain required. Explicit values still undergo the original type,
 constructor and derived-value checks; an invalid explicit value never falls back
-to a default. Wire types, schema versions and custom codec protocols are unchanged.
-The current writer still emits the complete current field set. Reads do not
-rewrite or migrate source records.
+to a default. Wire types and schema versions are unchanged. Format-specific
+adapters retain their projections and compact encodings; ordinary dataclass
+fields use the same declared-default rule. Writers retain their existing field
+sets. Reads do not rewrite or migrate source records.
 
 Defaults mean what the model declares, not a recovered historical value. For
 example, omitted budget counts use their declared zero, an omitted optional
@@ -753,6 +754,18 @@ construction time. The codec cannot distinguish a genuinely older omission from
 a field removed from a current record; preserve original byte-integrity checks
 and do not edit payloads to suppress errors. Mutable factories create a fresh
 value for each decoded object, and cross-field constructor invariants still apply.
+
+For model interactions, omitted `attachments` means the declared empty tuple,
+while omitted `client_requests` means uncaptured (`None`), not an observed empty
+attempt list. Client-request omissions use the declared `capture_error=None`,
+`response=None` and `record_http_bodies=True`. That last default is missing-value
+metadata, not evidence that bodies were historically captured: resolution never
+recreates absent body bytes. Explicit `False` remains `False`, and a body reference
+with explicit recording disabled is still rejected. Task-node views use the same
+default rule for ordinary fields while retaining their existing durable projection:
+lease ownership and resolved dependencies remain outside that projection.
+Format-specific TaskNode input semantics and explicit dependency/failure policies
+retain their custom required-field contracts.
 
 For an existing `SessionRecord` v1 without `repository_instruction_scopes`, this
 same generic rule uses the field's existing empty-tuple default. The earlier
