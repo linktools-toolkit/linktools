@@ -44,6 +44,7 @@ class _RepositoryBoundary:
         tool_call_id: str,
         arguments: dict[str, Any],
         path_fields: tuple[str, ...],
+        approved: bool = False,
     ) -> None:
         del tool_call_id, path_fields
         self.calls.append((tool_name, arguments))

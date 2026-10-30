@@ -3,11 +3,13 @@
 """Repository-instruction overlay and tool-boundary coordination."""
 
 import asyncio
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import Capability
-from pydantic_ai.messages import InstructionPart
+from pydantic_ai.messages import InstructionPart, ToolCallPart
 
 from ..capability import AgentContext
 from ..capability import ToolCallRetry
@@ -89,6 +91,12 @@ def _validate_repository_instruction_frontier(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
+@dataclass(frozen=True, slots=True)
+class _RepositoryInstructionApproval:
+    tool_name: str
+    frontier_digest: str
+
+
 class _RepositoryInstructionBoundary:
     def __init__(
         self,
@@ -97,6 +105,7 @@ class _RepositoryInstructionBoundary:
         initial: RepositoryInstructions | None,
         overlay: RepositoryInstructions | None,
         producer_generation: int | None = None,
+        approved_frontiers: Mapping[str, _RepositoryInstructionApproval] | None = None,
     ) -> None:
         self._runtime = runtime
         self._execution = execution
@@ -109,6 +118,9 @@ class _RepositoryInstructionBoundary:
         self._lock = asyncio.Lock()
         self._revision = 0
         self._observed_revision = -1
+        self._approved_frontiers = dict(approved_frontiers or {})
+        self._checked_approvals: dict[str, _RepositoryInstructionApproval] = {}
+        self._observed_frontier: str | None = None
 
     def _render_overlay_text(
         self, overlay: RepositoryInstructions | None
@@ -122,7 +134,27 @@ class _RepositoryInstructionBoundary:
 
     def render_overlay(self) -> str:
         self._observed_revision = self._revision
+        self._observed_frontier = self._frontier_digest()
         return self._overlay_text
+
+    def _frontier_digest(self) -> str:
+        return canonical_sha256({
+            "initial": [list(document) for document in _repository_instruction_signature(self._initial)],
+            "overlay": [list(document) for document in _repository_instruction_signature(self._overlay)],
+        })
+
+    def approval_frontiers(self, calls: Sequence[ToolCallPart]) -> dict[str, str]:
+        result = {}
+        for call in calls:
+            if self._observed_frontier is not None:
+                result[call.tool_call_id] = self._observed_frontier
+            else:
+                # Deferred replay may pause again without a new model request.
+                # Only that original approved call can carry its observed frontier.
+                checked = self._checked_approvals.get(call.tool_call_id)
+                if checked is not None and checked.tool_name == call.tool_name:
+                    result[call.tool_call_id] = checked.frontier_digest
+        return result
 
     async def check(
         self,
@@ -131,10 +163,21 @@ class _RepositoryInstructionBoundary:
         tool_call_id: str,
         arguments: dict[str, object],
         path_fields: tuple[str, ...],
+        approved: bool = False,
     ) -> None:
         async with self._lock:
             if self._observed_revision != self._revision:
-                raise ToolCallRetry(_REPOSITORY_INSTRUCTION_RECONSIDER)
+                permit = self._approved_frontiers.get(tool_call_id)
+                if (
+                    not approved
+                    or permit is None
+                    or permit.tool_name != tool_name
+                    or permit.frontier_digest != self._frontier_digest()
+                ):
+                    raise ToolCallRetry(_REPOSITORY_INSTRUCTION_RECONSIDER)
+                # The SDK binds approval to the frozen original args through
+                # ToolApproved.override_args; its validators may normalize them.
+                self._checked_approvals[tool_call_id] = permit
             previous_signature = _repository_instruction_signature(self._overlay)
             next_overlay, reconsider = (
                 await self._runtime.check_repository_instructions(

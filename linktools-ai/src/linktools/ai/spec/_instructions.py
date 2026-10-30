@@ -148,6 +148,8 @@ class RepositoryInstructions:
 
 
 class RepositoryInstructionResolver(Protocol):
+    def validate(self, instructions: RepositoryInstructions) -> None: ...
+
     async def resolve(
         self,
         path: str | Path = ".",
@@ -182,11 +184,14 @@ class RuleInstructionResolver:
         exclude_sources: frozenset[str] = frozenset(),
     ) -> RepositoryInstructions:
         result = self._rules.for_path(path, exclude_sources=exclude_sources)
-        result.validate_limits(
+        self.validate(result)
+        return result
+
+    def validate(self, instructions: RepositoryInstructions) -> None:
+        instructions.validate_limits(
             max_documents=self._max_documents,
             max_bytes=self._max_bytes,
         )
-        return result
 
 
 def _validate_document(document: RepositoryInstructionDocument) -> None:

@@ -1365,6 +1365,16 @@ class RuntimeRepository(Protocol):
 
 
 class SessionRepository(SessionRepositoryContract, RuntimeRepository, Protocol):
+    async def remember_repository_instruction_scopes_in_transaction(
+        self,
+        transaction: StateTransaction,
+        session_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        scopes: tuple[str, ...],
+    ) -> SessionRecord: ...
+
     async def pending_turn_commit_in_transaction(
         self, transaction: StateTransaction, *, session_id: str, execution_id: str,
         allow_unadmitted: bool = False,

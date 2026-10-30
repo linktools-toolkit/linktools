@@ -44,6 +44,7 @@ from ..storage import StoredPayload
 from ..spec import RepositoryInstructionResolver, RepositoryInstructions
 from ..inputs import CanonicalUserInput
 from ._repository_instructions import (
+    _RepositoryInstructionApproval,
     _merge_repository_instructions,
     _repository_instruction_signature,
     _repository_instructions_contain,
@@ -85,6 +86,7 @@ class _DeferredResume:
     results: DeferredToolResults
     producer_generation: int
     binding: AgentBinding = field(repr=False, compare=False)
+    repository_instruction_approvals: Mapping[str, _RepositoryInstructionApproval] = field(default_factory=dict)
 
 
 class _RecoveryCoordinatorPort(Protocol):
@@ -180,6 +182,8 @@ class _RecoveryCoordinatorPort(Protocol):
         source_agent_run_id: str,
         call: ToolCallPart,
         metadata: Mapping[str, object],
+        *,
+        repository_instruction_frontier: str | None = None,
     ) -> PendingDeferredCall: ...
 
     async def commit_deferred_frontier(
@@ -460,6 +464,9 @@ class _RecoveryCoordinator:
         next_overlay = _merge_repository_instructions(persisted_overlay, new_documents)
         if next_overlay is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        cumulative = _merge_repository_instructions(initial, next_overlay)
+        assert cumulative is not None
+        resolver.validate(cumulative)
         barrier = RepositoryInstructionBarrier(
             checkpoint.agent_run_id,
             tool_call_id,
@@ -497,6 +504,7 @@ class _RecoveryCoordinator:
         agent_run_id: str,
         paused_at: datetime,
         producer_generation: int | None = None,
+        repository_instruction_frontiers: Mapping[str, str] | None = None,
     ) -> ExecutionRecord:
         current = await self._port.load_execution(
             execution.execution_id,
@@ -531,6 +539,10 @@ class _RecoveryCoordinator:
                     agent_run_id,
                     call,
                     metadata.get(call.tool_call_id, {}),
+                    repository_instruction_frontier=(
+                        None if repository_instruction_frontiers is None
+                        else repository_instruction_frontiers.get(call.tool_call_id)
+                    ),
                 )
             )
         approvals = tuple(approvals_list)
@@ -1162,6 +1174,7 @@ class _RecoveryCoordinator:
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         deferred_results = DeferredToolResults()
+        repository_approvals: dict[str, _RepositoryInstructionApproval] = {}
         for pending in recovery.pending_tools.approvals:
             approval_id = deferred_resource_id(
                 "approval-v1",
@@ -1185,6 +1198,21 @@ class _RecoveryCoordinator:
                 deferred_results.approvals[pending.tool_call_id] = ToolApproved(
                     override_args=arguments
                 )
+                # Only runtime-frozen pending metadata is evidence of the
+                # original model's instruction frontier, never resolution metadata.
+                metadata = pending.metadata.get("linktools")
+                if metadata is not None:
+                    frontier = (metadata.get("repository_instruction_frontier")
+                                if isinstance(metadata, Mapping) else None)
+                    if (
+                        not isinstance(frontier, str)
+                        or len(frontier) != 64
+                        or any(character not in "0123456789abcdef" for character in frontier)
+                    ):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    repository_approvals[pending.tool_call_id] = _RepositoryInstructionApproval(
+                        pending.tool_name, frontier,
+                    )
             elif record.status in {
                 ApprovalStatus.DENIED,
                 ApprovalStatus.CANCELLED,
@@ -1263,6 +1291,7 @@ class _RecoveryCoordinator:
             deferred_results,
             current.revision + 1,
             binding,
+            repository_approvals,
         )
 
     def _deferred_attempt_advanced(

@@ -81,11 +81,14 @@ class WorkspaceInstructionResolver:
             exclude_sources,
         )
         bundle = RepositoryInstructions((*rules.documents, *agents))
-        bundle.validate_limits(
+        self.validate(bundle)
+        return bundle
+
+    def validate(self, instructions: RepositoryInstructions) -> None:
+        instructions.validate_limits(
             max_documents=self._policy.max_repository_instruction_documents,
             max_bytes=self._policy.max_repository_instruction_bytes,
         )
-        return bundle
 
 
 def _normalize_target_path(root: Path, value: str | Path) -> Path:

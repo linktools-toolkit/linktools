@@ -1463,6 +1463,37 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             )
         )
 
+    async def remember_repository_instruction_scopes_in_transaction(
+        self,
+        transaction: StateTransaction,
+        session_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        scopes: tuple[str, ...],
+    ) -> SessionRecord:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        record = await transaction.get_record(self._key("session", session_id))
+        if record is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        current = await self._decode(record, SessionRecord)
+        if current.active_execution_id != execution_id:
+            raise AIError(ErrorCode.SESSION_BUSY)
+        merged = tuple(sorted(set(current.repository_instruction_scopes).union(scopes)))
+        if merged == current.repository_instruction_scopes:
+            return current
+        updated = replace(
+            current,
+            repository_instruction_scopes=merged,
+            revision=current.revision + 1,
+            updated_at=await transaction.now(),
+        )
+        await _replace_checked(
+            transaction, _projected_record(self, record, updated), record.storage_revision,
+        )
+        await self._bump_list_generation(transaction, current.owner_principal_id)
+        return updated
+
     async def get_in_transaction(
         self,
         transaction: StateTransaction,

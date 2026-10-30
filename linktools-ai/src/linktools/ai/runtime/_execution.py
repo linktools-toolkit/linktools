@@ -77,6 +77,7 @@ from ..core import (
 )
 from ..asset import AssetVersionRef
 from ..session import SessionAdmission
+from ..spec import RepositoryInstructions
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..task import TaskBindingContract, TaskEffectResolution
 from ..storage import (
@@ -145,6 +146,7 @@ if TYPE_CHECKING:
     from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
     from ..execution import RuntimePayloadRef
     from ..session import SessionRecord
+    from ..spec import RepositoryInstructionResolver
 
 _logger = environ.get_logger("ai.runtime.execution")
 
@@ -162,14 +164,6 @@ class _SubagentCancellation(Protocol):
     async def cancel_children(
         self, parent_execution_id: str, principal: Principal
     ) -> None: ...
-
-
-class _RepositoryInstructionBundle(Protocol):
-    def to_payload(self) -> JsonValue: ...
-
-
-class _RepositoryInstructionResolver(Protocol):
-    async def resolve(self, path: str) -> _RepositoryInstructionBundle: ...
 
 
 async def _missing_terminal_verifier(
@@ -250,6 +244,10 @@ _TerminalMetricDelivery = Callable[[], Awaitable[None]]
 
 
 class _ExecutionRuntimePort(ExecutionBackend, Protocol):
+    async def load_repository_instructions(
+        self, reference: "RuntimePayloadRef | None",
+    ) -> RepositoryInstructions | None: ...
+
     async def commit_terminal_checkpoint(
         self,
         commit: ExecutionTerminalCommit,
@@ -366,7 +364,7 @@ class DefaultExecutionService(TaskExecutionService):
         history_reader: ExecutionHistoryReader,
         history_service: "ExecutionHistoryService | None" = None,
         release_terminal: _ExecutionReleaseCallback | None = None,
-        instruction_resolver: "_RepositoryInstructionResolver | None" = None,
+        instruction_resolver: "RepositoryInstructionResolver | None" = None,
         object_key_factory: "ObjectKeyFactory | None" = None,
         payload_policy: "PayloadPolicy | None" = None,
         input_materializer: "ExecutionInputMaterializer | None" = None,
@@ -466,7 +464,7 @@ class DefaultExecutionService(TaskExecutionService):
 
     async def _materialize_repository_instructions(
         self,
-        instructions: _RepositoryInstructionBundle,
+        instructions: RepositoryInstructions,
         *,
         tenant_id: str,
     ) -> "RuntimePayloadRef":
@@ -1381,6 +1379,12 @@ class DefaultExecutionService(TaskExecutionService):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
         await self._validate_tool_response_input(request.tool_response_ref, session_id=session_id)
+        input_instruction_paths = (
+            *context.canonical_files,
+            *(() if isinstance(request.user_prompt, str) else (
+                item.path for item in request.user_prompt if isinstance(item, WorkspaceFileInput)
+            )),
+        )
         context = await self._freeze_input(context, binding)
         request = context.request
 
@@ -1395,7 +1399,6 @@ class DefaultExecutionService(TaskExecutionService):
             prepared_context = await self._context_archive.prepare(request.input_context)
             input_context = prepared_context.reference
             if request.input_context.repository_instructions is not None:
-                from ..spec import RepositoryInstructions
                 repository_instructions = await self._materialize_repository_instructions(
                     RepositoryInstructions.from_payload(request.input_context.repository_instructions), tenant_id=request.principal.tenant_id)
         elif self._instruction_resolver is not None:
@@ -1403,15 +1406,27 @@ class DefaultExecutionService(TaskExecutionService):
                 if parent is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 repository_instructions = parent.repository_instructions
-                if repository_instructions is None:
-                    resolved_instructions = await self._instruction_resolver.resolve(
-                        "."
-                    )
-                    repository_instructions = (
-                        await self._materialize_repository_instructions(
-                            resolved_instructions,
-                            tenant_id=request.principal.tenant_id,
-                        )
+                if repository_instructions is None or input_instruction_paths:
+                    documents = {}
+                    if repository_instructions is not None:
+                        port = self._runtime_bridge.port
+                        if port is None:
+                            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                        inherited = await port.load_repository_instructions(repository_instructions)
+                        if inherited is None:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        documents.update((document.source, document) for document in inherited.documents)
+                    for path in dict.fromkeys((
+                        *((".",) if repository_instructions is None else ()),
+                        *input_instruction_paths,
+                    )):
+                        resolved = await self._instruction_resolver.resolve(path, exclude_sources=frozenset(documents))
+                        for document in resolved.documents:
+                            documents.setdefault(document.source, document)
+                    resolved_instructions = RepositoryInstructions(tuple(documents.values()))
+                    self._instruction_resolver.validate(resolved_instructions)
+                    repository_instructions = await self._materialize_repository_instructions(
+                        resolved_instructions, tenant_id=request.principal.tenant_id,
                     )
             else:
                 instruction_path: str = "."
@@ -1424,9 +1439,20 @@ class DefaultExecutionService(TaskExecutionService):
                         if session is None:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     instruction_path = "." if session.cwd is None else session.cwd
-                resolved_instructions = await self._instruction_resolver.resolve(
-                    instruction_path
-                )
+                instruction_paths = dict.fromkeys((
+                    instruction_path,
+                    *(() if session is None else session.repository_instruction_scopes),
+                    *input_instruction_paths,
+                ))
+                documents = {}
+                for path in instruction_paths:
+                    resolved = await self._instruction_resolver.resolve(
+                        path, exclude_sources=frozenset(documents),
+                    )
+                    for document in resolved.documents:
+                        documents.setdefault(document.source, document)
+                resolved_instructions = RepositoryInstructions(tuple(documents.values()))
+                self._instruction_resolver.validate(resolved_instructions)
                 repository_instructions = (
                     await self._materialize_repository_instructions(
                         resolved_instructions,
