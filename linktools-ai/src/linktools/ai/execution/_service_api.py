@@ -1315,6 +1315,10 @@ class ExecutionService(Protocol):
 
 
 class SessionService(Protocol):
+    async def wait_inactive(
+        self, session_id: str, *, principal: Principal, timeout_seconds: float | None = None,
+    ) -> SessionView: ...
+
     async def lookup_admission(
         self, session_id: str, *, principal: Principal, idempotency_key: str,
     ) -> SessionAdmission | None: ...

@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 """Session query API and persistence-backed session service."""
 
+import asyncio
 import json
 import math
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
 from typing import Protocol
 
@@ -26,7 +27,7 @@ from ..core import (
     validate_page_limit,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import CacheBackend
+from ..storage import CacheBackend, TurnCoordination
 from ..history import SessionDisplayCache
 from ..history import (
     capture_session_refresh,
@@ -39,6 +40,7 @@ from ..execution import (
     ExecutionHandle,
     ExecutionRequest,
     ExecutionService,
+    LocalExecutionWaiter,
     ResumeSessionRequest,
     SessionDetail,
     SessionHistoryItem,
@@ -165,6 +167,9 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         workspace_access: InputFileSource | None = None,
         cache: CacheBackend | None = None,
         pending_session_execution: SessionPendingExecutionLookup[ExecutionRecord] | None = None,
+        observe_local_session: Callable[..., tuple[ExecutionRecord | None, int]] | None = None,
+        read_session_owner: Callable[..., Awaitable[TurnCoordination | None]] | None = None,
+        local_waiter: LocalExecutionWaiter | None = None,
     ) -> None:
         self._admission_execution = execution
         self._runtime_conversation = conversation
@@ -172,6 +177,9 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         self._runtime_authorization = authorization
         self._runtime_cursor_signer = cursor_signer
         self._runtime_pending_session_execution = pending_session_execution
+        self._observe_local_session = observe_local_session
+        self._read_session_owner = read_session_owner
+        self._local_waiter = local_waiter
         super().__init__(
             conversation, executions, authorization, _SessionExecutionAdapter(execution), cursor_signer,
             enabled=enabled, release_terminal=release_terminal,
@@ -187,6 +195,120 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
             conversation, executions, transcript_store, cursor_signer, self._cache,
             now=lambda: time.time(),
         )
+
+    async def wait_inactive(
+        self, session_id: str, *, principal: Principal,
+        timeout_seconds: float | None = None,
+    ) -> SessionView:
+        """Observe authoritative inactivity without consuming or reconciling a turn.
+
+        Success is a point-in-time observation, not an admission reservation.
+        A local worker completion is only a wake-up hint. Remote observations
+        retain a bounded fallback; timeout/cancellation stop only this observer.
+        """
+        self.require_available()
+        if (timeout_seconds is not None and (
+            isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(timeout_seconds) or timeout_seconds < 0
+        )):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        sessions, executions = self._runtime_conversation.sessions, self._runtime_executions
+        observe = self._observe_local_session
+        if (type(sessions) is not SessionRepositoryImpl
+                or type(executions) is not ExecutionRepositoryImpl or observe is None):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
+                          safe_details={"reason": "session_inactivity_not_supported"})
+        if principal.tenant_id != sessions.tenant_id:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if active_state_scope() is not None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
+                          safe_details={"reason": "session_wait_inside_state_transaction"})
+
+        async def read_session() -> tuple[SessionRecord, int]:
+            async def read(transaction):
+                stored = await transaction.get_record(sessions.session_record_key(session_id))
+                if stored is None:
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                record = await sessions.get_in_transaction(transaction, session_id, tenant_id=principal.tenant_id)
+                if record.session_id != session_id:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return record, stored.storage_revision
+            return await sessions.state_store.read(read)
+
+        async def read_execution(execution_id: str) -> tuple[ExecutionRecord, int]:
+            async def read(transaction):
+                stored = await transaction.get_record(executions.execution_record_key(execution_id))
+                if stored is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                record = await executions.get_in_transaction(transaction, execution_id, tenant_id=principal.tenant_id)
+                if record is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return record, stored.storage_revision
+            return await executions.state_store.read(read)
+
+        async def observe_inactivity() -> SessionView:
+            retry_delay = 1.0
+            while True:
+                first, session_revision = await read_session()
+                header = ResourceRef(ResourceKind.SESSION, session_id, principal.tenant_id, first.owner_principal_id)
+                await self._runtime_authorization.authorize(principal, AuthorizationAction.SESSION_READ, header)
+                local, epoch = observe(session_id, tenant_id=principal.tenant_id)
+                if local is not None and (local.session_id != session_id or local.parent_execution_id is not None):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                execution, execution_revision = (
+                    (None, None) if first.active_execution_id is None
+                    else await read_execution(first.active_execution_id)
+                )
+                active = self.validate_admission(first, execution)
+                if execution is not None:
+                    await self._runtime_authorization.authorize(
+                        principal, AuthorizationAction.EXECUTION_READ,
+                        ResourceRef(ResourceKind.EXECUTION, execution.execution_id, principal.tenant_id),
+                    )
+                owner = (None if self._read_session_owner is None else
+                         await self._read_session_owner(session_id, tenant_id=principal.tenant_id))
+                if local is None and active is None and owner is None:
+                    second, confirmed_revision = await read_session()
+                    if (second.owner_principal_id, second.history_id, second.created_at) != (
+                        first.owner_principal_id, first.history_id, first.created_at,
+                    ):
+                        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                    stable = session_revision == confirmed_revision
+                    if stable and execution is not None:
+                        confirmed, revision = await read_execution(execution.execution_id)
+                        stable = (revision == execution_revision and confirmed.execution_id == execution.execution_id
+                                  and confirmed.session_id == session_id and confirmed.status is execution.status
+                                  and confirmed.principal_id == execution.principal_id
+                                  and confirmed.created_at == execution.created_at)
+                    pending, confirmed_epoch = observe(session_id, tenant_id=principal.tenant_id)
+                    if stable and pending is None and epoch == confirmed_epoch:
+                        return await self.project_view(second, principal, active=None, authorized_header=header)
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(30.0, retry_delay * 2)
+                    continue
+                execution_id = (local.execution_id if local is not None else
+                                active.execution_id if active is not None else owner.execution_id)
+                waiter = self._local_waiter
+                if waiter is not None and waiter.owns_execution(execution_id, tenant_id=principal.tenant_id):
+                    wake = asyncio.timeout(30)
+                    try:
+                        async with wake:
+                            await waiter.wait_terminal(execution_id, tenant_id=principal.tenant_id)
+                    except TimeoutError:
+                        if not wake.expired():
+                            raise
+                else:
+                    await asyncio.sleep(30)
+                retry_delay = 1.0
+
+        deadline = asyncio.timeout(timeout_seconds)
+        try:
+            async with deadline:
+                return await observe_inactivity()
+        except TimeoutError as error:
+            if not deadline.expired():
+                raise
+            raise AIError(ErrorCode.WAIT_TIMEOUT, safe_details={"scope": "session", "resource_id": session_id}) from error
 
     async def history(
         self,

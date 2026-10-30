@@ -236,6 +236,10 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             values[execution_id] = value
         return values
 
+    def execution_record_key(self, execution_id: str) -> bytes:
+        """Identify the canonical record for a transaction-local read receipt."""
+        return self._key("execution", execution_id)
+
     def terminal_record_keys(
         self, execution: ExecutionRecord, *, include_history_seal: bool,
     ) -> tuple[bytes, ...]:
