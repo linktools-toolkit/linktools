@@ -168,15 +168,22 @@ browser. Browser Back/Forward restores the corresponding page.
   cancellation expose **Recovery options**; explicit Resume/End choices remain
   available after confirming the previous executor has stopped. They never
   infer process death or silently take ownership.
-- **Options** beside the composer contains planning, thinking, memory scope and
-  workspace files and keyboard/lifecycle hints. Ctrl / Cmd Enter sends. Each message's Markdown source
-  disclosure preserves original source and its copy action.
+- The composer exposes **Plan mode** and a keyboard-accessible **Thinking** slider:
+  Low, Medium, High, Extra high, Maximum. New drafts start at Low. The chosen
+  effort is sent as `low`, `medium`, `high`, `xhigh`, or `max`; SDK/API thinking
+  compatibility and provider-specific precedence remain unchanged. Ctrl / Cmd
+  Enter sends. Chat messages render Markdown with a Copy action, without raw
+  input or Markdown-source disclosures. Plan mode enables the SDK planning
+  capability (`write_plan`); it is not a read-only mode or an authorization override.
 - **Tools & settings** contains Executions, Metrics, exact-ID lookup and Runtime
   capabilities. Execution filters, explicit newest-20 scans, list paging and the
   full metric query retain their original behavior. A Conversations button
   returns from other pages. The narrow-screen sidebar closes after navigation
   and has its own close button and Escape support.
-- Tool/thinking content and ordinary activity expand on demand. Failure,
+- Tool calls show Started · awaiting result as their start event arrives, and their observed result
+  as it arrives, without waiting for the turn to end or opening Activity. This
+  metadata is not the tool result body; incomplete observation never implies
+  success. Thinking content and other ordinary activity expand on demand. Failure,
   recovery, cancellation, input-required events and observation interruptions
   remain visible. A healthy connection is not a second execution-status badge.
 
@@ -235,7 +242,7 @@ place; diagnostic exception messages remain redacted to protect credentials.
 
 | Command capability | Console surface | Runtime source |
 | --- | --- | --- |
-| `ai-run` | New conversation, composer, planning/thinking/memory/files, live text and tool/subagent progress, Stop, final JSON download | Agent/Session `start`, Execution `watch`/`cancel`, History `result` |
+| `ai-run` | New conversation, composer, Plan mode/Thinking slider, live text and tool/subagent progress, Stop, final JSON download | Agent/Session `start`, Execution `watch`/`cancel`, History `result` |
 | Former `ai-session` | Session list, status/revision/CWD/active execution, paged turns, create/rename/fork/close | RuntimeSessions and History session APIs |
 | Former `ai-history` | Paged executions, explicit newest-by-time scan, metadata, paged SDK history/transcript, original client requests/responses, SDK prompt architecture, duration/cache usage | History `list_executions`, `recent_executions`, `inspect_execution`, `history`, `transcript`, `model_interactions` |
 | Former `ai-trace` | Metadata timeline with source execution, run/request/step/tool locators, duration, purpose, token usage and content drill-down | History `trace` and filtered `history` |
@@ -476,10 +483,10 @@ closing/reopening dialogs. Use fake models and an isolated fixture store.
 ### Message formatting and drafts
 
 User and assistant message text supports Markdown headings, lists, tables, links
-and fenced code. The composer edits the original Markdown; **Copy Markdown** and
-**Markdown source** preserve its exact source. Incomplete streaming code fences
-are rendered safely as text/code until more content arrives. Tool structures and
-unknown input formats stay inspectable under their original details. Stored
+and fenced code. The composer edits the original Markdown; the **Copy** action preserves its
+exact source. Incomplete streaming code fences
+are rendered safely as text/code until more content arrives. Tool structures remain available in run details; chat no longer expands raw
+input payloads or Markdown source. Stored
 version-1 inputs display prompt text and attachment descriptions rather than a
 JSON chat bubble. No input or output storage contract is changed.
 
@@ -493,7 +500,7 @@ integrity is `sha512-q4IGxMv56jCqT4OCRCADBoDP3LO4MhmTXjFbphHPXs4g3j9Xg5RDnxqN8IF
 No CDN request or browser package installation is needed. Live rendering batches
 received updates and leaves historical turns unchanged between canonical reads.
 
-Unsent prompts, file paths, planning/thinking options and memory scope are kept
+Unsent prompts and planning/thinking selections are kept
 per conversation in this page's memory. Switching pages or conversations does
 not submit them. An admission conflict preserves the draft for an explicit next
 Send; an uncertain response reuses its request identity. A confirmed admission
