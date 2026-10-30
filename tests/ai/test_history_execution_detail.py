@@ -117,27 +117,35 @@ async def test_execution_detail_requires_both_permissions_and_the_requested_bind
         await state.close()
 
 
-async def test_execution_detail_rechecks_session_ownership_after_authorization() -> None:
+async def test_execution_detail_rechecks_session_ownership_after_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="execution-detail", tenant_id="tenant")
     try:
         await _seed(state)
         sessions = state.conversation.sessions
+        get_session = sessions.get
+        authorized = False
+
+        async def get(session_id, *, tenant_id):
+            session = await get_session(session_id, tenant_id=tenant_id)
+            return replace(session, owner_principal_id="new-owner") if authorized else session
 
         class Authorization(TenantAuthorizationPolicy):
             async def authorize(self, principal, action, resource):
+                nonlocal authorized
                 await super().authorize(principal, action, resource)
                 if action is AuthorizationAction.SESSION_READ:
-                    session = await sessions.get("session", tenant_id="tenant")
-                    await sessions.compare_and_swap(
-                        "session", tenant_id="tenant", expected_revision=session.revision,
-                        next_record=replace(session, owner_principal_id="new-owner", revision=session.revision + 1),
-                    )
+                    authorized = True
 
-        with pytest.raises(AIError) as error:
-            await _reader(state, authorization=Authorization()).execution_detail(
-                "execution", session_id="session", principal=_OWNER,
-            )
+        # Native session writes reject owner changes; model an inconsistent reader.
+        with monkeypatch.context() as patch:
+            patch.setattr(sessions, "get", get)
+            with pytest.raises(AIError) as error:
+                await _reader(state, authorization=Authorization()).execution_detail(
+                    "execution", session_id="session", principal=_OWNER,
+                )
         assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
     finally:
         await state.close()
@@ -296,6 +304,7 @@ async def test_execution_detail_never_returns_a_stale_terminal_record(
     try:
         original = await _seed(state)
         repository = state.execution.executions
+        header = await repository.get_header("execution", tenant_id="tenant")
         if source == "changed_output":
             fresh = replace(original, result=replace(
                 original.result, output=StoredPayload.inline_json({"source": "fresh"}),
@@ -311,8 +320,15 @@ async def test_execution_detail_never_returns_a_stale_terminal_record(
             assert (execution_id, tenant_id) == ("execution", "tenant")
             return fresh if active_state_transaction(repository.state_store) is not None else original
 
+        async def get_owned_header(execution_id, *, tenant_id):
+            assert (execution_id, tenant_id) == ("execution", "tenant")
+            return replace(header, owner_principal_id=original.principal_id)
+
         with monkeypatch.context() as patch:
             patch.setattr(repository, "get", get)
+            if source == "different_owner":
+                # Custom execution headers can impose an owner beyond tenant scope.
+                patch.setattr(repository, "get_header", get_owned_header)
             reader = _reader(state)
             if source in {"different_owner", "missing"}:
                 with pytest.raises(AIError) as error:
