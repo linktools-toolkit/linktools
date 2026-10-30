@@ -10,7 +10,10 @@ from dataclasses import FrozenInstanceError, replace
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.storage import InMemoryCacheBackend, TurnCoordination, TurnCoordinationBackend
+from linktools.ai.storage import (
+    InMemoryCacheBackend, TurnAdmissionReader, TurnCoordination,
+    TurnCoordinationBackend, TurnSessionReader,
+)
 from linktools.ai.storage import _cache as cache_module
 
 
@@ -167,6 +170,7 @@ async def test_stale_owner_and_old_execution_cannot_affect_new_generation(
     assert not await cache.release_turn(old.lease)
     assert not await cache.cancel_turn("tenant:runtime", "execution")
     assert await cache.read_turn("tenant:runtime", "new-execution") == replace(new, lease=None)
+    assert await cache.read_turn_by_session("tenant:runtime", "session") == replace(new, lease=None)
     for forged in (
         replace(new.lease, token=old.lease.token),
         replace(new.lease, fence=old.lease.fence),
@@ -175,6 +179,7 @@ async def test_stale_owner_and_old_execution_cannot_affect_new_generation(
         assert not await cache.release_turn(forged)
     assert await cache.release_turn(new.lease)
     assert await cache.read_turn("tenant:runtime", "new-execution") is None
+    assert await cache.read_turn_by_session("tenant:runtime", "session") is None
 
 
 @pytest.mark.asyncio
@@ -185,6 +190,7 @@ async def test_cache_capacity_pressure_cannot_evict_live_turn_ownership() -> Non
     assert await cache.append("writes", "id", "key", b"y", wait=False)
     assert owner is not None
     assert await cache.read_turn("tenant:runtime", "execution") == replace(owner, lease=None)
+    assert await cache.read_turn_by_session("tenant:runtime", "session") == replace(owner, lease=None)
     assert await _claim(cache, request_key="other", execution_id="other") is None
     independent = InMemoryCacheBackend(max_bytes=0, max_size=0)
     assert await _claim(independent) is not None
@@ -257,3 +263,78 @@ async def test_request_lookup_rejects_invalid_identity(scope: str, request_key: 
     cache = InMemoryCacheBackend(max_bytes=1)
     with pytest.raises(ValueError):
         await cache.read_turn_by_request(scope, request_key)
+
+
+@pytest.mark.asyncio
+async def test_session_lookup_is_scoped_token_free_and_never_renews(clock: list[float]) -> None:
+    cache = InMemoryCacheBackend(max_bytes=1)
+    assert isinstance(cache, TurnSessionReader)
+    owner = await _claim(cache)
+    assert owner is not None and owner.lease is not None
+    clock[0] = 109.0
+    assert await cache.read_turn_by_session("tenant:runtime", "session") == replace(owner, lease=None)
+    assert await cache.read_turn_by_session("other", "session") is None
+    assert await cache.read_turn_by_session("tenant:runtime", "other") is None
+    assert await cache.cancel_turn("tenant:runtime", "execution")
+    assert await cache.read_turn_by_session("tenant:runtime", "session") == replace(
+        owner, lease=None, cancel_requested=True,
+    )
+    clock[0] = 110.0
+    assert await cache.read_turn_by_session("tenant:runtime", "session") is None
+    assert await cache.read_turn("tenant:runtime", "execution") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope,session_key", (("", "session"), ("scope", ""), (None, "session"), ("scope", 1)))
+async def test_session_lookup_rejects_invalid_identity(scope: str, session_key: str) -> None:
+    cache = InMemoryCacheBackend(max_bytes=1)
+    with pytest.raises(ValueError):
+        await cache.read_turn_by_session(scope, session_key)
+
+
+@pytest.mark.asyncio
+async def test_session_lookup_capability_does_not_change_legacy_coordination_or_request_readers() -> None:
+    cache = InMemoryCacheBackend(max_bytes=1)
+
+    class LegacyBackend:
+        claim_turn = cache.claim_turn
+        read_turn = cache.read_turn
+        renew_turn = cache.renew_turn
+        release_turn = cache.release_turn
+        cancel_turn = cache.cancel_turn
+        read_turn_by_request = cache.read_turn_by_request
+
+    class RequestReader:
+        read_turn_by_request = cache.read_turn_by_request
+
+    reader = RequestReader()
+    assert isinstance(reader, TurnAdmissionReader)
+    assert not isinstance(reader, TurnSessionReader)
+    assert not isinstance(reader, TurnCoordinationBackend)
+    backend = LegacyBackend()
+    assert isinstance(backend, TurnCoordinationBackend)
+    assert isinstance(backend, TurnAdmissionReader)
+    assert not isinstance(backend, TurnSessionReader)
+    owner = await _claim(backend)
+    assert owner is not None
+    assert await reader.read_turn_by_request("tenant:runtime", "request") == replace(owner, lease=None)
+    assert await backend.read_turn_by_request("tenant:runtime", "request") == replace(owner, lease=None)
+    assert await backend.read_turn("tenant:runtime", "execution") == replace(owner, lease=None)
+
+
+@pytest.mark.asyncio
+async def test_session_lookup_does_not_turn_backend_failure_into_absence(monkeypatch: pytest.MonkeyPatch) -> None:
+    cache = InMemoryCacheBackend(max_bytes=1)
+    owner = await _claim(cache)
+    assert owner is not None
+    failure = AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+    def unavailable_clock() -> float:
+        raise failure
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cache_module, "monotonic", unavailable_clock)
+        with pytest.raises(AIError) as raised:
+            await cache.read_turn_by_session("tenant:runtime", "session")
+        assert raised.value is failure
+    assert await cache.read_turn_by_session("tenant:runtime", "session") == replace(owner, lease=None)

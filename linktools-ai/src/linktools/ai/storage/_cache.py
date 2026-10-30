@@ -345,6 +345,16 @@ class InMemoryCacheBackend:
             key = self._turn_requests.get((scope, request_key))
             return None if key is None else self._turns[key].coordination()
 
+    async def read_turn_by_session(self, scope: str, session_key: str) -> "TurnCoordination | None":
+        """Read the authoritative session claim without extending its lifetime."""
+        _require_turn_text(scope, "scope")
+        _require_turn_text(session_key, "session_key")
+        async with self._lock:
+            self._expire_turns(monotonic())
+            key = json.dumps(("turn", scope, session_key), separators=(",", ":"))
+            turn = self._turns.get(key)
+            return None if turn is None else turn.coordination()
+
     async def renew_turn(
         self, lease: Lease, *, lease_seconds: float,
     ) -> "TurnCoordination | None":
