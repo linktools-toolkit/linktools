@@ -734,6 +734,46 @@ the selected reader, so a consumer must not promote a partial view to complete
 history. `runtime.executions.capture_input(...)` captures Agent-owned execution inputs;
 `engine.inputs` is the public capture and replay facade for a `TaskEngine`.
 
+### Read an execution within a session
+
+```python
+detail = await history.execution_detail(
+    execution_id, session_id=session_id, principal=principal,
+)
+status = detail.execution.status
+if detail.result is not None:
+    output = detail.result.output
+```
+
+`execution_detail` checks both session and execution read authorization on every
+call and rejects an execution bound to a different session. It does not require
+the execution to remain the session's active turn. Missing or inaccessible
+resources and mismatched bindings all raise `AUTHORIZATION_DENIED`; callers
+must not retry as the resource owner.
+
+Ordinary metadata retains the existing bounded read-cache semantics. Built-in
+record caches expire observations within three seconds; a remote metadata
+change can remain invisible within that window. This is not an instantaneous
+session-ownership or policy-revocation guarantee. Authorization callbacks still
+run on each call. An observed terminal execution is reread from its authoritative
+source, and its owner is checked again before returning terminal data. If that
+read no longer finds the execution, the cached terminal value is not returned.
+
+With built-in repositories, `ExecutionDetail` uses that one execution record for
+terminal metadata and its result. Custom repositories retain their authoritative
+`get_result` operation; the method does not impose a cross-read snapshot on
+that owner. `result` is present for `SUCCEEDED`, `FAILED` and `CANCELLED`; it is
+`None` for other states, including `RECOVERY_REQUIRED`, whose diagnostic
+metadata remains in `execution`. Terminal integrity and retained-turn checks
+are the same as `History.result()`. Usage aggregation is not performed:
+`execution.usage` is `None`, while a terminal result includes its recorded usage.
+
+This is a read-only projection, not a reconciliation, admission, lease renewal
+or terminal-handoff operation. It does not promise a single physical query for
+every repository or inline large object results. Existing `inspect_execution`
+remains the metadata-only operation; `result` retains its not-ready and
+recovery-required errors.
+
 ### Recover an accepted request after a lost response
 
 When the host builds input from mutable context, rebuilding that input before

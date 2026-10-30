@@ -131,6 +131,19 @@ class ExecutionInfo:
         object.__setattr__(self, "safe_error_details", dict(self.safe_error_details))
 
 
+@dataclass(frozen=True, slots=True)
+class ExecutionDetail:
+    """One session-bound execution observation and its committed terminal result.
+
+    ``result`` is present exactly for succeeded, failed and cancelled executions.
+    Other states, including recovery-required, retain their metadata without a
+    result. Usage aggregation is not performed; terminal usage is in ``result``.
+    """
+
+    execution: ExecutionInfo
+    result: ExecutionResult | None
+
+
 def _merge_usage_summaries(
     values: "list[UsageSummary]",
     *,
@@ -364,6 +377,57 @@ class History:
         principal: Principal,
     ) -> ExecutionResult:
         record = await self._authorized_record(execution_id, principal, committed=True)
+        return await self._result_from_record(record, principal=principal)
+
+    async def execution_detail(
+        self,
+        execution_id: str,
+        *,
+        session_id: str,
+        principal: Principal,
+    ) -> ExecutionDetail:
+        """Read state and any terminal result after both resource authorizations.
+
+        The requested session must be readable and contain this execution.
+        Missing, forbidden and differently bound resources are all denied.
+        Ordinary metadata retains the existing bounded cache semantics, with
+        both authorization policies checked on every call. Observed terminal
+        executions are reread from their source before constructing a result.
+        Built-in repositories project state and result from that same record.
+        This read does not reconcile, renew, publish or consume a handoff.
+        """
+        sessions, authorization = self._require_session_reader()
+        header = await sessions.get_header(session_id, tenant_id=principal.tenant_id)
+        if (header is None or header.kind is not ResourceKind.SESSION
+                or header.id != session_id or header.tenant_id != principal.tenant_id):
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await authorization.authorize(principal, AuthorizationAction.SESSION_READ, header)
+        record = await self._authorized_record(execution_id, principal, refresh_terminal=True)
+        session = await sessions.get(session_id, tenant_id=principal.tenant_id)
+        if (
+            session is None
+            or session.session_id != session_id
+            or session.owner_principal_id != header.owner_principal_id
+            or record.session_id != session_id
+        ):
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        result = (
+            await self._result_from_record(record, principal=principal)
+            if record.status in {
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+            }
+            else None
+        )
+        return ExecutionDetail(_project_execution_info(record), result)
+
+    async def _result_from_record(
+        self,
+        record: ExecutionRecord,
+        *,
+        principal: Principal,
+    ) -> ExecutionResult:
         if record.status is ExecutionStatus.RECOVERY_REQUIRED:
             if record.error_code is None or record.error_diagnostics is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -381,7 +445,7 @@ class History:
 
         executions, _authorization = self._require_direct_reader()
         stored = (record.result if type(executions) is ExecutionRepositoryImpl else
-                  await executions.get_result(execution_id, tenant_id=principal.tenant_id))
+                  await executions.get_result(record.execution_id, tenant_id=principal.tenant_id))
         if stored is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if not record.retention_closed and record.conversation and record.session_id is not None:
@@ -1490,7 +1554,7 @@ class History:
         self,
         execution_id: str,
         principal: Principal,
-        *, committed: bool = False,
+        *, committed: bool = False, refresh_terminal: bool = False,
     ) -> ExecutionRecord:
         executions, authorization = self._require_direct_reader()
         pending = (None if self._pending_execution is None else
@@ -1506,13 +1570,21 @@ class History:
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await authorization.authorize(principal, AuthorizationAction.EXECUTION_READ, header)
+        source_read = committed or pending is not None and isinstance(executions, ExecutionRepositoryImpl)
         record = (
             await executions.state_store.read(
                 lambda _transaction: executions.get(execution_id, tenant_id=principal.tenant_id)
             )
-            if committed or pending is not None and isinstance(executions, ExecutionRepositoryImpl)
+            if source_read
             else await executions.get(execution_id, tenant_id=principal.tenant_id)
         )
+        if (refresh_terminal and not source_read and record is not None
+                and record.status in {
+                    ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+                }):
+            record = await executions.state_store.read(
+                lambda _transaction: executions.get(execution_id, tenant_id=principal.tenant_id)
+            )
         if record is not None:
             if header.owner_principal_id is not None and record.principal_id != header.owner_principal_id:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
@@ -1622,4 +1694,4 @@ def _terminal_error_code(record: ExecutionRecord) -> str:
     return code.value
 
 
-__all__ = ["ExecutionInfo", "History"]
+__all__ = ["ExecutionInfo", "ExecutionDetail", "History"]
