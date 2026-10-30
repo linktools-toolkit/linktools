@@ -230,7 +230,7 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
 
 
 @pytest.mark.parametrize("persisted", (False, True), ids=("domain", "persisted"))
-def test_execution_wire_requires_admitted_persistence_flags(persisted: bool) -> None:
+def test_execution_wire_uses_declared_persistence_defaults(persisted: bool) -> None:
     record = _execution()
     assert not record.restart_checkpoints and not record.durable_trace
     encode = _encode_persisted_domain if persisted else encode_domain
@@ -246,9 +246,7 @@ def test_execution_wire_requires_admitted_persistence_flags(persisted: bool) -> 
     assert decode(payload) == record
     for omitted in (("restart_checkpoints",), ("durable_trace",), ("restart_checkpoints", "durable_trace")):
         fields = {name: value for name, value in payload["fields"].items() if name not in omitted}
-        with pytest.raises(AIError) as missing:
-            decode({**payload, "fields": fields})
-        assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert decode({**payload, "fields": fields}) == record
 
 
 @pytest.mark.asyncio
