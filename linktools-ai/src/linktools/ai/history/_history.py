@@ -953,6 +953,46 @@ class History:
         )
         return Page(tuple(values), next_cursor)
 
+    async def lookup_session(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+    ) -> SessionView | None:
+        """Look up a known ID within the caller's owned-session discovery scope.
+
+        None means absent or outside that scope, not globally nonexistent.
+        Scope and resource policy failures remain errors. Like session listing,
+        this metadata observation retains the existing bounded cache semantics;
+        it is not an authoritative inactivity or admission receipt.
+        """
+        sessions, authorization = self._require_session_reader()
+        if principal.tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await authorization.authorize(
+            principal, AuthorizationAction.SESSION_READ,
+            ResourceRef(ResourceKind.SESSION, "list", principal.tenant_id),
+        )
+        record = await sessions.get(session_id, tenant_id=principal.tenant_id)
+        if record is None:
+            return None
+        if record.session_id != session_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if record.owner_principal_id != principal.principal_id:
+            return None
+        header = ResourceRef(
+            ResourceKind.SESSION, session_id, principal.tenant_id, record.owner_principal_id,
+        )
+        await authorization.authorize(principal, AuthorizationAction.SESSION_READ, header)
+        current = await sessions.get(session_id, tenant_id=principal.tenant_id)
+        if current is None:
+            return None
+        if current.session_id != session_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if current.owner_principal_id != header.owner_principal_id:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        return await self._observed_session_view(current, principal)
+
     async def messages(
         self,
         session_id: str,

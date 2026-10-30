@@ -734,6 +734,28 @@ the selected reader, so a consumer must not promote a partial view to complete
 history. `runtime.executions.capture_input(...)` captures Agent-owned execution inputs;
 `engine.inputs` is the public capture and replay facade for a `TaskEngine`.
 
+### Look up a known session
+
+```python
+session = await history.lookup_session(session_id, principal=principal)
+```
+
+`lookup_session` uses the same tenant and owned-session discovery scope as
+`list_sessions`, without enumerating pages. It first checks the existing list
+permission, then checks the actual resource's read permission if the ID belongs
+to the caller's scope. `None` means absent or outside that scope; it does **not**
+establish that the ID is globally unused. A policy denial, dependency failure or
+integrity error remains an error, never an empty result. The method does not
+guess an owner or retry as another principal.
+
+The returned `SessionView` retains the existing bounded metadata-cache and
+pending-observation semantics. Built-in record caches can lag remote changes by
+up to three seconds; authorization still runs on every call. This is not a
+reservation, an instantaneous revocation check, or proof that no active or
+pending execution exists. Keep admission and inactivity decisions on their
+authoritative control paths. Existing `inspect_session` still denies missing
+resources rather than returning an optional value.
+
 ### Read an execution within a session
 
 ```python
