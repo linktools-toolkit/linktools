@@ -1078,7 +1078,7 @@ class TaskNodeExecutor(Generic[AppT]):
             for node in graph_state.node_states:
                 if node.execution_id is not None:
                     try:
-                        await self._execution_reads.release_dependency_hold(
+                        await self._execution_reads.release_settled_dependency_hold(
                             node.execution_id, tenant_id=tenant_id,
                             hold_id=f"task:{graph_state.graph_id}:{node.node_id}",
                         )

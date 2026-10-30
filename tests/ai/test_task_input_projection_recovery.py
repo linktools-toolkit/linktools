@@ -5,18 +5,20 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from pydantic_ai.models.test import TestModel
 
-from linktools.ai.core import TaskStatus
+from linktools.ai.core import ExecutionStatus, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.inputs import AgentTaskContextError, AgentTaskInputBuilder, AgentTaskInputContext
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.task import Task, TaskGraph, TaskNode
 from linktools.ai.task.engine import TaskEngine
+from linktools.ai.task.engine._reads import TaskExecutionReads
 
 from ._runtime_test_helpers import model_features
 from .test_task_mixed_node_reliability import _TaskTestModels
@@ -286,3 +288,68 @@ async def test_uncertain_consumer_start_reuses_prepared_prompt(
             accepted, principal=runtime.default_principal,
         )
         assert len(interactions.items) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ("closed", "open", "held", "nonterminal", "producer-error", "empty-ports-error"))
+async def test_terminal_hold_cleanup_only_skips_an_already_settled_missing_producer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str,
+) -> None:
+    async def build(context: AgentTaskInputContext) -> str:
+        return "unused"
+
+    async with _environment(tmp_path / "cleanup.sqlite", build) as (persistence, runtime, engine, a, b):
+        source = await runtime.agents.get().start("source", idempotency_key="source")
+        await source.wait(timeout_seconds=10)
+        tasks = engine._execution_service
+        record = await tasks.load_source_execution(source.execution_id, tenant_id=runtime.tenant_id)
+        assert record is not None and record.retention_closed
+        assert record.dependency_hold_ids == ()
+        hold_id = "task:finished:node"
+        if case == "open":
+            record = replace(record, retention_closed=False)
+        elif case == "held":
+            record = replace(record, dependency_hold_ids=(hold_id,))
+        elif case == "nonterminal":
+            record = replace(record, status=ExecutionStatus.STARTED, result=None)
+        port = a.agent_execution
+        assert port is not None
+        ports = {} if case == "empty-ports-error" else {"another-execution": port}
+        if case == "producer-error":
+            ports[source.execution_id] = port
+        reads = TaskExecutionReads(tasks, ports)
+        source_reads = []
+
+        async def load_source(execution_id: str, *, tenant_id: str):
+            assert (execution_id, tenant_id) == (source.execution_id, runtime.tenant_id)
+            source_reads.append(execution_id)
+            return record
+
+        monkeypatch.setattr(tasks, "load_source_execution", load_source)
+        failure = AIError(ErrorCode.BINDING_NOT_REGISTERED)
+
+        async def broken_release(*args, **kwargs) -> None:
+            raise failure
+
+        if case == "producer-error":
+            monkeypatch.setattr(port.service, "release_dependency_hold", broken_release)
+        elif case == "empty-ports-error":
+            monkeypatch.setattr(tasks, "release_dependency_hold", broken_release)
+        if case == "closed":
+            await reads.release_settled_dependency_hold(source.execution_id, tenant_id=runtime.tenant_id, hold_id=hold_id)
+            await reads.release_settled_dependency_hold(source.execution_id, tenant_id=runtime.tenant_id, hold_id=hold_id)
+            assert len(source_reads) >= 4
+            # Settled cleanup must not turn into a general missing-producer fallback.
+            with pytest.raises(AIError) as ordinary_release:
+                await reads.release_dependency_hold(source.execution_id, tenant_id=runtime.tenant_id, hold_id=hold_id)
+            assert ordinary_release.value.code is ErrorCode.BINDING_NOT_REGISTERED
+            with pytest.raises(AIError) as result_read:
+                await reads.result(source.execution_id, principal=runtime.default_principal)
+            assert result_read.value.code is ErrorCode.BINDING_NOT_REGISTERED
+        else:
+            with pytest.raises(AIError) as rejected:
+                await reads.release_settled_dependency_hold(source.execution_id, tenant_id=runtime.tenant_id, hold_id=hold_id)
+            assert rejected.value.code is ErrorCode.BINDING_NOT_REGISTERED
+            if case in {"producer-error", "empty-ports-error"}:
+                assert rejected.value is failure
+                assert source_reads == []

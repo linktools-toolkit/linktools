@@ -188,7 +188,7 @@ async def test_terminal_graph_own_hold_cleanup_is_idempotent_without_hiding_othe
                 if failure is not None:
                     raise AIError(failure)
 
-            monkeypatch.setattr(executor._execution_reads, "release_dependency_hold", release)
+            monkeypatch.setattr(executor._execution_reads, "release_settled_dependency_hold", release)
             state = _state(TaskStatus.SUCCEEDED)
             if failure in {None, ErrorCode.STORAGE_NOT_FOUND}:
                 await executor.release_graph_dependencies(state, tenant_id="tenant")

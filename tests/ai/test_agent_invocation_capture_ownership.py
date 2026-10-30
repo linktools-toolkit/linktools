@@ -22,7 +22,7 @@ from linktools.ai.inputs import AgentTaskInput, CaptureInputRequest
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.task import TaskGraph, TaskNode
+from linktools.ai.task import TaskGraph, TaskGraphState, TaskNode, TaskNodeView
 from ._runtime_test_helpers import _RuntimeUsageModelBinding, _UsageFunctionModel
 
 
@@ -125,7 +125,7 @@ async def test_terminal_capture_failure_quiescence_finishes_dependency_hold_rele
             quiesce_entered, quiesce_allowed = asyncio.Event(), asyncio.Event()
             cancel_requested, quiesced = asyncio.Event(), asyncio.Event()
             launcher = engine._launcher
-            original_release = launcher._release_execution_hold
+            original_release = runtime._execution_service.release_dependency_hold
             original_quiesce = launcher._quiesce_node_owned
 
             async def fail_invocation(key: str, *args: object, **kwargs: object) -> object:
@@ -160,14 +160,18 @@ async def test_terminal_capture_failure_quiescence_finishes_dependency_hold_rele
                     quiesced.set()
 
             monkeypatch.setattr(objects, "put", fail_invocation)
-            monkeypatch.setattr(launcher, "_release_execution_hold", pause_release)
+            # Fault the shared retention owner, including terminal-graph
+            # compensation, not just the launcher's first release attempt.
+            monkeypatch.setattr(runtime._execution_service, "release_dependency_hold", pause_release)
             monkeypatch.setattr(launcher, "_quiesce_node_owned", pause_quiesce)
             run = await engine.start(TaskGraph("source", (
                 TaskNode("agent", task=engine.definitions[0], input=AgentTaskInput("question")),
             )), principal=principal, idempotency_key="source")
             try:
                 await asyncio.wait_for(quiesce_entered.wait(), 5)
-                assert (await run.wait(timeout_seconds=5)).result.wait_status is TaskStatus.FAILED
+                # Observe terminal metadata without triggering another cleanup
+                # consumer while all release attempts are held at the barrier.
+                assert (await run.state()).wait_status is TaskStatus.FAILED
                 quiesce_allowed.set()
                 await asyncio.wait_for(cancel_requested.wait(), 5)
                 release_allowed.set()
@@ -215,13 +219,22 @@ async def test_dependency_hold_release_preserves_failure_and_repeated_cancellati
         if release_fails:
             raise failure
 
+    class Repository:
+        async def graph_state(self, graph_id: str, *, tenant_id: str) -> TaskGraphState:
+            assert (graph_id, tenant_id) == ("graph", "tenant")
+            node = TaskNodeView("graph", "node", (), TaskStatus.SUCCEEDED, None, 1, None,
+                                "a" * 64, None, None, execution_id="execution")
+            return TaskGraphState("graph", TaskStatus.SUCCEEDED, (TaskNode("node"),), (node,))
+
     launcher = object.__new__(LocalTaskGraphLauncher)
+    launcher._repository = Repository()
     launcher._hold_cleanup_failure = None
     launcher._release_execution_hold = release
     cleanup = asyncio.create_task(launcher._finish_execution_hold(
         "execution", tenant_id="tenant", hold_id="hold",
+        graph_id="graph", node_id="node", expected_fence=1,
     ))
-    await entered.wait()
+    await asyncio.wait_for(entered.wait(), 5)
     try:
         for _ in range(2):
             cleanup.cancel()
