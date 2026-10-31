@@ -701,7 +701,8 @@ async def test_end_recovery_required_execution_uses_durable_cancel_and_replays_r
 
 
 @pytest.mark.asyncio
-async def test_web_memory_uses_runtime_configuration_and_rejects_per_message_scope() -> None:
+@pytest.mark.parametrize("extra", ({}, {"memory_scope": {"application": "value"}}))
+async def test_web_memory_uses_runtime_configuration(extra: dict[str, object]) -> None:
     from linktools.ai.capability import MemoryCapability
 
     features = model_features(RuntimeUsageModels())
@@ -711,12 +712,7 @@ async def test_web_memory_uses_runtime_configuration_and_rejects_per_message_sco
         async with client(create_app(runtime=runtime)) as http:
             config = await http.get("/api/config")
             assert "memory_scope" not in config.json()
-            payload = {"prompt": "hello", "request_id": "message"}
-            for scope in (None, "default", "other"):
-                rejected = await http.post("/api/session/messages?session_id=session",
-                    json={**payload, "memory_scope": scope}, headers=_HEADERS)
-                assert rejected.status_code == 400
-                assert rejected.json()["code"] == "REQUEST_FIELD_INVALID"
+            payload = {"prompt": "hello", "request_id": "message", **extra}
             accepted = await http.post("/api/session/messages?session_id=session", json=payload, headers=_HEADERS)
             assert accepted.status_code == 202, accepted.text
             execution = await runtime.executions.get(accepted.json()["execution_id"])

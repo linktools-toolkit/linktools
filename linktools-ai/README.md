@@ -281,14 +281,13 @@ Memory is selected once through `MemoryCapability(scope="default")` in Runtime f
 not through Agent, Session or Task invocation arguments. Omitting the declaration disables
 memory for ordinary SDK executions; local CLI commands register the default declaration.
 Admitted executions retain their scope across recovery, while imported input contexts
-use isolated captured memory. Existing durable Task inputs retain their recorded memory
-scope (including disabled memory) on recovery; new Task authoring cannot override the
-capability through an input field.
+use isolated captured memory. Task inputs do not configure memory; new executions use
+the Runtime declaration, while recovery retains the execution's admitted scope.
 
 A Task-bound execution retains its result until the Task node is durably settled,
-not merely until an observer finishes or shuts down. Recovery of older, already-closed
-executions can settle an available authorized terminal result; missing or invalid data
-requires recovery instead of rerunning the Agent. Terminal graph access through wait,
+not merely until an observer finishes or shuts down. Recovery must reacquire the hold
+before consuming its existing execution result; it cannot reopen closed retention or
+rerun the Agent to replace a missing result. Terminal graph access through wait,
 recovery or cancellation also completes any outstanding hold release; this is not a
 background garbage-collection guarantee for graphs that are never accessed again.
 

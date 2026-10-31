@@ -1551,27 +1551,9 @@ class LocalTaskGraphLauncher:
         graph_id = request.graph_id
         tenant_id = request.principal.tenant_id
         hold_id = f"task:{graph_id}:{node.node_id}"
-        try:
-            await self._acquire_execution_hold(
-                execution_id, tenant_id=tenant_id, hold_id=hold_id,
-            )
-        except AIError as error:
-            if (error.code is not ErrorCode.STORAGE_CONFLICT
-                    or error.safe_details.get("reason") != "execution_retention_closed"):
-                raise
-            state = await self._repository.graph_state(graph_id, tenant_id=tenant_id)
-            current = next((item for item in state.node_states if item.node_id == node.node_id), None) if state is not None else None
-            if current is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if current.fence != expected_fence or current.execution_id != execution_id:
-                raise AIError(ErrorCode.TASK_FENCE_STALE)
-            # Historical producers may have consumed their result before the Task
-            # committed. Read only that terminal result; never reopen retention.
-            await self._settle_bound_node(
-                run, node, execution_id, expected_fence,
-                wait_for_completion=False, require_terminal_result=True,
-            )
-            return
+        await self._acquire_execution_hold(
+            execution_id, tenant_id=tenant_id, hold_id=hold_id,
+        )
         try:
             await self._settle_bound_node(
                 run,
@@ -1595,7 +1577,6 @@ class LocalTaskGraphLauncher:
         expected_fence: int,
         *,
         wait_for_completion: bool = True,
-        require_terminal_result: bool = False,
     ) -> None:
         request = run.request
         graph_id = request.graph_id
@@ -1622,9 +1603,6 @@ class LocalTaskGraphLauncher:
                     execution_id,
                 )
                 if completion is None:
-                    if require_terminal_result:
-                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                                      safe_details={"phase": "closed_execution_result"})
                     return
         except asyncio.CancelledError:
             raise

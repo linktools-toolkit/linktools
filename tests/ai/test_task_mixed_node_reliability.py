@@ -1656,7 +1656,6 @@ def test_agent_task_input_authoring_defaults_and_durable_required_fields() -> No
         ("parameters", []),
         ("files", "file.txt"),
         ("session_id", 1),
-        ("memory_scope", 1),
         ("planning", None),
         ("thinking", 1),
     ),
@@ -1674,22 +1673,16 @@ def test_agent_task_input_durable_known_fields_fail_closed(
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-@pytest.mark.parametrize("scope", (None, "default", "other", 1))
-def test_agent_task_input_rejects_per_call_memory_scope(scope: JsonValue) -> None:
-    with pytest.raises(AIError) as authoring:
-        AgentTaskInput.from_authoring({"prompt": "prompt", "memory_scope": scope})
-    assert authoring.value.code is ErrorCode.REQUEST_FIELD_INVALID
-    durable = dict(AgentTaskInput("prompt", planning=False))
-    durable["memory_scope"] = scope
-    if scope == 1:
-        with pytest.raises(AIError) as stored:
-            AgentTaskInput.from_mapping(durable)
-        assert stored.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    else:
-        restored = AgentTaskInput.from_mapping(durable)
-        assert dict(restored) == durable
-        assert dict(restored.execution_payload()) == durable
-        assert restored["memory_scope"] == scope
+@pytest.mark.parametrize("name", ("metadata", "memory_scope"))
+def test_agent_task_input_extensions_stay_out_of_execution_payload(name: str) -> None:
+    authored = AgentTaskInput.from_authoring({
+        "prompt": "prompt", "planning": False, "thinking": False,
+        name: {"application": "value"},
+    })
+    restored = AgentTaskInput.from_mapping(dict(authored))
+    assert dict(restored) == dict(authored)
+    assert restored[name] == {"application": "value"}
+    assert name not in restored.execution_payload()
 
 
 @pytest.mark.parametrize("thinking", (None, False, "max"))
@@ -1799,10 +1792,8 @@ async def test_recovery_preflight_preserves_unknown_agent_input_version(
         assert result.wait_status is TaskStatus.SUCCEEDED
 
 
-@pytest.mark.parametrize("legacy_scope", (None, "legacy-memory"))
-def test_legacy_task_memory_preserves_prepared_input_and_request_digests(legacy_scope: str | None) -> None:
+def test_agent_task_input_uses_current_request_digest_projection() -> None:
     original = dict(AgentTaskInput("prompt", planning=False, thinking=False))
-    original["memory_scope"] = legacy_scope
     restored = AgentTaskInput.from_mapping(original)
     principal = Principal("principal", "tenant")
     invocation = TaskNodeInvocation(
@@ -1820,7 +1811,7 @@ def test_legacy_task_memory_preserves_prepared_input_and_request_digests(legacy_
         "task_revision": 1, "agent_binding_digest": "a" * 64,
         "principal": principal_identity_payload(principal), "input_identity": input_identity,
         "prompt": original["prompt"], "files": [], "final_input_digest": "b" * 64,
-        "session_id": None, "memory_scope": legacy_scope, "planning": False,
+        "session_id": None, "planning": False,
         "thinking": False, "output_contract": None,
     })
     assert _agent_task_request_identity(invocation, task_input=restored, prompt="prompt",
@@ -1829,12 +1820,13 @@ def test_legacy_task_memory_preserves_prepared_input_and_request_digests(legacy_
                                        binding_digest="a" * 64) == expected
 
 
-def test_agent_task_input_identity_excludes_additive_fields() -> None:
+@pytest.mark.parametrize("name", ("metadata", "memory_scope"))
+def test_agent_task_input_identity_excludes_additive_fields(name: str) -> None:
     authored = dict(
         AgentTaskInput("prompt", planning=False, thinking=False)
     )
     plain = AgentTaskInput.from_mapping(authored)
-    authored["metadata"] = {"source": "host"}
+    authored[name] = {"source": "host"}
     extended = AgentTaskInput.from_mapping(authored)
     invocation = TaskNodeInvocation(
         TaskNode("node", task=TaskRef("example.agent", 1)),
@@ -4004,6 +3996,28 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
 
 
 @pytest.mark.asyncio
+async def test_task_input_extensions_do_not_override_runtime_memory() -> None:
+    features = model_features(_TaskTestModels())
+    features.capability(MemoryCapability(scope="host-memory"))
+    features.capability(ExecutionCapability(retain_history=True))
+    features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
+    async with Persistence.open("task-memory-owner", storage=PersistenceStorage.in_memory()) as persistence:
+        async with Runtime.attach(persistence=persistence, features=features) as runtime, task_engine_scope(runtime, persistence) as runtime_engine:
+            worker = Task.from_agent("memory.worker", runtime.agents.get())
+            run = await runtime_engine.with_definitions(worker).start(
+                TaskGraph("memory-owner", (TaskNode("agent", task=worker, input={
+                    "prompt": "return a result", "memory_scope": {"application": "value"},
+                }),)),
+                principal=runtime.default_principal, idempotency_key="memory-owner",
+            )
+            completed = (await run.wait(timeout_seconds=10)).result
+            assert completed.wait_status is TaskStatus.SUCCEEDED
+            execution = await run.execution("agent")
+            record = await persistence.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+            assert record is not None and record.memory_scope == "host-memory"
+
+
+@pytest.mark.asyncio
 async def test_task_execution_port_replay_rejects_changed_runtime_memory_scope() -> None:
     features = model_features(_TaskTestModels())
     features.capability(MemoryCapability(scope="task-memory"))
@@ -4037,17 +4051,17 @@ async def test_task_execution_port_replay_rejects_changed_runtime_memory_scope()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("legacy_scope", (None, "legacy-memory"))
-@pytest.mark.parametrize("phase", ("unknown-admission", "bound", "bound-closed"))
-async def test_legacy_task_memory_survives_unknown_and_bound_recovery(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_scope: str | None, phase: str,
+@pytest.mark.parametrize("admitted_scope", (None, "task-memory"))
+@pytest.mark.parametrize("phase", ("unknown-admission", "bound"))
+async def test_task_execution_scope_survives_unknown_and_bound_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, admitted_scope: str | None, phase: str,
 ) -> None:
     from linktools.ai.persistence import _filesystem
 
     entered = asyncio.Event()
     execution_ids: list[str] = []
     request_keys: list[str] = []
-    storage_root = tmp_path / "legacy-task"
+    storage_root = tmp_path / "task-recovery"
     model_calls: list[None] = []
     from contextlib import asynccontextmanager
 
@@ -4061,23 +4075,19 @@ async def test_legacy_task_memory_survives_unknown_and_bound_recovery(
 
     monkeypatch.setattr(TestModel, "request_stream", count_request_stream)
 
-    def features(scope: str) -> RuntimeFeatures:
+    def features(scope: str | None) -> RuntimeFeatures:
         result = model_features(_TaskTestModels())
         result.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
         result.capability(ExecutionCapability(retain_history=True))
-        result.capability(MemoryCapability(scope=scope))
+        if scope is not None:
+            result.capability(MemoryCapability(scope=scope))
         return result
 
-    original_normalize = AgentTaskRunner.normalize
     original_wait = AgentTaskRunner._wait_execution
 
-    def historical_writer(self, value):
-        # Reproduce the committed writer's field, including explicit disabled memory.
-        return {**original_normalize(self, value), "memory_scope": legacy_scope}
-
-    async with Persistence.open("legacy-task", storage=PersistenceStorage.filesystem(storage_root)) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features("first-host")) as runtime, task_engine_scope(runtime, persistence) as runtime_engine:
-            worker = Task.from_agent("legacy.worker", runtime.agents.get())
+    async with Persistence.open("task-recovery", storage=PersistenceStorage.filesystem(storage_root)) as persistence:
+        async with Runtime.attach(persistence=persistence, features=features(admitted_scope)) as runtime, task_engine_scope(runtime, persistence) as runtime_engine:
+            worker = Task.from_agent("recovery.worker", runtime.agents.get())
             port_type = type(worker.agent_execution)
             original_start = port_type.start
 
@@ -4093,34 +4103,23 @@ async def test_legacy_task_memory_survives_unknown_and_bound_recovery(
 
             async def paused_wait(self, invocation, execution, execution_id, budget_scope):
                 await execution.wait(timeout_seconds=10)
-                if phase == "bound-closed":
-                    # The old producer released this hold after handoff but before
-                    # Task settlement, allowing result consumption to close retention.
-                    await persistence.execution.executions.release_dependency_hold(
-                        execution_id, tenant_id=runtime.tenant_id,
-                        hold_id="task:legacy-graph:agent",
-                    )
-                    assert await persistence.execution.executions.close_retention(
-                        execution_id, tenant_id=runtime.tenant_id,
-                    )
                 entered.set()
                 await asyncio.Event().wait()
                 return await original_wait(self, invocation, execution, execution_id, budget_scope)
 
             with monkeypatch.context() as patch:
-                patch.setattr(AgentTaskRunner, "normalize", historical_writer)
                 patch.setattr(port_type, "start", paused_start)
                 if phase.startswith("bound"):
                     patch.setattr(AgentTaskRunner, "_wait_execution", paused_wait)
                 await runtime_engine.with_definitions(worker).start(
-                    TaskGraph("legacy-graph", (TaskNode("agent", task=worker, input=AgentTaskInput("legacy prompt")),)),
-                    principal=runtime.default_principal, idempotency_key="legacy-graph-start",
+                    TaskGraph("recovery-graph", (TaskNode("agent", task=worker, input=AgentTaskInput("recovery prompt")),)),
+                    principal=runtime.default_principal, idempotency_key="recovery-graph-start",
                 )
                 await asyncio.wait_for(entered.wait(), 10)
-                source = await persistence.task.tasks.graph_state("legacy-graph", tenant_id=runtime.tenant_id)
+                source = await persistence.task.tasks.graph_state("recovery-graph", tenant_id=runtime.tenant_id)
                 assert source is not None
                 source_input = dict(source.nodes[0].input)
-                assert source_input["memory_scope"] == legacy_scope
+                assert "memory_scope" not in source_input
                 state = source.node_states[0]
                 assert (state.execution_id is None) == (phase == "unknown-admission")
                 admitted_calls = len(model_calls)
@@ -4131,10 +4130,8 @@ async def test_legacy_task_memory_survives_unknown_and_bound_recovery(
                 )
                 assert persisted is not None
                 if phase == "bound":
-                    assert "task:legacy-graph:agent" in persisted.dependency_hold_ids
+                    assert "task:recovery-graph:agent" in persisted.dependency_hold_ids
                     assert persisted.retention_closed is False
-                elif phase == "bound-closed":
-                    assert persisted.retention_closed is True
 
     expired_at = datetime.now(timezone.utc) + timedelta(seconds=task_local._LEASE_SECONDS + 1)
 
@@ -4146,9 +4143,9 @@ async def test_legacy_task_memory_survives_unknown_and_bound_recovery(
     # Keep the live admission window intact, then expire only the abandoned lease.
     monkeypatch.setattr(task_local, "datetime", AfterLeaseExpiry)
     monkeypatch.setattr(_filesystem, "datetime", AfterLeaseExpiry)
-    async with Persistence.open("legacy-task", storage=PersistenceStorage.filesystem(storage_root)) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features("changed-host")) as runtime, task_engine_scope(runtime, persistence) as runtime_engine:
-            worker = Task.from_agent("legacy.worker", runtime.agents.get())
+    async with Persistence.open("task-recovery", storage=PersistenceStorage.filesystem(storage_root)) as persistence:
+        async with Runtime.attach(persistence=persistence, features=features(admitted_scope if phase == "unknown-admission" else "changed-host")) as runtime, task_engine_scope(runtime, persistence) as runtime_engine:
+            worker = Task.from_agent("recovery.worker", runtime.agents.get())
 
             async def replay_start(self, *args, **kwargs):
                 execution = await original_start(self, *args, **kwargs)
@@ -4160,7 +4157,7 @@ async def test_legacy_task_memory_survives_unknown_and_bound_recovery(
                 patch.setattr(port_type, "start", replay_start)
                 engine = runtime_engine.with_definitions(worker)
                 await engine.recover_pending()
-                run = await engine.get("legacy-graph")
+                run = await engine.get("recovery-graph")
                 completed = (await run.wait(timeout_seconds=10)).result
             assert completed.wait_status is TaskStatus.SUCCEEDED, completed.node_states
             assert len(execution_ids) == (2 if phase == "unknown-admission" else 1)
@@ -4168,10 +4165,10 @@ async def test_legacy_task_memory_survives_unknown_and_bound_recovery(
             assert len(set(request_keys)) == 1
             record = await persistence.execution.executions.get(execution_ids[0], tenant_id=runtime.tenant_id)
             assert record is not None
-            assert record.memory_scope == legacy_scope
+            assert record.memory_scope == admitted_scope
             assert len(model_calls) == admitted_calls
             assert record.dependency_hold_ids == ()
-            restored = await persistence.task.tasks.graph_state("legacy-graph", tenant_id=runtime.tenant_id)
+            restored = await persistence.task.tasks.graph_state("recovery-graph", tenant_id=runtime.tenant_id)
             assert restored is not None
             assert dict(restored.nodes[0].input) == source_input
             # A concurrent launcher finalizer can own the handoff cleanup. Check

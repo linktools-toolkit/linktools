@@ -14,7 +14,6 @@ from ..core import (
     canonical_sha256,
     normalize_json_value,
     normalize_thinking,
-    validate_memory_scope,
 )
 from ..errors import AIError, ErrorCode
 from ..task import TaskDependencyState, TaskNodeInvocation, TaskResultRef
@@ -158,12 +157,6 @@ class AgentTaskInput(Mapping[str, JsonValue]):
                 thinking=thinking,
             )
             normalized_values = dict(result._values)
-            if "memory_scope" in value:
-                legacy_scope = value["memory_scope"]
-                if legacy_scope is not None:
-                    if not isinstance(legacy_scope, str):
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    validate_memory_scope(legacy_scope)
             if stored_prompt is not None:
                 normalized_values["prompt"] = dict(prompt)
                 object.__setattr__(result, "_stored_prompt", stored_prompt)
@@ -187,8 +180,6 @@ class AgentTaskInput(Mapping[str, JsonValue]):
         if value is None or (isinstance(value, Mapping) and not value):
             return cls()
         if not isinstance(value, Mapping):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if "memory_scope" in value:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if ("kind" in value or "version" in value) and not _AGENT_TASK_INPUT_FIELD_SET.issubset(value):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -236,7 +227,6 @@ class AgentTaskInput(Mapping[str, JsonValue]):
                 key: self._values[key]
                 for key in (
                     *_AGENT_TASK_INPUT_FIELDS,
-                    *(key for key in ("memory_scope",) if key in self._values),
                     *(key for key in ("capture_context", "capture_files") if key in self._values),
                 )
             }

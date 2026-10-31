@@ -263,9 +263,6 @@ class _Console:
         if environ.debug:
             request.state.phase = f"session.{action}"
         if action == "messages":
-            if "memory_scope" in payload:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
-                              safe_details={"reason": "memory_scope_is_runtime_configuration"})
             execution = await session.start(
                 _text(payload, "prompt"), files=payload.get("files", ()), idempotency_key=request_id,
                 planning=payload.get("planning", False), thinking=payload.get("thinking"),

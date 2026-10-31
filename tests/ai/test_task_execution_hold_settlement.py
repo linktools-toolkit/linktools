@@ -132,44 +132,19 @@ async def test_cancelled_bound_observer_keeps_waiting_execution_hold() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason", (None, "unrelated_conflict"))
-async def test_general_hold_conflict_is_not_treated_as_closed_retention(reason: str | None) -> None:
-    error = AIError(ErrorCode.STORAGE_CONFLICT, safe_details={} if reason is None else {"reason": reason})
+async def test_hold_conflict_does_not_consume_or_reexecute_a_bound_result() -> None:
+    error = AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def acquire(*args, **kwargs) -> None:
         raise error
 
-    repository, runner = _Repository(_state(TaskStatus.WAITING)), _Runner()
+    repository = _Repository(_state(TaskStatus.WAITING))
+    runner = _Runner(TaskNodeRunResult("a" * 64, "execution"))
     launcher = LocalTaskGraphLauncher(repository, runner, owner="owner", acquire_execution_hold=acquire)
     with pytest.raises(AIError) as raised:
         await launcher._wait_bound_node(_run(), NODE, "execution", 1)
     assert raised.value is error
     assert runner.inspections == runner.waits == repository.completed == 0
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ("available", "missing", "denied", "not-terminal"))
-async def test_closed_retention_only_settles_existing_result(outcome: str) -> None:
-    result = TaskNodeRunResult("a" * 64, "execution") if outcome == "available" else None
-    if outcome in {"missing", "denied"}:
-        result = AIError(ErrorCode.STORAGE_NOT_FOUND if outcome == "missing" else ErrorCode.AUTHORIZATION_DENIED)
-    repository, runner = _Repository(_state(TaskStatus.WAITING)), _Runner(result)
-    releases = []
-
-    async def acquire(*args, **kwargs) -> None:
-        raise AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"reason": "execution_retention_closed"})
-
-    async def release(*args, **kwargs) -> None:
-        releases.append(args)
-
-    launcher = LocalTaskGraphLauncher(repository, runner, owner="owner",
-                                     acquire_execution_hold=acquire, release_execution_hold=release)
-    await launcher._wait_bound_node(_run(), NODE, "execution", 1)
-    assert runner.inspections == 1
-    assert runner.waits == 0
-    assert releases == []
-    assert repository.completed == int(outcome == "available")
-    assert repository.recovery == int(outcome != "available")
 
 
 @pytest.mark.asyncio
