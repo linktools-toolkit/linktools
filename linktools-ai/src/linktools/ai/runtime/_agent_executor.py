@@ -202,6 +202,7 @@ class _AgentRunScope:
     initial_attachments: tuple[Mapping[str, JsonValue], ...] = ()
     history_id: str | None = None
     memory_store: MemoryStore | None = None
+    memory_tool_names: tuple[str, ...] = ()
     plan_store_resolver: (
         Callable[[PydanticRunContext[object]], RuntimePlanStore] | None
     ) = None
@@ -969,6 +970,8 @@ async def _materialize_agent(
         if tool_class == "business":
             business_tools.append(tool)
             business_descriptors[candidate.id] = descriptor
+        elif tool_class == "memory":
+            continue
         elif tool_class in {
             "filesystem.read",
             "filesystem.write",
@@ -979,6 +982,8 @@ async def _materialize_agent(
         else:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
+    if any(tool.name in scope.memory_tool_names for tool in business_tools):
+        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
     capabilities: list[AbstractCapability[AgentContext[object]]] = [
         PydanticToolControlCapability(), RunCallbackScope(callbacks)
     ]
@@ -1189,7 +1194,7 @@ async def _materialize_agent(
         memory_scope=scope.context.memory_scope,
         run_store=scope.run_store,
         memory_store=scope.memory_store,
-        tool_policy=compiled_agent.tool_policy,
+        tool_policy=scope.memory_tool_names,
         compaction_policy=compaction_policy,
         limits=scope.limits,
         planning=scope.planning,

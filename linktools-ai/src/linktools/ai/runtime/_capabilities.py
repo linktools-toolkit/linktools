@@ -18,10 +18,9 @@ from ..persistence.capabilities import CapabilityPersistence
 from ._agent_run_recorder import AgentRunRecorder
 from ._budget import RunBudgetContext
 from ._compaction import ExternalModelRequestRecorder, CompactionCapability, CompactionPolicy
-from ..capability import ExecutionCapability
+from ..capability import ExecutionCapability, MemoryCapability
 from ._harness import HarnessPlanStoreAdapter
-from ._harness_memory import build_harness_memory, select_harness_memory_tools
-from ._harness_planning import build_harness_planning
+from ..capability.planning import HarnessPlanning
 from ._memory import MemoryStore
 from ..capability import CheckpointCapability, TraceCapability
 from ._plan import RuntimePlanStore
@@ -35,7 +34,6 @@ from ..persistence.runs import RuntimeAgentRunStore
 if TYPE_CHECKING:
     from ..observe.journal import ModelRequestJournal
 
-_MEMORY_CAPABILITY_ID = "linktools.ai.memory"
 _logger = environ.get_logger("ai.runtime.capabilities")
 
 
@@ -158,15 +156,11 @@ async def compose_platform_capabilities(
     for enabled, feature, service in zip(guarantees[1:], (CheckpointCapability, TraceCapability), (CheckpointService, TraceService)):
         if enabled and feature not in bound_types:
             capabilities.append(feature().bind(service(persistence)))
-    selected_memory = select_harness_memory_tools(tool_policy)
+    selected_memory = MemoryCapability.select_tools(tool_policy)
     if memory_scope is not None and selected_memory:
         if memory_store is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        memory_capability = build_harness_memory(
-            memory_store,
-            allow_tools=tool_policy,
-            capability_id=_MEMORY_CAPABILITY_ID,
-        )
+        memory_capability = MemoryCapability(scope=memory_scope).bind(selected_memory, store=memory_store)
         capabilities.append(memory_capability)
     if planning:
         if plan_store_resolver is None:
@@ -180,7 +174,7 @@ async def compose_platform_capabilities(
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             return HarnessPlanStoreAdapter(store)
 
-        planning_capability = build_harness_planning(resolve_plan_store)
+        planning_capability = HarnessPlanning.bind(resolve_plan_store)
         capabilities.append(planning_capability)
     capabilities.append(
         CompactionCapability(

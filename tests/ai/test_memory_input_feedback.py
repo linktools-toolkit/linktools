@@ -19,7 +19,7 @@ from pydantic_ai_harness.memory import InMemoryStore, MemoryFile
 
 from linktools.ai.capability import ToolCallRetry
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._harness_memory import build_harness_memory
+from linktools.ai.capability import MemoryCapability
 from linktools.ai.capability import PydanticToolControlCapability
 
 from ._runtime_test_helpers import is_tool_retry, tool_run_context
@@ -35,7 +35,7 @@ async def test_memory_input_rejection_precedes_storage(content: str, hint: str) 
     store.get_operation = AsyncMock(side_effect=AssertionError("storage must not be accessed"))
     store.read = AsyncMock(side_effect=AssertionError("storage must not be accessed"))
     store.write = AsyncMock(side_effect=AssertionError("storage must not be accessed"))
-    capability = build_harness_memory(store, allow_tools=("write_memory",), capability_id="memory")
+    capability = MemoryCapability().bind(("write_memory",), store=store)
     toolset = capability.get_toolset()
     assert toolset is not None
     context = tool_run_context()
@@ -58,7 +58,7 @@ async def test_memory_input_rejection_precedes_storage(content: str, hint: str) 
 @pytest.mark.asyncio
 async def test_model_can_correct_memory_content_after_feedback() -> None:
     store = InMemoryStore()
-    capability = build_harness_memory(store, allow_tools=("write_memory",), capability_id="memory")
+    capability = MemoryCapability().bind(("write_memory",), store=store)
     requests = 0
 
     def respond(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
@@ -100,7 +100,7 @@ async def test_model_can_correct_memory_content_after_feedback() -> None:
 async def test_memory_backend_errors_are_not_model_retries(error: Exception) -> None:
     store = InMemoryStore()
     store.write = AsyncMock(side_effect=error)
-    capability = build_harness_memory(store, allow_tools=("write_memory",), capability_id="memory")
+    capability = MemoryCapability().bind(("write_memory",), store=store)
     requests = 0
 
     def respond(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
@@ -128,7 +128,7 @@ async def test_clean_memory_input_does_not_reclassify_corrupt_stored_content() -
     )
     error = ValueError("stored content is invalid")
     store.write = AsyncMock(side_effect=error)
-    capability = build_harness_memory(store, allow_tools=("write_memory",), capability_id="memory")
+    capability = MemoryCapability().bind(("write_memory",), store=store)
 
     def respond(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[ToolCallPart("write_memory", {"content": "clean new content"}, tool_call_id="call")])

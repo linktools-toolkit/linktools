@@ -14,7 +14,7 @@ from pydantic_ai.capabilities import AbstractCapability, WrapperCapability
 from pydantic_ai.workspaces import WorkspaceBackend
 
 from ..asset import AssetStoreReader
-from ..agent import AgentCatalog, AgentCompiler
+from ..agent import AgentBinding, AgentBindingContract, AgentCatalog, AgentCompiler
 from ..capability import (
     ToolResponsesCapability,
     SessionCapability,
@@ -25,6 +25,7 @@ from ..capability import (
     AssetSkillSource,
     CapabilityContribution,
     SkillSourceRegistry,
+    tool_class_from_metadata,
 )
 from ._lifecycle import _RuntimeCloseCoordinator
 from ._features import (
@@ -42,6 +43,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..session import SessionPendingExecutionLookup
 from ..observe import Metrics
+from ..model import ModelBinding
 from ..spec import (
     AgentSpec,
     RuleInstructionResolver,
@@ -351,17 +353,28 @@ async def compose_runtime_components(
         models = {} if captured is None else captured.models
         if "default" not in agents and "default" in models:
             agents["default"] = AgentSpec("default")
-        compiler = AgentCompiler(
-            defaults=None if captured is None else captured.defaults,
-            models=models,
-            candidates=tuple(
-                candidate
-                for candidate in candidates
-                if candidate.kind != "agent"
-            ),
-            agents=agents,
-            capability_filter=None if captured is None else captured.filter,
-        )
+        compile_candidates = tuple(candidate for candidate in candidates if candidate.kind != "agent")
+        compiler_options = dict(defaults=None if captured is None else captured.defaults,
+                                models=models, agents=agents, capability_filter=None if captured is None else captured.filter)
+
+        class _RuntimeAgentCompiler(AgentCompiler):
+            def restore(self, binding_contract: AgentBindingContract, *, model: ModelBinding | None = None) -> AgentBinding:
+                memory_ids = {pin.id for pin in binding_contract.selected
+                              if pin.kind == "tool" and tool_class_from_metadata(pin.contract.get("metadata")) == "memory"}
+                if not memory_ids:
+                    return super().restore(binding_contract, model=model)
+                # Current admission selects host contributions. Admitted Memory pins
+                # retain their native implementation even when the host disables it.
+                memory_candidates = tuple(CapabilityContribution.from_opaque("tool", tool.name, tool)
+                                          for tool in MemoryCapability().tool_definitions() if tool.name in memory_ids)
+                memory_restore_compiler = AgentCompiler(
+                    candidates=tuple(candidate for candidate in compile_candidates
+                                     if candidate.kind != "tool" or candidate.id not in memory_ids) + memory_candidates,
+                    **compiler_options,
+                )
+                return memory_restore_compiler.restore(binding_contract, model=model)
+
+        compiler = _RuntimeAgentCompiler(candidates=compile_candidates, **compiler_options)
         root_agents = {
             agent_id: compiler.compile(agents[agent_id])
             for agent_id in sorted(agents)

@@ -23,6 +23,7 @@ ToolClass = Literal[
     "filesystem.read",
     "filesystem.write",
     "shell",
+    "memory",
     "mcp",
 ]
 ToolContextDedupe = Literal["workspace_file_read_v1"]

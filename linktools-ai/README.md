@@ -278,8 +278,13 @@ async with Runtime.open("default", storage=storage,
 ```
 
 Memory is selected once through `MemoryCapability(scope="default")` in Runtime features,
-not through Agent, Session or Task invocation arguments. Omitting the declaration disables
-memory for ordinary SDK executions; local CLI commands register the default declaration.
+not through Agent, Session or Task invocation arguments. Its `read_memory`, `search_memory`,
+`write_memory` and `delete_memory` tools join the same Agent candidates as other capability
+tools. The default `allow_tools=("*",)` exposes them automatically; an explicit selection
+such as `allow_tools=("read_memory",)` restricts them, and `allow_tools=()` exposes none.
+Omitting the declaration disables memory for ordinary SDK executions; local CLI commands
+register the default declaration. Memory content is read and changed through these tools,
+not automatically injected into every model request.
 Admitted executions retain their scope across recovery, while imported input contexts
 use isolated captured memory. Task inputs do not configure memory; new executions use
 the Runtime declaration, while recovery retains the execution's admitted scope.

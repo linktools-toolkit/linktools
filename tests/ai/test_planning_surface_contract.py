@@ -19,7 +19,7 @@ from linktools.ai.runtime._plan import (
 from linktools.ai.runtime._capabilities import (
     compose_platform_capabilities,
 )
-from linktools.ai.runtime._harness_planning import HarnessPlanning
+from linktools.ai.capability.planning import HarnessPlanning
 from linktools.ai.runtime._compaction import CompactionPolicy
 from linktools.ai.persistence.runs import (
     StagingAgentRunStore,

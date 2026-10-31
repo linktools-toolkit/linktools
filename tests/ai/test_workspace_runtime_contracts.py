@@ -21,7 +21,7 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
 from linktools.ai.core import ExecutionContext
-from linktools.ai.runtime._harness_memory import build_harness_memory
+from linktools.ai.capability import MemoryCapability
 from linktools.ai.runtime._memory import RuntimeMemoryStore
 from linktools.ai.storage import StorageOverlay
 from linktools.ai.workspace import Workspace
@@ -70,19 +70,18 @@ async def test_memory_capability_is_harness_owned_over_runtime_storage() -> None
             execution_id="execution",
             memory_scope="workspace",
         )
-        capability = build_harness_memory(
-            store,
-            allow_tools=(
+        capability = MemoryCapability().bind(
+            (
                 "delete_memory",
                 "read_memory",
                 "search_memory",
                 "write_memory",
             ),
-            capability_id="linktools-memory",
+            store=store,
         )
 
         assert isinstance(capability, Memory)
-        assert capability.id == "linktools-memory"
+        assert capability.id == "linktools.ai.memory"
         assert capability.inject_memory is False
         assert capability.store is not store
     finally:
