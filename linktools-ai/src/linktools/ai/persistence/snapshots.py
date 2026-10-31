@@ -86,6 +86,8 @@ class SnapshotResources:
     read_only: bool
     portable_export: bool = True
     archive_object_stores: Mapping[PersistenceDomain, ObjectStore] | None = None
+    # Borrow the live mapping so cached maintenance sees later capability bindings.
+    capability_stores: Mapping[str, StateStore] | None = None
 
     def archive_object_store(self, domain: PersistenceDomain) -> ObjectStore:
         return (self.archive_object_stores if self.archive_object_stores is not None else self.object_stores)[domain]
@@ -107,6 +109,12 @@ class RuntimeSnapshotOperations:
         self, candidates: tuple[tuple[PersistenceDomain, ObjectRef], ...], *,
         exclusive: SnapshotExclusiveGuard, limit: int = 100,
     ) -> ObjectCleanupResult:
+        """Purge core references only; known opaque capability partitions block cleanup.
+
+        The exclusive guard must quiesce every source user. Historical raw
+        custom writes without a durable marker require their original owner;
+        an absent marker is not proof that arbitrary custom references are absent.
+        """
         self._require_ready()
         if self._resources.read_only:
             raise AIError(ErrorCode.STORAGE_READ_ONLY)
@@ -115,6 +123,7 @@ class RuntimeSnapshotOperations:
             stores=self._resources.stores,
             object_stores=self._resources.object_stores,
             archive_object_stores=self._resources.archive_object_stores,
+            capability_stores=self._resources.capability_stores,
             exclusive=exclusive, limit=limit,
         )
 

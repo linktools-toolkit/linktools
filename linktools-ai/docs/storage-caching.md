@@ -923,3 +923,23 @@ extension. Custom capability partitions still require their dependency contract;
 archive membership alone does not prove object closure. Existing snapshot and
 opaque-object rejection checks remain in force. It does not retire the filesystem
 backend or grant automatic recovery to a SQL source.
+
+
+## Offline object cleanup and opaque capability state
+
+`Persistence.purge_unreferenced_objects()` requires the caller to quiesce all
+users of the routed state and object stores. Its core reference scan cannot
+interpret arbitrary capability payloads. A currently bound capability partition
+(including a volatile one), or an existing durable capability-presence marker,
+therefore returns the selected candidates as `blocked`, before pruning archive
+records or deleting objects. Cached maintenance operations observe later
+capability bindings. Marker read or integrity failures abort without deletion.
+Ordinary core-only cleanup and volatile-state portable snapshot rules are unchanged.
+
+This is not a complete custom-dependency inventory. Raw custom writes that never
+published a capability marker cannot be rediscovered reliably after the original
+configuration is lost, especially from opaque SQL partition digests. Keep that
+source out of generic cleanup until its original owner supplies a complete
+reference inventory; do not treat an absent marker as proof of no custom data.
+The check adds one source read scope per discovered partition to offline cleanup,
+not to Runtime writes or reads. It neither creates markers nor changes schema.

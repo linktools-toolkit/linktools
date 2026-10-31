@@ -525,6 +525,7 @@ class Persistence:
             object_stores={domain: self.object_store(domain) for domain in PersistenceDomain
                            if runtime_domain_uses_object_store(domain)},
             archive_object_stores={domain: self.archive_object_store(domain) for domain in PersistenceDomain},
+            capability_stores=self.capability_stores,
             read_only=self.read_only,
             portable_export=not self.durable_capability_ids,
         )
