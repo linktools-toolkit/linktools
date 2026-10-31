@@ -268,7 +268,7 @@ async def test_terminal_results_survive_restart_through_live_and_read_only_apis(
             assert summary.error_diagnostics is None
 
 
-def test_execution_requires_error_diagnostics_field() -> None:
+def test_execution_uses_declared_error_diagnostics_default() -> None:
     diagnostics = ErrorDiagnostics.from_exception(RuntimeError("current"))
     _started, _result, commit = _failed_terminal(
         datetime.now(timezone.utc),
@@ -277,28 +277,22 @@ def test_execution_requires_error_diagnostics_field() -> None:
     payload = _encode_persisted_domain(commit.execution)
     payload["fields"].pop("error_diagnostics")
 
-    with pytest.raises(AIError) as raised:
-        _decode_enveloped_domain(
-            encode_envelope({"type": "execution_record", "payload": payload}),
-            ExecutionRecord,
-        )
-
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    restored = _decode_enveloped_domain(
+        encode_envelope({"type": "execution_record", "payload": payload}), ExecutionRecord,
+    )
+    assert restored == replace(commit.execution, error_diagnostics=None)
 
 
-def test_execution_requires_started_at_field() -> None:
+def test_execution_uses_declared_started_at_default() -> None:
     now = datetime.now(timezone.utc)
     current = replace(_started_execution(now), started_at=now)
     payload = _encode_persisted_domain(current)
     payload["fields"].pop("started_at")
 
-    with pytest.raises(AIError) as raised:
-        _decode_enveloped_domain(
-            encode_envelope({"type": "execution_record", "payload": payload}),
-            ExecutionRecord,
-        )
-
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    restored = _decode_enveloped_domain(
+        encode_envelope({"type": "execution_record", "payload": payload}), ExecutionRecord,
+    )
+    assert restored == replace(current, started_at=None)
 
 
 def test_model_timeout_preserves_diagnostics_without_changing_safe_contract() -> None:

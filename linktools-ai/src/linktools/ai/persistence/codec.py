@@ -12,7 +12,7 @@ import json
 import math
 import types
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import MISSING, dataclass, fields, is_dataclass
 from datetime import datetime
 from enum import Enum
 from functools import lru_cache
@@ -762,143 +762,18 @@ def _decode_v1_task_node_view(
     codec: "_VersionCodec",
     persisted: bool,
 ) -> TaskNodeView:
-    expected = {
-        "graph_id",
-        "node_id",
-        "status",
-        "execution_id",
-        "result_digest",
-        "error_code",
-        "error_digest",
-        "next_attempt_at",
-        "occupies_concurrency",
-        "error_origin",
-        "safe_error_details",
-    }
-    if not persisted:
-        expected.update({"dependencies", "owner", "fence", "lease_expires_at"})
-    _require_required_keys(raw_fields, frozenset(expected))
-    return TaskNodeView(
-        cast(str, _decode_domain(raw_fields["graph_id"], str, codec, persisted=persisted)),
-        cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
-        ()
-        if persisted
-        else tuple(
-            _decode_domain(
-                raw_fields["dependencies"],
-                tuple[str, ...],
-                codec,
-                persisted=persisted,
-            )
-        ),
-        cast(
-            TaskStatus,
-            _decode_domain(raw_fields["status"], TaskStatus, codec, persisted=persisted),
-        ),
-        None
-        if persisted
-        else cast(
-            str | None,
-            _decode_domain(raw_fields["owner"], str | None, codec, persisted=persisted),
-        ),
-        1
-        if persisted
-        else int(_decode_domain(raw_fields["fence"], int, codec, persisted=persisted)),
-        None
-        if persisted
-        else cast(
-            datetime | None,
-            _decode_domain(
-                raw_fields["lease_expires_at"],
-                datetime | None,
-                codec,
-                persisted=persisted,
-            ),
-        ),
-        cast(
-            str | None,
-            _decode_domain(
-                raw_fields["result_digest"], str | None, codec, persisted=persisted
-            ),
-        ),
-        cast(
-            str | None,
-            _decode_domain(
-                raw_fields["error_code"], str | None, codec, persisted=persisted
-            ),
-        ),
-        cast(
-            str | None,
-            _decode_domain(
-                raw_fields["error_digest"], str | None, codec, persisted=persisted
-            ),
-        ),
-        cast(
-            str | None,
-            _decode_domain(
-                raw_fields["execution_id"], str | None, codec, persisted=persisted
-            ),
-        ),
-        cast(
-            datetime | None,
-            _decode_domain(
-                raw_fields["next_attempt_at"],
-                datetime | None,
-                codec,
-                persisted=persisted,
-            ),
-        ),
-        bool(
-            _decode_domain(
-                raw_fields["occupies_concurrency"],
-                bool,
-                codec,
-                persisted=persisted,
-            )
-        ),
-        cast(
-            str | None,
-            _decode_domain(
-                raw_fields["error_origin"],
-                str | None,
-                codec,
-                persisted=persisted,
-            ),
-        ),
-        cast(
-            Mapping[str, JsonValue],
-            _decode_domain(
-                raw_fields["safe_error_details"],
-                Mapping[str, JsonValue],
-                codec,
-                persisted=persisted,
-            ),
-        ),
-    )
-
-
-def _encode_v1_task_result(
-    value: object,
-    codec: "_VersionCodec",
-    persisted: bool,
-) -> Mapping[str, JsonValue]:
-    if not isinstance(value, TaskResultRecord):
-        raise TypeError("V1 task_result encoder received the wrong type")
-    encoded: dict[str, JsonValue] = {
-        "graph_id": _encode_domain(value.graph_id, codec, persisted=persisted),
-        "node_id": _encode_domain(value.node_id, codec, persisted=persisted),
-        "result_digest": _encode_domain(
-            value.result_digest,
-            codec,
-            persisted=persisted,
-        ),
-    }
-    encoded["execution_id"] = _encode_domain(
-        value.execution_id,
-        codec,
-        persisted=persisted,
-    )
-    return encoded
+    if persisted:
+        # Lease ownership and resolved dependencies are outside this durable projection.
+        raw_fields = {
+            **raw_fields,
+            "dependencies": {"$tuple": []},
+            "owner": None,
+            "fence": 1,
+            "lease_expires_at": None,
+        }
+    return cast(TaskNodeView, _decode_dataclass_fields(
+        raw_fields, TaskNodeView, codec, persisted=persisted,
+    ))
 
 
 def _decode_v1_task_result(
@@ -1063,13 +938,7 @@ def _decode_v1_stored_user_input(
     codec: "_VersionCodec",
     persisted: bool,
 ) -> StoredUserInput:
-    required = frozenset({"codec", "payload"})
-    if "view" in raw_fields:
-        required = frozenset({"codec", "payload", "view"})
-    _require_required_keys(
-        raw_fields,
-        required,
-    )
+    _require_required_keys(raw_fields, frozenset({"codec", "payload"}))
     codec_name = _decode_domain(
         raw_fields["codec"], str, codec, persisted=persisted
     )
@@ -1078,15 +947,11 @@ def _decode_v1_stored_user_input(
     payload = _decode_domain(
         raw_fields["payload"], StoredPayload, codec, persisted=persisted
     )
-    view = (
-        None
-        if "view" not in raw_fields
-        else _decode_domain(
-            raw_fields["view"],
-            Mapping[str, JsonValue] | None,
-            codec,
-            persisted=persisted,
-        )
+    view = _decode_domain(
+        raw_fields.get("view"),
+        Mapping[str, JsonValue] | None,
+        codec,
+        persisted=persisted,
     )
     try:
         return StoredUserInput(
@@ -1172,25 +1037,6 @@ def _encode_v1_error_diagnostics(
     return encoded
 
 
-def _decode_v1_error_diagnostics(
-    raw_fields: Mapping[str, object], codec: "_VersionCodec", persisted: bool,
-) -> ErrorDiagnostics:
-    _require_required_keys(raw_fields, frozenset({"exception_type", "exception_message", "cause_digest"}))
-    return ErrorDiagnostics(
-        _decode_domain(raw_fields["exception_type"], str, codec, persisted=persisted),
-        _decode_domain(raw_fields["exception_message"], str, codec, persisted=persisted),
-        _decode_domain(raw_fields["cause_digest"], str, codec, persisted=persisted),
-        exception_chain=_decode_domain(
-            raw_fields.get("exception_chain"), tuple[Mapping[str, str], ...] | None,
-            codec, persisted=persisted,
-        ),
-        traceback=_decode_domain(raw_fields.get("traceback"), str | None, codec, persisted=persisted),
-        content_omission_reason=_decode_domain(
-            raw_fields.get("content_omission_reason"), str | None, codec, persisted=persisted,
-        ),
-    )
-
-
 def _encode_v1_model_client_request_ref(
     value: object, codec: "_VersionCodec", persisted: bool,
 ) -> Mapping[str, JsonValue]:
@@ -1201,22 +1047,6 @@ def _encode_v1_model_client_request_ref(
         for field in fields(value)
         if field.name != "diagnostics" or value.diagnostics is not None
     }
-
-
-def _decode_v1_model_client_request_ref(
-    raw_fields: Mapping[str, object], codec: "_VersionCodec", persisted: bool,
-) -> ModelClientRequestRef:
-    _require_required_keys(raw_fields, frozenset({
-        "api", "body", "capture_error", "response", "record_http_bodies",
-    }))
-    return ModelClientRequestRef(
-        api=_decode_domain(raw_fields["api"], str, codec, persisted=persisted),
-        body=_decode_domain(raw_fields["body"], ModelClientBodyRef | None, codec, persisted=persisted),
-        capture_error=_decode_domain(raw_fields["capture_error"], str | None, codec, persisted=persisted),
-        response=_decode_domain(raw_fields["response"], ModelClientResponseRef | None, codec, persisted=persisted),
-        record_http_bodies=_decode_domain(raw_fields["record_http_bodies"], bool, codec, persisted=persisted),
-        diagnostics=_decode_domain(raw_fields.get("diagnostics"), Mapping[str, JsonValue] | None, codec, persisted=persisted),
-    )
 
 
 def _encode_v1_model_interaction(
@@ -1231,20 +1061,6 @@ def _encode_v1_model_interaction(
     }
 
 
-def _decode_v1_model_interaction(
-    raw_fields: Mapping[str, object], codec: "_VersionCodec", persisted: bool,
-) -> ModelInteractionRecord:
-    declared = _dataclass_fields(ModelInteractionRecord)
-    missing = sorted(name for name in declared if name != "stream_attempts" and name not in raw_fields)
-    if missing:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR,
-                      safe_details={"wire_type": "model_interaction", "missing_fields": missing})
-    return ModelInteractionRecord(**{
-        name: _decode_domain(raw_fields.get(name), field_type, codec, persisted=persisted)
-        for name, (field_type, _init) in declared.items()
-    })
-
-
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
     {
         "error_diagnostics": _encode_v1_error_diagnostics,
@@ -1256,16 +1072,12 @@ _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
         "task_graph_view": _encode_v1_task_graph_view,
         _TASK_NODE_WIRE_ID: _encode_v1_task_node,
         _TASK_NODE_VIEW_WIRE_ID: _encode_v1_task_node_view,
-        "task_result": _encode_v1_task_result,
         "execution_start_reservation": _encode_v1_execution_start_reservation,
         "evaluation_slot_disposition_view": _encode_v1_slot_disposition_view,
     }
 )
 _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
     {
-        "error_diagnostics": _decode_v1_error_diagnostics,
-        "model_interaction": _decode_v1_model_interaction,
-        "model_client_request_ref": _decode_v1_model_client_request_ref,
         "object_ref": _decode_v1_object_ref,
         "stored_payload": _decode_v1_stored_payload,
         "stored_user_input": _decode_v1_stored_user_input,
@@ -2303,22 +2115,34 @@ def _decode_dataclass(
         except (KeyError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
+    return _decode_dataclass_fields(raw_fields, target, codec, persisted=persisted)
+
+
+def _decode_dataclass_fields(
+    raw_fields: Mapping[str, object],
+    target: type,
+    codec: _VersionCodec,
+    *,
+    persisted: bool,
+) -> object:
     try:
         declared = _dataclass_fields(target)
     except (NameError, TypeError) as error:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
-    # Constructor defaults author new values; durable records carry every field.
     missing_fields = sorted(
-        name for name in declared if name not in raw_fields
+        field.name for field in fields(target) if field.name not in raw_fields
+        and (not field.init or field.default is MISSING and field.default_factory is MISSING)
     )
     if missing_fields:
         raise AIError(
             ErrorCode.STORAGE_INTEGRITY_ERROR,
-            safe_details={"wire_type": wire_id, "missing_fields": missing_fields},
+            safe_details={"wire_type": _codec_wire_type_id(target, codec), "missing_fields": missing_fields},
         )
     kwargs: dict[str, object] = {}
     post_init_fields: dict[str, object] = {}
     for field_name, (field_type, field_init) in declared.items():
+        if field_name not in raw_fields:
+            continue
         try:
             decoded = _decode_domain(
                 raw_fields[field_name],
@@ -2625,11 +2449,13 @@ def _validate_v1_codec_definition() -> None:
         raise RuntimeError("Runtime v1 enum type registry is incomplete")
     if set(_CURRENT_CODEC.enum_wire_ids.values()) != set(enum_wire_ids):
         raise RuntimeError("Runtime v1 enum wire-id registry is incomplete")
-    if set(_V1_DATACLASS_ENCODERS) != set(_V1_DATACLASS_DECODERS):
-        raise RuntimeError("Runtime v1 dataclass adapters must be paired")
     if not set(_V1_DATACLASS_ENCODERS).issubset(domain_wire_ids):
         raise RuntimeError(
             "Runtime v1 dataclass encoder mapping contains an unknown type"
+        )
+    if not set(_V1_DATACLASS_DECODERS).issubset(domain_wire_ids):
+        raise RuntimeError(
+            "Runtime v1 dataclass decoder mapping contains an unknown type"
         )
 
 

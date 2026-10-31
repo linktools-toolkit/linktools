@@ -1264,7 +1264,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                 local_base = 0
                 local_count = (projection.target_message_index if projection.transcript is not None
                                else batch.target_transcript_message_count)
-                staged_transcript = self._staging.staged_transcript(projection.run.agent_run_id)
+                payloads = dict(projection.payloads)
                 prepared.append(
                     PreparedExecutionProjection(
                         projection.run,
@@ -1291,14 +1291,10 @@ class RuntimeAgentRunStore(AgentRunStore):
                             await archive.prepare_interactions(
                                 projection.run,
                                 projection.interactions,
-                                lambda digest,
-                                agent_run_id=projection.run.agent_run_id: self._staging.staged_payload(
-                                    agent_run_id,
-                                    digest,
-                                ),
+                                payloads.__getitem__,
                                 local_message_base=local_base,
                                 local_message_count=local_count,
-                                local_messages=() if staged_transcript is None else staged_transcript.messages,
+                                local_messages=projection.local_messages,
                                 prepared=interaction_archive,
                                 **({"baseline": batch.checkpoints[-1].projection}
                                    if batch.checkpoints and type(archive).prepare_interactions is StateStepArchive.prepare_interactions
@@ -1540,6 +1536,8 @@ class RuntimeAgentRunStore(AgentRunStore):
                         projection.base_message_index,
                         projection.target_message_index,
                         self._execution_producers.get(agent_run_id, (None, None))[1],
+                        projection.payloads,
+                        projection.local_messages,
                     )
                     _logger.debug(
                         "projection flight captured: agent_run=%s token=%s "
@@ -1753,14 +1751,14 @@ class RuntimeAgentRunStore(AgentRunStore):
             )
             local_count = (captured.target_message_index if captured.transcript is not None
                            else prepared.target_transcript_message_count)
-            staged_transcript = self._staging.staged_transcript(captured.run.agent_run_id)
+            payloads = dict(captured.payloads)
             interactions = await archive.prepare_interactions(
                 captured.run,
                 captured.interactions,
-                lambda digest: self._staging.staged_payload(captured.run.agent_run_id, digest),
+                payloads.__getitem__,
                 local_message_base=0,
                 local_message_count=local_count,
-                local_messages=() if staged_transcript is None else staged_transcript.messages,
+                local_messages=captured.local_messages,
                 prepared=interaction_archive,
             )
             checkpoint_values, observation, interaction_archive = archive.combine_projection_archives(

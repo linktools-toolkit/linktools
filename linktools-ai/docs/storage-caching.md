@@ -70,26 +70,22 @@ live streams, including the non-authoritative pending-turn view.
 ### Owner defaults for batch writes
 
 Provide only the batch settings you want to override. A buffer-only declaration
-uses Trace's 128-entry / 3-second defaults or Metrics' 128-entry / 60-second
-defaults:
+uses Trace's 128-entry / 3-second defaults:
 
 ```python
 from linktools.ai.capability import TraceCapability
 from linktools.ai.core import CommitPolicy
-from linktools.ai.observe import Metrics
 
 trace = TraceCapability(commit=CommitPolicy.batch(buffer=write_buffer))
-metrics = Metrics.sql(engine, commit=CommitPolicy.batch(buffer=write_buffer))
 ```
 
-Here `write_buffer` is a host-provided `WriteBufferBackend` and `engine` is the
-host's provisioned SQL engine. Omit `buffer` for synchronous source writes,
+Here `write_buffer` is a host-provided `WriteBufferBackend`. Omit `buffer` for synchronous source writes,
 without a hidden queue. Explicit `batch_size` and `flush_interval` always win;
 for example, `CommitPolicy.batch(buffer=write_buffer, batch_size=32)` changes
 only the size and retains the receiving owner's interval.
 
-`None` for either timing field means an omitted authoring value. Trace and
-Metrics resolve those fields once in their constructors and retain a complete,
+`None` for either timing field means an omitted authoring value. Trace resolves
+those fields once in its constructor and retains a complete,
 immutable policy before any Runtime capture, recorder or write scope uses it.
 The input policy is not mutated, so it can be reused by owners with different
 defaults. The generic policy has no universal batch interval.
@@ -187,79 +183,80 @@ cancellation or close can release ownership. An append error can mean unknown
 admission, so it must not be reported as a definite capacity rejection or
 silently redirected into a local queue.
 
-## Automatic Metrics buffering
+## Automatic Metrics providers
+
+`Metrics` is a synchronous source/query dataset and a default
+`MetricRecorderProvider`. Automatic recording can instead use a host provider
+without creating a SQL dataset in the producer:
 
 ```python
-from linktools.ai.observe import Metrics
-from linktools.ai.core import CommitPolicy
-from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.observe import MetricRecorderProvider, Metrics
 
-cache = InMemoryCacheBackend(max_bytes=8 * 1024 * 1024, max_size=1024)
-metrics = Metrics.sqlite(
-    "metrics.sqlite3",
-    commit=CommitPolicy.batch(buffer=cache, batch_size=64, flush_interval=15.0),
-)
+metrics = Metrics.sqlite("metrics.sqlite3")
 recorder = metrics.recorder()
 try:
     accepted = await recorder.try_record(observation)
     result = await recorder.flush()
 finally:
     await recorder.close()
+
+# telemetry implements MetricRecorderProvider over an already-open host client.
+async with Runtime.open("app", storage=storage, features=features,
+                        metrics=telemetry) as runtime:
+    tasks = await runtime.tasks.bind(*definitions)
 ```
 
-`Runtime.open(..., metrics=dataset)` configures Agent observations and its
-bound TaskEngine recorders, including evaluation work. Each producer owns an isolated
-recorder over the borrowed Metrics dataset;
-explicit application recording uses the dataset independently.
+The provider contract is `recorder() -> MetricRecorder`, with no arguments.
+Every call returns a fresh scope, owned by its Agent or Task producer.
+Construction starts no I/O or background tasks and acquires no asynchronous
+resources. A host recorder may start work on its first `try_record`; its close
+must settle its own work without closing the provider/client or another scope.
+Evaluation borrows its TaskEngine and does not create another recorder.
+`metrics=None` disables automatic observations without creating any dataset.
 
-All Metrics constructors and factories accept `commit`. Their effective default
-is `CommitPolicy.batch(batch_size=128, flush_interval=60.0)`. Use
-`CommitPolicy.sync()` for immediate writes; Metrics supports sync and batch
-policies. A Metrics batch policy requires an integer `batch_size`
-from 1 to 256 and a finite positive `flush_interval` in seconds; booleans are
-invalid for both.
-These settings are validated when creating the dataset and inherited by each
-fresh recorder, including those owned by separate Runtimes. Only automatic recorders
-use `commit.buffer`; without a buffer they await the source in the caller,
-without a hidden local queue. `record`, `record_observations`, and queries keep
-their strong source semantics. Queries never add pending observations.
+`Metrics` constructors/factories have no commit policy, and `recorder()` has no
+batch-scheduler parameter. Both explicit writes and its default automatic
+recorder await source settlement; no SDK queue, timer or threshold is created.
+Queries never include pending host observations. Runtime continues to enrich
+observations with dimensions and correlation while preserving their original
+IDs, source namespace and tenant. The provider binds the target dataset; those
+business-source fields must not silently choose a different destination.
 
-`MetricRecorder.status()` returns `MetricRecorderStatus` in both direct and
-buffered modes. `persisted` counts confirmed source writes; `unconfirmed`
-counts settled attempts without that confirmation, including cancellation or
-an unknown outcome after the source may already have committed. It does not
-mean those observations were definitely lost. `MetricFlushResult.completed`
-reports prefix settlement, not that every observation persisted.
+A host may implement bounded publishing and a separately managed consumer.
+Only the host chooses batching, capacity, retry and client ownership. Broker
+acceptance is not a SQL receipt: `persisted` counts confirmed source writes,
+`unconfirmed` may include successful broker delivery awaiting source proof,
+and `flush.completed` means the recorder's accepted prefix settled, not that
+all consumers committed. Publishing success without SQL proof is not itself a
+write failure. Unknown outcomes must remain visible; do not silently fall back
+to per-observation SQL or disable recording when the broker fails.
 
-`BatchWriteScope` is the lower-level scheduling and settlement extension for
-custom encoded batch sinks. The injected cache owns pending bytes and capacity;
-the scope owns dispatch and its lifetime. Its `BatchWriteStatus.confirmed`
-means only that the sink returned successfully. Metrics maps that count to
-`persisted` because its sink confirms authoritative writes.
-Its `BatchWriteFlushResult` reports settlement of the captured admission prefix,
-with `unconfirmed` preserving failed or unknown source outcomes.
-`StorageBuffer` separately provides final-value reads and writes over a source;
-it reuses the same scheduler rather than defining another pending queue.
+The existing `MetricRecorder` methods (`try_record`, `status`, `flush`, `close`)
+remain unchanged. A direct recorder completes admission after its source call
+settles; flush does not wait for calls still in admission, while close stops
+new admissions and waits for active calls without cancelling their callers.
+Failures are best effort and cancellation propagates without rewriting already
+confirmed business facts. SDK owners close scopes, never the borrowed provider.
 
-Automatic batches flush at the configured entry threshold or interval after
-the first pending admission, whichever comes first (defaults: 128 entries and
-60 seconds); explicit flush and close wake partial batches. These
-are batching defaults, not query TTLs. The cache contains the encoded pending
-bytes using the existing Observation codec. Independent recorders own separate
-scopes and close only their own work; shared cache capacity remains shared.
+### Migrating automatic recording
 
-Admission is best effort, not a durability receipt. A full cache rejects new
-automatic observations; failed/cancelled writes remain visible in status.
-`queue_size` includes unacknowledged in-flight entries; `queue_capacity` is
-`None` because capacity belongs to the adapter and has no common query contract;
-it does not mean unbounded storage. A successful sink is never
-called again merely because acknowledgement failed; an unresolved cleanup
-failure is exposed by flush/close. Caller cancellation does not abandon
-close-owned I/O, and neither recorder close nor Runtime close closes the cache.
-`pending` counts source outcomes not yet settled; `queue_size` counts entries
-not yet acknowledged in the cache. A successful sink followed by an ack failure
-can therefore have `persisted=1`, `pending=0`, and `queue_size=1`; flush/close
-report that cleanup failure without claiming the source write failed.
+Remove `commit=` from Metrics factories and `batch_scopes=` from recorder calls.
+Default, explicit-sync and buffer-free batch calls were already synchronous;
+they retain that behavior. A genuinely buffered caller must switch to a prepared
+host provider/consumer in the same coordinated release, not silently become
+per-item SQL. Drain the old scopes and preserve failed/unknown outcomes before
+switching; owner-local pending bytes are not a recoverable work queue.
+
+Host consumers retain stable observation IDs and submit through
+`Metrics.record_observations`. Advance acknowledgements only after source
+confirmation; duplicates, unknown commits, conflicting payloads, retention and
+consumer reassignment need their own tested settlement policy. Producer-only
+provider support does not prove any broker adapter or deployment is ready.
+
+`BatchWriteScope` and `StorageBuffer` remain available to their other owners.
+Their generic settlement status is not a reliable work-queue acknowledgement
+contract. Trace continues to use its own commit policy and lifecycle, independent
+of automatic Metrics.
 
 ## Asset content digests
 
@@ -376,10 +373,9 @@ require a new per-call cache option or a different Runtime profile.
 
 ## Runtime observation publication
 
-Metrics uses `commit.buffer` with its configurable scheduler (defaults: 60
-seconds or 128 entries). Trace uses the same owner-scoped buffering primitive
-through its own `commit.buffer` (defaults: three seconds or 128 observation
-boundaries). Without a buffer, each observation boundary awaits the existing
+Trace uses owner-scoped buffering through its own `commit.buffer`
+(defaults: three seconds or 128 observation boundaries). Automatic Metrics
+uses the independent provider described above. Without a buffer, each observation boundary awaits the existing
 guarded projection commit. The route's hot cache never enables write batching.
 
 The policy borrows its buffer; equality and hashing compare timing values only.
@@ -693,7 +689,8 @@ This is a final-value buffer: repeated keys within one dispatch can collapse to
 the last value. Intermediate values need not be persisted. The source receives
 ordinary `StorageChange` PUT/DELETE entries; conditional revisions, RESET,
 metadata changes and business atomic batches are not implicitly queued.
-`Metrics` continues to use append buffering, where every observation matters.
+An observation publisher must preserve every observation rather than use this
+last-value coalescing contract.
 
 A successful `flush` confirms that intentions accepted before the call have
 been persisted, or superseded by a later same-key value that was successfully

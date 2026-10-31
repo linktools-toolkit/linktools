@@ -93,20 +93,17 @@ def test_conversation_wire_roundtrip_is_explicit(persisted: bool, conversation: 
 
 
 @pytest.mark.parametrize("persisted", (False, True), ids=("domain", "persisted"))
-def test_execution_wire_requires_conversation_guarantee(persisted: bool) -> None:
+def test_execution_wire_uses_declared_conversation_default(persisted: bool) -> None:
     record = _execution()
     assert record.conversation is True
     payload = (_encode_persisted_domain if persisted else encode_domain)(record)
     payload["fields"].pop("conversation")
-    with pytest.raises(AIError) as missing:
-        if persisted:
-            _decode_enveloped_domain(
-                encode_envelope({"type": "execution_record", "payload": payload}), ExecutionRecord,
-            )
-        else:
-            decode_domain(payload, ExecutionRecord)
-    assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    assert missing.value.safe_details["missing_fields"] == ["conversation"]
+    restored = (
+        _decode_enveloped_domain(
+            encode_envelope({"type": "execution_record", "payload": payload}), ExecutionRecord,
+        ) if persisted else decode_domain(payload, ExecutionRecord)
+    )
+    assert restored == record
 
 
 @pytest.mark.parametrize("invalid", (1, "true", None))

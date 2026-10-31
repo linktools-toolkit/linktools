@@ -15,7 +15,7 @@ from ...execution.handle import ExecutionBinding
 from ...core import (AuthorizationPolicy, CorrelationData, ExecutionContext, PrincipalKind, PromptLimits,
     TenantAuthorizationPolicy, canonical_sha256, overlay_correlation, principal_identity_payload, validate_idempotency_key)
 from ...persistence import Persistence, PersistenceDomain
-from ...observe import Metrics, MetricsControl, MetricFlushResult, MetricRecorderStatus
+from ...observe import MetricRecorderProvider, MetricsControl, MetricFlushResult, MetricRecorderStatus
 from ...storage import PayloadPolicy, StorageRetentionMode
 from ...task import (
     DefaultTaskGraphService,
@@ -92,14 +92,14 @@ class TaskEngine(Generic[AppT]):
         persistence: Persistence,
         context: ExecutionContext[AppT] | None = None,
         authorization: AuthorizationPolicy | None = None,
-        metrics: Metrics | None = None,
+        metrics: MetricRecorderProvider | None = None,
     ) -> None:
         if not isinstance(persistence, Persistence) or not persistence.ready:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if context is not None and not isinstance(context, ExecutionContext):
             raise TypeError("context must be ExecutionContext")
-        if metrics is not None and not isinstance(metrics, Metrics):
-            raise TypeError("metrics must be Metrics or None")
+        if metrics is not None and not isinstance(metrics, MetricRecorderProvider):
+            raise TypeError("metrics must be MetricRecorderProvider or None")
         self._persistence = persistence
         self._context = ExecutionContext(None) if context is None else context
         self._authorization = TenantAuthorizationPolicy() if authorization is None else authorization
@@ -379,7 +379,7 @@ class TaskEngine(Generic[AppT]):
         persistence: Persistence,
         context: ExecutionContext[AppT] | None = None,
         authorization: AuthorizationPolicy | None = None,
-        metrics: Metrics | None = None,
+        metrics: MetricRecorderProvider | None = None,
     ) -> AsyncIterator["TaskEngine[AppT]"]:
         engine = cls(*definitions, persistence=persistence, context=context, authorization=authorization, metrics=metrics)
         try:

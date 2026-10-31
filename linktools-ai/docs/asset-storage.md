@@ -107,4 +107,3 @@ Existing SQL metadata, ObjectStore implementations and Directory readers are
 not reinterpreted by this backend removal. Runtime's
 `PersistenceStorage.from_root()` is a separate composition: it already uses
 SQLite state and filesystem objects, not this Asset metadata format.
-

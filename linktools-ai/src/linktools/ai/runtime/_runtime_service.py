@@ -56,7 +56,7 @@ from ..execution import ExecutionInputContext
 from ..core import ExecutionContext
 from ..model import normalize_input_files
 from ..inputs import CanonicalUserInput
-from ..observe import (Metrics, MetricRecorderStatus, MetricFlushResult, MetricsControl,
+from ..observe import (MetricRecorderProvider, MetricRecorderStatus, MetricFlushResult, MetricsControl,
                        RuntimeMetricsStatus, RuntimeMetricsFlushResult)
 from ..observe.service import disabled_metric_status
 from ..execution import (
@@ -152,7 +152,7 @@ class Runtime(Generic[AppT]):
         self, *, persistence: Persistence, namespace: str, tenant_id: str,
         owns_persistence: bool, context: ExecutionContext[AppT] | None = None,
         features: RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None = None,
-        metrics: Metrics | None = None, authorization: AuthorizationPolicy | None = None,
+        metrics: MetricRecorderProvider | None = None, authorization: AuthorizationPolicy | None = None,
         auto_recover: bool = True,
     ) -> None:
         if not isinstance(persistence, Persistence):
@@ -161,8 +161,8 @@ class Runtime(Generic[AppT]):
             raise TypeError("context must be ExecutionContext")
         if features is not None and not isinstance(features, (RuntimeFeatures, RuntimeFeaturesCapture)):
             raise TypeError("features must be RuntimeFeatures or RuntimeFeaturesCapture")
-        if metrics is not None and not isinstance(metrics, Metrics):
-            raise TypeError("metrics must be Metrics or None")
+        if metrics is not None and not isinstance(metrics, MetricRecorderProvider):
+            raise TypeError("metrics must be MetricRecorderProvider or None")
         if not isinstance(auto_recover, bool):
             raise TypeError("auto_recover must be bool")
         self._namespace = validate_persistence_namespace(namespace)
@@ -202,7 +202,7 @@ class Runtime(Generic[AppT]):
         cls, namespace: str, *, storage: PersistenceStorage, tenant_id: str = "default",
         context: ExecutionContext[AppT] | None = None,
         features: RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None = None,
-        metrics: Metrics | None = None, authorization: AuthorizationPolicy | None = None,
+        metrics: MetricRecorderProvider | None = None, authorization: AuthorizationPolicy | None = None,
         auto_recover: bool = True,
     ) -> "Runtime[AppT]":
         """Own persistence and only the producer domains explicitly composed here.
@@ -221,7 +221,7 @@ class Runtime(Generic[AppT]):
     def attach(
         cls, *, persistence: Persistence, context: ExecutionContext[AppT] | None = None,
         features: RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None = None,
-        metrics: Metrics | None = None, authorization: AuthorizationPolicy | None = None,
+        metrics: MetricRecorderProvider | None = None, authorization: AuthorizationPolicy | None = None,
         auto_recover: bool = True,
     ) -> "Runtime[AppT]":
         """Borrow an open Persistence; its provider retains its close responsibility."""

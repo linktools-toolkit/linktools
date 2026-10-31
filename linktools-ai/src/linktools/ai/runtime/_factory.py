@@ -40,7 +40,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..session import SessionPendingExecutionLookup
-from ..observe import Metrics
+from ..observe import MetricRecorderProvider
 from ..spec import (
     AgentSpec,
     RuleInstructionResolver,
@@ -172,7 +172,7 @@ async def compose_runtime_components(
     *,
     persistence: Persistence,
     app: "AppT | None" = None,
-    metrics: Metrics | None = None,
+    metrics: MetricRecorderProvider | None = None,
     features: "RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None" = None,
     auto_recover: bool = True,
     authorization: AuthorizationPolicy | None = None,
@@ -588,7 +588,7 @@ async def _build_local_components(
     state: Persistence,
     lifecycle: "_AgentLifecycle",
     run_store: RuntimeAgentRunStore,
-    metrics: Metrics | None,
+    metrics: MetricRecorderProvider | None,
     commit: CommitPolicy,
     coordination: CacheBackend | TurnCoordinationBackend | StreamBackend | None,
     catalog: AgentCatalog,
@@ -662,7 +662,7 @@ async def _build_local_components(
         )
         batch_scopes = BatchWriteScope.scoped_factory()
         run_store.trace_persistence.bind_batch_scopes(batch_scopes)
-        metric_buffer = None if metrics is None else MetricsService(metrics, batch_scopes=batch_scopes)
+        metric_buffer = None if metrics is None else MetricsService(metrics)
         lifecycle.metric_buffer = metric_buffer
         metric_source_namespace = None if metric_buffer is None else namespace
         if coordination is not None:

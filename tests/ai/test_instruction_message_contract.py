@@ -105,14 +105,26 @@ def test_instruction_delta_reader_rejects_malformed_known_fields(field: str, val
 
 @pytest.mark.parametrize("part", [
     {"part_kind": "instruction-baseline", "instructions": None}, _baseline(None),
-    _baseline({key: value for key, value in _block().items() if key != "name"}),
-    _baseline({key: value for key, value in _block(digest=True).items() if key != "dynamic"}),
-    {key: value for key, value in _delta().items() if key != "base_hash"},
 ])
-def test_instruction_window_reader_requires_complete_shapes(part: dict[str, object]) -> None:
+def test_instruction_window_reader_requires_declared_structure(part: dict[str, object]) -> None:
     with pytest.raises(AIError) as caught:
         decode_model_messages(_wire(part))
     assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("part,expected", [
+    (_baseline({key: value for key, value in _block().items() if key != "name"}),
+     InstructionBaselinePart(instructions=[InstructionPart("original", dynamic=True, on_change="append",
+         id=InstructionId(CapabilityInstructionSource("catalog"), name="details"))])),
+    (_baseline({key: value for key, value in _block(digest=True).items() if key != "dynamic"}),
+     InstructionBaselinePart(instructions=[InstructionDigest(content_hash=_HASH,
+         id=InstructionId(CapabilityInstructionSource("catalog"), name="details"))])),
+    ({key: value for key, value in _delta().items() if key != "base_hash"},
+     InstructionDeltaPart(id=InstructionId(CapabilityInstructionSource("catalog"), name="details"), content="replacement")),
+])
+def test_instruction_window_reader_uses_declared_defaults(part: dict[str, object], expected: object) -> None:
+    restored, = decode_model_messages(_wire(part))
+    assert restored == ModelRequest(parts=[expected], timestamp=_STAMP)
 
 
 @pytest.mark.parametrize("part", [

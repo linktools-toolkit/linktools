@@ -5,8 +5,8 @@
 import binascii
 import json
 import math
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, fields, replace
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import cast
@@ -58,6 +58,7 @@ from ..errors import AIError, ErrorCode
 from . import model_input_content, ReferencedContent, project_model_attempts, project_model_response_attempts
 from ._attachment import binary_attachment_text, has_binary_attachment_metadata
 from ._user_content_codec import RetiredReferencedContent, decode_user_content_item, encode_user_content_item
+from ._wire_fields import decode_fields
 from ._json_snapshot import stable_json_snapshot
 from ._tool_return_codec import decode_tool_return_content, encode_tool_return_content
 
@@ -269,7 +270,7 @@ def freeze_model_messages(
     return decode_model_messages(encode_model_messages(messages))
 
 
-def decode_model_messages(raw: bytes) -> tuple[ModelMessage, ...]:
+def _parse_model_message_payload(raw: bytes) -> list[JsonValue]:
     try:
         value = json.loads(raw.decode("utf-8"))
         if canonical_json_bytes(cast(JsonValue, value)) != raw:
@@ -280,6 +281,50 @@ def decode_model_messages(raw: bytes) -> tuple[ModelMessage, ...]:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     if not isinstance(value, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return cast(list[JsonValue], value)
+
+
+def _read_model_message_payloads(
+    payloads: Iterable[bytes], *, decode: bool,
+) -> tuple[bytes, tuple[ModelMessage, ...]]:
+    fragments: list[bytes | memoryview] = [b"["]
+    messages: list[ModelMessage] = []
+    try:
+        for raw in payloads:
+            leaf = _parse_model_message_payload(raw)
+            if len(leaf) != 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if len(fragments) > 1:
+                fragments.append(b",")
+            fragments.append(memoryview(raw)[1:-1])
+            if decode:
+                messages.append(_decode_message(leaf[0]))
+    except AIError:
+        raise
+    except (TypeError, ValueError, KeyError, binascii.Error) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    fragments.append(b"]")
+    return b"".join(fragments), tuple(messages)
+
+
+def combine_model_message_payloads(payloads: Iterable[bytes]) -> bytes:
+    """Combine validated singleton arrays without materializing SDK defaults.
+
+    Message semantics are checked by the normal decoder when consumed. Original
+    canonical fragments are framed once, without copying each array's contents.
+    """
+    return _read_model_message_payloads(payloads, decode=False)[0]
+
+
+def decode_model_message_payloads(
+    payloads: Iterable[bytes],
+) -> tuple[bytes, tuple[ModelMessage, ...]]:
+    """Read singleton message arrays and retain their original canonical bytes."""
+    return _read_model_message_payloads(payloads, decode=True)
+
+
+def decode_model_messages(raw: bytes) -> tuple[ModelMessage, ...]:
+    value = _parse_model_message_payload(raw)
     try:
         return tuple(_decode_message(item) for item in value)
     except AIError:
@@ -337,90 +382,33 @@ def _decode_message(value: object) -> ModelMessage:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     kind = value.get("kind")
     if kind == "request":
-        _require_keys(
-            value,
-            {
-                "version",
-                "kind",
-                "parts",
-                "timestamp",
-                "instructions",
-                "run_id",
-                "agent_conversation_id",
-                "metadata",
-                "state",
-            },
-        )
-        parts = value["parts"]
-        if not isinstance(parts, list):
-            raise ValueError("model request parts are invalid")
-        state = _required_string(value["state"])
-        if state not in _REQUEST_STATES:
-            raise ValueError("model request state is invalid")
-        return ModelRequest(
-            parts=[_decode_request_part(item) for item in parts],
-            timestamp=_decode_optional_datetime(value["timestamp"]),
-            instructions=_optional_string(value["instructions"]),
-            run_id=_optional_string(value["run_id"]),
-            conversation_id=_optional_string(value["agent_conversation_id"]),
-            metadata=_decode_optional_mapping(value["metadata"]),
-            state=cast(object, state),
-        )
+        return ModelRequest(**decode_fields(value, ModelRequest, {
+            "state": lambda raw: _choice(raw, _REQUEST_STATES),
+            "parts": lambda raw: _decode_list(raw, _decode_request_part),
+            "timestamp": _decode_optional_datetime,
+            "instructions": _optional_string,
+            "run_id": _optional_string,
+            "agent_conversation_id": _optional_string,
+            "metadata": _decode_optional_mapping,
+        }, required={"version", "kind"}, aliases={"agent_conversation_id": "conversation_id"}))
     if kind == "response":
-        has_attempts = "failed_attempts" in value
-        _require_keys(
-            value,
-            {
-                "version",
-                "kind",
-                "parts",
-                "usage",
-                "model_name",
-                "timestamp",
-                "provider_name",
-                "provider_url",
-                "provider_details",
-                "provider_response_id",
-                "finish_reason",
-                "run_id",
-                "agent_conversation_id",
-                "metadata",
-                "state",
-            } | ({"failed_attempts"} if has_attempts else set()),
-        )
-        parts = value["parts"]
-        if not isinstance(parts, list):
-            raise ValueError("model response parts are invalid")
-        state = _required_string(value["state"])
-        if state not in _RESPONSE_STATES:
-            raise ValueError("model response state is invalid")
-        finish_reason = value["finish_reason"]
-        if finish_reason is not None and finish_reason not in _FINISH_REASONS:
-            raise ValueError("model response finish reason is invalid")
-        timestamp = _decode_optional_datetime(value["timestamp"])
-        if timestamp is None:
-            raise ValueError("model response timestamp is required")
-        attempt_fields: dict[str, object] = {}
-        if has_attempts:
-            attempt_fields["failed_attempts"] = _decode_model_attempts(value["failed_attempts"])
-        return ModelResponse(
-            parts=[_decode_response_part(item) for item in parts],
-            usage=_decode_usage(value["usage"]),
-            model_name=_optional_string(value["model_name"]),
-            timestamp=timestamp,
-            provider_name=_optional_string(value["provider_name"]),
-            provider_url=_optional_string(value["provider_url"]),
-            provider_details=_decode_optional_mapping(value["provider_details"]),
-            provider_response_id=_optional_string(value["provider_response_id"]),
-            finish_reason=cast(object, finish_reason),
-            run_id=_optional_string(value["run_id"]),
-            conversation_id=_optional_string(value["agent_conversation_id"]),
-            metadata=_decode_optional_mapping(value["metadata"]),
-            state=cast(object, state),
-            **attempt_fields,
-        )
+        return ModelResponse(**decode_fields(value, ModelResponse, {
+            "state": lambda raw: _choice(raw, _RESPONSE_STATES),
+            "finish_reason": lambda raw: None if raw is None else _choice(raw, _FINISH_REASONS),
+            "timestamp": _required_datetime,
+            "failed_attempts": _decode_model_attempts,
+            "parts": lambda raw: _decode_list(raw, _decode_response_part),
+            "usage": _decode_usage,
+            "model_name": _optional_string,
+            "provider_name": _optional_string,
+            "provider_url": _optional_string,
+            "provider_details": _decode_optional_mapping,
+            "provider_response_id": _optional_string,
+            "run_id": _optional_string,
+            "agent_conversation_id": _optional_string,
+            "metadata": _decode_optional_mapping,
+        }, required={"version", "kind"}, aliases={"agent_conversation_id": "conversation_id"}))
     raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-
 
 def _encode_request_part(part: object) -> dict[str, JsonValue]:
     if isinstance(part, SystemPromptPart):
@@ -501,86 +489,58 @@ def _decode_request_part(value: object) -> object:
     part = _part_mapping(value)
     kind = part.get("part_kind")
     if kind in {"system-prompt", "runtime-summary-prompt"}:
-        _require_keys(part, {"part_kind", "content", "timestamp", "dynamic_ref"})
         part_type = SummaryPromptPart if kind == "runtime-summary-prompt" else SystemPromptPart
-        return part_type(
-            _required_string(part["content"]),
-            timestamp=_required_datetime(part["timestamp"]),
-            dynamic_ref=_optional_string(part["dynamic_ref"]),
-        )
+        return part_type(**decode_fields(part, part_type, {
+            "content": _required_string,
+            "timestamp": _required_datetime,
+            "dynamic_ref": _optional_string,
+        }, required={"part_kind"}))
     if kind == "user-prompt":
-        _require_keys(part, {"part_kind", "content", "timestamp"})
-        raw_content = part["content"]
-        if not isinstance(raw_content, Mapping):
-            raise ValueError("user prompt content is invalid")
-        content_type = raw_content.get("type")
-        if content_type == "text":
-            _require_keys(raw_content, {"type", "value"})
-            content: object = _required_string(raw_content["value"])
-        elif content_type == "items":
-            _require_keys(raw_content, {"type", "items"})
-            items = raw_content["items"]
-            if not isinstance(items, list):
-                raise ValueError("user prompt items are invalid")
-            content = [decode_user_content_item(item) for item in items]
-        else:
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        return UserPromptPart(
-            cast(object, content),
-            timestamp=_required_datetime(part["timestamp"]),
-        )
+        return UserPromptPart(**decode_fields(part, UserPromptPart, {
+            "content": _decode_prompt_content,
+            "timestamp": _required_datetime,
+        }, required={"part_kind"}))
     if kind == "tool-return":
         return _decode_tool_return_part(part, native=False)
     if kind == "retry-prompt":
-        _require_keys(
-            part,
-            {"part_kind", "content", "tool_name", "tool_call_id", "timestamp"},
-        )
-        return RetryPromptPart(
-            _retry_content(part["content"]),
-            tool_name=_optional_string(part["tool_name"]),
-            tool_call_id=_required_string(part["tool_call_id"]),
-            timestamp=_required_datetime(part["timestamp"]),
-        )
+        return RetryPromptPart(**decode_fields(part, RetryPromptPart, {
+            "content": _retry_content,
+            "tool_name": _optional_string,
+            "tool_call_id": _required_string,
+            "timestamp": _required_datetime,
+        }, required={"part_kind", "tool_call_id"}))
     if kind == "retry-feedback":
-        _require_keys(part, {"part_kind", "content", "retry", "timestamp"})
         if RetryFeedbackPart is None:
+            _require_keys(part, {"part_kind", "content", "retry", "timestamp"})
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        return RetryFeedbackPart(
-            _retry_content(part["content"]),
-            retry=_decode_retry_info(part["retry"], feedback=True),
-            timestamp=_required_datetime(part["timestamp"]),
-        )
+        return RetryFeedbackPart(**decode_fields(part, RetryFeedbackPart, {
+            "content": _retry_content,
+            "retry": lambda raw: _decode_retry_info(raw, feedback=True),
+            "timestamp": _required_datetime,
+        }, required={"part_kind"}))
     if kind == "tool-availability-delta":
-        _require_keys(part, {"part_kind", "tools_added", "tool_call_id"})
-        tools = part["tools_added"]
-        if not isinstance(tools, list) or any(not isinstance(item, str) for item in tools):
-            raise ValueError("tool availability is invalid")
-        return ToolAvailabilityDeltaPart(
-            tools_added=cast(list[str], tools),
-            tool_call_id=_optional_string(part["tool_call_id"]),
-        )
+        return ToolAvailabilityDeltaPart(**decode_fields(part, ToolAvailabilityDeltaPart, {
+            "tools_added": lambda raw: _decode_list(raw, _required_string),
+            "tool_call_id": _optional_string,
+        }, required={"part_kind"}))
     if kind == "model-settings-delta":
-        _require_keys(part, {"part_kind", "settings", "top_level"})
         if ModelSettingsDeltaPart is None:
+            _require_keys(part, {"part_kind", "settings", "top_level"})
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        return ModelSettingsDeltaPart(
-            settings=_recorded_model_settings(part["settings"]),
-            top_level=_settings_top_level(part["top_level"]),
-        )
+        return ModelSettingsDeltaPart(**decode_fields(part, ModelSettingsDeltaPart, {
+            "settings": _recorded_model_settings,
+            "top_level": _settings_top_level,
+        }, required={"part_kind"}))
     if kind == "instruction-baseline":
-        _require_keys(part, {"part_kind", "instructions"})
-        instructions = part["instructions"]
-        if not isinstance(instructions, list):
-            raise ValueError("instruction baseline must contain a list")
-        return InstructionBaselinePart(instructions=[_decode_instruction_block(block) for block in instructions])
+        return InstructionBaselinePart(**decode_fields(part, InstructionBaselinePart, {
+            "instructions": lambda raw: _decode_list(raw, _decode_instruction_block),
+        }, required={"part_kind"}))
     if kind == "instruction-delta":
-        _require_keys(part, {"part_kind", "id", "content", "base_hash"})
-        return InstructionDeltaPart(
-            id=_decode_instruction_id(part["id"]),
-            content=_optional_string(part["content"]),
-            base_hash=None if part["base_hash"] is None else _instruction_hash(part["base_hash"]),
-        )
+        return InstructionDeltaPart(**decode_fields(part, InstructionDeltaPart, {
+            "id": _decode_instruction_id,
+            "content": _optional_string,
+            "base_hash": lambda raw: None if raw is None else _instruction_hash(raw),
+        }, required={"part_kind"}))
     if kind == "compaction":
         if not hasattr(CompactionPart, "metadata"):
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
@@ -592,6 +552,18 @@ def _decode_request_part(value: object) -> object:
         return speech
     raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
+
+def _decode_prompt_content(value: object) -> object:
+    if not isinstance(value, Mapping):
+        raise ValueError("user prompt content is invalid")
+    content_type = value.get("type")
+    if content_type == "text":
+        _require_keys(value, {"type", "value"})
+        return _required_string(value["value"])
+    if content_type == "items":
+        _require_keys(value, {"type", "items"})
+        return _decode_list(value["items"], decode_user_content_item)
+    raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
 def _recorded_model_settings(value: object) -> dict[str, JsonValue]:
     if not isinstance(value, Mapping):
@@ -631,23 +603,20 @@ def _decode_instruction_block(value: object) -> object:
     block = _part_mapping(value)
     kind = block.get("part_kind")
     if kind == "instruction":
-        _require_keys(block, {"part_kind", "id", "content", "dynamic", "on_change", "name"})
-        return InstructionPart(
-            _required_string(block["content"]),
-            id=_decode_instruction_id(block["id"]),
-            dynamic=_instruction_dynamic(block["dynamic"]),
-            on_change=_instruction_policy(block["on_change"]),
-            name=_optional_string(block["name"]),
-        )
+        return InstructionPart(**decode_fields(block, InstructionPart, {
+            "content": _required_string,
+            "id": _decode_instruction_id,
+            "dynamic": _instruction_dynamic,
+            "on_change": _instruction_policy,
+            "name": _optional_string,
+        }, required={"part_kind"}))
     if kind == "instruction-digest":
-        _require_keys(block, {"part_kind", "id", "dynamic", "content_hash"})
-        return InstructionDigest(
-            id=_decode_instruction_id(block["id"]),
-            dynamic=_instruction_dynamic(block["dynamic"]),
-            content_hash=_instruction_hash(block["content_hash"]),
-        )
+        return InstructionDigest(**decode_fields(block, InstructionDigest, {
+            "id": _decode_instruction_id,
+            "dynamic": _instruction_dynamic,
+            "content_hash": _instruction_hash,
+        }, required={"part_kind"}))
     raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-
 
 def _encode_instruction_id(value: InstructionId | None) -> str | None:
     if value is None:
@@ -740,16 +709,12 @@ def _decode_response_part(value: object) -> object:
     part = _part_mapping(value)
     kind = part.get("part_kind")
     if kind == "text":
-        _require_keys(
-            part,
-            {"part_kind", "content", "id", "provider_name", "provider_details"},
-        )
-        return TextPart(
-            _required_string(part["content"]),
-            id=_optional_string(part["id"]),
-            provider_name=_optional_string(part["provider_name"]),
-            provider_details=_decode_optional_mapping(part["provider_details"]),
-        )
+        return TextPart(**decode_fields(part, TextPart, {
+            "content": _required_string,
+            "id": _optional_string,
+            "provider_name": _optional_string,
+            "provider_details": _decode_optional_mapping,
+        }, required={"part_kind"}))
     if kind == "tool-call":
         return _decode_tool_call_part(part, native=False)
     if kind == "builtin-tool-call":
@@ -757,56 +722,33 @@ def _decode_response_part(value: object) -> object:
     if kind == "builtin-tool-return":
         return _decode_tool_return_part(part, native=True)
     if kind == "thinking":
-        _require_keys(
-            part,
-            {
-                "part_kind",
-                "content",
-                "id",
-                "signature",
-                "provider_name",
-                "provider_details",
-            },
-        )
-        return ThinkingPart(
-            _required_string(part["content"]),
-            id=_optional_string(part["id"]),
-            signature=_optional_string(part["signature"]),
-            provider_name=_optional_string(part["provider_name"]),
-            provider_details=_decode_optional_mapping(part["provider_details"]),
-        )
+        return ThinkingPart(**decode_fields(part, ThinkingPart, {
+            "content": _required_string,
+            "id": _optional_string,
+            "signature": _optional_string,
+            "provider_name": _optional_string,
+            "provider_details": _decode_optional_mapping,
+        }, required={"part_kind"}))
     if kind == "compaction":
-        _require_keys(
-            part,
-            {"part_kind", "content", "id", "provider_name", "provider_details"}
-            | ({"metadata"} if "metadata" in part else set()),
-        )
         if "metadata" in part and not hasattr(CompactionPart, "metadata"):
+            _require_keys(part, {"part_kind", "content", "id", "provider_name", "provider_details", "metadata"})
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        content = part["content"]
-        if content is not None and not isinstance(content, str):
-            raise ValueError("compaction content is invalid")
-        return CompactionPart(
-            cast(str | None, content),
-            id=_optional_string(part["id"]),
-            provider_name=_optional_string(part["provider_name"]),
-            provider_details=_decode_optional_mapping(part["provider_details"]),
-            **({"metadata": _decode_optional_mapping(part["metadata"])} if "metadata" in part else {}),
-        )
+        decoders = {
+            "content": _optional_string,
+            "id": _optional_string,
+            "provider_name": _optional_string,
+            "provider_details": _decode_optional_mapping,
+        }
+        if hasattr(CompactionPart, "metadata"):
+            decoders["metadata"] = _decode_optional_mapping
+        return CompactionPart(**decode_fields(part, CompactionPart, decoders, required={"part_kind"}))
     if kind == "file":
-        _require_keys(
-            part,
-            {"part_kind", "content", "id", "provider_name", "provider_details"},
-        )
-        content = decode_user_content_item(part["content"])
-        if not isinstance(content, BinaryContent):
-            raise ValueError("file part content is invalid")
-        return FilePart(
-            content,
-            id=_optional_string(part["id"]),
-            provider_name=_optional_string(part["provider_name"]),
-            provider_details=_decode_optional_mapping(part["provider_details"]),
-        )
+        return FilePart(**decode_fields(part, FilePart, {
+            "content": _decode_binary_content,
+            "id": _optional_string,
+            "provider_name": _optional_string,
+            "provider_details": _decode_optional_mapping,
+        }, required={"part_kind"}))
     if kind == "speech":
         speech = _decode_speech_part(part)
         if speech.speaker != "assistant":
@@ -814,6 +756,12 @@ def _decode_response_part(value: object) -> object:
         return speech
     raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
+
+def _decode_binary_content(value: object) -> BinaryContent:
+    content = decode_user_content_item(value)
+    if not isinstance(content, BinaryContent):
+        raise ValueError("binary message content is invalid")
+    return content
 
 def _encode_tool_call_part(
     part: ToolCallPart | NativeToolCallPart,
@@ -839,38 +787,23 @@ def _decode_tool_call_part(
     *,
     native: bool,
 ) -> object:
-    _require_keys(
-        part,
-        {
-            "part_kind",
-            "tool_name",
-            "args",
-            "tool_call_id",
-            "tool_kind",
-            "id",
-            "provider_name",
-            "provider_details",
-        },
-    )
-    tool_kind = _decode_tool_kind(part["tool_kind"])
-    args = part["args"]
-    if args is not None and not isinstance(args, (str, Mapping)):
-        raise ValueError("tool call args are invalid")
-    kwargs = {
-        "tool_name": _required_string(part["tool_name"]),
-        "args": cast(object, dict(args) if isinstance(args, Mapping) else args),
-        "tool_call_id": _required_string(part["tool_call_id"]),
-        "tool_kind": cast(object, tool_kind),
-        "id": _optional_string(part["id"]),
-        "provider_name": _optional_string(part["provider_name"]),
-        "provider_details": _decode_optional_mapping(part["provider_details"]),
-    }
-    if native:
-        value = NativeToolCallPart(**kwargs)
-        return NativeToolCallPart.narrow_type(value)
-    value = ToolCallPart(**kwargs)
-    return ToolCallPart.narrow_type(value)
+    part_type = NativeToolCallPart if native else ToolCallPart
+    value = part_type(**decode_fields(part, part_type, {
+        "tool_kind": _decode_tool_kind,
+        "args": _decode_tool_args,
+        "tool_name": _required_string,
+        "tool_call_id": _required_string,
+        "id": _optional_string,
+        "provider_name": _optional_string,
+        "provider_details": _decode_optional_mapping,
+    }, required={"part_kind", "tool_call_id"}))
+    return part_type.narrow_type(value)
 
+
+def _decode_tool_args(value: object) -> object:
+    if value is not None and not isinstance(value, (str, Mapping)):
+        raise ValueError("tool call args are invalid")
+    return dict(value) if isinstance(value, Mapping) else value
 
 def _encode_tool_return_part(
     part: ToolReturnPart | NativeToolReturnPart,
@@ -909,47 +842,32 @@ def _decode_tool_return_part(
     *,
     native: bool,
 ) -> object:
-    expected = {
-        "part_kind",
-        "tool_name",
-        "content",
-        "tool_call_id",
-        "tool_kind",
-        "metadata",
-        "timestamp",
-        "outcome",
+    part_type = NativeToolReturnPart if native else ToolReturnPart
+    decoders: dict[str, Callable[[object], object]] = {
+        "outcome": _decode_tool_outcome,
+        "tool_name": _required_string,
+        "content": decode_tool_return_content,
+        "tool_call_id": _required_string,
+        "tool_kind": _decode_tool_kind,
+        "metadata": _portable_json,
+        "timestamp": _required_datetime,
     }
     if native:
-        expected |= {"provider_name", "provider_details"}
-    elif "retry" in part:
-        expected.add("retry")
-    _require_keys(part, expected)
-    outcome = _required_string(part["outcome"])
-    if outcome not in _TOOL_OUTCOMES:
-        raise ValueError("tool outcome is invalid")
+        decoders.update(provider_name=_optional_string, provider_details=_decode_optional_mapping)
+    elif "retry" in part or RetryInfo is not None:
+        decoders["retry"] = lambda raw: None if raw is None else _decode_retry_info(raw, feedback=False)
+    kwargs = decode_fields(part, part_type, decoders, required={"part_kind", "tool_call_id"})
+    if kwargs.get("retry") is None and not any(field.name == "retry" for field in fields(part_type)):
+        kwargs.pop("retry", None)
+    value = part_type(**kwargs)
+    return part_type.narrow_type(value)
+
+
+def _decode_tool_outcome(value: object) -> str:
+    outcome = _choice(value, _TOOL_OUTCOMES)
     if outcome == "retried" and RetryInfo is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    kwargs = {
-        "tool_name": _required_string(part["tool_name"]),
-        "content": decode_tool_return_content(cast(JsonValue, part["content"])),
-        "tool_call_id": _required_string(part["tool_call_id"]),
-        "tool_kind": cast(object, _decode_tool_kind(part["tool_kind"])),
-        "metadata": _portable_json(part["metadata"]),
-        "timestamp": _required_datetime(part["timestamp"]),
-        "outcome": cast(object, outcome),
-    }
-    if native:
-        value = NativeToolReturnPart(
-            **kwargs,
-            provider_name=_optional_string(part["provider_name"]),
-            provider_details=_decode_optional_mapping(part["provider_details"]),
-        )
-        return NativeToolReturnPart.narrow_type(value)
-    if part.get("retry") is not None:
-        kwargs["retry"] = _decode_retry_info(part["retry"], feedback=False)
-    value = ToolReturnPart(**kwargs)
-    return ToolReturnPart.narrow_type(value)
-
+    return outcome
 
 def _retry_content(value: object) -> str | list[ErrorDetails]:
     if isinstance(value, str):
@@ -972,15 +890,18 @@ def _encode_retry_info(value: object, *, feedback: bool) -> dict[str, JsonValue]
 
 
 def _decode_retry_info(value: object, *, feedback: bool) -> "RetryInfo":
-    fields = _part_mapping(value)
-    _require_keys(fields, {"cause", "attempt", "max_retries"})
+    raw = _part_mapping(value)
     if RetryInfo is None:
+        _require_keys(raw, {"cause", "attempt", "max_retries"})
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    retry = RetryInfo(cause=fields["cause"], attempt=fields["attempt"], max_retries=fields["max_retries"])
+    retry = RetryInfo(**decode_fields(raw, RetryInfo, {
+        "cause": lambda item: item,
+        "attempt": lambda item: item,
+        "max_retries": lambda item: item,
+    }))
     # The SDK dataclass constructor does not validate its field annotations.
     _encode_retry_info(retry, feedback=feedback)
     return retry
-
 
 def _encode_speech_part(part: SpeechPart) -> dict[str, JsonValue]:
     return {
@@ -1000,45 +921,15 @@ def _encode_speech_part(part: SpeechPart) -> dict[str, JsonValue]:
 
 
 def _decode_speech_part(part: Mapping[str, object]) -> SpeechPart:
-    _require_keys(
-        part,
-        {
-            "part_kind",
-            "speaker",
-            "transcript",
-            "audio",
-            "interrupted_at_ms",
-            "id",
-            "provider_name",
-            "provider_details",
-        },
-    )
-    speaker = _required_string(part["speaker"])
-    if speaker not in {"user", "assistant"}:
-        raise ValueError("speech speaker is invalid")
-    audio = part["audio"]
-    decoded_audio = None
-    if audio is not None:
-        decoded_audio = decode_user_content_item(audio)
-        if not isinstance(decoded_audio, BinaryContent):
-            raise ValueError("speech audio is invalid")
-    interrupted = part["interrupted_at_ms"]
-    if interrupted is not None and (
-        isinstance(interrupted, bool)
-        or not isinstance(interrupted, int)
-        or interrupted < 0
-    ):
-        raise ValueError("speech interruption offset is invalid")
-    return SpeechPart(
-        speaker=cast(object, speaker),
-        transcript=_optional_string(part["transcript"]),
-        audio=decoded_audio,
-        interrupted_at_ms=cast(int | None, interrupted),
-        id=_optional_string(part["id"]),
-        provider_name=_optional_string(part["provider_name"]),
-        provider_details=_decode_optional_mapping(part["provider_details"]),
-    )
-
+    return SpeechPart(**decode_fields(part, SpeechPart, {
+        "speaker": lambda raw: _choice(raw, frozenset({"user", "assistant"})),
+        "transcript": _optional_string,
+        "audio": lambda raw: None if raw is None else _decode_binary_content(raw),
+        "interrupted_at_ms": lambda raw: None if raw is None else _nonnegative_integer(raw),
+        "id": _optional_string,
+        "provider_name": _optional_string,
+        "provider_details": _decode_optional_mapping,
+    }, required={"part_kind"}))
 
 def _encode_model_attempts(attempts: Sequence[object]) -> JsonValue:
     values: list[JsonValue] = []
@@ -1071,33 +962,32 @@ def _decode_model_attempts(value: object) -> list[object]:
     for item in value:
         if not isinstance(item, Mapping):
             raise ValueError("model request attempt must be an object")
-        _require_keys(item, {
-            "model_name", "provider_name", "outcome", "error", "timestamp", "duration_us", "usage",
-        })
-        outcome = _required_string(item["outcome"])
-        if outcome not in {"error", "rejected"}:
-            raise ValueError("model request attempt outcome is invalid")
-        duration = item["duration_us"]
-        if type(duration) is not int or duration < 0:
-            raise ValueError("model request attempt duration is invalid")
-        try:
-            elapsed = timedelta(microseconds=duration)
-        except OverflowError as error:
-            raise ValueError("model request attempt duration is invalid") from error
-        timestamp = _required_datetime(item["timestamp"])
-        if timestamp.tzinfo is None:
-            raise ValueError("model request attempt timestamp must include a timezone")
-        attempts.append(ModelRequestAttempt(
-            model_name=_required_string(item["model_name"]),
-            provider_name=_optional_string(item["provider_name"]),
-            outcome=outcome,
-            error=_optional_string(item["error"]),
-            timestamp=timestamp,
-            duration=elapsed,
-            usage=None if item["usage"] is None else _decode_usage(item["usage"]),
-        ))
+        attempts.append(ModelRequestAttempt(**decode_fields(item, ModelRequestAttempt, {
+            "model_name": _required_string,
+            "provider_name": _optional_string,
+            "outcome": lambda raw: _choice(raw, frozenset({"error", "rejected"})),
+            "error": _optional_string,
+            "timestamp": _attempt_timestamp,
+            "duration_us": _attempt_duration,
+            "usage": lambda raw: None if raw is None else _decode_usage(raw),
+        }, aliases={"duration_us": "duration"})))
     return attempts
 
+
+def _attempt_timestamp(value: object) -> datetime:
+    timestamp = _required_datetime(value)
+    if timestamp.tzinfo is None:
+        raise ValueError("model request attempt timestamp must include a timezone")
+    return timestamp
+
+
+def _attempt_duration(value: object) -> timedelta:
+    if type(value) is not int or value < 0:
+        raise ValueError("model request attempt duration is invalid")
+    try:
+        return timedelta(microseconds=value)
+    except OverflowError as error:
+        raise ValueError("model request attempt duration is invalid") from error
 
 def _encode_usage(usage: RequestUsage) -> dict[str, JsonValue]:
     known = {
@@ -1123,63 +1013,47 @@ def _encode_usage(usage: RequestUsage) -> dict[str, JsonValue]:
 def _decode_usage(value: object) -> RequestUsage:
     if not isinstance(value, Mapping):
         raise ValueError("usage must be an object")
-    _require_keys(
-        value,
-        {
-            "input_tokens",
-            "cache_write_tokens",
-            "cache_read_tokens",
-            "output_tokens",
-            "input_audio_tokens",
-            "cache_audio_read_tokens",
-            "output_audio_tokens",
-            "details",
-            "cost",
-            "extensions",
-        },
-    )
     numeric_names = (
-        "input_tokens",
-        "cache_write_tokens",
-        "cache_read_tokens",
-        "output_tokens",
-        "input_audio_tokens",
-        "cache_audio_read_tokens",
-        "output_audio_tokens",
+        "input_tokens", "cache_write_tokens", "cache_read_tokens", "output_tokens",
+        "input_audio_tokens", "cache_audio_read_tokens", "output_audio_tokens",
     )
-    numbers: dict[str, int] = {}
-    for name in numeric_names:
-        item = value[name]
-        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
-            raise ValueError("usage token count is invalid")
-        numbers[name] = item
-    details = value["details"]
+    decoders: dict[str, Callable[[object], object]] = {
+        name: _nonnegative_integer for name in numeric_names
+    }
+    decoders.update(details=_usage_details, cost=_usage_cost)
+    kwargs = decode_fields(value, RequestUsage, decoders, required={"extensions"})
     extensions = value["extensions"]
-    if not isinstance(details, Mapping) or not isinstance(extensions, Mapping):
-        raise ValueError("usage details are invalid")
-    if any(
-        not isinstance(key, str)
-        for key in set(details) | set(extensions)
-    ):
-        raise ValueError("usage extension key is invalid")
-    cost = value["cost"]
-    if cost is not None and not isinstance(cost, str):
-        raise ValueError("usage cost is invalid")
-    parsed_cost = None
-    if cost is not None:
-        try:
-            parsed_cost = Decimal(cost)
-        except (InvalidOperation, ValueError) as error:
-            raise ValueError("usage cost is invalid") from error
-        if not parsed_cost.is_finite():
-            raise ValueError("usage cost is invalid")
-    return RequestUsage(
-        **numbers,
-        details=dict(details),
-        cost=parsed_cost,
-        **dict(extensions),
-    )
+    if not isinstance(extensions, Mapping) or any(not isinstance(key, str) for key in extensions):
+        raise ValueError("usage extensions are invalid")
+    if set(extensions) & (set(decoders) | {"extensions"}):
+        raise ValueError("usage extensions cannot override standard fields")
+    return RequestUsage(**kwargs, **dict(extensions))
 
+
+def _usage_details(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
+        raise ValueError("usage details are invalid")
+    return dict(value)
+
+
+def _usage_cost(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("usage cost is invalid")
+    try:
+        result = Decimal(value)
+    except (InvalidOperation, ValueError) as error:
+        raise ValueError("usage cost is invalid") from error
+    if not result.is_finite():
+        raise ValueError("usage cost is invalid")
+    return result
+
+
+def _nonnegative_integer(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("nonnegative integer is required")
+    return value
 
 def _encode_optional_mapping(value: object) -> JsonValue:
     if value is None:
@@ -1261,6 +1135,20 @@ def _part_mapping(value: object) -> Mapping[str, object]:
     return cast(Mapping[str, object], value)
 
 
+
+def _decode_list(value: object, decode: Callable[[object], object]) -> list[object]:
+    if not isinstance(value, list):
+        raise ValueError("message field must be a list")
+    return [decode(item) for item in value]
+
+
+def _choice(value: object, choices: frozenset[str]) -> str:
+    result = _required_string(value)
+    if result not in choices:
+        raise ValueError("message field has an invalid choice")
+    return result
+
+
 def _require_keys(
     value: Mapping[object, object],
     expected: set[str],
@@ -1269,7 +1157,7 @@ def _require_keys(
         raise ValueError("durable message shape is invalid")
 
 
-__all__ = ['RetiredReferencedContent', 'SummaryPromptPart', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'model_input_content', 'model_response_usage', 'project_model_response_attempts', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_return_content_digest', 'without_history_system_prompts']
+__all__ = ['RetiredReferencedContent', 'SummaryPromptPart', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'combine_model_message_payloads', 'decode_model_message_payloads', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'model_input_content', 'model_response_usage', 'project_model_response_attempts', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_return_content_digest', 'without_history_system_prompts']
 
 from ._attachment import (binary_attachment_text, bind_tool_return_attachments, file_tool_result_metadata, has_binary_attachment_metadata, input_attachment_views, is_binary_attachment_text, request_attachment_facts)
 

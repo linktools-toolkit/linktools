@@ -3718,7 +3718,7 @@ class LocalExecutionBackend:
                     current, accepted_context = await self._persist_input_context(
                         current, accepted_context, loaded_context,
                     )
-                    if accepted_context.digest != proposed_context.digest:
+                    if accepted_context is not proposed_context and accepted_context.digest != proposed_context.digest:
                         history = list(accepted_context.model_messages())
                         loaded_context = LoadedModelContext(tuple(LoadedContextMessage(message, None) for message in history))
                         session_history_start = accepted_context.replace_history_system_prompt

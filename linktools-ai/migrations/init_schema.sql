@@ -164,17 +164,21 @@ CREATE TABLE ai_metric_definitions (
 
 CREATE TABLE ai_metric_observations (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
+    namespace VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original Metrics namespace retained after pruning.',
+    observation_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original observation identity retained after pruning.',
     namespace_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 partition identity of the Metrics namespace.',
     observation_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 identity of namespace plus observation_id.',
     payload_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the canonical ObservationEnvelope payload.',
     kind VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical observation kind query projection.',
     occurred_at DATETIME(6) NOT NULL COMMENT 'Canonical UTC observation occurrence time.',
-    payload_json JSON NOT NULL COMMENT 'Versioned canonical immutable ObservationEnvelope payload.',
+    payload_json JSON NULL COMMENT 'Versioned canonical immutable ObservationEnvelope payload.',
+    active_occurred_at DATETIME(6) NULL COMMENT 'Derived occurrence time for active observations only.',
+    pruned_at DATETIME(6) NULL COMMENT 'Backend time of the first payload pruning transition.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id),
     UNIQUE KEY uk_observation_digest (observation_digest),
-    KEY ix_namespace_digest_kind_occurred_at (namespace_digest, kind, occurred_at),
-    KEY ix_namespace_digest_occurred_at (namespace_digest, occurred_at),
+    KEY ix_namespace_digest_kind_active_occurred_at (namespace_digest, kind, active_occurred_at),
+    KEY ix_namespace_digest_active_occurred_at (namespace_digest, active_occurred_at),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Immutable metric observations.';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Immutable metric observations and retained pruning receipts.';

@@ -90,6 +90,7 @@ class _WriteScope:
         self.timer: asyncio.TimerHandle | None = None
         self.failure: BaseException | None = None
         self._scheduled = False
+        self._cleanup_task: asyncio.Task[None] | None = None
 
     def stop_timer(self) -> None:
         if self.timer is not None:
@@ -167,35 +168,38 @@ class _WriteScope:
         await self.lock.acquire()
         self.stop_timer()
         try:
-            confirmed = tuple(write for write in self.pending if write.id in self.confirmed)
-            if confirmed:
-                await self._ack(confirmed)
-            prefix = tuple(self.pending)
+            prefix = tuple(write for write in self.pending if write.id not in self.confirmed)
             if any(write.durable for write in prefix) and self.marker is not None:
                 await self.marker.confirm_before(self.group)
             buffered = tuple(write for write in prefix if write.buffered)
             if buffered:
                 assert self.policy.buffer is not None
-                queued = await self.policy.buffer.read_batch(self.id, limit=len(buffered))
-                expected = {write.id: (write.receipt_key.hex(), write.content) for write in buffered}
+                retained = tuple(write for write in self.pending if write.buffered)
+                queued = await self.policy.buffer.read_batch(self.id, limit=len(retained))
+                expected = {write.id: (write.receipt_key.hex(), write.content) for write in retained}
                 returned = tuple(entry[0] for entry in queued)
                 if (len(set(returned)) != len(returned)
                         or any(expected.get(identity) != (key, content) for identity, key, content in queued)
-                        or returned != tuple(write.id for write in buffered if write.id in returned)
+                        or returned != tuple(write.id for write in retained if write.id in returned)
                         or any(write.queued and write.id not in returned for write in buffered)):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "capability buffer prefix changed")
+                if any(write.id not in returned for write in buffered):
+                    raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN, "capability buffer admission is unresolved")
+                contents = {identity: content for identity, _key, content in queued}
+                for write in buffered:
+                    content = contents[write.id]
+                    assert content is not None
+                    write.payload = ImmutableJsonMapping(json.loads(content))
             return PreparedCapabilityWrites(self, prefix)
         except BaseException:
             self.lock.release()
             raise
 
-    async def flush(self) -> None:
+    async def flush(self, *, on_settled: Callable[[], None] | None = None) -> None:
         prepared = await self.prepare()
+        prepared.on_settled = on_settled
         try:
             if not prepared.writes:
-                self.failure = None
-                return
-            if all(write.id in self.confirmed for write in prepared.writes):
                 await prepared.settle()
                 self.failure = None
                 return
@@ -223,33 +227,80 @@ class _WriteScope:
         finally:
             await prepared.abort()
 
-    async def _ack(self, writes: tuple[_Write, ...]) -> None:
+    async def _ack(self, writes: tuple[_Write, ...], *, lock_held: bool = False) -> None:
         buffered = [write.id for write in writes if write.buffered]
         if buffered:
             assert self.policy.buffer is not None
             await self.policy.buffer.ack(self.id, buffered)
+        if lock_held:
+            self._forget_confirmed(writes)
+        else:
+            async with self.lock:
+                self._forget_confirmed(writes)
+
+    def _forget_confirmed(self, writes: tuple[_Write, ...]) -> None:
         ids = {write.id for write in writes}
         self.pending[:] = [write for write in self.pending if write.id not in ids]
         self.confirmed.difference_update(ids)
 
+    async def acknowledge_confirmed(self) -> None:
+        async with self.lock:
+            writes = tuple(write for write in self.pending if write.id in self.confirmed)
+        if writes:
+            await self._ack(writes)
+
+    def schedule_acknowledgement(self, settled: Callable[[], None]) -> None:
+        if self._cleanup_task is not None and not self._cleanup_task.done():
+            return
+
+        async def acknowledge() -> None:
+            try:
+                await self.acknowledge_confirmed()
+            except BaseException as error:
+                self.failure = error
+            finally:
+                settled()
+
+        task = asyncio.create_task(acknowledge())
+        self._cleanup_task = task
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
 
 class PreparedCapabilityWrites:
-    """One locked prefix that can join an already-owned terminal transaction."""
+    """Locked prefixes joining one already-owned transaction."""
 
     def __init__(self, scope: _WriteScope | None, writes: tuple[_Write, ...] = ()) -> None:
-        self.scope = scope
-        self.writes = writes
-        self.marker = scope.marker if scope is not None and any(write.durable for write in writes) and scope.marker is not None and not scope.marker.confirmed else None
-        stores = tuple(write.store for write in writes)
-        if self.marker is not None:
-            stores += (self.marker.store,)
-        self.stores = tuple(dict.fromkeys(stores))
+        self._set_prefixes(() if scope is None else ((scope, writes),))
         self._released = False
         self.on_settled: Callable[[], None] | None = None
 
+    def _set_prefixes(self, prefixes: tuple[tuple[_WriteScope, tuple[_Write, ...]], ...]) -> None:
+        self._prefixes = prefixes
+        self.scope = prefixes[0][0] if prefixes else None
+        self.writes = tuple(write for _scope, writes in prefixes for write in writes)
+        self._markers = tuple(dict.fromkeys(
+            scope.marker for scope, writes in prefixes
+            if any(write.durable for write in writes) and scope.marker is not None and not scope.marker.confirmed
+        ))
+        stores = tuple(write.store for write in self.writes) + tuple(marker.store for marker in self._markers)
+        self.stores = tuple(dict.fromkeys(stores))
+
+    @classmethod
+    def _combine(cls, prepared: tuple["PreparedCapabilityWrites", ...]) -> "PreparedCapabilityWrites":
+        combined = cls(None)
+        combined._set_prefixes(tuple(prefix for value in prepared for prefix in value._prefixes))
+        if combined.scope is not None and any(
+            scope.group is not combined.scope.group for scope, _writes in combined._prefixes
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT, "capability prefixes require one storage group")
+        for value in prepared:
+            value._released = True
+        return combined
+
     async def apply(self, group: StateGroupTransaction) -> None:
-        if self.marker is not None:
-            await ensure_capability_partition_marker(group.transaction(self.marker.store))
+        for marker in self._markers:
+            await ensure_capability_partition_marker(group.transaction(marker.store))
         for write in self.writes:
             transaction = group.transaction(write.store)
             receipt = await transaction.get_operation(write.receipt_key)
@@ -280,8 +331,10 @@ class PreparedCapabilityWrites:
                     complete = False
                 else:
                     self._validate_receipt(receipt, write)
-            if complete and self.marker is not None and not await has_capability_partition_marker(group.transaction(self.marker.store)):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "capability writes lack their durable partition marker")
+            if complete:
+                for marker in self._markers:
+                    if not await has_capability_partition_marker(group.transaction(marker.store)):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "capability writes lack their durable partition marker")
             return complete
         return await self.scope.group.read_many(self.stores, read)
 
@@ -295,22 +348,32 @@ class PreparedCapabilityWrites:
         return CommitObservation(DurableCommitState.COMMITTED if committed else DurableCommitState.NOT_COMMITTED)
 
     async def settle(self) -> None:
-        if self.scope is None:
-            return
-        # Confirmation precedes ack. An ack failure keeps a confirmed prefix;
-        # explicit retry settles transport without replaying the source mutation.
-        if self.marker is not None:
-            self.marker.confirmed = True
-        self.scope.confirmed.update(write.id for write in self.writes)
-        self.scope.receipts.update((write.receipt_key, write.digest) for write in self.writes)
-        await self.scope._ack(self.writes)
+        for marker in self._markers:
+            marker.confirmed = True
+        for scope, writes in self._prefixes:
+            scope.confirmed.update(write.id for write in writes)
+            scope.receipts.update((write.receipt_key, write.digest) for write in writes)
         if self.on_settled is not None:
+            # Terminal publication must return its canonical result independently
+            # of transport cleanup. The owner retains failed acknowledgements.
+            await self.abort()
+            for scope, _writes in self._prefixes:
+                if any(write.buffered and write.id in scope.confirmed for write in scope.pending):
+                    scope.schedule_acknowledgement(self.on_settled)
+                else:
+                    await scope.acknowledge_confirmed()
             self.on_settled()
-        await self.abort()
+        else:
+            for scope, _writes in self._prefixes:
+                confirmed = tuple(write for write in scope.pending if write.id in scope.confirmed)
+                if confirmed:
+                    await scope._ack(confirmed, lock_held=True)
+            await self.abort()
 
     async def abort(self) -> None:
-        if not self._released and self.scope is not None:
-            self.scope.lock.release()
+        if not self._released:
+            for scope, _writes in reversed(self._prefixes):
+                scope.lock.release()
         self._released = True
 
 
@@ -338,7 +401,7 @@ class _BoundWriter(CapabilityWriter):
             id=uuid4().hex, store=self.store, persist=self.persist, payload=copied,
             receipt_key=receipt_key, digest=hashlib.sha256(content).hexdigest(), content=content,
             durable=self.durable,
-            buffered=self.scope.policy.mode == "batch" and self.scope.policy.buffer is not None,
+            buffered=self.scope.policy.mode in {"batch", "terminal"} and self.scope.policy.buffer is not None,
         ))
 
     async def flush(self) -> None:
@@ -399,20 +462,28 @@ class RuntimeCapabilityWrites:
     ) -> PreparedCapabilityWrites:
         if self._has_active_execution(execution_id):
             self._sealed.add(execution_id)
-        chosen = None
         scopes = tuple(scope for scope in self._scopes.values() if scope.execution_id == execution_id)
         for scope in scopes:
             scope.accepting = False
             scope.stop_timer()
+        chosen: list[_WriteScope] = []
         for scope in scopes:
             if scope.run_id == run_id and scope.policy.mode == "terminal" and scope.group is storage_group:
-                chosen = scope
+                chosen.append(scope)
             else:
-                await scope.flush()
-        if chosen is None:
+                await scope.flush(on_settled=lambda: self._release_execution(execution_id))
+        if not chosen:
             self._release_execution(execution_id)
             return PreparedCapabilityWrites(None)
-        prepared = await chosen.prepare()
+        prefixes: list[PreparedCapabilityWrites] = []
+        try:
+            for scope in sorted(chosen, key=lambda value: value.id):
+                prefixes.append(await scope.prepare())
+            prepared = PreparedCapabilityWrites._combine(tuple(prefixes))
+        except BaseException:
+            for prefix in reversed(prefixes):
+                await prefix.abort()
+            raise
         prepared.on_settled = lambda: self._release_execution(execution_id)
         return prepared
 

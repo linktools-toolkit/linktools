@@ -33,7 +33,7 @@ from linktools.ai.observe import MetricRecorder, Metrics, Observation
 from linktools.ai.observe._memory import InMemoryMetricStore
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.persistence.capabilities import CapabilityPersistence, CapabilityWriter
+from linktools.ai.persistence.capabilities import CapabilityPersistence, CapabilityWriter, PreparedCapabilityWrites
 from linktools.ai.persistence.state import (
     StateGroupTransaction,
     StateStorageGroup,
@@ -45,7 +45,7 @@ from linktools.ai.persistence.state import (
 from linktools.ai.persistence._filesystem import FilesystemStateStorageGroup
 from linktools.ai.persistence._memory import InMemoryStateStorageGroup
 from linktools.ai.persistence._sql import SqlStateStorageGroup, _SqlTransaction
-from linktools.ai.storage import BatchWriteScopeFactory, InMemoryCacheBackend, StorageRoute
+from linktools.ai.storage import InMemoryCacheBackend, StorageRoute
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
 from .test_metrics_recording import _observation
@@ -313,6 +313,10 @@ def _batch(buffer: _Buffer, *, size: int = 100, interval: float = 300) -> Commit
     return CommitPolicy.batch(buffer=buffer, batch_size=size, flush_interval=interval)
 
 
+class _IndependentTerminalPolicy(CommitPolicy):
+    """A distinct valid policy keeps its participant in a separate write scope."""
+
+
 def test_public_persistence_types_resolve_without_runtime_import_cycles() -> None:
     for owner, names in ((CapabilityPersistence, ("bind_persistence", "persist_in_transaction")),
                          (CapabilityWriter, ("submit", "flush"))):
@@ -432,7 +436,7 @@ async def test_submission_keys_are_idempotent_and_payloads_are_frozen(tmp_path: 
 async def test_terminal_custom_writes_join_the_existing_execution_transaction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
     async with _opened(
         tmp_path, monkeypatch, backend="sqlite" if backend in {"separate-conversation", "pending-turn"} else backend,
-        policies=(CommitPolicy.terminal(), CommitPolicy.terminal()), terminal=True,
+        policies=(CommitPolicy.terminal(), _IndependentTerminalPolicy.terminal()), terminal=True,
         conversation_storage=StorageRoute.sqlite(tmp_path / "conversation.db") if backend == "separate-conversation" else None,
         trace=backend == "separate-conversation",
     ) as opened:
@@ -536,10 +540,149 @@ async def test_lost_buffer_ack_never_reexecutes_a_confirmed_domain_write(tmp_pat
             pass
         assert len(await opened.probe.facts("audit")) == len(await opened.probe.facts("index")) == 1
         assert await buffer.pending() == 2
+        await opened.finish()
         buffer.fail_ack = False
         await index.flush()
         assert await buffer.pending() == 0
         assert len(opened.probe.writes) == 2
+
+
+@pytest.mark.asyncio
+async def test_terminal_prefix_confirmation_does_not_wait_for_buffer_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class DelayedBuffer(_Buffer):
+        async def ack(self, scope: str, ids: Sequence[str]) -> None:
+            entered.set()
+            await release.wait()
+            await super().ack(scope, ids)
+
+    first, second = DelayedBuffer(), _Buffer()
+    async with _opened(tmp_path, monkeypatch, policies=(_batch(first), _batch(second))) as opened:
+        audit, index = await opened.start()
+        await audit.submit("audit")
+        await index.submit("index")
+        scopes = (audit.writer.scope, index.writer.scope)
+        prefixes = tuple([await scope.prepare() for scope in scopes])
+        prepared = PreparedCapabilityWrites._combine(prefixes)
+        settled = asyncio.Event()
+        prepared.on_settled = settled.set
+        try:
+            await scopes[0].group.mutate(prepared.stores, prepared.apply)
+            await asyncio.wait_for(prepared.settle(), 2)
+            await asyncio.wait_for(entered.wait(), 2)
+            assert settled.is_set() and all(not scope.lock.locked() for scope in scopes)
+            assert len(await opened.probe.facts("audit")) == len(await opened.probe.facts("index")) == 1
+            assert opened.probe.writes[0].frame is opened.probe.writes[1].frame
+            assert await first.pending() == 1
+        finally:
+            release.set()
+            await prepared.abort()
+            await audit.flush()
+            await index.flush()
+        assert await first.pending() == await second.pending() == 0
+        assert len(opened.probe.writes) == 2
+
+
+@pytest.mark.asyncio
+async def test_independent_prefixes_roll_back_as_one_source_batch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    first, second = _Buffer(), _Buffer()
+    async with _opened(tmp_path, monkeypatch, policies=(_batch(first), _batch(second))) as opened:
+        audit, index = await opened.start()
+        await audit.submit("audit")
+        await index.submit("index")
+        scopes = (audit.writer.scope, index.writer.scope)
+        prepared = PreparedCapabilityWrites._combine(tuple([await scope.prepare() for scope in scopes]))
+        opened.probe.fail.add("index")
+        try:
+            with pytest.raises(AIError) as conflict:
+                await scopes[0].group.mutate(prepared.stores, prepared.apply)
+            assert conflict.value.code is ErrorCode.STORAGE_CONFLICT
+        finally:
+            await prepared.abort()
+        assert all(not scope.lock.locked() for scope in scopes)
+        assert await opened.probe.facts("audit") == await opened.probe.facts("index") == ()
+        assert await first.pending() == await second.pending() == 1
+        assert not first.acknowledged and not second.acknowledged
+        opened.probe.fail.clear()
+        prepared = PreparedCapabilityWrites._combine(tuple([await scope.prepare() for scope in scopes]))
+        try:
+            await scopes[0].group.mutate(prepared.stores, prepared.apply)
+            await prepared.settle()
+        finally:
+            await prepared.abort()
+        assert len(await opened.probe.facts("audit")) == len(await opened.probe.facts("index")) == 1
+        assert await first.pending() == await second.pending() == 0
+
+
+@pytest.mark.asyncio
+async def test_buffer_payload_rebuilds_a_discarded_local_write_view(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    buffer = _Buffer()
+    async with _opened(tmp_path, monkeypatch, policies=(_batch(buffer), _batch(buffer))) as opened:
+        audit, _index = await opened.start()
+        await audit.submit("request", {"items": [1, 2]})
+        write, = audit.writer.scope.pending
+        write.payload = {}
+        await audit.flush()
+        fact, = await opened.probe.facts("audit")
+        assert fact.data["value"] == {"items": [1, 2]}
+        assert await buffer.pending() == 0
+
+
+@pytest.mark.asyncio
+async def test_terminal_cleanup_failure_does_not_reopen_confirmed_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    buffer = _Buffer()
+    async with _opened(tmp_path, monkeypatch, policies=(_batch(buffer), _batch(buffer))) as opened:
+        audit, index = await opened.start()
+        await audit.submit("audit")
+        await index.submit("index")
+        scope = audit.writer.scope
+        prepared = await scope.prepare()
+        prepared.on_settled = lambda: None
+        buffer.fail_ack = True
+        await scope.group.mutate(prepared.stores, prepared.apply)
+        await prepared.settle()
+        await scope._cleanup_task
+        assert isinstance(scope.failure, OSError)
+        assert await buffer.pending() == 2
+
+        async def unavailable(scope: str, *, limit: int):
+            raise OSError("buffer read unavailable")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(buffer, "read_batch", unavailable)
+            retry = await scope.prepare()
+            try:
+                assert retry.writes == () and await retry.readback()
+            finally:
+                await retry.abort()
+        with pytest.raises(OSError):
+            await audit.flush()
+        buffer.fail_ack = False
+        await index.flush()
+        assert await buffer.pending() == 0 and len(opened.probe.writes) == 2
+
+
+@pytest.mark.asyncio
+async def test_unknown_buffer_admission_cannot_publish_missing_payload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class UnavailableBuffer(_Buffer):
+        async def append(self, scope: str, id: str, key: Hashable, content: bytes | None, *, wait: bool) -> bool:
+            raise OSError("append outcome unavailable")
+
+    buffer = UnavailableBuffer()
+    async with _opened(tmp_path, monkeypatch, policies=(_batch(buffer), _batch(buffer))) as opened:
+        audit, _index = await opened.start()
+        with pytest.raises(OSError):
+            await audit.submit("request")
+        with pytest.raises(AIError) as unknown:
+            await audit.flush()
+        assert unknown.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+        assert opened.probe.writes == []
+        scope = audit.writer.scope
+        write, = scope.pending
+        await _Buffer.append(buffer, scope.id, write.id, write.receipt_key.hex(), write.content, wait=False)
+        await audit.flush()
+        assert len(await opened.probe.facts("audit")) == 1
 
 
 @pytest.mark.asyncio
@@ -642,6 +785,43 @@ async def test_automatic_batch_trigger_commits_compatible_participants_together(
 
 
 @pytest.mark.asyncio
+async def test_automatic_batch_keeps_the_next_prefix_scheduled_after_ack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class DelayedBuffer(_Buffer):
+        calls = 0
+
+        async def ack(self, scope: str, ids: Sequence[str]) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                entered.set()
+                await release.wait()
+            await super().ack(scope, ids)
+
+    buffer = DelayedBuffer()
+    async with _opened(tmp_path, monkeypatch, policies=(_batch(buffer, size=1), _batch(buffer, size=1))) as opened:
+        audit, index = await opened.start()
+        await audit.submit("first")
+        await asyncio.wait_for(entered.wait(), 2)
+        tail = asyncio.create_task(index.submit("second"))
+        try:
+            await asyncio.sleep(0)
+            assert not tail.done()
+        finally:
+            release.set()
+        await asyncio.wait_for(tail, 2)
+
+        async def acknowledged() -> None:
+            while len(buffer.acknowledged) < 2:
+                buffer.acked.clear()
+                await buffer.acked.wait()
+
+        await asyncio.wait_for(acknowledged(), 2)
+        assert len(await opened.probe.facts("audit")) == len(await opened.probe.facts("index")) == 1
+        assert await buffer.pending() == 0
+
+
+@pytest.mark.asyncio
 async def test_full_buffer_rejects_without_blocking_an_explicit_drain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     buffer = _Buffer(max_size=1)
     async with _opened(tmp_path, monkeypatch, policies=(_batch(buffer), _batch(buffer))) as opened:
@@ -715,18 +895,18 @@ async def test_metric_weak_failure_does_not_settle_custom_atomic_writes(tmp_path
             raise OSError("metric source unavailable")
 
     class RecordingMetrics(Metrics):
-        def recorder(self, *, batch_scopes: BatchWriteScopeFactory | None = None) -> MetricRecorder:
-            recorder = super().recorder(batch_scopes=batch_scopes)
+        def recorder(self) -> MetricRecorder:
+            recorder = super().recorder()
             recorders.append(recorder)
             return recorder
 
     buffer = _Buffer()
-    metrics = RecordingMetrics.from_store(FailedMetricStore(), commit=_batch(buffer))
+    metrics = RecordingMetrics.from_store(FailedMetricStore())
     async with _opened(tmp_path, monkeypatch, policies=(_batch(buffer), _batch(buffer)), metrics=metrics) as opened:
         audit, index = await opened.start()
         await audit.submit("audit")
         await index.submit("index")
-        assert await recorders[0].try_record(_observation("weak-metric"))
+        assert not await recorders[0].try_record(_observation("weak-metric"))
         assert (await opened.runtime.metrics.flush()).completed
         status = opened.runtime.metrics.status()
         assert status.pending == 0 and status.unconfirmed > 0 and status.write_failures > 0

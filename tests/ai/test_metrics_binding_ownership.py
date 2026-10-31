@@ -6,12 +6,10 @@ import asyncio
 from datetime import datetime, timezone
 
 import pytest
-from linktools.ai.core import CommitPolicy
 
 from linktools.ai.observe import Metrics, Observation
 from linktools.ai.observe._memory import InMemoryMetricStore
 from linktools.ai.observe.service import MetricsService
-from linktools.ai.storage import InMemoryCacheBackend
 
 
 def _observation(identity: str) -> Observation:
@@ -24,26 +22,15 @@ def _observation(identity: str) -> Observation:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cached", [False, True])
-async def test_binding_owns_only_its_recording_and_reuses_dataset(cached: bool) -> None:
-    class BorrowedCache(InMemoryCacheBackend):
-        async def close(self) -> None:
-            pytest.fail("recording must not close the borrowed cache")
-
-    metrics = Metrics.in_memory(commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=BorrowedCache(max_bytes=2**20) if cached else None))
+async def test_binding_owns_only_its_recording_and_reuses_dataset() -> None:
+    metrics = Metrics.in_memory()
     first, second = MetricsService(metrics), MetricsService(metrics)
     try:
         assert await first.try_record(_observation("first"))
         assert await second.try_record(_observation("second"))
-        if cached:
-            assert await metrics.get_observation("first") is None
-            assert await metrics.get_observation("second") is None
         await first.close()
         assert await metrics.get_observation("first") is not None
         assert second.status().accepting
-        if cached:
-            assert await metrics.get_observation("second") is None
-            assert second.status().pending == 1
         await metrics.record_observations((_observation("explicit-business"),))
         assert await metrics.get_observation("explicit-business") is not None
         assert await second.try_record(_observation("after-first-close"))
@@ -57,7 +44,7 @@ async def test_binding_owns_only_its_recording_and_reuses_dataset(cached: bool) 
 
 @pytest.mark.asyncio
 async def test_shared_dataset_creates_independent_runtime_services() -> None:
-    dataset = Metrics.in_memory(commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=2**20)))
+    dataset = Metrics.in_memory()
     first, second = MetricsService(dataset), MetricsService(dataset)
     try:
         assert first is not second
@@ -139,7 +126,7 @@ async def test_recording_bindings_borrow_shared_sql_engine(tmp_path, monkeypatch
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'metrics.db'}")
     await provision_metrics_database(engine)
-    metrics = Metrics.sql(engine, commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=2**20)))
+    metrics = Metrics.sql(engine)
     first, second = MetricsService(metrics), MetricsService(metrics)
     async def unexpected_dispose(*args, **kwargs):
         pytest.fail("recording must not dispose the borrowed SQL engine")
@@ -150,8 +137,8 @@ async def test_recording_bindings_borrow_shared_sql_engine(tmp_path, monkeypatch
             assert await second.try_record(_observation("second-sql"))
             await first.close()
             assert await metrics.get_observation("first-sql") is not None
-            assert await metrics.get_observation("second-sql") is None
-            assert second.status().pending == 1
+            assert await metrics.get_observation("second-sql") is not None
+            assert second.status().pending == 0
             await second.close()
             assert await metrics.get_observation("second-sql") is not None
             await metrics.record_observations((_observation("after-close-sql"),))
@@ -162,8 +149,8 @@ async def test_recording_bindings_borrow_shared_sql_engine(tmp_path, monkeypatch
         await engine.dispose()
 
 
-def test_metrics_service_requires_explicit_dataset() -> None:
+def test_metrics_service_requires_explicit_provider() -> None:
     with pytest.raises(TypeError):
         MetricsService()
-    with pytest.raises(TypeError, match="metrics must be Metrics"):
+    with pytest.raises(TypeError, match="metrics must be MetricRecorderProvider"):
         MetricsService(None)

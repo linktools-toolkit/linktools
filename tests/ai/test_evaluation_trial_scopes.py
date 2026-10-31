@@ -104,7 +104,7 @@ _UNSCOPED_MANIFEST_WIRE = """
 """
 
 
-def test_current_manifest_wire_requires_scope_flag_and_scoped_mode_changes_identity() -> None:
+def test_manifest_wire_defaults_scope_flag_and_scoped_mode_changes_identity() -> None:
     wire = json.loads(_UNSCOPED_MANIFEST_WIRE)
     unscoped = decode_domain(wire, EvaluationManifest)
     assert not unscoped.trial_scope_required
@@ -124,10 +124,9 @@ def test_current_manifest_wire_requires_scope_flag_and_scoped_mode_changes_ident
     assert decode_domain(encode_domain(unscoped), EvaluationManifest) == unscoped
 
     del wire["fields"]["trial_scope_required"]
-    with pytest.raises(AIError) as missing:
-        decode_domain(wire, EvaluationManifest)
-    assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    assert missing.value.safe_details["missing_fields"] == ["trial_scope_required"]
+    restored_default = decode_domain(wire, EvaluationManifest)
+    assert restored_default == unscoped
+    assert restored_default.digest == unscoped.digest
     wire["fields"]["trial_scope_required"] = "false"
     with pytest.raises(AIError) as malformed:
         decode_domain(wire, EvaluationManifest)

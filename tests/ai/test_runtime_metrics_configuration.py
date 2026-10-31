@@ -6,7 +6,6 @@ from linktools.ai.persistence import Persistence
 from ._runtime_test_helpers import model_features
 import asyncio
 import pytest
-from linktools.ai.core import CommitPolicy
 from pydantic_ai.models.test import TestModel
 from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
@@ -15,7 +14,6 @@ from linktools.ai.observe._memory import InMemoryMetricStore
 from linktools.ai.capability import CheckpointCapability, TraceCapability
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.storage import InMemoryCacheBackend
 from .test_explicit_runtime_features import _FeatureModels, _features, _definitions
 
 
@@ -30,15 +28,14 @@ class _RecordingStore(InMemoryMetricStore):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enabled", (False, True))
-@pytest.mark.parametrize("cached", (False, True))
-async def test_agent_metrics_require_resource_and_keep_batching(enabled, cached):
+async def test_agent_metrics_require_explicit_provider(enabled):
     store = _RecordingStore()
-    metrics = Metrics.from_store(store, commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=2**20) if cached else None))
+    metrics = Metrics.from_store(store)
     features = _definitions()
     async with Persistence.open('metrics-explicit', storage=PersistenceStorage.in_memory()) as persistence_35, Runtime.attach(persistence=persistence_35, features=model_features(_FeatureModels(), features), metrics=metrics if enabled else None) as runtime:
         execution = await runtime.agents.get().start("question")
         await execution.wait(timeout_seconds=5)
-        if cached or not enabled:
+        if not enabled:
             assert store.observations == []
         await runtime.metrics.flush()
         kinds = {item.kind for item in store.observations}
@@ -51,7 +48,7 @@ async def test_agent_metrics_require_resource_and_keep_batching(enabled, cached)
         assert len(ids) == len(set(ids))
 
 
-def test_runtime_metrics_requires_dataset():
+def test_runtime_metrics_requires_provider():
     with pytest.raises(TypeError, match="metrics"):
         Runtime.open("invalid-metrics", storage=PersistenceStorage.in_memory(), features=model_features(_FeatureModels()), metrics=object())
 
@@ -70,7 +67,7 @@ async def test_trace_and_checkpoint_do_not_enable_metrics():
 @pytest.mark.asyncio
 async def test_shared_metrics_survive_other_runtime_close():
     store = _RecordingStore()
-    metrics = Metrics.from_store(store, commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=2**20)))
+    metrics = Metrics.from_store(store)
     for namespace in ("first", "second"):
         async with Persistence.open(namespace, storage=PersistenceStorage.in_memory()) as persistence_72, Runtime.attach(persistence=persistence_72, features=model_features(_FeatureModels(), _definitions()), metrics=metrics) as runtime:
             execution = await runtime.agents.get().start("question")

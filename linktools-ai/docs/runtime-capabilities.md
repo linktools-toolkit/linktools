@@ -46,9 +46,10 @@ provide duplicate capability exports.
 A captured declaration can be reused across Runtime instances. Runtime binds
 isolated `ConversationService`, `CheckpointService` and `TraceService` instances
 for each run without changing the declaration or its custom native hooks.
-`MetricsService` owns one Runtime recording lifetime shared by Agent, Task and
-Evaluation, over a borrowed Metrics dataset, and enriches observations without
-creating a second recording queue.
+`MetricsService` owns one producer recording lifetime over a borrowed
+`MetricRecorderProvider` and enriches observations without creating a second
+queue. Agent and each independent TaskEngine own separate recorders; Evaluation
+borrows its TaskEngine.
 Conversation, Checkpoint and Trace persistence owners keep their existing
 module-specific reads, buffers and commit boundaries.
 
@@ -109,8 +110,10 @@ is explicit; binding or opening it does not launch pending graphs. Shared storag
 
 ### Automatic Runtime metrics
 
-`Metrics` remains the shared dataset for Agent, Task, Evaluation and application
-recording. Supply it once to Runtime for its bound producers:
+`metrics=` accepts a `MetricRecorderProvider`, whose no-argument `recorder()`
+creates an independent scope. A `Metrics` dataset naturally supplies a
+synchronous recorder; a host provider can publish without a producer-side SQL
+dataset. Supply it once to Runtime for its bound producers:
 
 ```python
 async with Runtime.open("app", storage=storage,
@@ -126,8 +129,9 @@ Each producer owns its recorder and drain lifecycle; Runtime closes its bound
 domains in dependency order without closing the caller-owned dataset, database
 engine or cache. Independently opened Task engines accept `metrics=...` too.
 `metrics=None` disables automatic recording; application calls on the dataset
-remain available. Read-only history and snapshots never activate recording. Metrics
-retain their own batching; a conversation turn does not force a metrics flush.
+remain available. Read-only history and snapshots never activate recording.
+Host providers own their delivery policy; a conversation turn does not force
+unrelated metrics delivery. See [provider ownership and migration](storage-caching.md#automatic-metrics-providers).
 
 `TraceCapability()` retains structured execution evidence and model-request
 metadata without original HTTP bodies. Opt into
@@ -247,7 +251,8 @@ pairs write timing with its optional borrowed buffer, independently of read
 cache routing. In batch mode without a buffer, observation writes await the source. A buffer
 never becomes a hot-read cache and is never closed by the policy.
 Runtime execution supports sync and terminal. Trace supports sync, batch and terminal;
-Metrics supports sync and batch. Conversation has a fixed terminal boundary;
+Metrics datasets always write synchronously; a host provider separately chooses
+automatic-delivery timing. Conversation has a fixed terminal boundary;
 Checkpoint has fixed model/tool safety boundaries. They do not accept timing
 preferences that would weaken those guarantees.
 `ExecutionCapability(commit=CommitPolicy.sync())` is the default: new turns use durable admission even with
@@ -308,8 +313,8 @@ storage = PersistenceStorage.sqlite("chat.db")
 
 Conversation commits its final context, Session cursor, and corresponding
 Execution outcome at the turn boundary. Checkpoint retains its recovery-critical
-model/tool boundaries. Trace defaults to batch size 128 and a 3-second interval;
-Metrics defaults to batch size 128 and a 60-second interval. Explicit flush,
+model/tool boundaries. Trace defaults to batch size 128 and a 3-second interval.
+Metrics does not share that scheduler. Explicit flush,
 completion, close, and required safety barriers remain authoritative. One module
 does not force unrelated modules to flush at every boundary.
 
@@ -454,20 +459,11 @@ Explicit flush, tool-effect, checkpoint and terminal safety boundaries can
 publish earlier and cannot be delayed by these options. Cache configuration does
 not weaken those boundaries.
 
-Metrics recording independently accepts
-`commit=CommitPolicy.batch(buffer=buffer, batch_size=128, flush_interval=60.0)` on its dataset
-constructors. With `buffer=None`, automatic observations remain
-synchronous; timing options do not introduce an in-memory queue. These settings
-are resource scheduling policy, not model-visible execution binding identity.
-
-Inside one Runtime, equal batch size/interval and the same borrowed buffer
-share automatic threshold and earliest-pending-deadline scheduling. The default
-Trace 128/3 and Metrics 128/60 policies therefore remain separate. Explicitly
-matching both values combines their pending queue-entry count; Trace entries
-are observation markers, not SQL rows. Each owner still writes and settles
-independently in its own transactions. Explicit flush, close and safety
-boundaries remain owner-local, and separate Runtime instances do not share
-a scheduler.
+Automatic Metrics uses `metrics=provider` independently of Trace scheduling.
+A `Metrics` dataset provides synchronous recording; host providers choose their
+own bounded delivery and consumer batching. There is no SDK Metrics timer or
+shared Trace/Metrics threshold. Explicit flush, close and required safety
+boundaries remain owner-local, and closing a recorder never closes its provider.
 
 ## Optional atomic persistence
 
