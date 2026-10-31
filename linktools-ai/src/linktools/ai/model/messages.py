@@ -63,6 +63,7 @@ from ._json_snapshot import stable_json_snapshot
 from ._tool_return_codec import decode_tool_return_content, encode_tool_return_content
 
 _MESSAGE_VERSION = 1
+_RESPONSE_IDENTITY_FIELDS = frozenset(field.name for field in fields(ModelResponse)) & {"model_id", "canonical_system"}
 _TOOL_KINDS = frozenset({"tool-search", "capability-load"})
 _REQUEST_STATES = frozenset({"complete", "interrupted"})
 _RESPONSE_STATES = frozenset({"complete", "incomplete", "suspended", "interrupted"})
@@ -365,6 +366,10 @@ def _encode_message(message: ModelMessage) -> dict[str, JsonValue]:
             "metadata": _encode_optional_mapping(message.metadata),
             "state": message.state,
         }
+        for name in _RESPONSE_IDENTITY_FIELDS:
+            identity = getattr(message, name)
+            if identity is not None:
+                result[name] = identity
         attempts = message.failed_attempts
         if attempts is not None:
             result["failed_attempts"] = _encode_model_attempts(attempts)
@@ -400,6 +405,7 @@ def _decode_message(value: object) -> ModelMessage:
             "parts": lambda raw: _decode_list(raw, _decode_response_part),
             "usage": _decode_usage,
             "model_name": _optional_string,
+            **{name: _optional_string for name in _RESPONSE_IDENTITY_FIELDS},
             "provider_name": _optional_string,
             "provider_url": _optional_string,
             "provider_details": _decode_optional_mapping,

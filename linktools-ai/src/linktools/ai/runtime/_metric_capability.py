@@ -296,6 +296,11 @@ class PreparedRequestModel(WrapperModel):
         self._observed = observed or (lambda event, error: None)
         self._project_response = project_response or (lambda response: response)
         self._response_observed = False
+        self._observed_usage: RequestUsage | None = None
+
+    @property
+    def observed_usage(self) -> RequestUsage | None:
+        return self._observed_usage
 
     @property
     def response_observed(self) -> bool:
@@ -303,9 +308,11 @@ class PreparedRequestModel(WrapperModel):
 
     def reset_response_observation(self) -> None:
         self._response_observed = False
+        self._observed_usage = None
 
     def project_response(self, response: ModelResponse) -> ModelResponse:
         self._response_observed = True
+        self._observed_usage = model_response_usage(response)
         return self._project_response(response)
 
 
@@ -647,6 +654,52 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                         safe_details={"phase": "model_request_started_event"},
                     ) from error
 
+                def defer_failed_request(provider_error: Exception) -> None:
+                    async def finish_failed_request(messages: Sequence[ModelMessage]) -> None:
+                        try:
+                            prepared_model = self._prepared_models.get(model_request_seq)
+                            observed_response = prepared_model is not None and prepared_model.response_observed
+                            partial = messages[-1] if observed_response and messages is history and messages else None
+                            if (not isinstance(partial, ModelResponse) or id(partial) in history_identities
+                                or partial.state != "interrupted" or partial.run_id != ctx.run_id
+                                or partial.conversation_id != ctx.conversation_id):
+                                partial = None
+                            usage = _failed_attempt_usage(provider_error)
+                            if partial is not None:
+                                partial = project_model_response_attempts(
+                                    partial, content_omission_reason=client_recorder.body_omission_reason,
+                                )
+                            if partial is not None or usage is not None:
+                                # Use this SDK's native counter/cost and resumed-seed
+                                # semantics without re-merging stream segments.
+                                usage = ctx.usage - usage_before
+                            elif observed_response:
+                                # Native first-event lookahead can fail after an empty
+                                # suspended response but before SDK history is installed.
+                                # Retain that observed usage (including explicit zero),
+                                # not a manufactured zero for a request with no response.
+                                usage = prepared_model.observed_usage
+                            observed_error = provider_error
+                            if ctx.usage_limits is not None:
+                                try:
+                                    ctx.usage_limits.check_tokens(ctx.usage)
+                                    ctx.usage_limits.check_cost(ctx.usage, warn_if_cost_unavailable=False)
+                                except UsageLimitExceeded as exceeded:
+                                    observed_error = exceeded
+                            interrupted = await self._complete_request(
+                                fact, run_context, selected_model, status="FAILED", response=partial,
+                                error_code=_model_error_code(observed_error), usage=usage, phase="failed",
+                                usage_includes_unreturned=True,
+                            )
+                            if interrupted:
+                                raise asyncio.CancelledError
+                        finally:
+                            self._client_recorders.pop(model_request_seq, None)
+                            self._prepared_models.pop(model_request_seq, None)
+                            self._provider_errors.pop(model_request_seq, None)
+                            self._journal.consume(model_request_seq)
+                    self._pending_model_failure = finish_failed_request
+
                 try:
                     response = (
                         await handler(request_context) if self._budget is None else
@@ -662,45 +715,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                     if failed and (_fallback_error(provider_error) is not None or observed_response):
                         # SDK commits the interrupted continuation after cancelling
                         # this wrapper. Finish this same fact at its public node boundary.
-                        async def finish_failed_request(messages: Sequence[ModelMessage]) -> None:
-                            try:
-                                prepared_model = self._prepared_models.get(model_request_seq)
-                                observed_response = prepared_model is not None and prepared_model.response_observed
-                                partial = messages[-1] if observed_response and messages is history and messages else None
-                                if (not isinstance(partial, ModelResponse) or id(partial) in history_identities
-                                    or partial.state != "interrupted" or partial.run_id != ctx.run_id
-                                    or partial.conversation_id != ctx.conversation_id):
-                                    partial = None
-                                usage = _failed_attempt_usage(provider_error)
-                                if partial is not None:
-                                    partial = project_model_response_attempts(
-                                        partial, content_omission_reason=client_recorder.body_omission_reason,
-                                    )
-                                if partial is not None or usage is not None:
-                                    # Use this SDK's native counter/cost and resumed-seed
-                                    # semantics without re-merging stream segments.
-                                    usage = ctx.usage - usage_before
-                                observed_error = provider_error
-                                if ctx.usage_limits is not None:
-                                    try:
-                                        ctx.usage_limits.check_tokens(ctx.usage)
-                                        ctx.usage_limits.check_cost(ctx.usage, warn_if_cost_unavailable=False)
-                                    except UsageLimitExceeded as exceeded:
-                                        observed_error = exceeded
-                                interrupted = await self._complete_request(
-                                    fact, run_context, selected_model, status="FAILED", response=partial,
-                                    error_code=_model_error_code(observed_error), usage=usage, phase="failed",
-                                    usage_includes_unreturned=True,
-                                )
-                                if interrupted:
-                                    raise asyncio.CancelledError
-                            finally:
-                                self._client_recorders.pop(model_request_seq, None)
-                                self._prepared_models.pop(model_request_seq, None)
-                                self._provider_errors.pop(model_request_seq, None)
-                                self._journal.consume(model_request_seq)
-
-                        self._pending_model_failure = finish_failed_request
+                        defer_failed_request(provider_error)
                         deferred_failure = True
                         raise
                     await self._complete_request(
@@ -729,10 +744,19 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                         raise asyncio.CancelledError from error
                     raise
                 except Exception as error:
+                    provider_error = self._provider_errors.get(model_request_seq, error)
+                    prepared_model = self._prepared_models.get(model_request_seq)
+                    observed_response = prepared_model is not None and prepared_model.response_observed
                     safe_error = model_request_error(
-                        error, content_omission_reason=client_recorder.body_omission_reason, fact=fact,
+                        provider_error, content_omission_reason=client_recorder.body_omission_reason, fact=fact,
                         stream_attempts=client_recorder.stream_attempts,
                     )
+                    if _fallback_error(provider_error) is not None or observed_response:
+                        # SDK priming may propagate the provider error directly instead
+                        # of cancelling this wrapper. History is still finalized at the node boundary.
+                        defer_failed_request(provider_error)
+                        deferred_failure = True
+                        raise safe_error from None
                     interrupted = await self._complete_request(
                         fact,
                         run_context,
@@ -752,6 +776,8 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 # Freeze the resolved SDK identity before publishing the completed request.
                 response.run_id = response.run_id or ctx.run_id
                 response.conversation_id = response.conversation_id or ctx.conversation_id
+                if hasattr(response, "model_id"):
+                    response.model_id = response.model_id or request_context.model_id or selected_model.model_id
                 interrupted = await self._complete_request(
                     fact,
                     run_context,

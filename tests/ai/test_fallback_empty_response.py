@@ -32,9 +32,10 @@ class _Response(CompletedStreamedResponse):
 
 
 class _EmptyThenFailure(FunctionModel):
-    def __init__(self, *, initial_response: bool) -> None:
+    def __init__(self, *, initial_response: bool, input_tokens: int = 0) -> None:
         super().__init__(stream_function=self._unused_stream, model_name="empty")
         self._initial_response = initial_response
+        self._input_tokens = input_tokens
 
     async def _unused_stream(self, messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
         raise AssertionError("the completed response adapter owns streaming")
@@ -51,17 +52,18 @@ class _EmptyThenFailure(FunctionModel):
         self._initial_response = False
         response = ModelResponse(
             [], model_name=None, provider_response_id="actual-response",
-            state="suspended", usage=RequestUsage(),
+            state="suspended", usage=RequestUsage(input_tokens=self._input_tokens),
         )
         yield _Response(response, model_request_parameters=model_request_parameters, replay_events=True)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("initial_response", [False, True])
-async def test_empty_zero_usage_response_is_not_confused_with_no_response(initial_response: bool) -> None:
+@pytest.mark.parametrize("input_tokens", [0, 7])
+async def test_empty_zero_usage_response_is_not_confused_with_no_response(initial_response: bool, input_tokens: int) -> None:
     features = RuntimeFeatures("empty-fallback-response")
     features.agent("default", allow_tools=(), allow_skills=(), allow_subagents=())
-    features.model("default", FallbackBinding(_Binding(_EmptyThenFailure(initial_response=initial_response))))
+    features.model("default", FallbackBinding(_Binding(_EmptyThenFailure(initial_response=initial_response, input_tokens=input_tokens))))
     features.capability(TraceCapability(), scope="runtime")
 
     async with Persistence.open('empty-fallback-response', storage=PersistenceStorage.in_memory()) as persistence_64, Runtime.attach(persistence=persistence_64, features=features) as runtime:
@@ -75,7 +77,10 @@ async def test_empty_zero_usage_response_is_not_confused_with_no_response(initia
     usage = interactions[0].usage
     if initial_response:
         assert usage is not None
-        assert usage.input_tokens == usage.output_tokens == 0
+        assert usage.input_tokens == input_tokens
+        assert result.usage.input_tokens == input_tokens
+        assert result.usage.output_tokens == 0
+        assert usage.output_tokens == 0
         assert usage.model_requests == 1
     else:
         assert usage is None
