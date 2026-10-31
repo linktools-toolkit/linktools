@@ -947,5 +947,15 @@ async def test_close_failure_retains_writes_and_does_not_erase_the_execution_fai
         assert retained_failure.value.code is ErrorCode.STORAGE_CONFLICT
     finally:
         if opened is not None:
-            await opened.runtime._state.close()
+            persistence = opened.runtime._state
+            source_group = persistence.execution.executions.state_store.storage_group
+            try:
+                with pytest.raises(AIError) as persistence_error:
+                    await persistence.close()
+                assert persistence_error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+                assert persistence.ready and len(persistence._runtime_owners) == 1
+            finally:
+                await source_group.close()
+                await source_group.context.close()
+                assert source_group.context.closed
     assert not buffer.closed

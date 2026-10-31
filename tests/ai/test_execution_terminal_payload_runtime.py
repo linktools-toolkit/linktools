@@ -158,10 +158,14 @@ async def test_pending_payload_dispatch_retains_exact_source_evidence(
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.sqlite(tmp_path / "state.db",
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    async with Persistence.open("execution-payload-interference", storage=storage) as persistence:
+    persistence = Persistence(storage)
+    await persistence.initialize(namespace="execution-payload-interference", tenant_id="default")
+    source_group = persistence.execution.executions.state_store.storage_group
+    try:
         context = Runtime.attach(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None)
         runtime = await context.__aenter__()
+        owners = tuple(persistence._runtime_owners)
         backend = runtime._execution_service.runtime_backend()
         source_commit = backend._runtime_commands.commit_pending_turn
         prepare = backend._context_archive.prepare
@@ -214,3 +218,14 @@ async def test_pending_payload_dispatch_retains_exact_source_evidence(
             assert set(buffer.acknowledged) == set(buffer.accepted)
         else:
             assert not buffer.acknowledged
+    finally:
+        try:
+            with pytest.raises(AIError) as persistence_error:
+                await persistence.close()
+            assert persistence_error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+            assert persistence.ready and tuple(persistence._runtime_owners) == owners
+        finally:
+            # Preserve unresolved producer ownership; release only the fixture source.
+            await source_group.close()
+            await source_group.context.close()
+            assert source_group.context.closed

@@ -101,7 +101,10 @@ async def test_pending_source_dispatch_rechecks_ownership_after_context_material
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.sqlite(tmp_path / "state.db",
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    async with Persistence.open("pending-ownership", storage=storage) as persistence:
+    persistence = Persistence(storage)
+    await persistence.initialize(namespace="pending-ownership", tenant_id="default")
+    source_group = persistence.execution.executions.state_store.storage_group
+    try:
         context = Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features))
         runtime = await context.__aenter__()
         try:
@@ -148,3 +151,16 @@ async def test_pending_source_dispatch_rechecks_ownership_after_context_material
                 assert failed_close.value.code is ErrorCode.STORAGE_CONFLICT
             else:
                 await context.__aexit__(None, None, None)
+    finally:
+        try:
+            if interference == "lease":
+                with pytest.raises(AIError) as persistence_error:
+                    await persistence.close()
+                assert persistence_error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+                assert persistence.ready and len(persistence._runtime_owners) == 1
+            else:
+                await persistence.close()
+        finally:
+            await source_group.close()
+            await source_group.context.close()
+            assert source_group.context.closed

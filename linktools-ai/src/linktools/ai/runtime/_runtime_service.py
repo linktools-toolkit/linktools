@@ -166,6 +166,7 @@ class Runtime(Generic[AppT]):
         self._tenant_id = validate_tenant_id(tenant_id)
         self._state = persistence
         self._owns_persistence = owns_persistence
+        self._persistence_cleanup: Callable[[], Awaitable[None]] | None = None
         self._context = ExecutionContext(None) if context is None else context
         self._features = features
         self._metrics_dataset = metrics
@@ -242,6 +243,10 @@ class Runtime(Generic[AppT]):
                     await self._state.initialize(namespace=self.namespace, tenant_id=self.tenant_id)
                 elif not self._state.ready or self._state.read_only:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                self._persistence_cleanup = await self._state.bind_runtime(
+                    execution_producer=self._features is not None,
+                    owns_persistence=self._owns_persistence,
+                )
                 if self._features is not None:
                     from ._factory import _AgentLifecycle, compose_runtime_components
 
@@ -925,7 +930,9 @@ class Runtime(Generic[AppT]):
                 *(engine.close for engine in reversed(self._task_engines)),
                 self._close_agent,
             ]
-            if self._owns_persistence:
+            if self._persistence_cleanup is not None:
+                actions.append(self._persistence_cleanup)
+            elif self._owns_persistence:
                 actions.append(self._state.close)
             self._close_coordinator = _RuntimeCloseCoordinator(tuple(actions))
             del actions

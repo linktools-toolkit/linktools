@@ -195,6 +195,7 @@ class TaskEngine(Generic[AppT]):
             release_observation=self._release_observation,
             capture_tree=self._capture_execution_tree, replay_tree=self._replay_execution_tree,
         )
+        self._release_persistence = persistence.bind_task_engine()
 
     @property
     def metrics(self) -> MetricsControl:
@@ -494,6 +495,7 @@ class TaskEngine(Generic[AppT]):
             while self._close_callbacks:
                 self._close_callbacks[0](self)
                 self._close_callbacks.popleft()
+            self._release_persistence()
         finally:
             self._notifying_closed = False
 

@@ -218,6 +218,7 @@ class _Bundle:
         )
         self.engine = object.__new__(TaskEngine)
         self.engine._persistence = persistence
+        self.engine._release_persistence = persistence.bind_task_engine()
         self.engine._owner = self.engine
         self.engine._closed = False
         self.engine._notifying_closed = False

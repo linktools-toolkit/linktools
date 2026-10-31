@@ -13,6 +13,28 @@ provide replaceable source or transport capabilities. These roles are not
 determined by whether a type is a protocol or a concrete implementation, and a
 store does not necessarily imply durable retention.
 
+`Runtime.open` and `Runtime.attach` register their lifetime with Persistence
+before composing producers. An execution filesystem route admits only one Agent
+Runtime on that Persistence; Task-only Runtimes do not occupy that exclusive
+execution slot. SQL and Memory continue to allow independent Agent Runtimes.
+`TaskEngine(...)` and `TaskEngine.open(...)` also register a borrowed lifetime.
+Definition views share that registration; closing a view does not release the
+engine. Task producers do not occupy the filesystem Agent-exclusive slot, and
+read-only Task observation remains available.
+
+`Persistence.close()` rejects active Runtime or TaskEngine borrowers without
+closing their resources. An owning Runtime closes Persistence only after its
+own cleanup and after independent producers have released it. TaskEngine
+releases only after resource cleanup and every close callback succeeds. Failed
+cleanup or notification retains the registration for retry; cancellation of
+the caller does not release an in-flight cleanup.
+This is instance-local protection, not a cross-process lock or a new SQL
+takeover mode. Callers must still finish their own in-flight ordinary Task
+queries before closing the engine. History is not registered by this producer
+mechanism; hosts must await its ordinary queries and close its subscriptions
+before closing Persistence. Filesystem state retirement and retained-history migration
+require their separate recovery and inventory checks.
+
 | Interface | Responsibility | Host integration |
 | --- | --- | --- |
 | `CacheBackend` | Store discardable immutable bytes | Supply it to a domain content cache or `PersistenceStorage.sqlite(path, cache=...)` |
