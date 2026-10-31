@@ -80,8 +80,10 @@ This change requires a coordinated **non-mixed-version maintenance window**:
    and all audit columns/indexes.
 5. Replace the two occurrence-time query indexes with
    `(namespace_digest, kind, active_occurred_at)` and
-   `(namespace_digest, active_occurred_at)` using the names/types in canonical
-   metadata. SQLite requires an appropriate table rebuild to change nullability;
+   `(namespace_digest, active_occurred_at)` using DDL compiled from canonical
+   metadata for the target dialect. Generated portable index names use
+   SQLAlchemy's deterministic shortening when they exceed that dialect's limit;
+   MySQL index names remain table-local. SQLite requires an appropriate table rebuild to change nullability;
    preserve IDs, uniqueness and audit values when copying validated rows.
 6. Run schema validation and a full backfill integrity check before starting only
    the matching new reader/writer/pruner versions. Verify active reads and query

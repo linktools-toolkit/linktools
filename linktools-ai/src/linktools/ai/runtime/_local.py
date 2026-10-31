@@ -45,8 +45,10 @@ from ..inputs import (
     stored_input_attachment_views,
 )
 from ._plan import RuntimePlanStore
+from ._execution_payload import _materialize_execution_json, _materialize_execution_payloads
 from ._pending_turn import _PendingExecutionTurn, _PendingExecutionTurns
 from ..core import (
+    CommitPolicy,
     ExecutionEventType,
     ExecutionMode,
     ExecutionLineageKind,
@@ -280,9 +282,13 @@ class LocalExecutionBackend:
         metric_recorder: "MetricRecorder | None" = None,
         worker_completed: "Callable[[str], Awaitable[None]] | None" = None,
         exclusive_execution_writer: bool = False,
+        commit: CommitPolicy = CommitPolicy.sync(),
         pending_turns: _PendingExecutionTurns | None = None,
         pending_cancel: Callable[[str, Principal], Awaitable[object]] | None = None,
     ) -> None:
+        if not isinstance(commit, CommitPolicy) or commit.mode not in {"sync", "terminal"}:
+            raise ValueError("Execution requires sync or terminal commit")
+        self._commit = commit
         self._pending_turns = pending_turns or _PendingExecutionTurns()
         self._pending_cancel = pending_cancel
         self._pending_renewals: dict[str, asyncio.Task[None]] = {}
@@ -970,7 +976,7 @@ class LocalExecutionBackend:
         session: SessionRecord | None, coordination: TurnCoordination | None,
     ) -> str | None:
         execution = reservation.execution
-        if (coordination is None or self._pending_turns.coordination is None
+        if (self._commit.mode != "terminal" or coordination is None or self._pending_turns.coordination is None
                 or not execution.conversation or not self._can_prepare_initial_attempt(execution, request.resolved_binding)
                 or execution.budget_scope_id is not None or execution.memory_scope is not None
                 or not self._conversation_durable or not self._execution_objects_durable
@@ -1137,6 +1143,11 @@ class LocalExecutionBackend:
                 raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
 
             await self._check_pending_lease(turn, allow_cancelled=allow_cancelled)
+            reservation = replace(turn.reservation, execution=await _materialize_execution_payloads(
+                turn.reservation.execution, input_materializer=self._input_materializer,
+                objects=self._execution_objects, keys=ObjectKeyFactory(self._namespace),
+                policy=self._payload_policy, tenant_id=self._tenant_id,
+            ))
             context = turn.execution.input_context
             context_write = None
             if context is not None:
@@ -1157,7 +1168,7 @@ class LocalExecutionBackend:
 
             async def confirm() -> None:
                 value = await self._runtime_commands.read_pending_turn_promotion(
-                    turn.reservation, expected_session=turn.session,
+                    reservation, expected_session=turn.session,
                     captured_input_context=context, producer_claim_id=claim,
                 )
                 if value is None:
@@ -1184,7 +1195,7 @@ class LocalExecutionBackend:
 
             async def promote_owned() -> None:
                 await self._runtime_commands.promote_pending_turn(
-                    turn.reservation, expected_session=turn.session,
+                    reservation, expected_session=turn.session,
                     captured_input_context=context, producer_claim_id=claim, context_write=context_write,
                 )
                 await accept()
@@ -4493,18 +4504,7 @@ class LocalExecutionBackend:
             return current
         if current.status is ExecutionStatus.RECOVERY_REQUIRED:
             return current
-        payload = canonical_json_bytes(output)
-        inline = StoredPayload.inline_json(output)
-        output_payload = inline
-        if not payload_fits_inline(inline, self._payload_policy):
-            object_ref = await put_runtime_object(
-                self._execution_objects,
-                ObjectKeyFactory(self._namespace),
-                PersistenceDomain.EXECUTION,
-                self._tenant_id,
-                payload,
-            )
-            output_payload = StoredPayload.object(object_ref)
+        output_payload = StoredPayload.inline_json(output)
         return await self._commit_terminal(
             current,
             ExecutionStatus.SUCCEEDED,
@@ -4516,7 +4516,7 @@ class LocalExecutionBackend:
             usage=usage,
             producer_generation=producer_generation,
             # Inline serialization has not yielded since this record was read.
-            observed_execution=current if output_payload.kind == "inline" else None,
+            observed_execution=current,
         )
 
     async def _expected_session_cursor(
@@ -5449,6 +5449,12 @@ class LocalExecutionBackend:
         expected_revision: int | None = None,
         observed_execution: ExecutionRecord | None = None,
     ) -> ExecutionRecord:
+        if output is not None and output.kind == "inline" and not payload_fits_inline(output, self._payload_policy):
+            output = await _materialize_execution_json(
+                output, objects=self._execution_objects, keys=ObjectKeyFactory(self._namespace),
+                policy=self._payload_policy, tenant_id=self._tenant_id,
+            )
+            observed_execution = None
         current = observed_execution
         if current is None:
             current = await self.load_execution(
@@ -5754,6 +5760,19 @@ class LocalExecutionBackend:
         context = await self.load_input_context(current.input_context)
         if context is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        current = await _materialize_execution_payloads(
+            current, input_materializer=self._input_materializer,
+            objects=self._execution_objects, keys=ObjectKeyFactory(self._namespace),
+            policy=self._payload_policy, tenant_id=self._tenant_id,
+        )
+        reservation = replace(turn.reservation, execution=replace(
+            turn.reservation.execution, stored_user_input=current.stored_user_input,
+            repository_instructions=current.repository_instructions,
+        ))
+        output = await _materialize_execution_json(
+            output, objects=self._execution_objects, keys=ObjectKeyFactory(self._namespace),
+            policy=self._payload_policy, tenant_id=self._tenant_id,
+        )
         prepared_context = await self._context_archive.prepare(context,
             history_root=turn.history_root, history_digest=turn.history_digest)
         now = datetime.now(timezone.utc)
@@ -5795,7 +5814,7 @@ class LocalExecutionBackend:
 
         async def confirm() -> None:
             committed = await self._runtime_commands.read_pending_turn(
-                turn.reservation, expected_session=turn.session,
+                reservation, expected_session=turn.session,
             )
             if committed is None:
                 error = AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"phase": "pending_commit_not_found"})
@@ -5813,7 +5832,7 @@ class LocalExecutionBackend:
 
         async def commit_owned() -> ExecutionTerminalCommitResult:
             committed = await self._runtime_commands.commit_pending_turn(
-                turn.reservation, commit, expected_session=turn.session,
+                reservation, commit, expected_session=turn.session,
                 context_write=(prepared_context.archive, prepared_context.records),
                 capability_run_id=agent_run_id,
                 next_cursor=None if turn.session is None else ConversationCursor(agent_run_id, history_id=history_id),

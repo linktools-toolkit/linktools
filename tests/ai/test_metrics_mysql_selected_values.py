@@ -54,7 +54,7 @@ def test_mysql_selected_value_matches_python(
     script = """DROP TABLE IF EXISTS ai_metric_observations;
 CREATE TABLE ai_metric_observations (
     namespace_digest VARCHAR(64), kind VARCHAR(128), occurred_at DATETIME(6),
-    observation_digest VARCHAR(64), payload_json JSON
+    observation_digest VARCHAR(64), payload_json JSON, pruned_at DATETIME(6), active_occurred_at DATETIME(6)
 );
 """
     partitions = ((None, 0), ("x", 0), (None, 1), ("x", 1)) if partitioned else ((None, 0),)
@@ -66,7 +66,7 @@ CREATE TABLE ai_metric_observations (
             }}
             insert = text(
                 "INSERT INTO ai_metric_observations VALUES "
-                "('ns', 'business.numeric', :occurred, :identity, CAST(:payload AS JSON));"
+                "('ns', 'business.numeric', :occurred, :identity, CAST(:payload AS JSON), NULL, :occurred);"
             ).bindparams(
                 occurred=plan.start.replace(tzinfo=None) + timedelta(
                     seconds=bucket_index, microseconds=index,

@@ -329,6 +329,13 @@ async def test_write_cache_later_admission_does_not_extend_first_pending_deadlin
         assert batches.empty()
         clock[0] = 60.0
         assert await scope.try_submit("third", b"third")
-        assert await asyncio.wait_for(batches.get(), 0.1) == ("first", "second", "third")
+        first_batch = await asyncio.wait_for(batches.get(), 1)
+        # The expired timer may dispatch before the third submission is admitted.
+        assert first_batch[:2] == ("first", "second")
+        await scope.close()
+        persisted = list(first_batch)
+        while not batches.empty():
+            persisted.extend(batches.get_nowait())
+        assert persisted == ["first", "second", "third"]
     finally:
         await scope.close()

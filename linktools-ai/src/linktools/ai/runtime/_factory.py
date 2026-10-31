@@ -716,7 +716,7 @@ async def _build_local_components(
             restart_checkpoints=restart_checkpoints,
             durable_trace=durable_trace,
             conversation=conversation,
-            terminal_commit=commit.mode == "terminal",
+            commit=commit,
             context_archive=ExecutionContextArchive(
                 state.execution.executions.state_store,
                 state.archive_object_store(PersistenceDomain.EXECUTION),
@@ -822,6 +822,7 @@ async def _build_local_components(
             metric_recorder=metric_buffer,
             worker_completed=worker_completed,
             exclusive_execution_writer=exclusive_execution_writer,
+            commit=commit,
             pending_turns=runtime_bridge.pending_turns,
             pending_cancel=lambda execution_id, principal: execution.cancel(
                 execution_id, CancelExecutionRequest(principal, f"pending-cancel:{execution_id}"),

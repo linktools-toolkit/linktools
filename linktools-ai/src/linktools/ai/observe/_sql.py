@@ -465,11 +465,11 @@ class SqlMetricStore:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             for identity, (payload, observation) in collapsed.items():
                 row = existing[identity]
+                if row["payload_digest"] != payload:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
                 _validate_observation_identity(namespace, namespace_key, row)
                 if row["observation_id"] != observation.observation_id:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if row["payload_digest"] != payload:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
                 if (
                     row["kind"] != observation.kind
                     or _utc_database_datetime(cast(datetime, row["occurred_at"]))

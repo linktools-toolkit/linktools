@@ -7,7 +7,7 @@ import hashlib
 import json
 import mimetypes
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol, TypeAlias, cast
 
 from linktools.core import environ
@@ -441,43 +441,52 @@ class ExecutionInputMaterializer:
         )
         return (binary_attachment_text(content, path=item.path), content), view
 
-    async def store(
-        self,
-        value: CanonicalUserInput,
-        *,
-        tenant_id: str,
-    ) -> "StoredUserInput":
+    def capture(self, value: CanonicalUserInput) -> "StoredUserInput":
+        """Freeze accepted input bytes without publishing an ObjectStore object."""
         from ..execution import StoredUserInput
 
         canonical = validate_user_input(value)
         if isinstance(canonical, str):
-            return StoredUserInput(
-                _TEXT_CODEC,
-                StoredPayload.inline_text(canonical),
-            )
+            return StoredUserInput(_TEXT_CODEC, StoredPayload.inline_text(canonical))
         view = (
             dict(value.view)
             if isinstance(value, MaterializedUserContent)
             else _input_view(value)
         )
-        payload = StoredPayload.inline_json(encode_user_content(canonical))
-        if not payload_fits_inline(payload, self._payload_policy):
-            if self._object_store is None or self._object_key_factory is None:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            body = canonical_json_bytes(cast(JsonValue, payload.value))
-            from ..persistence.objects import ObjectKeyFactory, put_runtime_object
+        return StoredUserInput(
+            _USER_CONTENT_CODEC, StoredPayload.inline_json(encode_user_content(canonical)), view,
+        )
 
-            if not isinstance(self._object_key_factory, ObjectKeyFactory):
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            reference = await put_runtime_object(
-                self._object_store,
-                self._object_key_factory,
-                self._object_domain,
-                tenant_id,
-                body,
-            )
-            payload = StoredPayload.object(reference)
-        return StoredUserInput(_USER_CONTENT_CODEC, payload, view)
+    async def store(
+        self, value: CanonicalUserInput, *, tenant_id: str,
+    ) -> "StoredUserInput":
+        return await self.materialize_payload(self.capture(value), tenant_id=tenant_id)
+
+    async def materialize_payload(
+        self, value: "StoredUserInput", *, tenant_id: str,
+    ) -> "StoredUserInput":
+        """Apply source payload placement to an already frozen accepted input."""
+        from ..execution import StoredUserInput
+
+        if not isinstance(value, StoredUserInput):
+            raise TypeError("value must be StoredUserInput")
+        payload = value.payload
+        if (value.codec == _TEXT_CODEC or payload.kind == "object"
+                or payload_fits_inline(payload, self._payload_policy)):
+            return value
+        if value.codec != _USER_CONTENT_CODEC or payload.encoding != "json":
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        if self._object_store is None or self._object_key_factory is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        from ..persistence.objects import ObjectKeyFactory, put_runtime_object
+
+        if not isinstance(self._object_key_factory, ObjectKeyFactory):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        reference = await put_runtime_object(
+            self._object_store, self._object_key_factory, self._object_domain,
+            tenant_id, canonical_json_bytes(payload.value),
+        )
+        return replace(value, payload=StoredPayload.object(reference))
 
     async def restore(self, value: "StoredUserInput") -> CanonicalUserInput:
         from ..execution import StoredUserInput

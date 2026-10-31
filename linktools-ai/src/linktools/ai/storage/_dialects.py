@@ -887,11 +887,12 @@ def sql_query_index(
     table: "Table", *columns: str, mysql_length: int | None = None
 ) -> "Index":
     from sqlalchemy import Index
+    from sqlalchemy.schema import conv
 
     _validate_index_columns(columns)
     column_objects = tuple(table.c[column] for column in columns)
     portable = Index(
-        f"ix_{table.name}_{'_'.join(columns)}",
+        conv(f"ix_{table.name}_{'_'.join(columns)}"),
         *column_objects,
     )
     portable.info["ddl_dialect"] = "portable"
