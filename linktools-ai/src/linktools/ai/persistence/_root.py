@@ -2,11 +2,14 @@
 # -*- coding: utf-8 -*-
 """Physical persistence resources and typed route configuration."""
 
+import json
+from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..storage import CacheBackend, TurnCoordinationBackend, StreamBackend, StorageRoute, FilesystemObjectStore, ObjectStore
-from ._plan import PersistencePlan
+from ..errors import AIError, ErrorCode
+from ._plan import PersistenceDomain, PersistencePlan
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -93,6 +96,8 @@ class PersistenceStorage:
         coordination: CacheBackend | TurnCoordinationBackend | StreamBackend | None = None,
     ) -> "PersistenceStorage":
         base = _normalize_path(root)
+        if not (base / "runtime.db").exists():
+            _reject_filesystem_state_root(base)
         return cls.sqlite(
             base / "runtime.db",
             object_store=FilesystemObjectStore(base / "objects"),
@@ -125,6 +130,28 @@ class PersistenceStorage:
         return cls(
             plan, object_store=object_store, coordination=coordination,
         )
+
+
+def _reject_filesystem_state_root(root: Path) -> None:
+    manifests = chain(
+        (root / "manifest.json",),
+        (root / ".state-groups").glob("*/manifest.json"),
+        *((root / domain.value).glob("*/*/manifest.json") for domain in PersistenceDomain),
+    )
+    for path in manifests:
+        if not path.is_file():
+            continue
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(manifest, dict) and manifest.get("format") in (
+            "linktools-ai-state", "linktools-ai-state-group",
+        ):
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                "Filesystem Runtime state requires explicit migration into a new SQLite root",
+            )
 
 
 def _validate_storage_configuration(plan: PersistencePlan, object_store: ObjectStore | None) -> None:

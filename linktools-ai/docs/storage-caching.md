@@ -35,6 +35,20 @@ mechanism; hosts must await its ordinary queries and close its subscriptions
 before closing Persistence. Filesystem state retirement and retained-history migration
 require their separate recovery and inventory checks.
 
+`PersistenceStorage.from_root(root)` selects `root/runtime.db` and file-backed
+ObjectStore bytes; it does not migrate filesystem state. When that database is
+absent, the factory refuses a root containing recognizable filesystem state
+manifests instead of silently creating an unrelated empty database. Quiesce the
+old writers and explicitly export/restore supported state into a separate empty
+root, then verify the retained records and object references before switching.
+Portable snapshots preserve the core Memory domain, including its operation
+receipts and object-backed content. Arbitrary durable capability partitions remain
+unsupported; this guard does not add their migration support.
+An existing `runtime.db` remains the selected SQLite source even if old files
+coexist. This check neither verifies that database as a completed migration nor
+recognizes every damaged/custom layout, and is not a cross-process ownership
+barrier against a root being changed after configuration.
+
 | Interface | Responsibility | Host integration |
 | --- | --- | --- |
 | `CacheBackend` | Store discardable immutable bytes | Supply it to a domain content cache or `PersistenceStorage.sqlite(path, cache=...)` |
