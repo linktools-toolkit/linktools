@@ -1,8 +1,8 @@
 # Storage 缓存与缓冲写入统一设计
 
-状态：已确认的框架实现与定向验收已完成；精确代码基线、测量范围和未认证环境见第9至12节。
-日期：2026-10-17
-范围：Issue #190 / PR #191
+状态：本文分别记录当前存储合同与历史验证基线；第9至12节是原有发布证据，不构成后续写缓冲、指标 provider 或宿主部署的整体完成声明。
+更新日期：2026-10-31
+范围：存储缓存、领域 payload 缓冲与独立指标 provider
 
 ## 1. 目标与边界
 
@@ -78,7 +78,7 @@ StoredRecord.storage_revision 与 Observed.storage_revision 是物理 CAS token�
 
 已有：CacheBackend、内存/文件/Tiered实现、ObjectStore、StorageOverlay。PR191已实现并验证：PersistenceStorage 快捷构造器的 cache 参数及内部读取路由（当前缓存由各 StorageRoute 持有）。Storage 与 Asset 批读沿用第3节的分层合同；当前术语见第3节，已确认的写缓存公开形状在第8节。
 
-配置分为两组：StorageRoute.cache 只借用 get/put/delete 热点读取能力；CommitPolicy.batch(buffer=..., batch_size=..., flush_interval=...) 借用 append/read_batch/ack 写缓存并声明提交时机。PersistenceStorage.coordination 独立借用 turn/stream 与 pending-turn 所需能力。同一底层实例可以分别注入多个用途，但不会因实现某组方法而隐式启用它。无写 buffer 时保持领域原有直接源写入路径，不创建隐藏队列；无热点 cache 时直接回源。宿主无需继承全能力包装或提供无用空方法。
+配置分为两组：StorageRoute.cache 只借用 get/put/delete 热点读取能力；CommitPolicy.batch(buffer=..., batch_size=..., flush_interval=...) 与 CommitPolicy.terminal(buffer=...) 借用 append/read_batch/ack 写缓存并声明提交时机；terminal 不接受批量阈值或定时参数。PersistenceStorage.coordination 独立借用 turn/stream 与 pending-turn 所需能力。同一底层实例可以分别注入多个用途，但不会因实现某组方法而隐式启用它。batch 无写 buffer 时同步确认源，不创建隐藏队列；terminal 无 buffer 时保留领域原有本地 staging。无热点 cache 时直接回源。宿主无需继承全能力包装或提供无用空方法。
 
 SQL Runtime 在 mutation 确认提交后，可以把事务实际写入或 guard 的完整 session/execution 记录写入同一 singleton 热点 key。no-op mutation 不失效也不重发已有观察。每个 store 最多持有一个受管发布任务，忙时丢弃后续填充，不新增待写队列；缓存错误不能改变源提交结果，关闭等待该任务的取消清理。未确认或结果未知的提交不发布，整批读取仍独立捕获完整快照，不拼接 singleton。期限始终从原事务 capture 起算3秒，commit、延迟发布及跨层读取都不续期；本 owner 失效阻止旧本地填充，跨 owner 晚到的旧快照在其原期限内仍可能覆盖较新的缓存，不承诺全局单调。该优化仅覆盖这两种 SQL metadata 热点，其他 backend 保持原 read-through；节省源查询可能增加 cache put 和传输字节，须分别计量。
 
@@ -221,13 +221,21 @@ max_bytes 只保留在各实例内存中。每次成功写入的put持共享锁�
 
 ## 8. 通用缓冲与自动指标
 
-### 8.1 通用写缓冲与 Trace 数据 owner
+### 8.1 通用写缓冲与领域数据 owner
 
-`WriteBufferBackend.append/read_batch/ack` 仍是借用的有序、非破坏读取能力；待写真实 bytes 和容量属于 backend。`BatchWriteScope` 是独立的通用 owner-local 调度/结算工具，callback 失败后的结算不等于 source 确认，不能把其结果当数据库 receipt。`StorageBuffer` 继续保留自己的显式读取可见性和 source 写入合同。
+`WriteBufferBackend.append/read_batch/ack` 是借用的有序、非破坏读取能力；待写真实 bytes 和容量属于 backend。`CommitPolicy.terminal(buffer=...)` 只增加可选 buffer，不增加 Runtime mode、writer、flush 或 receipt API。`BatchWriteScope` 仍是独立的通用 owner-local 调度/结算工具，callback 失败后的结算不等于 source 确认，不能把它当数据库 receipt。`StorageBuffer` 保留自己的显式读取可见性和 source 写入合同。
 
-Trace 的 `batch(buffer=...)` 现由专有数据 owner 准入不可变 projection 与选取的依赖 bytes，不再写 `None` marker，也不复用通用 scope 的失败后 ack 路径。同 Runtime、相同 buffer identity 与 timing 的 Trace runs 共享阈值/最早期限，但每个 run 只发布其 backend 读回并校验的固定已准入前缀；后续累计 snapshot 不能替换先前已准入的 append-only 事实。准入失败不回退直接 source；已确认 source 后的 ack 是独立可重试清理，未知 source 继续保留 flight 和 payload。
+Execution、Trace、显式 Capability 各自拥有 payload scope。Execution 冻结延期记录、输入/上下文、指令、输出和审计事实；需要 Conversation 时包含最终上下文。Trace 的 `batch(buffer=...)` 与 `terminal(buffer=...)` 都准入不可变 projection 与选取的依赖 bytes，不再写 `None` marker，也不复用通用 scope 失败后 ack 的路径。新增大对象在对应 source 准备时物化；已有持久不可变引用仍按原 owner 合同使用。
 
-升级须停止并 drain 旧 marker producer，不能复用旧活动 scope。容量需按真实序列化 bytes（含累计 snapshot/上下文重复量）配置，不能沿用 marker 条数估算；这不承诺进程重启接管、RAM 卸载或零拷贝。无 buffer、`terminal()` 的现有行为不变，`terminal(buffer=...)` 尚未开放。精确生命周期和故障合同见 [Runtime observation publication](storage-caching.md#runtime-observation-publication)。
+同 Runtime、相同 buffer identity 与 timing 的 batch Trace runs 共享阈值/最早期限；terminal 无自动批量定时器。每个 run 只发布 backend 读回并校验的固定完整前缀；后续累计 snapshot 不能替换先前已准入的 append-only 事实。同组 terminal 事务聚合各参与 scope 的全部选定前缀，并在源事务内检查 sequence、CAS 和 producer fence；不宣称跨资源分布式事务。
+
+准入使用 `wait=False` 和有界 transport 等待，不能等终态 drain 造成互锁。明确拒绝或未解决的 append 错误使该次写入/执行失败，不普通 SQL fallback、不自动关闭 Trace、不重发 provider 请求。Trace、terminal-buffered Execution 与显式 buffered Capability 只有完整读回已准入前缀，才可隔离明确被拒尾部并继续必要的 FAILED/CANCELLED 控制结算；尚未 durable admission 的 pending turn 可失败并释放协调。未知 append/source 不能伪装成明确失败，保留原 ID、bytes、plan/flight 供同身份核验。已确认 canonical 后 ack 只是精确 ID 清理，失败不改业务终态；close 保留并报告未结算错误，不关闭借用 backend。
+
+Task、真正 Checkpoint、tool effect、授权/幂等/恢复控制仍在必要源边界确认。工作读取仍用原本的 staging/overlay，独立 History 读取已提交源；buffer 不是热缓存、可靠任务队列或进程重启后的接管凭据。纯 bytes capture 不等于 RAM 卸载、零拷贝或仅靠 Redis 可恢复。Metrics best-effort provider 独立，不吞 Trace 准入错误；`metrics=None` 也不禁用 Trace interaction recorder。
+
+升级须停止并 drain 旧 marker producer，不能复用旧活动 scope。容量按真实序列化 bytes（含累计 snapshot/上下文重复量）配置，不能沿用 marker 条数估算或逐出未确认条目。无 buffer 的原有语义保持：batch 同步源写，terminal 本地 staging。同步 SQL 与有界热点读缓存仍可单独使用，缓存不放宽控制、授权或 unknown readback。
+
+本地定向验收使用内存 buffer 与本地 source，不能代替完整组合的精确 head CI、真实 Redis adapter、宿主故障/接管或性能验收。精确生命周期和故障合同见 [Runtime observation publication](storage-caching.md#runtime-observation-publication)。
 
 ### 8.2 自动指标与宿主写入节奏
 
@@ -297,7 +305,9 @@ Trace 的 `batch(buffer=...)` 现由专有数据 owner 准入不可变 projectio
 
 本稿记录已执行的精确代码基线；若后续实现改动，原结果不能替代新head验证。
 
-## 12. 已发布范围设计复审结论
+## 12. 历史已发布范围设计复审结论
+
+本节的章节引用对应第9节列出的历史代码基线，不是后来替换后的 payload owner 或 Metrics provider 的新验收证据。
 
 适用规则：根目录及 linktools-ai/AGENTS.md，尤其公共接口、单一所有权、revision/version 词汇、当前格式双端一致及 filelock 协调规则。审查覆盖本稿职责、名称、批读、多级缓存、修订提示、共享文件预算、写缓冲前缀与生命周期合同。
 
@@ -308,6 +318,8 @@ Trace 的 `batch(buffer=...)` 现由专有数据 owner 准入不可变 projectio
 ## 13. 缓冲写入与读取可见性
 
 ### 已确认：接纳、持久确认、读取可见性相互独立
+
+下表比较通用 `StorageBuffer` 的两种读视图及其 `BatchWriteScope` callback 结算，不替代第8.1节的领域 source-confirmation 合同。Execution/Trace/Capability 遇 source unknown 时仍保留原前缀与 ID，不能据通用 callback 失败就清空或 ack。
 
 两种路径都可以接纳尚未持久化的数据，并由同一个批写机制合并写入。区别在读视图，不在是否允许排队，也不能从读视图反推崩溃后的交付保证。
 
@@ -367,9 +379,9 @@ append/聚合查询则不能套按 key 覆盖：inflight 与持久结果可能�
 
 ### 当前公开接口结论与设计状态
 
-第8节 BatchWriteScope 保留 append 接纳、批写和结算合同。通用按 key 最终值视图由第14节 StorageBuffer 提供，复用同一调度机制；两种读取模式在构造时选择，不暴露 pending_items 让消费者自行合并。既有强 staging 继续由领域 owner 持有，不能以通用可丢缓冲替代。
+第8.1节的 BatchWriteScope 保留 append 接纳、批写和结算合同。通用按 key 最终值视图由第14节 StorageBuffer 提供，复用同一调度机制；两种读取模式在构造时选择，不暴露 pending_items 让消费者自行合并。既有强 staging 继续由领域 owner 持有，不能以通用可丢缓冲替代。
 
-两种读取可见性都支持共同批写机制，仅已提交可读不要求同步逐项写入。第14节的最终值缓存和第8节的 append 缓冲保持不同的数据语义。验收必须覆盖：pending 不污染 committed cache、提交结果未知但源可见、旧批结算遇新写、源读跨完整接纳/结算窗口、删除暂存、聚合去重/交接、不拆业务原子批与两种路径的取消/关闭行为。
+两种读取可见性都支持共同批写机制，仅已提交可读不要求同步逐项写入。第14节的最终值缓存和第8.1节的 append 缓冲保持不同的数据语义。验收必须覆盖：pending 不污染 committed cache、提交结果未知但源可见、旧批结算遇新写、源读跨完整接纳/结算窗口、删除暂存、聚合去重/交接、不拆业务原子批与两种路径的取消/关闭行为。
 
 ## 14. 通用按 key 可读缓冲
 

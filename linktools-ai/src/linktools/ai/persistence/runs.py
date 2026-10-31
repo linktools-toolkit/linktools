@@ -44,7 +44,7 @@ from .durability import (
     run_durable_commit,
 )
 from ._model_client import resolve_client_requests
-from ._projection_payload import encode_projection_payload
+from ._projection_payload import decode_projection_payload, encode_projection_payload
 from ._plan import PersistenceDomain
 from ._archive import PreparedArchive
 from ._step_archive import (
@@ -1162,7 +1162,7 @@ class RuntimeAgentRunStore(AgentRunStore):
     def trace_buffer_failure_settled(
         self, agent_run_id: str, *, execution_id: str, producer_generation: int,
     ) -> bool:
-        """Whether this producer's rejected tail has a confirmed source-only prefix."""
+        """Whether this producer's rejected tail is isolated under its publication policy."""
         return self.trace_persistence.failed_admission_settled(
             agent_run_id, execution_id=execution_id, producer_generation=producer_generation,
         )
@@ -1206,15 +1206,21 @@ class RuntimeAgentRunStore(AgentRunStore):
             if producer[0] == execution_id and self.trace_persistence.failed_admission_settled(run_id)
         )
         ordered_agent_run_ids = tuple(sorted(dict.fromkeys((*agent_run_ids, *failed_agent_run_ids))))
+        buffered_projections: dict[str, CapturedExecutionProjection | None] = {}
         for agent_run_id in ordered_agent_run_ids:
             producer_generation = self._execution_producers.get(agent_run_id, (None, None))[1]
-            if self.trace_persistence.failed_admission_settled(
+            if self.trace_persistence.terminal_buffered(agent_run_id):
+                buffered_projections[agent_run_id] = await self.trace_persistence.prepare_terminal_payload(
+                    agent_run_id, execution_id=execution_id, producer_generation=producer_generation,
+                )
+            elif self.trace_persistence.failed_admission_settled(
                 agent_run_id, execution_id=execution_id, producer_generation=producer_generation,
             ):
                 continue
-            await self.trace_persistence.stop(
-                agent_run_id, execution_id=execution_id, producer_generation=producer_generation,
-            )
+            else:
+                await self.trace_persistence.stop(
+                    agent_run_id, execution_id=execution_id, producer_generation=producer_generation,
+                )
         if not ordered_agent_run_ids:
             _logger.info(
                 "execution terminal seal prepared: execution=%s runs=0",
@@ -1257,7 +1263,20 @@ class RuntimeAgentRunStore(AgentRunStore):
                                 raise AIError(ErrorCode.STORAGE_CONFLICT)
                             captured_seal = seal
                             run = self._staging.get_agent_run_local(agent_run_id)
-                            if run is None or self.trace_persistence.failed_admission_settled(agent_run_id):
+                            buffered = buffered_projections.get(agent_run_id)
+                            if buffered is not None:
+                                captured.append((seal, ExecutionProjectionBatch(
+                                    buffered.run, buffered.events, buffered.checkpoints,
+                                    buffered.base_event_offset, buffered.base_checkpoint_offset,
+                                    buffered.target_event_offset, buffered.target_checkpoint_offset,
+                                    buffered.base_message_index, buffered.target_message_index,
+                                    buffered.interactions, buffered.base_interaction_offset,
+                                    buffered.target_interaction_offset, buffered.transcript,
+                                    buffered.payloads, buffered.local_messages,
+                                )))
+                                break
+                            if (run is None or agent_run_id in buffered_projections
+                                    or self.trace_persistence.failed_admission_settled(agent_run_id)):
                                 needs_archive_run = True
                             else:
                                 projection = self._capture_projection_checkpoint_locked(agent_run_id)
@@ -1481,6 +1500,8 @@ class RuntimeAgentRunStore(AgentRunStore):
                     offset.interactions,
                     projection.target_interaction_offset,
                 )
+            if self.trace_persistence.terminal_buffered(agent_run_id):
+                self.trace_persistence.confirm_terminal_payload(agent_run_id, execution_id=plan.execution_id)
             self.trace_persistence.confirm_failed_admission_terminal(
                 agent_run_id, execution_id=plan.execution_id,
             )
@@ -1550,6 +1571,43 @@ class RuntimeAgentRunStore(AgentRunStore):
     def _ensure_run_mutable(self, agent_run_id: str) -> None:
         if agent_run_id in self._terminal_seals:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+    async def capture_agent_run_checkpoint_payload(
+        self, agent_run_id: str, *, execution_id: str, producer_generation: int,
+        include_interrupted: bool = False,
+    ) -> bytes:
+        """Freeze only the run and latest checkpoint for a pending source boundary."""
+        await self._ensure_business()
+        async with self._history_lock.hold(agent_run_id):
+            self._ensure_run_mutable(agent_run_id)
+            if (self._execution_producers.get(agent_run_id) != (execution_id, producer_generation)
+                    or self.trace_persistence.failed_admission_settled(agent_run_id)):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            run = self._staging.get_agent_run_local(agent_run_id)
+            if run is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            checkpoint = self._staging.latest_checkpoint_local(agent_run_id, include_interrupted=include_interrupted)
+            checkpoints = () if checkpoint is None else (checkpoint,)
+            return encode_projection_payload(CapturedExecutionProjection(
+                run, (), checkpoints, 0, 0, 0, len(checkpoints), (), 0, 0,
+                None, 0, 0, producer_generation, (), (),
+            ))
+
+    def decode_agent_run_checkpoint_payload(
+        self, content: bytes, *, agent_run_id: str, producer_generation: int,
+    ) -> tuple[AgentRunRecord, AgentRunCheckpoint | None]:
+        """Restore a buffer-owned checkpoint without looking up mutable staging."""
+        captured = decode_projection_payload(content)
+        if (captured.run.agent_run_id != agent_run_id
+                or captured.producer_generation != producer_generation
+                or captured.events or captured.interactions or captured.payloads or captured.local_messages
+                or captured.transcript is not None or len(captured.checkpoints) > 1
+                or (captured.base_event_offset, captured.target_event_offset,
+                    captured.base_checkpoint_offset, captured.base_interaction_offset,
+                    captured.target_interaction_offset, captured.base_message_index,
+                    captured.target_message_index) != (0, 0, 0, 0, 0, 0, 0)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return captured.run, None if not captured.checkpoints else captured.checkpoints[0]
 
     async def capture_buffered_execution_projection(
         self, agent_run_id: str, *, execution_id: str, producer_generation: int | None,

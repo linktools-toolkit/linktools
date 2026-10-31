@@ -1773,6 +1773,10 @@ class StateCommands:
             stores.append(self._conversation.state_store)
         elif self._recovery_run_store is not None:
             stores.extend(self._recovery_run_store.transaction_stores)
+        if reservation.execution.durable_trace:
+            if self._execution_run_store is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            stores.extend(self._execution_run_store.transaction_stores)
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
@@ -1804,6 +1808,21 @@ class StateCommands:
         if (recovery is None or recovery.state is not RecoveryCheckpointState.COMPLETED
                 or recovery.agent_run_id != expected_run_id):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if execution.durable_trace:
+            seal = await self._execution.get_history_seal(execution.execution_id, tenant_id=self._tenant_id)
+            head = await self._execution.get_history_head(execution.execution_id, tenant_id=self._tenant_id)
+            run_ids = () if expected_run_id is None else (expected_run_id,)
+            heads = await self._execution_run_store.execution_history_heads(run_ids)
+            if (seal is None or head is None or head.seal_digest != seal.seal_digest
+                    or seal.execution_event_high_water != execution.event_seq):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            empty_failure = not seal.run_heads and execution.status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
+            if not empty_failure and seal.run_heads != tuple(heads[run_id] for run_id in run_ids):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for run_id in run_ids:
+                run = await self._execution_run_store.get_agent_run(agent_run_id=run_id)
+                if (run is None) != empty_failure:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if expected_session is None and execution.status is ExecutionStatus.SUCCEEDED:
             if self._recovery_run_store is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2054,12 +2073,14 @@ class StateCommands:
         conversation_checkpoint: AgentRunCheckpoint | None = None,
         recovery_run: AgentRunRecord | None = None,
         recovery_agent_run_checkpoint: AgentRunCheckpoint | None = None,
+        execution_projections: Sequence[PreparedExecutionProjection] = (),
         audit_events: Sequence[ExecutionEventAppend] = (),
         capability_run_id: str | None = None,
         context_write: tuple[ContentArchive, PreparedArchive] | None = None,
     ) -> ExecutionTerminalCommitResult:
         """Materialize one effect-free local turn at its final atomic boundary."""
         audit_events = tuple(audit_events)
+        execution_projections = tuple(execution_projections)
         archive = self._conversation_run_store
         if (type(self._execution) is not ExecutionRepositoryImpl
                 or type(self._recovery) is not RecoveryCheckpointRepositoryImpl):
@@ -2071,7 +2092,7 @@ class StateCommands:
                     or candidate.parent_execution_id is not None
                     or candidate.parent_invocation_id is not None or candidate.requires_task_invocation_capture
                     or candidate.budget_scope_id is not None or candidate.restart_checkpoints
-                    or candidate.durable_trace or candidate.dependency_hold_ids):
+                    or candidate.dependency_hold_ids):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if (execution.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
                 or reservation.budget is not None
@@ -2081,7 +2102,34 @@ class StateCommands:
                 or commit.expected_event_seq != 1 or commit.expected_revision < (2 if successful else 1)
                 or commit.operation is not None):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if execution.durable_trace != reservation.execution.durable_trace:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if not execution.durable_trace and execution_projections:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if execution.durable_trace:
+            if self._execution_run_store is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            expected_runs = (() if execution.agent_run_seq == 0 else (agent_run_id(
+                namespace=self._namespace, tenant_id=self._tenant_id,
+                execution_id=execution.execution_id, agent_run_seq=1,
+            ),))
+            if ((successful or execution_projections)
+                    and tuple(projection.run.agent_run_id for projection in execution_projections) != expected_runs):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for projection in execution_projections:
+                if (projection.run.agent_id != execution.agent_id or projection.run.parent_agent_run_id is not None
+                        or projection.base_event_offset != 0 or projection.base_checkpoint_offset != 0
+                        or projection.base_interaction_offset != 0
+                        or not projection.checkpoints and projection.durable_projection_digest != "empty"
+                        or projection.producer_generation != commit.producer_generation):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        seal = (_execution_history_seal(
+            commit, audit_events=audit_events, projections=execution_projections,
+            current_run=None, current_events=(), current_batch=None,
+        ) if execution.durable_trace else None)
         stores = [self._execution.state_store, self._recovery.state_store]
+        if execution.durable_trace:
+            stores.extend(self._execution_run_store.transaction_stores)
         if expected_session is None:
             if any(value is not None for value in (next_cursor, conversation_agent_run, conversation_checkpoint)):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2141,6 +2189,10 @@ class StateCommands:
                 )) or execution.conversation_agent_run_id is not None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 stores.append(self._conversation.state_store)
+        if successful and execution_projections:
+            expected_run = recovery_run if expected_session is None else conversation_agent_run
+            if execution_projections[0].run != expected_run:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         stores = tuple(_dedupe_stores(stores))
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -2244,6 +2296,32 @@ class StateCommands:
             final = await repository.insert_pending_turn_in_transaction(
                 execution_transaction, reservation, commit, audit_events=tuple(audit_events),
             )
+            if seal is not None:
+                await self._execution_run_store.execution_history_heads(expected_runs)
+                for run_id in expected_runs:
+                    if await self._execution_run_store.get_agent_run(agent_run_id=run_id) is not None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                # Only the reservation's expected-absent insertion creates this head.
+                head, head_record = await repository.require_open_history_head_in_transaction(
+                    execution_transaction, execution.execution_id,
+                )
+                for projection in execution_projections:
+                    await self._execution_run_store.transcript_repository.publish_archive(projection.archive)
+                    await self._execution_run_store.sync_projection_in_transaction(
+                        group.transaction(self._execution_run_store.state_store), projection.run,
+                        events=projection.events, checkpoints=projection.checkpoints,
+                        interactions=projection.interactions, observation=projection.observation,
+                        producer_generation=projection.producer_generation, execution_id=execution.execution_id,
+                        history_head_guard=(head, head_record),
+                    )
+                    if not await self._execution_run_store.verify_execution_projection_head(projection):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                await repository.put_history_seal_in_transaction(execution_transaction, seal)
+                await repository.replace_history_head_in_transaction(
+                    execution_transaction, head_record,
+                    replace(head, state=ExecutionHistoryState.SEALED, revision=head.revision + 1,
+                            seal_digest=seal.seal_digest),
+                )
             if expected_session is not None:
                 if successful:
                     assert archive is not None and conversation_agent_run is not None and prepared is not None

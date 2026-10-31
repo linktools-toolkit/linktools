@@ -16,6 +16,7 @@ from linktools.ai.runtime._pending_turn import _PendingExecutionTurns
 @pytest.mark.asyncio
 async def test_local_execution_close_surfaces_recorded_worker_failure() -> None:
     backend = object.__new__(LocalExecutionBackend)
+    backend._execution_buffer = None
     backend._accepting = True
     backend._live_broker = LiveExecutionEventBroker()
     backend._pending_turns = _PendingExecutionTurns()

@@ -1528,7 +1528,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         if (execution is None or execution.status not in terminal_statuses
                 or current.status is not terminal_statuses[execution.status]
                 or execution.result is None or head is None
-                or head.state is not ExecutionHistoryState.CLOSED
+                or execution.durable_trace != reservation.execution.durable_trace
+                or head.state is not (ExecutionHistoryState.SEALED if execution.durable_trace else ExecutionHistoryState.CLOSED)
                 or (execution.result.output is not None) != (execution.status is ExecutionStatus.SUCCEEDED)
                 or current.result_digest != (None if execution.result.output is None else execution.result.output.digest)
                 or current.error_code != execution.error_code):
@@ -1591,8 +1592,11 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                             result_digest=None if commit.result.output is None else commit.result.output.digest,
                             error_code=commit.execution.error_code,
                             updated_at=await transaction.now())
-        head = ExecutionHistoryHeadRecord(execution_id, ExecutionHistoryState.CLOSED, 2, None,
-                                          producer_generation=commit.producer_generation or 0)
+        head = ExecutionHistoryHeadRecord(
+            execution_id, ExecutionHistoryState.OPEN if commit.execution.durable_trace else ExecutionHistoryState.CLOSED,
+            1 if commit.execution.durable_trace else 2, None,
+            producer_generation=commit.producer_generation or 0,
+        )
         await transaction.insert_records((
             self._stored("execution", execution_id, final, state=final.status.value),
             self._idempotency._stored("idempotency", identity, completed, state=completed.status.value),

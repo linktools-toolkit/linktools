@@ -601,6 +601,7 @@ async def test_subagent_child_cleanup_failure_does_not_replace_cancellation() ->
     assert failure.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
 
     backend = object.__new__(LocalExecutionBackend)
+    backend._execution_buffer = None
     backend._live_broker = LiveExecutionEventBroker()
     backend._pending_turns = _PendingExecutionTurns()
     backend._pending_renewals = {}

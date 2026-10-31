@@ -24,6 +24,7 @@ from .test_explicit_runtime_features import _FeatureFunctionModel, _FeatureModel
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ("batch", "terminal"))
 @pytest.mark.parametrize("split,checkpoint,rejection,ack_failure,source_rejection", (
     (False, False, "before_provider", False, False),
     (False, False, "response", False, False),
@@ -35,7 +36,7 @@ from .test_explicit_runtime_features import _FeatureFunctionModel, _FeatureModel
 ))
 async def test_rejected_trace_payload_finishes_source_control_without_replaying_or_saving_rejected_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, split: bool, checkpoint: bool,
-    rejection: str, ack_failure: bool, source_rejection: bool,
+    rejection: str, ack_failure: bool, source_rejection: bool, mode: str,
 ) -> None:
     calls = 0
     rejected = []
@@ -69,7 +70,8 @@ async def test_rejected_trace_payload_finishes_source_control_without_replaying_
     if split:
         storage = PersistenceStorage(replace(storage.plan, conversation=StorageRoute.sqlite(tmp_path / "conversation.db")),
                                      object_store=storage.object_store)
-    policy = CommitPolicy.batch(buffer=buffer, batch_size=128, flush_interval=60)
+    policy = (CommitPolicy.terminal(buffer=buffer) if mode == "terminal"
+              else CommitPolicy.batch(buffer=buffer, batch_size=128, flush_interval=60))
     capabilities = [TraceCapability(commit=policy)]
     if checkpoint:
         capabilities.append(CheckpointCapability())
@@ -185,7 +187,8 @@ def _track_source_transactions(monkeypatch, archive, repository):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reject_cancel_tail", [False, True])
-async def test_trace_buffer_cancellation_keeps_control_settled(tmp_path, monkeypatch, reject_cancel_tail):
+@pytest.mark.parametrize("mode", ["batch", "terminal"])
+async def test_trace_buffer_cancellation_keeps_control_settled(tmp_path, monkeypatch, reject_cancel_tail, mode):
     entered = asyncio.Event()
     calls = 0
 
@@ -205,7 +208,8 @@ async def test_trace_buffer_cancellation_keeps_control_settled(tmp_path, monkeyp
         raise AssertionError("cancelled provider continued")
 
     buffer = Buffer(max_bytes=4 * 1024 * 1024)
-    policy = CommitPolicy.batch(buffer=buffer, batch_size=128, flush_interval=60)
+    policy = (CommitPolicy.terminal(buffer=buffer) if mode == "terminal"
+              else CommitPolicy.batch(buffer=buffer, batch_size=128, flush_interval=60))
     features = model_features(_FeatureModels(_FeatureFunctionModel(model)), _features(
         TraceCapability(commit=policy),
     ))
@@ -242,6 +246,8 @@ async def test_trace_buffer_cancellation_keeps_control_settled(tmp_path, monkeyp
             session_record = await persistence.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
             assert session_record.active_execution_id is None
             assert len(terminal_frames) == 1 and trace_frames
+            if mode == "terminal":
+                assert all(value is terminal_frames[0] for value in trace_frames)
             operations = await persistence.execution.operations.list_pending(
                 ResourceKind.EXECUTION, execution.execution_id, tenant_id=runtime.tenant_id,
                 limit=10, states=frozenset(OperationStatus),

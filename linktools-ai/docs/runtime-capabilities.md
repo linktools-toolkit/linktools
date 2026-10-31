@@ -226,6 +226,13 @@ unresolved tool effects retain their stronger recovery diagnostic. It does not
 silently convert recovery into cancellation. `auto_recover` still controls startup
 reconciliation; it does not grant a missing execution guarantee.
 
+`Runtime.handoff()` keeps its separate eligibility: synchronous Execution policy,
+CheckpointCapability, and durable Execution, Recovery and Checkpoint routes.
+An Execution terminal policy, with or without a buffer, does not enable handoff;
+the call reports `CAPABILITY_REQUIRED_MISSING` before closing. For recoverable
+handoff with delayed Trace publication, keep Execution synchronous and configure
+Trace with `CommitPolicy.terminal(buffer=...)`.
+
 For an ordinary Agent without restart checkpoints, explicit
 `execution.cancel(force=True)` may safely revoke the producer after cancellation
 has blocked new tool admission and all tool-effect claims are settled. It closes
@@ -245,91 +252,100 @@ existing confirmation outcome. It must not claim completion from force alone.
 ### Independent commit boundaries
 
 Import `CommitPolicy` from `linktools.ai.core`. Its factories are
-`CommitPolicy.sync()`, `CommitPolicy.terminal()`, and
-`CommitPolicy.batch(buffer=..., batch_size=..., flush_interval=...)`. The policy
-pairs write timing with its optional borrowed buffer, independently of read
-cache routing. In batch mode without a buffer, observation writes await the source. A buffer
-never becomes a hot-read cache and is never closed by the policy.
-Runtime execution supports sync and terminal. Trace supports sync, batch and terminal;
-Metrics datasets always write synchronously; a host provider separately chooses
-automatic-delivery timing. Conversation has a fixed terminal boundary;
-Checkpoint has fixed model/tool safety boundaries. They do not accept timing
-preferences that would weaken those guarantees.
-`ExecutionCapability(commit=CommitPolicy.sync())` is the default: new turns use durable admission even with
-a coordination cache. Shared admission ownership and idempotency coordination
-remain active for every policy, including a sync caller joining an already
-admitted terminal-policy turn. Opt into `ExecutionCapability(commit=CommitPolicy.terminal())`
-to defer eligible ordinary native turns until the terminal boundary. Deferred
-admission additionally requires explicitly configured `coordination`
-with the required coordination groups and compatible storage routes.
-Execution timing is independent of Conversation retention and Session activation.
-Execution is required and installed by default. Register one explicit
-`ExecutionCapability` on the runtime scope to replace its default configuration:
+`CommitPolicy.sync()`, `CommitPolicy.terminal(buffer=None)`, and
+`CommitPolicy.batch(buffer=..., batch_size=..., flush_interval=...)`. Terminal's
+optional keyword-only buffer provides `append/read_batch/ack`; it has no timer
+or batch threshold. Sync does not accept a buffer. The policy borrows, never
+closes, the backend and does not configure hot-read caching or coordination.
 
-```python
-from linktools.ai.capability import ExecutionCapability
-from linktools.ai.core import CommitPolicy
+| Owner | Commit policy | Required source boundary |
+| --- | --- | --- |
+| Execution | sync (default), terminal | Admission/control where required; canonical terminal outcome |
+| Trace | sync, batch (default 128 / 3 seconds), terminal | Selected projection prefix and guarded terminal seal |
+| Explicit `CapabilityPersistence` writer | sync, batch, terminal | Its own source confirmation; compatible terminal prefixes join the existing transaction |
+| Conversation | Fixed terminal context/cursor handoff | Retained turn and corresponding Execution outcome |
+| Checkpoint / Task / tool effects | Existing safety and ownership boundaries | Cannot be deferred by optional payload policy |
+| Metrics dataset | Synchronous source/query | Automatic delivery belongs to its independent provider |
 
-from linktools.ai.persistence import PersistenceStorage
+Batch without a buffer awaits source publication and creates no hidden queue.
+Terminal without a buffer preserves owner-local staging. With a buffer, Execution,
+Trace and explicit capability writes freeze actual business payload bytes; a
+successful append is admission, not source durability. They keep separate scopes
+even if they share a backend. See [payload and failure contracts](storage-caching.md#runtime-observation-publication).
 
-storage = PersistenceStorage.sqlite("state.db", coordination=shared_cache)
-features.capability(ExecutionCapability(
-    commit=CommitPolicy.terminal(),
-), scope="runtime")
-```
+`ExecutionCapability(commit=CommitPolicy.sync())` is the default: new turns use
+durable admission even when coordination is configured. Execution timing is
+independent of Conversation retention and Session activation. Register one
+explicit Runtime-scoped `ExecutionCapability` to replace that default;
+`Runtime.open` has no separate execution commit parameter or buffering mode.
+Shared admission ownership and idempotency coordination remain active for all
+policies, including a sync caller joining an already-admitted terminal-policy turn.
 
-`Runtime.open` does not take a separate execution commit policy.
-
-Use `TraceCapability(commit=CommitPolicy.terminal())` to retain optional trace
-observations in process-local staging until a required publication boundary. It
-needs no write buffer and does not make pending facts durable or hot-readable.
-When Trace, Conversation and Execution resolve to the same transaction resource,
-the existing terminal transaction includes the trace tail and final conversation
-state. Explicit flush and recovery/tool safety boundaries may publish earlier.
-
-Enabling durable Trace still requires durable admission and producer fencing,
-even with `ExecutionCapability(commit=CommitPolicy.terminal())`. The terminal
-transaction is shared; the entire traced turn is not promised to use only one
-transaction. This reduces intermediate optional projection transactions, not
-necessarily SQL statement count or network round trips. Trace and Checkpoint
-currently require the same transaction resource as Execution; incompatible
-routes are rejected during initialization. No distributed transaction is implied.
+Deferred admission requires explicitly configured `coordination`, compatible
+storage routes and an eligible ordinary native turn. With durable Trace, the
+Trace policy must be terminal and **at least one of the Execution or Trace
+policies must have an explicit buffer**. Thus Execution terminal(buffer) with
+Trace terminal(), or Execution terminal() with Trace terminal(buffer), can be
+eligible. Both terminal policies without buffers retain their existing
+source-first Trace admission. Trace sync/batch, Task ownership, recovery and
+other required source dependencies do not become pending merely because
+Execution selects terminal. Without Trace, the existing eligible
+Execution-terminal path without a payload buffer remains available.
 
 ```python
 from linktools.ai.capability import ExecutionCapability, TraceCapability
-from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy
-from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.runtime import RuntimeFeatures
 
 features = RuntimeFeatures("traced-chat")
 features.agent("default", model="default")
-features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()))
-features.capability(TraceCapability(commit=CommitPolicy.terminal()))
-storage = PersistenceStorage.sqlite("chat.db")
-# Open Persistence with storage, then Runtime with persistence and features.
-# Required admission/fencing writes remain; the final trace tail shares the
-# conversation/execution terminal transaction.
+features.capability(ExecutionCapability(
+    retain_history=True, commit=CommitPolicy.terminal(buffer=write_buffer),
+))
+features.capability(TraceCapability(commit=CommitPolicy.terminal(buffer=write_buffer)))
+# write_buffer and coordination are explicitly supplied, host-owned resources.
+# Register the model binding, then open Persistence and attach Runtime.
+storage = PersistenceStorage.sqlite("chat.db", coordination=coordination)
 ```
 
-Conversation commits its final context, Session cursor, and corresponding
-Execution outcome at the turn boundary. Checkpoint retains its recovery-critical
-model/tool boundaries. Trace defaults to batch size 128 and a 3-second interval.
-Metrics does not share that scheduler. Explicit flush,
-completion, close, and required safety barriers remain authoritative. One module
-does not force unrelated modules to flush at every boundary.
+Eligible deferred turns freeze inputs, instructions, result and audit data before
+source publication. Retained final Conversation context is included even without
+Trace; disabling retention does not retain extra history merely for buffering.
+New large-object bytes are materialized at their owning source preparation
+boundary. Necessary durable admission or promotion still prepares the required
+control/context; it is not a fallback that writes rejected optional output.
 
-Before side effects, Task ownership, or another durable dependency requires
-state, Runtime establishes the necessary durable facts. Authorization,
-idempotency, producer fencing, tool-effect ownership, and unknown-commit readback
-remain part of the execution core. A process crash cannot recover an uncommitted
-turn merely because Conversation or Trace was enabled.
+Trace terminal() retains optional observations in existing process-local staging;
+terminal(buffer) admits immutable projection and content-dependency bytes. A fixed
+terminal prefix joins the canonical success, failure or cancellation transaction.
+Explicit publication and genuine checkpoint/tool-effect boundaries can require
+earlier source work. After a terminal plan freezes a prefix, ordinary Trace
+flush/close cannot publish it independently to bypass unresolved terminal control.
 
-Multiple Runtime instances need shared turn coordination for provisional
-live turns. Without injected coordination, or when its required groups are absent,
-Runtime retains ordinary durable admission. It does not silently substitute
-private coordination. Remote preview remains
-provisional. Result completion and unknown-commit resolution use authoritative
-storage, and a lost lease never permits two canonical terminal results.
+Trace and Checkpoint require the same transaction resource as Execution;
+incompatible routes fail during initialization. Conversation follows its existing
+same-group atomic transaction or prepared cross-store handoff. Compatible explicit
+capability prefixes join the terminal resource; unrelated physical resources
+cannot join that transaction. Neither one transaction nor fewer optional
+projections implies one SQL statement or fewer total network operations.
+
+Buffer rejection is not a provider failure to retry. Trace, terminal-buffered
+Execution and buffered capability owners can settle a known rejection as FAILED/CANCELLED using
+only verified accepted facts for already-admitted control; unknown append/source results retain their original identities until
+readback. Canonical source confirmation precedes exact-ID acknowledgement, whose
+failure remains cleanup rather than reversing the business result. Working reads
+still use existing local staging, not a new Redis authority. Authorization,
+idempotency, producer fences, Task ownership, effect receipts and recovery
+checkpoints keep their source requirements; a cache cannot recover an uncommitted
+turn after process loss. Metrics best-effort delivery is separate and cannot
+suppress Trace failure.
+
+Multiple Runtime instances need shared turn coordination for provisional live
+turns. Missing coordination or required groups retain ordinary durable admission;
+Runtime does not substitute private coordination. Remote preview is provisional.
+Result completion and unknown-commit resolution use authoritative storage, and a
+lost lease never permits two canonical terminal results.
 
 ## Capture, identity and lifecycle
 
@@ -456,8 +472,8 @@ content dependencies, not flush markers. Admission is awaited, rejected/unknown
 admission does not fall back to source writes, and source-confirmed IDs alone
 are acknowledged. Source success is independent of retryable buffer-ack cleanup.
 Size adapter capacity for real bytes and drain old marker producers before upgrading.
-`terminal(buffer=...)` is not enabled by this batch-path migration.
-A policy with `buffer=None`
+Terminal policies can use the same buffer capability without batch scheduling.
+A **batch** policy with `buffer=None`
 awaits publication at each observation boundary; timing options do not create a
 hidden Runtime queue. A lower threshold or interval can make partial trace
 visible sooner at the cost of more writes.

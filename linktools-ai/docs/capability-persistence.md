@@ -61,13 +61,16 @@ async with Persistence.open("notes", storage=PersistenceStorage.in_memory()) as 
         ...
 ```
 
-Two different participants use separate domain partitions but can share one
-physical transaction. They must resolve to the same transaction resource in the
-same Runtime, belong to the same run, and have equal commit values and the same
-borrowed write buffer. Policy object identity does not matter. Participating in
-this protocol selects atomic failure handling: a failed domain operation rolls
-back the whole compatible prefix, retains it and raises. Default Metrics writes
-keep their independent best-effort contract.
+Different participants use separate domain partitions. Ordinary write scopes
+coalesce when they resolve to the same transaction resource in the same Runtime
+and run, with equal commit values and the same borrowed buffer instance. Policy
+object identity does not matter. At terminal preparation, all terminal scopes
+for that execution/run on the terminal transaction resource contribute their
+prefixes, even when they have different buffers. Each buffer still owns its own
+entries and acknowledgement IDs. A failed domain callback rolls back the whole
+combined source transaction and retains the prefixes; it does not partially
+commit one participant. Default Metrics writes keep their independent best-effort
+contract.
 
 Custom placement is optional: set `PersistencePlan.capability_routes` using the
 registered capability ID. `trace` and `checkpoint` similarly configure archive
@@ -85,19 +88,33 @@ producers; closing one Runtime never closes another producer's shared resources.
   deadline. A full buffer rejects a submission rather than waiting while holding
   the flush lock; callers may flush and retry. Without a buffer, batch writes
   synchronously confirm, as with existing policy behavior.
-- `terminal()` defers until the existing execution terminal transaction. A
-  compatible tail joins that transaction, including the pending-conversation
-  path. Other physical resources cannot join it.
-- `writer.flush()` and Runtime close are explicit forced boundaries. They can
-  persist a terminal-policy prefix independently of execution completion,
+- `terminal(buffer=None)` defers until the existing execution terminal
+  transaction. Without a buffer it keeps existing local staging; with a buffer,
+  each accepted entry contains immutable serialized payload bytes. All compatible
+  participant scopes contribute their selected prefixes, including on the
+  pending-turn path. Other physical resources cannot join that transaction.
+- For these explicit capability writers, `writer.flush()` and Runtime close
+  are forced boundaries. They can persist a terminal-policy prefix independently
+  of execution completion,
   including after a failed execution terminal attempt. Terminal policy is a
   scheduling boundary, not a promise that every stored note proves success.
 
-A successful deferred `submit` means accepted, not durable. After a failed
-flush, retry explicitly; no background retry loop is created. Close propagates
-failure and retains unresolved work. Buffer acknowledgement follows confirmed
-commit; acknowledgement failure retries acknowledgement without repeating the
-transaction. Borrowed buffers, engines and caches remain caller-owned. Retrying persistence
+A successful deferred `submit` means accepted, not durable. Buffered batch and
+terminal writers read back and validate the whole fixed selected prefix before
+calling the source callbacks; a short/missing/corrupt read is not permission to
+submit a RAM copy. Capacity rejection uses `wait=False`, not a wait that depends
+on the same execution reaching its terminal boundary. For a buffered batch or
+terminal writer, an unhandled known rejection fails the turn without repeating a
+provider request or silently changing the policy to synchronous SQL; required
+Execution control still has to settle. Unknown append/source outcomes keep their
+original IDs for readback.
+
+After a failed flush, retry explicitly; no background retry loop is created.
+Close propagates failure and retains unresolved work. Canonical terminal
+confirmation and release of owned source locks precede buffer acknowledgement. An acknowledgement failure cannot turn that confirmed business
+result into failure; it retains cleanup for retry without repeating the source
+transaction. Explicit flush/close can still report outstanding cleanup. Borrowed
+buffers, engines and caches remain caller-owned. Retrying persistence
 does not erase a recorded execution-worker failure: Runtime close may continue
 to report that failure even after the retained writes are confirmed.
 
@@ -117,7 +134,9 @@ This initial protocol supports Runtime-scoped declarations only; selecting it on
 an Agent-scoped declaration is rejected. Ordinary Agent capabilities are
 unaffected.
 
-Pending callbacks are owner-local. A shared buffer is not a durable task queue
+Payload bytes live in the borrowed buffer, but callback bindings remain
+owner-local. This adds no query API or pending-read view, and does not promise
+RAM unloading. A shared buffer is not a durable task queue
 and does not enable another Pod to execute Python callbacks after owner loss.
 Already committed records remain in the configured backend; uncommitted memory
 is subject to the selected deferred policy's loss boundary. Execution recovery

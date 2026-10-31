@@ -821,6 +821,8 @@ async def _build_local_components(
             worker_completed=worker_completed,
             exclusive_execution_writer=exclusive_execution_writer,
             commit=commit,
+            trace_commit=next((value.commit for value in persistence_capabilities
+                               if isinstance(value, TraceCapability)), None),
             pending_turns=runtime_bridge.pending_turns,
             pending_cancel=lambda execution_id, principal: execution.cancel(
                 execution_id, CancelExecutionRequest(principal, f"pending-cancel:{execution_id}"),

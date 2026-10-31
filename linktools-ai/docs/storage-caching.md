@@ -61,8 +61,9 @@ owning domain remains responsible for its retention rules.
 ## Read resources and write policies
 
 `StorageRoute(..., cache=...)` and the PersistenceStorage factories borrow a
-`CacheBackend` for hot reads only. `CommitPolicy.batch(buffer=..., ...)` borrows
-an independent `WriteBufferBackend` for pending writes. The same implementation
+`CacheBackend` for hot reads only. `CommitPolicy.batch(buffer=..., ...)` and
+`CommitPolicy.terminal(buffer=...)` borrow an independent `WriteBufferBackend`
+for pending payloads. The same implementation
 may provide both capabilities, but each use is explicitly configured.
 `PersistenceStorage(..., coordination=...)` separately supplies turn ownership and
 live streams, including the non-authoritative pending-turn view.
@@ -79,8 +80,10 @@ from linktools.ai.core import CommitPolicy
 trace = TraceCapability(commit=CommitPolicy.batch(buffer=write_buffer))
 ```
 
-Here `write_buffer` is a host-provided `WriteBufferBackend`. Omit `buffer` for synchronous source writes,
-without a hidden queue. Explicit `batch_size` and `flush_interval` always win;
+Here `write_buffer` is a host-provided `WriteBufferBackend`. In **batch mode**,
+omit `buffer` for synchronous source writes without a hidden queue.
+`terminal()` without a buffer instead retains the owner's existing local staging
+until its publication boundary. Explicit `batch_size` and `flush_interval` always win;
 for example, `CommitPolicy.batch(buffer=write_buffer, batch_size=32)` changes
 only the size and retains the receiving owner's interval.
 
@@ -373,51 +376,108 @@ require a new per-call cache option or a different Runtime profile.
 
 ## Runtime observation publication
 
-Trace uses owner-scoped buffering through its own `commit.buffer`
-(defaults: three seconds or 128 observation boundaries). Automatic Metrics
-uses the independent provider described above. Without a buffer, each observation boundary awaits the existing
-guarded projection commit. The route's hot cache never enables write batching.
+Write timing and storage are independent. `sync()` confirms source writes at the
+owner's existing boundaries; `batch(buffer=...)` schedules admitted payloads;
+`terminal(buffer=...)` defers optional payload publication to the terminal
+boundary. Terminal has no batch size or timer. `terminal()` without a buffer
+keeps local staging; batch without a buffer awaits source writes. Neither a
+hot-read cache nor a coordination backend implicitly enables payload buffering.
 
-The policy borrows its buffer; equality and hashing compare timing values only.
-Within one Runtime, Trace runs using the same buffer object and equal batch size
-and interval share automatic scheduling. Accepted, undispatched entries count
-against one threshold; the earliest pending entry sets the deadline. Each trigger
-selects that run's fixed admitted prefix, not newer staging or an in-progress
-append. Each run retains independent source transactions and failure handling.
-Other Runtime instances and buffers/timing values have independent schedules.
+### Payload ownership and publication
 
-A buffered Trace entry contains immutable logical projection bytes and selected
-content dependencies, including request/response and captured failed-stream
-content. It is **not a `None` flush marker**. Publication reads and verifies the
-whole admitted prefix from the backend before source preparation. The local
-preview mirror is not a fallback when entries are missing or corrupt. Source
-sequences and producer fencing remain owned by the existing guarded transaction.
-No cross-process claiming or restart recovery of these live-owner scopes is implied.
+Execution, Trace and explicit `CapabilityPersistence` writers keep independent
+scopes even when they borrow the same backend. Entries carry immutable serialized
+business data, not `None` flush markers or digests that require an unacknowledged
+RAM payload mirror. Execution captures its deferred records, input/context,
+instructions, output and audit facts, including the retained turn context when
+required. Trace captures logical projections and their selected request/response,
+failed-stream and object-content dependencies. Already durable immutable object
+references keep their existing ownership. New object bodies are materialized
+when the owning source publication is prepared, not merely to encode a buffer
+entry. Necessary durable admission/checkpoint/effect preparation may occur earlier.
 
-Admission is awaited with `wait=False` and a bounded transport wait. Capacity
-rejection or unresolved append failure is sticky: it does not fall back to direct
-source writes. An uncertain append retains its original ID/bytes and may be
-resolved by reading that exact entry back. It is not retried as a new model call.
-Source rollback can retry the same fixed payload; unknown source outcomes retain
-the source flight and unacknowledged entries. Only source-covered IDs are acked.
-After source success, ack failure is retryable cleanup and does not turn success
-into failure or replay source writes. Close reports remaining cleanup failures
-and can be retried without closing the borrowed backend.
+Publication reads and verifies the complete fixed admitted prefix from the
+backend before source preparation. Missing, short or corrupt reads do not permit
+using newer staging, publishing a smaller prefix or acknowledging it early.
+Later cumulative snapshots cannot replace previously admitted append-only facts.
+Source sequence assignment, CAS and producer fencing remain in the authoritative
+transaction. Compatible terminal prefixes join the existing Execution terminal
+transaction; each distinct participant scope contributes its full selected prefix.
+There is no distributed transaction across unrelated storage resources.
 
-An explicit publication boundary admits its current tail before draining it.
-Revoked-producer discard first quiesces publication and only abandons queued data
-after the existing source revocation proof. Checkpoint/effect safety boundaries
-remain independent. `terminal()` without a buffer keeps its existing staging and
-terminal transaction behavior; `terminal(buffer=...)` is not yet enabled.
+Within one Runtime, batch Trace runs using the same buffer object and equal batch
+size and interval share automatic scheduling (defaults: 128 observation
+boundaries / three seconds). Accepted undispatched entries count against that
+threshold; the earliest pending entry sets the deadline. Each run still owns its
+transaction and failure handling. Other Runtime instances have independent
+schedules and scopes. Policy equality excludes buffer identity; grouping writers
+must compare the borrowed instance separately.
 
-**Adapter/capacity migration:** stop and drain old producers before upgrading;
-old marker scopes are not reusable with the new payload format. Size capacity
-for real serialized bytes, including cumulative snapshots and content context,
-not merely boundary counts. Large or frequently changing contexts can amplify
-buffer bytes; this change does not claim zero-copy capture or reduced RAM usage.
-The backend must return the requested ordered prefix non-destructively and keep
-accepted entries until exact-ID acknowledgement. A short read is not permission
-to publish or acknowledge a smaller prefix.
+### Admission, failures and cleanup
+
+Admission is awaited with `wait=False` and bounded transport waits; terminal
+producers must not wait for a terminal drain that cannot run until they finish.
+Capacity rejection or unresolved append failure fails that write/turn rather than
+silently falling back to ordinary SQL publication, disabling observations, or
+repeating the model request. An uncertain append retains its original ID and
+bytes; readback must resolve that exact entry, not create a replacement ID.
+
+For Trace, terminal-buffered Execution and buffered capability owners, a known rejection
+can isolate the rejected tail only after verifying the complete accepted prefix.
+Already-admitted Execution/Task control must still
+settle safely as FAILED or CANCELLED; it must not remain STARTED merely because
+optional bytes were rejected. Batch Trace can confirm its accepted prefix before
+that control settlement; terminal Trace joins its accepted prefix to the terminal
+transaction. Unadmitted output is not copied into SQL as a fallback. A turn with
+no durable admission may fail and release its pending coordination instead.
+Unknown admission or source outcomes are not treated as known rejection.
+
+Known source rollback retains the fixed payload for explicit retry. Unknown
+source outcomes retain the original plan, IDs and source flight until canonical
+readback resolves them. Only source-covered IDs are acknowledged. After source
+confirmation, acknowledgement is cleanup: failure does not change canonical
+success/failure/cancellation, replay source writes, or prevent the control result
+from becoming visible. The owner retains cleanup for retry. Close reports
+unsettled source/control or cleanup failures and never closes a borrowed backend.
+
+An ordinary explicit Trace publication boundary admits the current dirty tail
+before draining it; it must not claim success for a rejected tail. Once a terminal
+plan owns a fixed prefix, flush/close cannot downgrade it to an unrelated batch
+write after a failed terminal attempt. Canonical settlement or explicit authorized
+revocation must resolve that ownership. Revoked-producer discard first quiesces
+capture/publication and requires the existing source revocation proof. Required
+Task, recovery-checkpoint and tool-effect writes keep their own durable boundaries.
+
+### Reading and deployment limits
+
+Working reads remain with the existing owner-local staging/overlay. Independent
+History readers see source-confirmed data, not arbitrary buffer entries. The
+buffer does not replace SQL retention, hot-read cache policy, authorization,
+coordination leases or effect receipts. It does not provide process-restart
+handover, another Pod's Python callbacks, or Redis-only recovery. Capturing bytes
+does not by itself unload RAM mirrors or promise zero-copy execution.
+
+Automatic Metrics remain independent best-effort observations through their
+provider; they do not own Trace capture or swallow a Trace admission error.
+`metrics=None` does not disable the Trace interaction recorder. Metrics source
+queries remain committed-only. Synchronous SQL publication plus bounded hot-read
+caching remains a valid separate configuration; cache hits do not authorize
+control transitions or resolve unknown source commits.
+
+**Adapter/capacity migration:** stop and drain old marker producers before
+upgrading; their active scopes are not reusable with the payload format. Size
+capacity for real serialized bytes, cumulative snapshots and content context,
+not boundary counts. A host backend must retain accepted entries and provide the
+requested ordered prefix non-destructively until exact-ID acknowledgement. Shared
+capacity pressure must not evict unconfirmed payloads as ordinary hot-cache data.
+
+**Verification scope:** local directed tests exercise payload readback, rejection,
+rollback/unknown outcomes, acknowledgement failure, cancellation and independent
+Runtime lifetimes using the in-memory buffer and local source backends. These do
+not certify a Redis adapter, host failure/reassignment behavior, memory savings,
+or production throughput. Complete Execution/Trace/Capability combinations and
+supported source/dependency matrices require their own exact-head integration
+and CI evidence; the policy declaration alone is not that evidence.
 
 ## Runtime content
 

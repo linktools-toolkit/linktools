@@ -68,6 +68,7 @@ class _ObservationBuffer:
     ack_task: asyncio.Task[object] | None = None
     inflight: tuple[str, ...] = ()
     admitted_revision: int | None = None
+    terminal_ids: tuple[str, ...] | None = None
 
     @property
     def pending(self) -> tuple[_Admission, ...]:
@@ -78,6 +79,7 @@ class _ObservationBuffer:
 class _FailedAdmission:
     key: tuple[str, str, int | None]
     error: BaseException
+    terminal: bool = False
     terminal_confirmed: bool = False
 
 
@@ -127,8 +129,6 @@ class TracePersistence:
     ) -> None:
         if agent_run_id in self._buffers:
             raise RuntimeError("observation batching cannot change during an active run")
-        if terminal and buffer is not None:
-            raise ValueError("terminal observations do not use a write buffer")
         if buffer is not None and not isinstance(buffer, WriteBufferBackend):
             raise TypeError("buffer must implement append, read_batch and ack")
         self._caches[agent_run_id] = buffer
@@ -166,8 +166,8 @@ class TracePersistence:
 
     def release(self, agent_run_id: str) -> None:
         failed = self._failed_runs.get(agent_run_id)
-        if failed is not None and not failed.terminal_confirmed:
-            raise failed.error
+        if failed is not None:
+            self._require_failed_control_settled(failed)
         if agent_run_id in self._buffers:
             raise RuntimeError("observation buffer is not quiescent")
         self._caches.pop(agent_run_id, None)
@@ -215,7 +215,7 @@ class TracePersistence:
             offset = self.offsets.setdefault(agent_run_id, _ProjectionOffset())
             offset.observation_execution_id = execution_id
             offset.observation_producer_generation = producer_generation
-            if agent_run_id in self._terminal_runs:
+            if agent_run_id in self._terminal_runs and self._caches.get(agent_run_id) is None:
                 return
         backend = self._caches.get(agent_run_id)
         if backend is None:
@@ -295,7 +295,7 @@ class TracePersistence:
             self._timer = None
         groups: dict[tuple[int, int, float], list[tuple[_ObservationBuffer, tuple[_Admission, ...]]]] = {}
         for run_id, buffer in self._buffers.items():
-            if buffer.paused or buffer.error is not None:
+            if buffer.paused or buffer.error is not None or run_id in self._terminal_runs:
                 continue
             pending = tuple(entry for entry in buffer.pending if entry.id not in buffer.inflight)
             if not pending:
@@ -330,26 +330,34 @@ class TracePersistence:
             buffer.task = None
             self._schedule_changed()
 
+    async def _read_pending_locked(
+        self, buffer: _ObservationBuffer,
+    ) -> tuple[CapturedExecutionProjection, tuple[str, ...]] | None:
+        if not buffer.pending:
+            return None
+        expected = tuple(buffer.entries)
+        async with asyncio.timeout(_BUFFER_TIMEOUT_SECONDS):
+            queued = await buffer.backend.read_batch(buffer.id, limit=len(expected))
+        if not self._validate_read(buffer, expected, queued):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Trace payload prefix is missing or changed")
+        pending_ids = tuple(entry.id for entry in expected if not entry.confirmed)
+        selected = {id: content for id, _, content in queued}
+        captures = tuple(decode_projection_payload(selected[id]) for id in pending_ids)
+        for capture in captures:
+            if (capture.run.agent_run_id != buffer.key[0]
+                    or capture.producer_generation != buffer.key[2]):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for previous, current in zip(captures, captures[1:]):
+            self._validate_cumulative_prefix(previous, current)
+        return captures[-1], pending_ids
+
     async def _publish_pending(self, buffer: _ObservationBuffer) -> None:
         async with buffer.publish_lock:
             async with buffer.lock:
-                if not buffer.pending:
+                selected = await self._read_pending_locked(buffer)
+                if selected is None:
                     return
-                expected = tuple(buffer.entries)
-                async with asyncio.timeout(_BUFFER_TIMEOUT_SECONDS):
-                    queued = await buffer.backend.read_batch(buffer.id, limit=len(expected))
-                if not self._validate_read(buffer, expected, queued):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Trace payload prefix is missing or changed")
-                pending_ids = tuple(entry.id for entry in expected if not entry.confirmed)
-                selected = {id: content for id, _, content in queued}
-                captures = tuple(decode_projection_payload(selected[id]) for id in pending_ids)
-                for capture in captures:
-                    if (capture.run.agent_run_id != buffer.key[0]
-                            or capture.producer_generation != buffer.key[2]):
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                for previous, current in zip(captures, captures[1:]):
-                    self._validate_cumulative_prefix(previous, current)
-                captured = captures[-1]
+                captured, pending_ids = selected
                 buffer.inflight = pending_ids
             offset = self.offsets[buffer.key[0]]
             offset.observation_task = asyncio.current_task()
@@ -428,6 +436,59 @@ class TracePersistence:
     def buffered(self, agent_run_id: str) -> bool:
         return self._caches.get(agent_run_id) is not None
 
+    def terminal_buffered(self, agent_run_id: str) -> bool:
+        return agent_run_id in self._terminal_runs and self.buffered(agent_run_id)
+
+    async def prepare_terminal_payload(
+        self, agent_run_id: str, *, execution_id: str, producer_generation: int | None,
+    ) -> CapturedExecutionProjection | None:
+        """Freeze the final admitted prefix without publishing or acknowledging it."""
+        async with self._boundary_locks.setdefault(agent_run_id, asyncio.Lock()):
+            buffer = self._buffers.get(agent_run_id)
+            if buffer is None:
+                backend = self._caches.get(agent_run_id)
+                if backend is None or agent_run_id not in self.dirty:
+                    return None
+                buffer = _ObservationBuffer(backend, (agent_run_id, execution_id, producer_generation))
+                self._buffers[agent_run_id] = buffer
+            if buffer.key != (agent_run_id, execution_id, producer_generation):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            async with buffer.lock:
+                buffer.paused = True
+            self._schedule_changed()
+            if buffer.task is not None:
+                await asyncio.shield(buffer.task)
+            rejected = self._failed_runs.get(agent_run_id)
+            if buffer.error is not None and not (
+                rejected is not None and rejected.terminal and rejected.key == buffer.key
+                and rejected.error is buffer.error and buffer.terminal_ids is not None
+            ):
+                raise buffer.error
+            if buffer.terminal_ids is None:
+                await self._defer(
+                    agent_run_id, execution_id=execution_id,
+                    producer_generation=producer_generation, closing=True,
+                )
+            async with buffer.lock:
+                selected = await self._read_pending_locked(buffer)
+                ids = () if selected is None else selected[1]
+                if buffer.terminal_ids is not None and buffer.terminal_ids != ids:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                buffer.terminal_ids = ids
+                return None if selected is None else selected[0]
+
+    def confirm_terminal_payload(self, agent_run_id: str, *, execution_id: str) -> None:
+        """Transfer exact prepared IDs to cleanup after canonical terminal proof."""
+        buffer = self._buffers.get(agent_run_id)
+        if buffer is None:
+            return
+        if buffer.key[1] != execution_id or buffer.terminal_ids is None:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        for entry in buffer.entries:
+            if entry.id in buffer.terminal_ids:
+                entry.confirmed = True
+        self._retire(agent_run_id, buffer)
+
     def failed_admission_settled(
         self, agent_run_id: str, *, execution_id: str | None = None,
         producer_generation: int | None = None,
@@ -437,10 +498,15 @@ class TracePersistence:
             execution_id is None or failed.key == (agent_run_id, execution_id, producer_generation)
         )
 
+    def _require_failed_control_settled(self, failed: _FailedAdmission) -> None:
+        if not failed.terminal_confirmed:
+            if failed.terminal and self._has_flight(failed.key[0]):
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN, "Rejected Trace prefix is awaiting canonical confirmation")
+            raise failed.error
+
     def _require_failed_controls_settled(self) -> None:
         for failed in self._failed_runs.values():
-            if not failed.terminal_confirmed:
-                raise failed.error
+            self._require_failed_control_settled(failed)
 
     def confirm_failed_admission_terminal(self, agent_run_id: str, *, execution_id: str) -> None:
         failed = self._failed_runs.get(agent_run_id)
@@ -453,7 +519,7 @@ class TracePersistence:
         self, agent_run_id: str, *, execution_id: str,
         producer_generation: int, error: BaseException,
     ) -> bool:
-        """Freeze a definitely rejected tail after publishing its admitted prefix."""
+        """Isolate a rejected tail without changing its owner's publication policy."""
         key = (agent_run_id, execution_id, producer_generation)
         async with self._boundary_locks.setdefault(agent_run_id, asyncio.Lock()):
             failed = self._failed_runs.get(agent_run_id)
@@ -472,6 +538,12 @@ class TracePersistence:
                 if buffer.source_error is not None:
                     raise buffer.source_error
                 raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+            if agent_run_id in self._terminal_runs:
+                async with buffer.lock:
+                    selected = await self._read_pending_locked(buffer)
+                    buffer.terminal_ids = () if selected is None else selected[1]
+                    self._failed_runs[agent_run_id] = _FailedAdmission(key, error, terminal=True)
+                return True
             # A rejected packet has no buffer ownership. Earlier accepted packets
             # still require exact bytes and source confirmation before termination.
             try:
@@ -508,8 +580,8 @@ class TracePersistence:
         if failed is not None:
             if execution_id is not None and failed.key[1:] != (execution_id, producer_generation):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if publish and not failed.terminal_confirmed:
-                raise failed.error
+            if publish:
+                self._require_failed_control_settled(failed)
             return
         buffer = self._buffers.get(agent_run_id)
         if buffer is None:
@@ -525,6 +597,9 @@ class TracePersistence:
             await asyncio.shield(buffer.task)
         if self._has_flight(agent_run_id) and buffer.source_error is not None:
             raise buffer.source_error
+        if buffer.terminal_ids is not None and (publish or self._has_flight(agent_run_id)):
+            code = ErrorCode.STORAGE_COMMIT_UNKNOWN if self._has_flight(agent_run_id) else ErrorCode.STORAGE_CONFLICT
+            raise AIError(code, "Trace terminal prefix is awaiting canonical confirmation")
         if not publish:
             return
         if buffer.error is not None and (buffer.admission_failed or self._has_flight(agent_run_id)
@@ -538,9 +613,10 @@ class TracePersistence:
                 await self._publish_pending(buffer)
             # The caller's explicit boundary also freezes/admit its latest tail;
             # no direct source capture may silently include an unadmitted packet.
-            await self._defer(
-                agent_run_id, execution_id=buffer.key[1], producer_generation=buffer.key[2], closing=True,
-            )
+            if buffer.terminal_ids is None:
+                await self._defer(
+                    agent_run_id, execution_id=buffer.key[1], producer_generation=buffer.key[2], closing=True,
+                )
             await self._publish_pending(buffer)
         except BaseException as error:
             buffer.error = error

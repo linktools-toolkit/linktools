@@ -70,6 +70,12 @@ class _PartitionMarker:
             raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from outcome.error
 
 
+class _BufferRejection(AIError):
+    def __init__(self, scope: "_WriteScope") -> None:
+        super().__init__(ErrorCode.STORAGE_CONFLICT, "capability write buffer rejected append")
+        self.scope = scope
+
+
 class _WriteScope:
     def __init__(
         self, *, run_id: str, execution_id: str, store: StateStore,
@@ -131,7 +137,7 @@ class _WriteScope:
                         raise
                     if not accepted:
                         self.pending.remove(write)
-                        raise AIError(ErrorCode.STORAGE_CONFLICT, "capability write buffer rejected append")
+                        raise _BufferRejection(self)
                     write.queued = True
             if self.policy.mode == "batch" and self.policy.buffer is not None and self.failure is None:
                 assert self.policy.batch_size is not None and self.policy.flush_interval is not None
@@ -456,6 +462,17 @@ class RuntimeCapabilityWrites:
         writer.persist = bound.persist_in_transaction
         self._bound[id(bound)] = bound
         return bound
+
+    def is_buffer_rejection(
+        self, agent_run_id: str, *, execution_id: str, error: BaseException,
+    ) -> bool:
+        """Recognize this live producer's definite non-admission, never source uncertainty."""
+        return (
+            isinstance(error, _BufferRejection)
+            and error.scope.run_id == agent_run_id
+            and error.scope.execution_id == execution_id
+            and any(scope is error.scope for scope in self._scopes.values())
+        )
 
     async def prepare_terminal(
         self, execution_id: str, run_id: str | None, storage_group: StateStorageGroup,
