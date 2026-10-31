@@ -8,6 +8,7 @@ import os
 import shutil
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
@@ -75,6 +76,15 @@ class _FilesystemGroupTransaction:
             ) from error
 
 
+@dataclass(frozen=True, slots=True)
+class FilesystemStateMember:
+    """Validated local membership, not an object-closure or migration authorization."""
+
+    runtime_domain: str
+    root: Path
+    partition_key: bytes | None
+
+
 class FilesystemStateStorageGroup:
     """Own one journal and coordinate independent filesystem domain views."""
 
@@ -118,6 +128,9 @@ class FilesystemStateStorageGroup:
         self._initialization_task: asyncio.Task[None] | None = None
         self._maintenance_tasks: set[asyncio.Task[None]] = set()
         self._pending_physical: set[asyncio.Task[None]] = set()
+        self._offline_owner: asyncio.Task[object] | None = None
+        self._offline_locks: list[FilesystemWriterLock] = []
+        self._offline_members: tuple[FilesystemStateMember, ...] | None = None
 
     @property
     def _archive_root(self) -> Path:
@@ -340,6 +353,8 @@ class FilesystemStateStorageGroup:
         return self._transaction_root
 
     def add_member(self, store: "FilesystemStateStore") -> None:
+        if self._offline_members is not None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
         if self._closed or (self._initialized and not self._read_only
                             and store.root not in {self._archive_root, self._opening_partition_root}):
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
@@ -353,6 +368,8 @@ class FilesystemStateStorageGroup:
             self._members.append(store)
 
     async def initialize(self) -> None:
+        if self._offline_owner is not None or self._offline_locks:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if self._closed:
             raise AIError(ErrorCode.STORAGE_CLOSED)
         if self._initialized:
@@ -426,16 +443,21 @@ class FilesystemStateStorageGroup:
             raise
 
     async def close(self) -> None:
-        if (
-            self._closed
-            or not self._members
-            or not all(member._closed for member in self._members if member not in self._internal_members)
-        ):
-            return
-        if any(not task.done() for task in self._maintenance_tasks):
-            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+        if self._offline_owner is not None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if not self._offline_locks:
+            if (self._closed or not self._members
+                    or not all(member._closed for member in self._members if member not in self._internal_members)):
+                return
+            if any(not task.done() for task in self._maintenance_tasks):
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
         async with self._mutation_lock:
-            if self._closed:
+            if self._offline_owner is not None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            if self._offline_locks:
+                await self._release_offline_locks_owned()
+            if (self._closed or not self._members
+                    or not all(member._closed for member in self._members if member not in self._internal_members)):
                 return
             if any(not task.done() for task in self._maintenance_tasks):
                 raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
@@ -476,22 +498,128 @@ class FilesystemStateStorageGroup:
 
     @asynccontextmanager
     async def offline_exclusivity(self) -> AsyncIterator[None]:
-        if self._initialized or self._closed:
+        if (self._initialized or self._closed or self._initialization_task is not None
+                or self._offline_owner is not None or self._offline_locks or self._mutation_lock.locked()):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        await asyncio.to_thread(self._discover_members_sync)
-        members = tuple(sorted(self._members, key=lambda value: value.root.as_posix()))
-        acquired: list[FilesystemWriterLock] = []
-        if not self._standalone:
-            await self._group_lock.acquire()
-            acquired.append(self._group_lock)
+        owner = asyncio.current_task()
+        if owner is None:
+            raise RuntimeError("offline exclusivity requires an asyncio task")
+        self._offline_owner = owner
+        primary: BaseException | None = None
         try:
-            for member in members:
-                await member._writer_lock.acquire()
-                acquired.append(member._writer_lock)
+            acquiring = asyncio.create_task(self._acquire_offline_locks())
+            try:
+                await asyncio.shield(acquiring)
+            except asyncio.CancelledError as cancellation:
+                try:
+                    await _finish_owned_task(acquiring)
+                except BaseException as error:
+                    raise cancellation from error
+                raise
             yield
+        except BaseException as error:
+            primary = error
+            raise
         finally:
-            for lock in reversed(acquired):
-                await lock.release()
+            self._offline_members = None
+            try:
+                await self._release_offline_locks_owned()
+            except BaseException as cleanup_error:
+                if primary is not None:
+                    raise primary from cleanup_error
+                raise
+            finally:
+                self._offline_owner = None
+
+    def describe_offline_members(self) -> tuple[FilesystemStateMember, ...]:
+        """Describe all locked members in this task's offline scope.
+
+        Dynamic partition keys are opaque and preserve their original identity.
+        The group archive is included as metadata only: this neither establishes
+        its object closure nor enables portable capability snapshot admission.
+        """
+        if (self._offline_owner is None or self._offline_owner is not asyncio.current_task()
+                or self._offline_members is None):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return self._offline_members
+
+    async def _acquire_offline_locks(self) -> None:
+        if (not self._transaction_root.is_dir()
+                or (not self._standalone and not self._metadata_root.is_dir())):
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        if self._standalone:
+            roots = [member for member in self._members if member.root == self._transaction_root]
+            if len(roots) != 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            first = roots[0]._writer_lock
+        else:
+            first = self._group_lock
+        await first.acquire()
+        self._offline_locks.append(first)
+        # A producer may have published a member before this scope acquired the
+        # group (or standalone root) lock. Discover only after excluding it.
+        try:
+            await asyncio.to_thread(self._discover_members_sync)
+        except (OSError, ValueError, TypeError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        members = tuple(sorted(self._members, key=lambda value: value.root.as_posix()))
+        for member in members:
+            if not member.root.is_dir():
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if member._writer_lock is not first:
+                await member._writer_lock.acquire()
+                self._offline_locks.append(member._writer_lock)
+        try:
+            described = await asyncio.to_thread(self._describe_locked_members_sync, members)
+        except (OSError, ValueError, TypeError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if set(self._members) != set(members):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        self._offline_members = described
+
+    def _describe_locked_members_sync(
+        self, members: tuple["FilesystemStateStore", ...],
+    ) -> tuple[FilesystemStateMember, ...]:
+        self._discover_members_sync()
+        if set(self._members) != set(members):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        self._check_readable_sync()
+        if not self._standalone:
+            self._validate_group_read_only_sync()
+        else:
+            manifest = self._metadata_root / "manifest.json"
+            if manifest.exists() and not self._manifest_matches(_read_json(manifest), self._expected_manifest()):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result = []
+        for member in members:
+            member._validate_existing_root()
+            domain = member._runtime_domain
+            key = bytes.fromhex(domain.removeprefix("group_partition:")) if domain.startswith("group_partition:") else None
+            result.append(FilesystemStateMember(domain, member.root, key))
+        archive_scope = self._metadata_root / "archive_scope.json"
+        if self._archive_member is not None or archive_scope.exists() or self._archive_root.exists():
+            if self._archive_member is None or not archive_scope.is_file():
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            scope = _read_json(archive_scope).get("archive_scope_id")
+            if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return tuple(result)
+
+    async def _release_offline_locks_owned(self) -> None:
+        releasing = asyncio.create_task(self._release_offline_locks())
+        try:
+            await asyncio.shield(releasing)
+        except asyncio.CancelledError as cancellation:
+            try:
+                await _finish_owned_task(releasing)
+            except BaseException as error:
+                raise cancellation from error
+            raise
+
+    async def _release_offline_locks(self) -> None:
+        while self._offline_locks:
+            await self._offline_locks[-1].release()
+            self._offline_locks.pop()
 
     async def read(
         self, store: "FilesystemStateStore", fn: StateCallback[ValueT]
@@ -1623,4 +1751,4 @@ class FilesystemStateStore:
         )
 
 
-__all__ = ["FilesystemStateStorageGroup", "FilesystemStateStore"]
+__all__ = ["FilesystemStateStorageGroup", "FilesystemStateStore", "FilesystemStateMember"]

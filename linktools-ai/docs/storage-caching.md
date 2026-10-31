@@ -901,3 +901,25 @@ competing ownership changes must use the conditional operation, and external
 effects still require their own fence/idempotency enforcement. Keep mutation
 callbacks free of external effects and short. Task and Tool renewal use this
 operation; other domain transitions retain their existing authorization checks.
+
+## Offline filesystem member inspection
+
+A filesystem state group's `offline_exclusivity()` retains its existing
+`None`-yielding guard contract. On an uninitialized group it acquires the group
+(or standalone root) writer lock before discovering members, then acquires all
+member locks and validates the complete manifest set. A pending recovery journal,
+changed inventory, or incomplete archive metadata prevents inspection; this
+operation does not repair or provision missing source data.
+
+Within that scope, the owning task can call `describe_offline_members()` for
+immutable domain/root facts, including original opaque dynamic partition keys
+and the archive member. Nested or concurrent entry, initialization and premature
+close are rejected. Cancellation settles owned lock acquisition/release first;
+failed release retains the remaining locks for the same group's `close()` retry.
+Copied descriptors do not retain authorization after the scope exits.
+
+This is a filesystem-specific offline inventory seam, not a portable snapshot
+extension. Custom capability partitions still require their dependency contract;
+archive membership alone does not prove object closure. Existing snapshot and
+opaque-object rejection checks remain in force. It does not retire the filesystem
+backend or grant automatic recovery to a SQL source.
