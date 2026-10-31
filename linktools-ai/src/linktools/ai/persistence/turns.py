@@ -332,6 +332,29 @@ class StateTurnCoordination:
             records = {kind: None if found.get(key) is None else self._records.validate(found[key])
                        for kind, key in keys.items()}
             session, request, proposed = (records[kind] for kind in ("turn_session", "turn_request", "turn_execution"))
+            if session is None and request is None and proposed is None:
+                common: dict[str, JsonValue] = {
+                    "format": 1, "scope": scope, "session_key": session_key, "request_key": request_key,
+                    "request_digest": request_digest, "execution_id": execution_id,
+                }
+                session = self._records.make("turn_session", {
+                    "format": 1, "scope": scope, "session_key": session_key,
+                    "execution_id": execution_id, "request_key": request_key,
+                }, state="ACTIVE")
+                execution = self._records.make("turn_execution", {
+                    **common, "owner_id": owner_id, "token": token, "fence": 1,
+                    "cancel_requested": False, "receipt_id": token, "receipt_kind": "claim",
+                }, state="ACTIVE")
+                request = self._records.make("turn_request", common, state="ACTIVE")
+                # The complete graph and acquired lease become visible in one commit.
+                await tx.insert_records((session, execution, request))
+                acquired = await tx.transition_record_lease(
+                    session.key_digest, expected_storage_revision=session.storage_revision,
+                    transition=RecordLeaseTransition("acquire", token, session.lease_fence, duration),
+                )
+                if acquired is None:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                return self._coordination(self._records.graph(execution, request, acquired), owned=True)
             graphs: dict[bytes, _Graph] = {}
             for kind, anchor in (("turn_session", session), ("turn_request", request)):
                 if anchor is not None and anchor.state == "ACTIVE":

@@ -14,7 +14,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus, PersistenceDomain
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.persistence import FilesystemSnapshotReader, Persistence, PersistenceStorage
 from linktools.ai.persistence._snapshot_validation import validate_snapshot_domain
 from linktools.ai.persistence.turns import StateTurnCoordination
 from linktools.ai.persistence.state import StateTransactionNestingError
@@ -223,11 +223,13 @@ async def test_readonly_source_turn_binding_never_mutates(tmp_path: Path, backen
     assert not cache.closed
 
 
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize(("backend", "legacy_reader"), (
+    ("filesystem", False), ("sqlite", False), ("filesystem", True),
+))
 @pytest.mark.parametrize("active", (False, True))
 @pytest.mark.parametrize("exclusive_writer", (False, True))
 async def test_source_turn_snapshot_roundtrips_complete_graph_and_receipts(
-    tmp_path: Path, backend: str, active: bool, exclusive_writer: bool,
+    tmp_path: Path, backend: str, legacy_reader: bool, active: bool, exclusive_writer: bool,
 ) -> None:
     cache = _BorrowedCache()
     async with _opened(backend, tmp_path / "source", cache) as state:
@@ -241,10 +243,17 @@ async def test_source_turn_snapshot_roundtrips_complete_graph_and_receipts(
             assert await authority.release_turn(current.lease)
         expected = await state.execution.executions.state_store.read(lambda tx: tx.scan_records())
     archive = InMemoryObjectStore()
-    async with _opened(backend, tmp_path / "source", cache, read_only=True) as state:
-        # The public wrapper retains caller-owned offline exclusion.
-        assert await Snapshot.create(persistence=state, object_store=archive, exclusive=Offline(), limits=_LIMITS)
-        reference = await state.export_snapshot(object_store=archive, limits=_LIMITS)
+    if legacy_reader:
+        reader = FilesystemSnapshotReader(tmp_path / "source", namespace="source-turns", tenant_id="tenant")
+        try:
+            reference = await reader.export_snapshot(object_store=archive, limits=_LIMITS)
+        finally:
+            await reader.close()
+    else:
+        async with _opened(backend, tmp_path / "source", cache, read_only=True) as state:
+            # The public wrapper retains caller-owned offline exclusion.
+            assert await Snapshot.create(persistence=state, object_store=archive, exclusive=Offline(), limits=_LIMITS)
+            reference = await state.export_snapshot(object_store=archive, limits=_LIMITS)
     destination = tmp_path / "restored"
     await Persistence.restore_snapshot(reference, object_store=archive, root=destination,
                                        limits=_LIMITS, exclusive_writer=exclusive_writer)

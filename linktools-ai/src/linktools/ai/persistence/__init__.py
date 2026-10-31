@@ -6,5 +6,6 @@ from ..core import PersistenceDomain
 from ._plan import PersistencePlan
 from ._root import PersistenceStorage
 from ._runtime_state import Persistence, PersistenceStatus
+from ._filesystem_snapshot import FilesystemSnapshotReader
 
-__all__ = ["Persistence", "PersistenceStorage", "PersistencePlan", "PersistenceStatus", "PersistenceDomain"]
+__all__ = ["Persistence", "PersistenceStorage", "PersistencePlan", "PersistenceStatus", "PersistenceDomain", "FilesystemSnapshotReader"]

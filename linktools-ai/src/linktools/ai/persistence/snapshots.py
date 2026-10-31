@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Protocol
 
 from ..core import (
     canonical_json_bytes,
@@ -72,6 +73,65 @@ from .codec import (
     encode_record,
     iter_runtime_object_refs,
 )
+
+
+class _SnapshotReader(Protocol):
+    async def get_operation(self, key: bytes) -> StoredOperation | None: ...
+
+    async def scan_records_page(
+        self, *, after: RecordScanCursor | None, limit: int,
+    ) -> tuple[StoredRecord, ...]: ...
+
+    async def scan_facts_page(
+        self, *, after: FactScanCursor | None, limit: int,
+    ) -> tuple[StoredFact, ...]: ...
+
+    async def scan_operations_page(
+        self, *, after: OperationScanCursor | None, limit: int,
+    ) -> tuple[StoredOperation, ...]: ...
+
+
+class _StateSnapshotReader:
+    def __init__(self, store: StateStore) -> None:
+        self._store = store
+
+    async def get_operation(self, key: bytes) -> StoredOperation | None:
+        return await self._store.read(lambda tx: tx.get_operation(key))
+
+    async def scan_records_page(
+        self, *, after: RecordScanCursor | None, limit: int,
+    ) -> tuple[StoredRecord, ...]:
+        return await self._store.read(lambda tx: tx.scan_records_page(after=after, limit=limit))
+
+    async def scan_facts_page(
+        self, *, after: FactScanCursor | None, limit: int,
+    ) -> tuple[StoredFact, ...]:
+        return await self._store.read(lambda tx: tx.scan_facts_page(after=after, limit=limit))
+
+    async def scan_operations_page(
+        self, *, after: OperationScanCursor | None, limit: int,
+    ) -> tuple[StoredOperation, ...]:
+        return await self._store.read(lambda tx: tx.scan_operations_page(after=after, limit=limit))
+
+
+@dataclass(frozen=True, slots=True)
+class _SnapshotArchive:
+    scope_id: str
+    domain: PersistenceDomain
+    reader: _SnapshotReader
+
+
+@dataclass(frozen=True, slots=True)
+class _SnapshotExportSource:
+    namespace: str
+    tenant_id: str
+    readers: Mapping[PersistenceDomain, _SnapshotReader]
+    archives: AsyncIterator[_SnapshotArchive]
+    object_stores: Mapping[PersistenceDomain, ObjectStore]
+    archive_object_stores: Mapping[PersistenceDomain, ObjectStore]
+
+    def archive_object_store(self, domain: PersistenceDomain) -> ObjectStore:
+        return self.archive_object_stores[domain]
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,331 +204,337 @@ class RuntimeSnapshotOperations:
         if not self._resources.durable_domains:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
 
-        for domain in self._resources.durable_domains:
-            if await self._resources.stores[domain].read(has_capability_partition_marker):
-                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Capability persistence partitions are not supported by portable snapshots")
+        async def archives() -> AsyncIterator[_SnapshotArchive]:
+            groups = {}
+            for domain in sorted(self._resources.durable_domains, key=lambda value: value.value):
+                groups.setdefault(self._resources.stores[domain].storage_group, domain)
+            for group, domain in groups.items():
+                if not isinstance(group, StateStorageGroup):
+                    raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                opened = await group.open_archive()
+                if opened is not None:
+                    scope, archive = opened
+                    yield _SnapshotArchive(scope, domain, _StateSnapshotReader(archive))
 
-        archive_closures: dict[str, ArchiveClosure] = {}
-        archive_domains: dict[str, PersistenceDomain] = {}
-        groups = {}
-        for domain in sorted(self._resources.durable_domains, key=lambda value: value.value):
-            groups.setdefault(self._resources.stores[domain].storage_group, domain)
-        for group, domain in groups.items():
-            if not isinstance(group, StateStorageGroup):
-                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-            opened = await group.open_archive()
-            if opened is None:
-                continue
-            scope, archive = opened
-            records = []
-            cursor = None
-            while True:
-                page = await archive.read(lambda tx: tx.scan_records_page(after=cursor, limit=1000))
-                records.extend(page)
-                if len(page) < 1000:
-                    break
-                cursor = RecordScanCursor(page[-1].kind, page[-1].key_digest)
-            if scope in archive_closures:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            archive_closures[scope] = ArchiveClosure(scope, records)
-            archive_domains[scope] = domain
+        source = _SnapshotExportSource(
+            namespace=self._resources.namespace, tenant_id=self._resources.tenant_id,
+            readers={domain: _StateSnapshotReader(self._resources.stores[domain])
+                     for domain in self._resources.durable_domains},
+            archives=archives(), object_stores=self._resources.object_stores,
+            archive_object_stores=(self._resources.archive_object_stores
+                                  if self._resources.archive_object_stores is not None
+                                  else self._resources.object_stores),
+        )
+        return await _export_snapshot(source, object_store=object_store, limits=limits)
 
-        domains: dict[str, dict[str, list[object]]] = {}
-        snapshot_records: dict[PersistenceDomain, tuple[StoredRecord, ...]] = {}
-        snapshot_facts: dict[PersistenceDomain, tuple[StoredFact, ...]] = {}
-        objects: list[dict[str, object]] = []
-        copied_objects: set[tuple[str, str, str, int]] = set()
-        entry_count = 0
-        object_bytes = 0
 
-        def accept(value: object) -> object:
-            nonlocal entry_count
-            entry_count += 1
-            if entry_count > limits.max_entries:
-                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-            return value
+async def _export_snapshot(
+    source: _SnapshotExportSource, *, object_store: ObjectStore, limits: SnapshotLimits,
+) -> ObjectRef:
+    if not isinstance(limits, SnapshotLimits):
+        raise TypeError("limits must be SnapshotLimits")
+    if not source.readers:
+        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+    for reader in source.readers.values():
+        if await has_capability_partition_marker(reader):
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Capability persistence partitions are not supported by portable snapshots")
 
-        async def copy_reference(
-            source_domain: PersistenceDomain,
-            reference: ObjectRef,
-        ) -> None:
-            nonlocal entry_count, object_bytes
-            identity = (
-                source_domain.value,
-                reference.key,
-                reference.digest,
-                reference.size,
-            )
-            if identity in copied_objects:
-                return
-            entry_count += 1
-            object_bytes += reference.size
-            if (
-                entry_count > limits.max_entries
-                or object_bytes > limits.max_bytes
-            ):
-                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-            source_store = (self._resources.archive_object_store(source_domain) if reference.key.startswith("v1/archive/")
-                            else self._resources.object_stores[source_domain])
-            key = (
-                "v1/runtime-storage-object/"
-                f"{source_domain.value}/{reference.digest}"
-            )
-            await object_store.put(
-                key,
-                source_store.open(reference.key),
-                expected_size=reference.size,
-                expected_digest=reference.digest,
-            )
-            objects.append(
-                {
-                    "domain": source_domain.value,
-                    "source": _object_ref_payload(reference),
-                    "content": _object_ref_payload(
-                        ObjectRef(
-                            object_store.store_id,
-                            key,
-                            reference.digest,
-                            reference.size,
-                        )
-                    ),
-                }
-            )
-            copied_objects.add(identity)
-            if reference.key.startswith("v1/input-capture/"):
-                payload = await read_object(source_store, reference.key, expected_digest=reference.digest, expected_size=reference.size)
-                manifest = json.loads(payload)
-                validate_input_capture_payload(reference.key, manifest, namespace=self._resources.namespace, tenant_id=self._resources.tenant_id)
-                if _capture_contains_archived_context(manifest):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if not reference.key.startswith("v1/input-capture/result/"):
-                    await copy_references(manifest, PersistenceDomain.TASK, archive_owner=False)
-            if reference.key.startswith(
-                (
-                    "v1/asset-snapshot/",
-                    "v1/task-graph-binding-capture/",
-                )
-            ):
-                payload = await read_object(
-                    source_store,
-                    reference.key,
-                    expected_digest=reference.digest,
-                    expected_size=reference.size,
-                )
-                for nested_domain, nested in iter_runtime_object_dependencies(
-                    reference,
-                    payload,
-                    default_domain=source_domain,
-                ):
-                    await copy_reference(nested_domain, nested)
+    archive_closures: dict[str, ArchiveClosure] = {}
+    archive_domains: dict[str, PersistenceDomain] = {}
+    async for archive in source.archives:
+        if archive.scope_id in archive_closures:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        records: list[StoredRecord] = []
+        cursor = None
+        while True:
+            page = await archive.reader.scan_records_page(after=cursor, limit=1000)
+            records.extend(page)
+            if len(page) < 1000:
+                break
+            cursor = RecordScanCursor(page[-1].kind, page[-1].key_digest)
+        archive_closures[archive.scope_id] = ArchiveClosure(archive.scope_id, records)
+        archive_domains[archive.scope_id] = archive.domain
 
-        async def copy_references(encoded: object, domain: PersistenceDomain, *, archive_owner: bool = True) -> None:
-            if archive_owner:
-                _mark_archive_value(archive_closures, encoded)
-            for key, digest in iter_input_capture_dependencies(encoded, namespace=self._resources.namespace, tenant_id=self._resources.tenant_id):
-                source = self._resources.object_stores[PersistenceDomain.TASK]
-                marker = await source.stat(input_capture_expiry_key(key))
-                if marker is not None:
-                    await copy_reference(PersistenceDomain.TASK, ObjectRef(source.store_id, marker.key, marker.digest, marker.size))
-                    continue
-                stat = await source.stat(key)
-                if stat is None or stat.digest != digest:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await copy_reference(PersistenceDomain.TASK, ObjectRef(source.store_id, key, digest, stat.size))
-            for source_domain, reference in iter_runtime_object_refs(
-                encoded,
-                default_domain=domain,
-            ):
-                await copy_reference(source_domain, reference)
+    domains: dict[str, dict[str, list[object]]] = {}
+    snapshot_records: dict[PersistenceDomain, tuple[StoredRecord, ...]] = {}
+    snapshot_facts: dict[PersistenceDomain, tuple[StoredFact, ...]] = {}
+    objects: list[dict[str, object]] = []
+    copied_objects: set[tuple[str, str, str, int]] = set()
+    entry_count = 0
+    object_bytes = 0
 
-        if PersistenceDomain.TASK in self._resources.durable_domains:
-            capture_store = self._resources.object_stores[PersistenceDomain.TASK]
-            if not isinstance(capture_store, ObjectStoreInspection):
-                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-            async for stat in capture_store.list_objects():
-                if not stat.key.startswith(tuple("v1/input-capture/" + kind + "/" for kind in ("agent", "task", "graph", "template", "expired"))):
-                    continue
-                payload = await read_object(capture_store, stat.key, expected_digest=stat.digest, expected_size=stat.size)
-                value = json.loads(payload)
-                if not isinstance(value, Mapping) or value.get("namespace") != self._resources.namespace or value.get("tenant_id") != self._resources.tenant_id:
-                    continue
-                if not stat.key.startswith("v1/input-capture/expired/") and await capture_store.stat(input_capture_expiry_key(stat.key)) is not None:
-                    continue
-                await copy_reference(PersistenceDomain.TASK, ObjectRef(capture_store.store_id, stat.key, stat.digest, stat.size))
-
-        for domain in sorted(self._resources.durable_domains, key=lambda item: item.value):
-            store = self._resources.stores[domain]
-            raw_domain: dict[str, list[object]] = {
-                "records": [],
-                "aliases": [],
-                "facts": [],
-                "operations": [],
-                "sequences": [],
-            }
-            domain_records: list[StoredRecord] = []
-            domain_facts: list[StoredFact] = []
-            domain_operations: list[StoredOperation] = []
-
-            record_cursor: RecordScanCursor | None = None
-            while True:
-                page = await store.read(
-                    lambda transaction, cursor=record_cursor: transaction.scan_records_page(
-                        after=cursor,
-                        limit=128,
-                    )
-                )
-                if not page:
-                    break
-                for value in page:
-                    domain_records.append(value)
-                    encoded = encode_record(value)
-                    raw_domain["records"].append(accept(encoded))
-                    if value.kind != "evaluation_cleanup":
-                        await copy_references(encoded, domain)
-                    if value.kind in {"execution", "task_admission"}:
-                        if value.kind == "execution":
-                            from .contracts import ExecutionRecord
-                            identity = _decode_enveloped_domain(value.data, ExecutionRecord).execution_id
-                            capture_kind = "invocation"
-                        else:
-                            identity = _decode_enveloped_domain(value.data, TaskGraphAdmission).graph_id
-                            capture_kind = "declaration"
-                        key = input_capture_key(self._resources.namespace, self._resources.tenant_id, capture_kind, identity)
-                        stat = await self._resources.object_stores[PersistenceDomain.TASK].stat(key)
-                        if stat is not None:
-                            await copy_reference(PersistenceDomain.TASK, ObjectRef(self._resources.object_stores[PersistenceDomain.TASK].store_id, key, stat.digest, stat.size))
-                    if (
-                        domain is PersistenceDomain.TASK
-                        and value.kind in {"task_admission", "task_submission_payload"}
-                    ):
-                        admission = (
-                            _decode_enveloped_domain(value.data, TaskGraphAdmission)
-                            if value.kind == "task_admission"
-                            else _decode_enveloped_domain(value.data, TaskGraphSubmission).admission
-                        )
-                        key = task_graph_binding_capture_key(
-                            self._resources.namespace,
-                            admission.principal.tenant_id,
-                            admission.graph_id,
-                            admission.initial_request_digest,
-                        )
-                        stat = await self._resources.object_stores[PersistenceDomain.TASK].stat(key)
-                        if stat is None:
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        await copy_reference(
-                            PersistenceDomain.TASK,
-                            ObjectRef(
-                                self._resources.object_stores[PersistenceDomain.TASK].store_id,
-                                stat.key,
-                                stat.digest,
-                                stat.size,
-                            ),
-                        )
-                last = page[-1]
-                record_cursor = RecordScanCursor(last.kind, last.key_digest)
-                if len(page) < 128:
-                    break
-
-            fact_cursor: FactScanCursor | None = None
-            while True:
-                page = await store.read(
-                    lambda transaction, cursor=fact_cursor: transaction.scan_facts_page(
-                        after=cursor,
-                        limit=128,
-                    )
-                )
-                if not page:
-                    break
-                for value in page:
-                    domain_facts.append(value)
-                    encoded = encode_fact(value)
-                    raw_domain["facts"].append(accept(encoded))
-                    await copy_references(encoded, domain)
-                last = page[-1]
-                fact_cursor = FactScanCursor(last.stream_digest, last.sequence)
-                if len(page) < 128:
-                    break
-
-            operation_cursor: OperationScanCursor | None = None
-            while True:
-                page = await store.read(
-                    lambda transaction, cursor=operation_cursor: transaction.scan_operations_page(
-                        after=cursor,
-                        limit=128,
-                    )
-                )
-                if not page:
-                    break
-                for value in page:
-                    domain_operations.append(value)
-                    encoded = encode_operation(value)
-                    raw_domain["operations"].append(accept(encoded))
-                    await copy_references(encoded, domain)
-                operation_cursor = OperationScanCursor(page[-1].key_digest)
-                if len(page) < 128:
-                    break
-
-            aliases, sequences = canonical_snapshot_indexes(
-                namespace=self._resources.namespace,
-                tenant_id=self._resources.tenant_id,
-                domain=domain,
-                records=tuple(domain_records),
-                facts=tuple(domain_facts),
-                operations=tuple(domain_operations),
-            )
-            for value in aliases:
-                raw_domain["aliases"].append(
-                    accept(
-                        {
-                            "alias_digest": value.alias_digest.hex(),
-                            "record_key_digest": value.record_key_digest.hex(),
-                        }
-                    )
-                )
-            for key in sorted(sequences):
-                raw_domain["sequences"].append(
-                    accept({"key_digest": key.hex(), "value": sequences[key]})
-                )
-
-            domains[domain.value] = raw_domain
-            snapshot_records[domain] = tuple(domain_records)
-            snapshot_facts[domain] = tuple(domain_facts)
-
-        validate_snapshot_references(snapshot_records, snapshot_facts)
-        archives = []
-        for scope, closure in archive_closures.items():
-            domain = archive_domains[scope]
-            retained = closure.retained_records
-            if not closure.has_roots:
-                continue
-            for reference in closure.object_refs:
-                await copy_reference(domain, reference)
-            for record in retained:
-                if record.kind == "archive_content":
-                    content = ContentRecord.from_json(record.data)
-                    encoded = (content.payload.decode() if content.payload.ref is None else
-                               await read_object(self._resources.archive_object_store(domain), content.payload.ref.key,
-                                                 expected_digest=content.payload.digest, expected_size=content.payload.size))
-                    _validate_archive_content(content, encoded)
-            archives.append({"scope_id": scope, "domain": domain.value,
-                             "records": [accept(encode_record(record)) for record in retained]})
-        manifest = {
-            "kind": "runtime-storage-snapshot",
-            "format_version": 1,
-            "namespace": self._resources.namespace,
-            "tenant_id": self._resources.tenant_id,
-            "domains": domains,
-            "archives": archives,
-            "objects": objects,
-        }
-        payload = canonical_json_bytes(manifest)
-        if len(payload) + object_bytes > limits.max_bytes:
+    def accept(value: object) -> object:
+        nonlocal entry_count
+        entry_count += 1
+        if entry_count > limits.max_entries:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-        digest = hashlib.sha256(payload).hexdigest()
-        key = f"v1/runtime-storage-snapshot/{digest}"
-        await _put_snapshot_object(object_store, key, payload)
-        return ObjectRef(object_store.store_id, key, digest, len(payload))
+        return value
 
+    async def copy_reference(
+        source_domain: PersistenceDomain,
+        reference: ObjectRef,
+    ) -> None:
+        nonlocal entry_count, object_bytes
+        identity = (
+            source_domain.value,
+            reference.key,
+            reference.digest,
+            reference.size,
+        )
+        if identity in copied_objects:
+            return
+        entry_count += 1
+        object_bytes += reference.size
+        if (
+            entry_count > limits.max_entries
+            or object_bytes > limits.max_bytes
+        ):
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        source_store = (source.archive_object_store(source_domain) if reference.key.startswith("v1/archive/")
+                        else source.object_stores[source_domain])
+        key = (
+            "v1/runtime-storage-object/"
+            f"{source_domain.value}/{reference.digest}"
+        )
+        await object_store.put(
+            key,
+            source_store.open(reference.key),
+            expected_size=reference.size,
+            expected_digest=reference.digest,
+        )
+        objects.append(
+            {
+                "domain": source_domain.value,
+                "source": _object_ref_payload(reference),
+                "content": _object_ref_payload(
+                    ObjectRef(
+                        object_store.store_id,
+                        key,
+                        reference.digest,
+                        reference.size,
+                    )
+                ),
+            }
+        )
+        copied_objects.add(identity)
+        if reference.key.startswith("v1/input-capture/"):
+            payload = await read_object(source_store, reference.key, expected_digest=reference.digest, expected_size=reference.size)
+            manifest = json.loads(payload)
+            validate_input_capture_payload(reference.key, manifest, namespace=source.namespace, tenant_id=source.tenant_id)
+            if _capture_contains_archived_context(manifest):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if not reference.key.startswith("v1/input-capture/result/"):
+                await copy_references(manifest, PersistenceDomain.TASK, archive_owner=False)
+        if reference.key.startswith(
+            (
+                "v1/asset-snapshot/",
+                "v1/task-graph-binding-capture/",
+            )
+        ):
+            payload = await read_object(
+                source_store,
+                reference.key,
+                expected_digest=reference.digest,
+                expected_size=reference.size,
+            )
+            for nested_domain, nested in iter_runtime_object_dependencies(
+                reference,
+                payload,
+                default_domain=source_domain,
+            ):
+                await copy_reference(nested_domain, nested)
+
+    async def copy_references(encoded: object, domain: PersistenceDomain, *, archive_owner: bool = True) -> None:
+        if archive_owner:
+            _mark_archive_value(archive_closures, encoded)
+        for key, digest in iter_input_capture_dependencies(encoded, namespace=source.namespace, tenant_id=source.tenant_id):
+            capture_source = source.object_stores[PersistenceDomain.TASK]
+            marker = await capture_source.stat(input_capture_expiry_key(key))
+            if marker is not None:
+                await copy_reference(PersistenceDomain.TASK, ObjectRef(capture_source.store_id, marker.key, marker.digest, marker.size))
+                continue
+            stat = await capture_source.stat(key)
+            if stat is None or stat.digest != digest:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await copy_reference(PersistenceDomain.TASK, ObjectRef(capture_source.store_id, key, digest, stat.size))
+        for source_domain, reference in iter_runtime_object_refs(
+            encoded,
+            default_domain=domain,
+        ):
+            await copy_reference(source_domain, reference)
+
+    if PersistenceDomain.TASK in source.readers:
+        capture_store = source.object_stores[PersistenceDomain.TASK]
+        if not isinstance(capture_store, ObjectStoreInspection):
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        async for stat in capture_store.list_objects():
+            if not stat.key.startswith(tuple("v1/input-capture/" + kind + "/" for kind in ("agent", "task", "graph", "template", "expired"))):
+                continue
+            payload = await read_object(capture_store, stat.key, expected_digest=stat.digest, expected_size=stat.size)
+            value = json.loads(payload)
+            if not isinstance(value, Mapping) or value.get("namespace") != source.namespace or value.get("tenant_id") != source.tenant_id:
+                continue
+            if not stat.key.startswith("v1/input-capture/expired/") and await capture_store.stat(input_capture_expiry_key(stat.key)) is not None:
+                continue
+            await copy_reference(PersistenceDomain.TASK, ObjectRef(capture_store.store_id, stat.key, stat.digest, stat.size))
+
+    for domain in sorted(source.readers, key=lambda item: item.value):
+        store = source.readers[domain]
+        raw_domain: dict[str, list[object]] = {
+            "records": [],
+            "aliases": [],
+            "facts": [],
+            "operations": [],
+            "sequences": [],
+        }
+        domain_records: list[StoredRecord] = []
+        domain_facts: list[StoredFact] = []
+        domain_operations: list[StoredOperation] = []
+
+        record_cursor: RecordScanCursor | None = None
+        while True:
+            page = await store.scan_records_page(after=record_cursor, limit=128)
+            if not page:
+                break
+            for value in page:
+                domain_records.append(value)
+                encoded = encode_record(value)
+                raw_domain["records"].append(accept(encoded))
+                if value.kind != "evaluation_cleanup":
+                    await copy_references(encoded, domain)
+                if value.kind in {"execution", "task_admission"}:
+                    if value.kind == "execution":
+                        from .contracts import ExecutionRecord
+                        identity = _decode_enveloped_domain(value.data, ExecutionRecord).execution_id
+                        capture_kind = "invocation"
+                    else:
+                        identity = _decode_enveloped_domain(value.data, TaskGraphAdmission).graph_id
+                        capture_kind = "declaration"
+                    key = input_capture_key(source.namespace, source.tenant_id, capture_kind, identity)
+                    stat = await source.object_stores[PersistenceDomain.TASK].stat(key)
+                    if stat is not None:
+                        await copy_reference(PersistenceDomain.TASK, ObjectRef(source.object_stores[PersistenceDomain.TASK].store_id, key, stat.digest, stat.size))
+                if (
+                    domain is PersistenceDomain.TASK
+                    and value.kind in {"task_admission", "task_submission_payload"}
+                ):
+                    admission = (
+                        _decode_enveloped_domain(value.data, TaskGraphAdmission)
+                        if value.kind == "task_admission"
+                        else _decode_enveloped_domain(value.data, TaskGraphSubmission).admission
+                    )
+                    key = task_graph_binding_capture_key(
+                        source.namespace,
+                        admission.principal.tenant_id,
+                        admission.graph_id,
+                        admission.initial_request_digest,
+                    )
+                    stat = await source.object_stores[PersistenceDomain.TASK].stat(key)
+                    if stat is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    await copy_reference(
+                        PersistenceDomain.TASK,
+                        ObjectRef(
+                            source.object_stores[PersistenceDomain.TASK].store_id,
+                            stat.key,
+                            stat.digest,
+                            stat.size,
+                        ),
+                    )
+            last = page[-1]
+            record_cursor = RecordScanCursor(last.kind, last.key_digest)
+            if len(page) < 128:
+                break
+
+        fact_cursor: FactScanCursor | None = None
+        while True:
+            page = await store.scan_facts_page(after=fact_cursor, limit=128)
+            if not page:
+                break
+            for value in page:
+                domain_facts.append(value)
+                encoded = encode_fact(value)
+                raw_domain["facts"].append(accept(encoded))
+                await copy_references(encoded, domain)
+            last = page[-1]
+            fact_cursor = FactScanCursor(last.stream_digest, last.sequence)
+            if len(page) < 128:
+                break
+
+        operation_cursor: OperationScanCursor | None = None
+        while True:
+            page = await store.scan_operations_page(after=operation_cursor, limit=128)
+            if not page:
+                break
+            for value in page:
+                domain_operations.append(value)
+                encoded = encode_operation(value)
+                raw_domain["operations"].append(accept(encoded))
+                await copy_references(encoded, domain)
+            operation_cursor = OperationScanCursor(page[-1].key_digest)
+            if len(page) < 128:
+                break
+
+        aliases, sequences = canonical_snapshot_indexes(
+            namespace=source.namespace,
+            tenant_id=source.tenant_id,
+            domain=domain,
+            records=tuple(domain_records),
+            facts=tuple(domain_facts),
+            operations=tuple(domain_operations),
+        )
+        for value in aliases:
+            raw_domain["aliases"].append(
+                accept(
+                    {
+                        "alias_digest": value.alias_digest.hex(),
+                        "record_key_digest": value.record_key_digest.hex(),
+                    }
+                )
+            )
+        for key in sorted(sequences):
+            raw_domain["sequences"].append(
+                accept({"key_digest": key.hex(), "value": sequences[key]})
+            )
+
+        domains[domain.value] = raw_domain
+        snapshot_records[domain] = tuple(domain_records)
+        snapshot_facts[domain] = tuple(domain_facts)
+
+    validate_snapshot_references(snapshot_records, snapshot_facts)
+    archives = []
+    for scope, closure in archive_closures.items():
+        domain = archive_domains[scope]
+        retained = closure.retained_records
+        if not closure.has_roots:
+            continue
+        for reference in closure.object_refs:
+            await copy_reference(domain, reference)
+        for record in retained:
+            if record.kind == "archive_content":
+                content = ContentRecord.from_json(record.data)
+                encoded = (content.payload.decode() if content.payload.ref is None else
+                           await read_object(source.archive_object_store(domain), content.payload.ref.key,
+                                             expected_digest=content.payload.digest, expected_size=content.payload.size))
+                _validate_archive_content(content, encoded)
+        archives.append({"scope_id": scope, "domain": domain.value,
+                         "records": [accept(encode_record(record)) for record in retained]})
+    manifest = {
+        "kind": "runtime-storage-snapshot",
+        "format_version": 1,
+        "namespace": source.namespace,
+        "tenant_id": source.tenant_id,
+        "domains": domains,
+        "archives": archives,
+        "objects": objects,
+    }
+    payload = canonical_json_bytes(manifest)
+    if len(payload) + object_bytes > limits.max_bytes:
+        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+    digest = hashlib.sha256(payload).hexdigest()
+    key = f"v1/runtime-storage-snapshot/{digest}"
+    await _put_snapshot_object(object_store, key, payload)
+    return ObjectRef(object_store.store_id, key, digest, len(payload))
 
 async def restore_snapshot(
     ref: ObjectRef,

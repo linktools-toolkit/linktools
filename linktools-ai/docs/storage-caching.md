@@ -50,6 +50,62 @@ coexist. This check neither verifies that database as a completed migration nor
 recognizes every damaged/custom layout, and is not a cross-process ownership
 barrier against a root being changed after configuration.
 
+### Read-only legacy filesystem migration
+
+`FilesystemSnapshotReader` (from `linktools.ai.persistence`) is an offline
+source owner for **clean legacy filesystem state**, not a Runtime backend or a
+reader of portable snapshot archives. It exports the existing storage-snapshot
+format consumed by `Persistence.restore_snapshot`; no second high-level snapshot
+format or Workspace copy is introduced.
+
+```python
+from linktools.ai.persistence import FilesystemSnapshotReader, Persistence
+from linktools.ai.snapshot import SnapshotLimits
+
+reader = FilesystemSnapshotReader(old_root, namespace="app", tenant_id="tenant")
+try:
+    reference = await reader.export_snapshot(
+        object_store=snapshot_objects,
+        limits=SnapshotLimits(max_entries=100_000, max_bytes=100_000_000),
+    )
+finally:
+    await reader.close()
+
+await Persistence.restore_snapshot(
+    reference, object_store=snapshot_objects, root=new_empty_root,
+    limits=SnapshotLimits(max_entries=100_000, max_bytes=100_000_000),
+    exclusive_writer=True,
+)
+```
+
+Keep the reader instance if export or close fails: failed lock release retains
+its exact cleanup responsibility and `reader.close()` can be retried. A closed
+reader cannot export again. The constructor does not create source files;
+export acquires the native group/member writer locks and validates the complete
+standard grouped layout for the explicit namespace and tenant before reading.
+It does not initialize a writable StateStore, repair indexes, replay journals,
+or delete uncommitted staging. A committed recovery journal is an error requiring
+the original recovery procedure, not permission to guess or rewrite its outcome.
+Filesystem read cancellation drains that read before releasing locks; destination
+ObjectStore cancellation is not hidden by shielding the whole export.
+
+The reader preserves typed core records, facts, operation receipts, canonical
+indexes, archive content and their proven object dependencies. Missing members,
+nonstandard/custom layouts, opaque partitions and capability-presence markers
+are rejected rather than exported incompletely. Limits retain the existing
+snapshot-output admission meaning. They are not a bound on every source archive
+record inspected while establishing the reachable closure.
+
+By default, object references are resolved from the original per-domain and
+archive file ObjectStores. For an originally external object resource, pass its
+borrowed instance as `source_object_store`; it is neither closed nor replaced by
+a file-store fallback. Select a separate destination `object_store` if the whole
+source root must remain byte-for-byte unchanged: reader internals write only
+coordination locks, but an explicitly colocated destination still receives the
+requested snapshot objects. Verify the restored records/receipts/content before
+switching consumers. This migration reader does not itself retire the active
+filesystem State routes or provide opaque custom-object closure.
+
 ### Exclusively owned local SQLite
 
 `PersistenceStorage.from_root(root, exclusive_writer=True)` selects the same
