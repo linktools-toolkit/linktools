@@ -216,14 +216,14 @@ async def test_runtime_cancelled_close_keeps_storage_open_until_metric_sink_sett
             returned.set()
 
     metrics = Metrics.from_store(BlockingStore())
-    original_close = Persistence.close
+    original_close = Persistence._run_close_actions
 
     async def close_storage(owner) -> None:
         assert returned.is_set()
         storage_closed.set()
         await original_close(owner)
 
-    monkeypatch.setattr(Persistence, "close", close_storage)
+    monkeypatch.setattr(Persistence, "_run_close_actions", close_storage)
     async with Runtime.open(
         "close-owner", storage=PersistenceStorage.in_memory(), metrics=metrics,
         features=RuntimeFeatures("close-metrics"),
