@@ -1277,7 +1277,7 @@ class _SqlTransaction:
             candidate = transition.apply(guarded, now)
             if candidate is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if transition.operation == "guard":
+            if transition.operation in ("guard", "guard_available"):
                 return guarded
             if not await self.update_record_lease(
                 key, expected_storage_revision=guarded.storage_revision,

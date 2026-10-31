@@ -64,6 +64,7 @@ from ._repository_common import (
     restore_lease_fields,
 )
 from ._step_contracts import TOOL_ERROR_CODE_METADATA_KEY, AgentRunRecord, StepEvent
+from .turns import validate_turn_records
 from .state import (
     StoredAlias,
     StoredFact,
@@ -81,6 +82,8 @@ from .state import (
     subject_digest,
 )
 
+
+_TURN_RECORD_KINDS = frozenset({"turn_session", "turn_request", "turn_execution"})
 
 _ALLOWED_RECORD_KINDS = {
     PersistenceDomain.CONVERSATION: frozenset(
@@ -150,6 +153,7 @@ _ALLOWED_RECORD_KINDS[PersistenceDomain.TRACE] = _ARCHIVE_RECORD_KINDS | {"histo
 _ALLOWED_RECORD_KINDS[PersistenceDomain.CHECKPOINT] = _ARCHIVE_RECORD_KINDS
 _ALLOWED_RECORD_KINDS[PersistenceDomain.EXECUTION] -= _ARCHIVE_RECORD_KINDS | {"history_association"}
 _ALLOWED_RECORD_KINDS[PersistenceDomain.RECOVERY] -= _ARCHIVE_RECORD_KINDS
+_ALLOWED_RECORD_KINDS[PersistenceDomain.EXECUTION] |= _TURN_RECORD_KINDS
 
 
 _RECORD_TYPES = {
@@ -204,6 +208,7 @@ def canonical_snapshot_indexes(
     operations: tuple[StoredOperation, ...],
 ) -> tuple[tuple[StoredAlias, ...], Mapping[bytes, int]]:
     """Rebuild derived snapshot indexes from their durable semantic owners."""
+    validate_turn_records(records, namespace=namespace, tenant_id=tenant_id)
     _records_by_key, values = _decode_snapshot_records(domain, records)
     _validate_budget_projections(values)
     aliases = _canonical_aliases(
@@ -235,6 +240,7 @@ def validate_snapshot_domain(
     sequences: Mapping[bytes, int],
 ) -> None:
     """Reject physical identities that cannot represent the decoded v1 facts."""
+    validate_turn_records(records, namespace=namespace, tenant_id=tenant_id)
     records_by_key, values = _decode_snapshot_records(domain, records)
 
     _validate_budget_projections(values)
@@ -261,6 +267,8 @@ def validate_snapshot_domain(
         if set(event_counts) != covered_owners:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     for record in records:
+        if record.kind in _TURN_RECORD_KINDS:
+            continue
         if record.kind == "history_association":
             if record.sort_key == "coverage:event":
                 _validate_history_association_coverage(
@@ -412,6 +420,8 @@ def _canonical_aliases(
 
 
 def _decode_record(record: StoredRecord) -> object:
+    if record.kind in _TURN_RECORD_KINDS:
+        return record
     if record.kind == "session_turn_commit":
         return decode_session_turn_commit(record.data)
     if record.kind == "history_association":

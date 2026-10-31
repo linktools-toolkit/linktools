@@ -197,7 +197,7 @@ class _MemoryTransaction:
         candidate = transition.apply(current, datetime.now(timezone.utc))
         if candidate is None:
             return None
-        if transition.operation == "guard":
+        if transition.operation in ("guard", "guard_available"):
             self.records[key] = candidate
             self.guarded_record_keys.add(key)
             return candidate

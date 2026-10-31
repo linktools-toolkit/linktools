@@ -232,7 +232,7 @@ class _FilesystemTransaction:
         candidate = transition.apply(current, datetime.now(timezone.utc))
         if candidate is None:
             return None
-        if transition.operation == "guard":
+        if transition.operation in ("guard", "guard_available"):
             self.records[key] = candidate
             self.guarded_record_keys.add(key)
             self._write(_record_path(candidate), encode_record(candidate))

@@ -616,6 +616,48 @@ prefixes or require a stream-closing context. Origin errors propagate instead
 of becoming missing values. Backend metadata batching and shared cache loaders
 remain in use.
 
+## Source-backed turn authority
+
+`linktools.ai.persistence.turns.StateTurnCoordination` implements turn ownership,
+request lookup and authoritative session lookup over an initialized `StateStore`.
+Use the owning Persistence's public `execution.executions.state_store`; its
+session/request/execution records and mutation receipts are included in the
+Execution snapshot contract. This is an alternative authority, not a Redis
+projection or a second writer alongside an existing coordination backend.
+
+The backend supplies **only** the turn interfaces. Runtime selection still
+requires a host-owned object implementing both `CacheBackend` and
+`TurnCoordinationBackend`. Compose those interfaces with explicit delegation:
+create the host object, pass it to `PersistenceStorage(..., coordination=...)`,
+open that single Persistence, bind its ready source backend exactly once, then
+use `Runtime.attach(persistence=...)`. Unbound calls must fail, not fall back to
+another authority. Carry the Persistence's read-only and ready/closed guards;
+never rebind an existing host object to another source or namespace. Runtime
+closes before its Persistence; the host retains ownership of the borrowed cache.
+No new SDK coordination factory or Runtime mode is required.
+
+Claims atomically maintain session exclusion and request/execution identities.
+Lease durations round upward to milliseconds; fences advance per session and
+must be compared with the complete opaque lease key and token. Replays and
+reads never grant a lease or renew it. Cancellation requires a fresh live
+source guard. Expired cross-session request reuse retires all referenced old
+generations in the same transaction. Unknown commits are confirmed only by the
+original retained receipt; missing receipts are not proof of rollback.
+
+Source observations use independent read scopes and a backend-clock sample.
+A consistent empty anchor can report absence at that actual source read, not a
+promise that later claims cannot occur. Reachable broken edges remain errors.
+This does not detect arbitrary external deletion or a partial resource restore.
+Session anchors and execution receipts are retained: budget for their source
+writes and storage growth rather than assuming cache-like expiry or zero SQL.
+
+Switching authorities or restoring their records requires stopping old
+admission, draining producers, resolving unknown mutations, and moving a complete
+source generation. Do not run old and restored authorities concurrently or roll
+a source back beneath live effects. A snapshot does not prove those effects
+have stopped. Tests cover Memory, Filesystem and SQLite; deployment-specific
+strong-source routing, latency and resource capacity still require validation.
+
 ## Ordered live streams
 
 `PersistenceStorage(..., coordination=cache)` uses the optional `open_stream`/`read_stream`
