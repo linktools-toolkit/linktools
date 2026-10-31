@@ -239,11 +239,13 @@ async def test_saved_rescore_reports_expire_with_the_source_and_are_purged(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("code", (
-    ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE, ErrorCode.STORAGE_INTEGRITY_ERROR,
+    ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE, ErrorCode.STORAGE_INTEGRITY_ERROR, None,
 ))
 async def test_coordinator_does_not_retry_unexpired_read_failures(
-    monkeypatch: pytest.MonkeyPatch, code: ErrorCode,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, code: ErrorCode | None,
 ) -> None:
+    monkeypatch.setattr(evaluation_module.environ, "debug", False)
+    reason = str(code) if code is not None else "RuntimeError"
     target = Task("source.target", echo, effect_policy="none")
     storage = PersistenceStorage.in_memory()
     async with (
@@ -259,7 +261,7 @@ async def test_coordinator_does_not_retry_unexpired_read_failures(
         async def unavailable(*args, **kwargs):
             nonlocal attempts
             attempts += 1
-            raise AIError(code)
+            raise AIError(code, "private diagnostic context") if code is not None else RuntimeError("private diagnostic context")
 
         monkeypatch.setattr(evaluations, "_tick", unavailable)
         run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(
@@ -280,8 +282,13 @@ async def test_coordinator_does_not_retry_unexpired_read_failures(
         assert record.gate == "open"
         assert not record.intents
         assert record.dispositions[0].slot_id == "coordinator"
-        assert record.dispositions[0].disposition.reason_code == str(code)
+        assert record.dispositions[0].disposition.reason_code == reason
         assert record.dispositions[0].disposition.retryable
+        diagnostics = [item for item in caplog.records
+                       if f"experiment={run.experiment_id}" in item.getMessage()]
+        assert any(f"reason={reason}" in item.getMessage() for item in diagnostics)
+        assert not any(item.exc_info for item in diagnostics)
+        assert "private diagnostic context" not in caplog.text
 
 
 @pytest.mark.asyncio
