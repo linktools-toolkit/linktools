@@ -379,33 +379,45 @@ uses the independent provider described above. Without a buffer, each observatio
 guarded projection commit. The route's hot cache never enables write batching.
 
 The policy borrows its buffer; equality and hashing compare timing values only.
-Within one Runtime, owners using the same buffer object and equal batch size
-and interval share automatic flush scheduling. Their accepted, undispatched
-entries contribute to one threshold; the earliest pending entry sets the
-next deadline, which later admission cannot postpone. A trigger dispatches each
-owner's currently accepted prefix. Entries count queue records: a Trace marker
-is one observation-boundary flush request, not one SQL row.
+Within one Runtime, Trace runs using the same buffer object and equal batch size
+and interval share automatic scheduling. Accepted, undispatched entries count
+against one threshold; the earliest pending entry sets the deadline. Each trigger
+selects that run's fixed admitted prefix, not newer staging or an in-progress
+append. Each run retains independent source transactions and failure handling.
+Other Runtime instances and buffers/timing values have independent schedules.
 
-Each owner keeps its queue, callback, acknowledgement and domain failure
-semantics, including unknown-result readback. Source transactions remain
-separate, even when storage points to the same database. Explicit flush and
-close affect only that owner; they do not wait for unrelated Metrics delivery.
-The last departing owner cancels the shared timer. Different Runtime instances,
-buffers or timing values retain separate schedules. Standalone recorders remain
-independent. Sharing a buffer does not imply cross-process claiming.
+A buffered Trace entry contains immutable logical projection bytes and selected
+content dependencies, including request/response and captured failed-stream
+content. It is **not a `None` flush marker**. Publication reads and verifies the
+whole admitted prefix from the backend before source preparation. The local
+preview mirror is not a fallback when entries are missing or corrupt. Source
+sequences and producer fencing remain owned by the existing guarded transaction.
+No cross-process claiming or restart recovery of these live-owner scopes is implied.
 
-A Trace queue entry is a flush request, not the sole copy of trace evidence.
-The run's existing staging owner retains facts until atomic publication and
-readback confirm them. Queue acknowledgement is not a durability receipt and
-this owner-local queue does not provide cross-process recovery of pending trace.
-Capacity rejection or cache failure settles owned callbacks before direct
-publication; a source integrity error or unresolved commit remains authoritative.
+Admission is awaited with `wait=False` and a bounded transport wait. Capacity
+rejection or unresolved append failure is sticky: it does not fall back to direct
+source writes. An uncertain append retains its original ID/bytes and may be
+resolved by reading that exact entry back. It is not retried as a new model call.
+Source rollback can retry the same fixed payload; unknown source outcomes retain
+the source flight and unacknowledged entries. Only source-covered IDs are acked.
+After source success, ack failure is retryable cleanup and does not turn success
+into failure or replay source writes. Close reports remaining cleanup failures
+and can be retried without closing the borrowed backend.
 
-Required flushes, checkpoints, effect fences and terminal publication retain
-their existing boundaries. Before terminal capture or revoked-producer discard,
-queued requests are quiesced without independently committing the dirty tail.
-Already-running publication settles first. Closing a run drains its owned work
-without closing the borrowed cache.
+An explicit publication boundary admits its current tail before draining it.
+Revoked-producer discard first quiesces publication and only abandons queued data
+after the existing source revocation proof. Checkpoint/effect safety boundaries
+remain independent. `terminal()` without a buffer keeps its existing staging and
+terminal transaction behavior; `terminal(buffer=...)` is not yet enabled.
+
+**Adapter/capacity migration:** stop and drain old producers before upgrading;
+old marker scopes are not reusable with the new payload format. Size capacity
+for real serialized bytes, including cumulative snapshots and content context,
+not merely boundary counts. Large or frequently changing contexts can amplify
+buffer bytes; this change does not claim zero-copy capture or reduced RAM usage.
+The backend must return the requested ordered prefix non-destructively and keep
+accepted entries until exact-ID acknowledgement. A short read is not permission
+to publish or acknowledge a smaller prefix.
 
 ## Runtime content
 

@@ -25,7 +25,7 @@ _DEFAULT_CACHE = object()
 async def _setup(tmp_path: Path, backend: str, *, cache=_DEFAULT_CACHE):
     state = Persistence(_storage(backend, tmp_path))
     if cache is _DEFAULT_CACHE:
-        cache = InMemoryCacheBackend(max_bytes=65536)
+        cache = InMemoryCacheBackend(max_bytes=8 * 1024 * 1024)
     await state.initialize(
         namespace="observation-batches", tenant_id="tenant",
     )
@@ -166,7 +166,7 @@ async def test_staging_during_scheduled_commit_gets_another_bounded_batch(
         await asyncio.wait_for(entered.wait(), 2)
         await _observe(state.run_store, 2)
         assert state.run_store.trace_persistence.offsets["run"].observation_task is not None
-        assert state.run_store.trace_persistence._buffers["run"].scope.status().pending > 0
+        assert state.run_store.trace_persistence._buffers["run"].pending
         release.set()
         await asyncio.wait_for(second.wait(), 2)
         await state.run_store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
@@ -336,9 +336,9 @@ async def test_run_buffers_publish_independently_and_remain_idle_after_drain(
     monkeypatch.setattr(archive, "sync_prepared_projection", watched)
     try:
         await _observe(state.run_store, 1)
-        scope = state.run_store.trace_persistence._buffers["run"].scope
+        scope = state.run_store.trace_persistence._buffers["run"]
         await _observe(state.run_store, 2, run_id="other-run", execution_id="other-execution")
-        assert state.run_store.trace_persistence._buffers["other-run"].scope is not scope
+        assert state.run_store.trace_persistence._buffers["other-run"] is not scope
         await asyncio.wait_for(committed.wait(), 5)
         await state.run_store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
         await state.run_store.flush_execution_projection("other-run", execution_id="other-execution", producer_generation=1)

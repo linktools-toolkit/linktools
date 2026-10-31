@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from linktools.ai.persistence import Persistence
-"""Trace cache admission is optional; source durability never is."""
+"""Trace payload errors preserve authoritative source and cancellation boundaries."""
 from ._runtime_test_helpers import model_features
 
 import asyncio
@@ -67,42 +67,19 @@ async def test_trace_rejects_partial_write_buffer():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('failure', ['capacity', 'append_unknown'])
-async def test_trace_failed_cache_admission_uses_guarded_direct_commit(tmp_path, failure):
-    class Cache(InMemoryCacheBackend):
-        async def append(self, *args, **kwargs):
-            result = await super().append(*args, **kwargs)
-            if failure == 'append_unknown':
-                raise RuntimeError('lost cache acknowledgement')
-            return result
-    cache = Cache(max_bytes=0 if failure == 'capacity' else 65536)
-    state = await _setup(tmp_path, 'sqlite', cache=cache)
-    try:
-        store = state.run_store
-        store.trace_persistence.configure('run', buffer=store.trace_persistence._caches['run'], flush_interval=60)
-        await _observe(store, 1)
-        assert len(await store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id='run')) == 1
-        assert 'run' not in store.trace_persistence.dirty
-        assert not store.trace_persistence._buffers
-        assert cache._pending_count == 0
-    finally:
-        await state.close()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize('code', [ErrorCode.STORAGE_COMMIT_UNKNOWN, ErrorCode.STORAGE_INTEGRITY_ERROR])
 async def test_trace_callback_failure_surfaces_original_source_error(tmp_path, code):
     state = await _setup(tmp_path, 'sqlite')
     store = state.run_store
     owner = store.trace_persistence
-    original = owner._flush
+    original = owner._publish
     error = AIError(code)
     attempted = asyncio.Event()
     async def fail(*args, **kwargs):
         attempted.set()
         raise error
     owner.configure('run', buffer=owner._caches['run'], batch_size=1)
-    owner._flush = fail
+    owner._publish = fail
     try:
         await _observe(store, 1)
         await asyncio.wait_for(attempted.wait(), 2)
@@ -111,45 +88,21 @@ async def test_trace_callback_failure_surfaces_original_source_error(tmp_path, c
         assert captured.value is error
         assert 'run' in owner.dirty
         assert await store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id='run') == []
+        assert owner._buffers['run'].pending
+        with pytest.raises(AIError) as close_error:
+            await state.close()
+        assert close_error.value is error
     finally:
-        owner._flush = original
-        await store.flush_execution_projection('run', execution_id='execution', producer_generation=1)
-        await state.close()
-
-
-@pytest.mark.asyncio
-async def test_trace_ack_failure_does_not_replay_committed_projection(tmp_path, monkeypatch):
-    from linktools.ai.storage import _write_cache
-    monkeypatch.setattr(_write_cache, '_WRITE_TIMEOUT_SECONDS', 1.0)
-    class Cache(InMemoryCacheBackend):
-        async def ack(self, scope, ids):
-            raise RuntimeError('cache ack unavailable')
-    state = await _setup(tmp_path, 'sqlite', cache=Cache(max_bytes=65536))
-    try:
-        store = state.run_store
-        owner = store.trace_persistence
-        owner.configure('run', buffer=owner._caches['run'], batch_size=1)
-        await _observe(store, 1)
-        await _wait_until(lambda: 'run' not in owner.dirty)
-        before = await state.execution.executions.get_history_head('execution', tenant_id='tenant')
-        await store.flush_execution_projection('run', execution_id='execution', producer_generation=1)
-        after = await state.execution.executions.get_history_head('execution', tenant_id='tenant')
-        assert before == after
-        assert len(await store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id='run')) == 1
-        assert owner._caches['run'] is None
-    finally:
-        await state.close()
+        owner._publish = original
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('cancel_waiter', [False, True])
-async def test_trace_cache_timeout_settles_source_before_barrier_cancellation(tmp_path, monkeypatch, cancel_waiter):
-    from linktools.ai.storage import _write_cache
-    monkeypatch.setattr(_write_cache, '_WRITE_TIMEOUT_SECONDS', 0.01)
+async def test_trace_payload_owner_settles_source_before_barrier_cancellation(tmp_path, monkeypatch, cancel_waiter):
     state = await _setup(tmp_path, 'sqlite')
     store = state.run_store
     owner = store.trace_persistence
-    original = owner._flush
+    original = owner._publish
     entered, release = asyncio.Event(), asyncio.Event()
     calls = 0
     async def gated(*args, **kwargs):
@@ -158,13 +111,13 @@ async def test_trace_cache_timeout_settles_source_before_barrier_cancellation(tm
         entered.set()
         await release.wait()
         await original(*args, **kwargs)
-    owner._flush = gated
+    owner._publish = gated
     owner.configure('run', buffer=owner._caches['run'], batch_size=1)
     try:
         await _observe(store, 1)
         await asyncio.wait_for(entered.wait(), 2)
-        scope = owner._buffers['run'].scope
-        await _wait_until(lambda: scope.status().last_failure_code == 'WRITE_TIMEOUT')
+        buffer = owner._buffers['run']
+        assert buffer.inflight
         barrier = asyncio.create_task(store.flush_execution_projection(
             'run', execution_id='execution', producer_generation=1,
         ))
@@ -180,18 +133,17 @@ async def test_trace_cache_timeout_settles_source_before_barrier_cancellation(tm
         else:
             await barrier
         assert calls == 1
-        assert scope.status().confirmed == 1
-        assert scope.status().unconfirmed == 0
+        assert not buffer.pending
         assert not store._durability_flights
         assert len(await store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id='run')) == 1
     finally:
         release.set()
-        owner._flush = original
+        owner._publish = original
         await state.close()
 
 
 @pytest.mark.asyncio
-async def test_trace_stop_before_dispatch_keeps_tail_for_atomic_owner(tmp_path):
+async def test_trace_stop_before_dispatch_publishes_real_payload_before_ack(tmp_path):
     cache = InMemoryCacheBackend(max_bytes=65536)
     state = await _setup(tmp_path, 'sqlite', cache=cache)
     try:
@@ -201,9 +153,9 @@ async def test_trace_stop_before_dispatch_keeps_tail_for_atomic_owner(tmp_path):
         await _observe(store, 1)
         assert cache._pending_count == 1
         await owner.stop('run')
-        assert cache._pending_count == 0
-        assert 'run' in owner.dirty
-        assert await store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id='run') == []
+        assert 'run' not in owner.dirty
+        await _wait_until(lambda: cache._pending_count == 0)
+        assert len(await store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id='run')) == 1
         await store.flush_execution_projection('run', execution_id='execution', producer_generation=1)
         assert len(await store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id='run')) == 1
     finally:
@@ -211,15 +163,13 @@ async def test_trace_stop_before_dispatch_keeps_tail_for_atomic_owner(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_trace_timed_out_unknown_commit_keeps_authoritative_flight(tmp_path, monkeypatch):
-    from linktools.ai.storage import _write_cache
-    monkeypatch.setattr(_write_cache, '_WRITE_TIMEOUT_SECONDS', 0.01)
+async def test_trace_unknown_commit_keeps_authoritative_flight_and_buffer_payload(tmp_path, monkeypatch):
     state = await _setup(tmp_path, 'memory')
     store = state.run_store
     owner = store.trace_persistence
     archive = store.read_store(PersistenceDomain.TRACE)
     original_head = archive.execution_history_head_record
-    original_flush = owner._flush
+    original_flush = owner._publish
     entered, release = asyncio.Event(), asyncio.Event()
     failed = False
     async def write_failed(*args, **kwargs):
@@ -236,12 +186,12 @@ async def test_trace_timed_out_unknown_commit_keeps_authoritative_flight(tmp_pat
         await original_flush(*args, **kwargs)
     monkeypatch.setattr(archive, 'sync_prepared_projection', write_failed)
     monkeypatch.setattr(archive, 'execution_history_head_record', readback_failed)
-    owner._flush = gated
+    owner._publish = gated
     owner.configure('run', buffer=owner._caches['run'], batch_size=1)
     await _observe(store, 1)
     await asyncio.wait_for(entered.wait(), 2)
     buffer = owner._buffers['run']
-    await _wait_until(lambda: buffer.scope.status().last_failure_code == 'WRITE_TIMEOUT')
+    assert buffer.inflight
     release.set()
     await _wait_until(lambda: buffer.error is not None)
     assert isinstance(buffer.error, AIError)

@@ -107,7 +107,13 @@ class SqlStorageContext:
         if retry_limit < 1:
             raise ValueError("retry_limit must be positive")
         started = monotonic()
+        retry_delay = 0.005
         for attempt in range(retry_limit):
+            if attempt and self.dialect.single_writer:
+                # Release the previous snapshot/session before giving another
+                # SQLite writer time to finish instead of reacquiring read locks.
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 0.05)
             session = self.sessions()
             transaction = session.begin()
             entered = False

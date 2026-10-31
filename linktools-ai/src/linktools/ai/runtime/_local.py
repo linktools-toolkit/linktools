@@ -3942,7 +3942,12 @@ class LocalExecutionBackend:
                 if _is_infrastructure_error(error) and not (
                     isinstance(error, AIError) and error.code is ErrorCode.STORAGE_CONFLICT and terminal
                 ):
-                    raise
+                    if (terminal or agent_run_id is None or producer_generation is None
+                            or not await self._agent_run_lifecycle.settle_trace_buffer_failure(
+                                agent_run_id, execution_id=execution_id,
+                                producer_generation=producer_generation, error=error,
+                            )):
+                        raise
                 if terminal and producer_generation is not None:
                     await self._discard_terminal_producer_tail(
                         current, agent_run_id=agent_run_id, producer_generation=producer_generation,
@@ -4081,6 +4086,11 @@ class LocalExecutionBackend:
                     publish_readback = True
                 else:
                     try:
+                        if producer_generation is not None:
+                            await self._agent_run_lifecycle.settle_trace_buffer_failure(
+                                agent_run_id, execution_id=execution_id,
+                                producer_generation=producer_generation, error=terminal_error,
+                            )
                         committed = await self._commit_failure(
                             persisted,
                             terminal_error,
@@ -5554,12 +5564,20 @@ class LocalExecutionBackend:
                 if status is ExecutionStatus.SUCCEEDED and agent_run_id is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if agent_run_id is not None:
-                    if current.conversation or current.restart_checkpoints or current.durable_trace:
+                    rejected_trace = (
+                        status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
+                        and producer_generation is not None
+                        and self._agent_run_lifecycle.trace_buffer_failure_settled(
+                            agent_run_id, execution_id=current.execution_id,
+                            producer_generation=producer_generation,
+                        )
+                    )
+                    if not rejected_trace and (current.conversation or current.restart_checkpoints or current.durable_trace):
                         await self._agent_run_lifecycle.checkpoint_persistence.materialize_recovery_checkpoint(
                             agent_run_id=agent_run_id,
                             require_complete=status is ExecutionStatus.SUCCEEDED,
                         )
-                    if producer_generation is not None:
+                    if producer_generation is not None and not rejected_trace:
                         await self._agent_run_lifecycle.flush_execution_projection(
                             agent_run_id, execution_id=current.execution_id,
                             producer_generation=producer_generation,
@@ -6106,13 +6124,28 @@ class LocalExecutionBackend:
                         candidate_agent_run_ids = await self._existing_execution_agent_run_ids(
                             candidate_agent_run_ids
                         )
-                        plan = (
-                            await self._agent_run_lifecycle.prepare_execution_terminal_seal(
+                        try:
+                            plan = await self._agent_run_lifecycle.prepare_execution_terminal_seal(
                                 execution_id=current.execution_id,
                                 agent_run_ids=candidate_agent_run_ids,
                                 binding_digest=current.binding_digest,
                             )
-                        )
+                        except Exception as error:
+                            if (commit.execution.status not in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
+                                    or agent_run_id is None or commit.producer_generation is None
+                                    or not await self._agent_run_lifecycle.settle_trace_buffer_failure(
+                                        agent_run_id, execution_id=current.execution_id,
+                                        producer_generation=commit.producer_generation, error=error,
+                                    )):
+                                raise
+                            # Only a known rejected tail can be removed from this
+                            # failure/cancellation plan. Keep its control intent and
+                            # accepted prefix; unknown source outcomes are not retried.
+                            plan = await self._agent_run_lifecycle.prepare_execution_terminal_seal(
+                                execution_id=current.execution_id,
+                                agent_run_ids=candidate_agent_run_ids,
+                                binding_digest=current.binding_digest,
+                            )
                 if agent_run_id is not None and not state_archive:
                     await self._agent_run_lifecycle.flush_execution_projection(
                         agent_run_id,

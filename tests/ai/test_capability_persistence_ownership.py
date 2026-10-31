@@ -140,6 +140,24 @@ async def test_trace_pressure_and_timer_lifetimes_are_isolated_between_owners() 
         pass
 
     def make_owner(name: str) -> TracePersistence:
+        captures = 0
+        run = AgentRunRecord("same-run")
+
+        async def capture(agent_run_id, *, execution_id, producer_generation):
+            from linktools.ai.persistence._projection_payload import encode_projection_payload
+            from linktools.ai.persistence._step_archive import CapturedExecutionProjection
+            from linktools.ai.persistence._transcript_staging import StagedTranscript
+
+            nonlocal captures
+            captures += 1
+            return encode_projection_payload(CapturedExecutionProjection(
+                run, (), (), 0, 0, 0, 0, producer_generation=producer_generation,
+                transcript=StagedTranscript((), ModelResponse(parts=[TextPart(str(captures))]), ("part:0",)),
+            ))
+
+        async def publish(captured, *, execution_id):
+            await flush(captured.run.agent_run_id, execution_id=execution_id)
+
         async def flush(
             agent_run_id: str, *, execution_id: str,
             producer_generation: int | None = None, deferred: bool = False,
@@ -151,23 +169,24 @@ async def test_trace_pressure_and_timer_lifetimes_are_isolated_between_owners() 
         return TracePersistence(
             None, history_lock=_AgentRunHistoryLock(), ensure_ready=ready,
             require_mutable=lambda _run: None, has_flight=lambda _run: False,
-            flush=flush, flush_boundary=flush, background_tasks=tasks,
+            capture=capture, publish=publish, flush_boundary=flush, background_tasks=tasks,
         )
 
     owners.update((name, make_owner(name)) for name in ("first", "second"))
     try:
         for name, owner in owners.items():
-            owner.configure("same-run", buffer=InMemoryCacheBackend(max_bytes=65536), flush_interval=60.0)
-            owner.dirty.add("same-run")
+            owner.configure("same-run", buffer=InMemoryCacheBackend(max_bytes=1024 * 1024), flush_interval=60.0)
+            owner.mark_dirty("same-run")
             await owner.defer("same-run", execution_id=name, producer_generation=1)
         for _ in range(_trace_persistence.DEFAULT_TRACE_BATCH_SIZE - 1):
+            owners["first"].mark_dirty("same-run")
             await owners["first"].defer("same-run", execution_id="first", producer_generation=1)
         await asyncio.wait_for(published.wait(), 2)
         assert writes == [("first", "first")]
         assert owners["second"].dirty == {"same-run"}
-        assert owners["second"]._buffers["same-run"].scope.status().pending == 1
+        assert len(owners["second"]._buffers["same-run"].pending) == 1
         await asyncio.wait_for(owners["first"].settle_buffers(), 1)
-        assert owners["second"]._buffers["same-run"].scope.status().accepting
+        assert not owners["second"]._buffers["same-run"].paused
         assert writes == [("first", "first")]
     finally:
         for owner in owners.values():

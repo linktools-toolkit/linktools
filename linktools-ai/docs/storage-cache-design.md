@@ -41,7 +41,7 @@ ObjectStore 和 CacheBackend 不能为了词形一致合并。get 返回可缺�
 | Runtime 内容注入 | cache | 保留 Runtime 的引用、租户和来源验证 |
 | 内容摘要 | digest | SHA-256 内容完整性 |
 | 物理记录修订 | storage_revision / expected_storage_revision | 与业务 revision 区分 |
-| 写缓存 | CommitPolicy.buffer 的 append/read_batch/ack；既有 BatchWriteScope 调度 | 待写字节属于所注入实例，scope 只拥有该调用者的调度和结算，见第8节 |
+| 写缓存 | CommitPolicy.buffer 的 append/read_batch/ack；各数据 owner 调度 | 待写字节属于所注入实例，scope 只拥有该调用者的调度和结算，见第8节 |
 
 其他名称只有真实职责歧义时才调整，不为了字面整齐改变公开接口。本轮不同时推行另一组未实施的路径、metadata或revision方法改名。
 
@@ -219,7 +219,17 @@ max_bytes 只保留在各实例内存中。每次成功写入的put持共享锁�
 
 预算继续是已提交payload逻辑计费，空内容至少1字节，并非OS实际块分配或临时文件峰值。纯文件共享计量已实现并通过定向验证，随 PR #191 发布；SQLite和持久最小quota均已否决，不是备选待确认项。
 
-## 8. 自动指标与宿主写入节奏
+## 8. 通用缓冲与自动指标
+
+### 8.1 通用写缓冲与 Trace 数据 owner
+
+`WriteBufferBackend.append/read_batch/ack` 仍是借用的有序、非破坏读取能力；待写真实 bytes 和容量属于 backend。`BatchWriteScope` 是独立的通用 owner-local 调度/结算工具，callback 失败后的结算不等于 source 确认，不能把其结果当数据库 receipt。`StorageBuffer` 继续保留自己的显式读取可见性和 source 写入合同。
+
+Trace 的 `batch(buffer=...)` 现由专有数据 owner 准入不可变 projection 与选取的依赖 bytes，不再写 `None` marker，也不复用通用 scope 的失败后 ack 路径。同 Runtime、相同 buffer identity 与 timing 的 Trace runs 共享阈值/最早期限，但每个 run 只发布其 backend 读回并校验的固定已准入前缀；后续累计 snapshot 不能替换先前已准入的 append-only 事实。准入失败不回退直接 source；已确认 source 后的 ack 是独立可重试清理，未知 source 继续保留 flight 和 payload。
+
+升级须停止并 drain 旧 marker producer，不能复用旧活动 scope。容量需按真实序列化 bytes（含累计 snapshot/上下文重复量）配置，不能沿用 marker 条数估算；这不承诺进程重启接管、RAM 卸载或零拷贝。无 buffer、`terminal()` 的现有行为不变，`terminal(buffer=...)` 尚未开放。精确生命周期和故障合同见 [Runtime observation publication](storage-caching.md#runtime-observation-publication)。
+
+### 8.2 自动指标与宿主写入节奏
 
 热点读取、Trace 缓冲和自动指标各有独立 owner。`Metrics` 是同步 source/query dataset，同时结构化满足 `MetricRecorderProvider`；`Runtime.open/attach` 与独立 `TaskEngine` 继续通过已有 `metrics=` 接收 provider。只有 `recorder() -> MetricRecorder` 一个无参组合点，不要求 producer 创建 SQL dataset，不添加具体中间件依赖。
 

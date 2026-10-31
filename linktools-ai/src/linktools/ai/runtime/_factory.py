@@ -47,7 +47,7 @@ from ..spec import (
     RepositoryInstructionResolver,
     RepositoryInstructions,
 )
-from ..storage import BatchWriteScope, CacheBackend, ObjectStore, PayloadPolicy, StreamBackend, TurnCoordinationBackend
+from ..storage import CacheBackend, ObjectStore, PayloadPolicy, StreamBackend, TurnCoordinationBackend
 from ..workspace import (
     WorkspaceInstructionResolver,
     LocalWorkspaceBackend,
@@ -660,8 +660,6 @@ async def _build_local_components(
             isinstance(value, ExecutionCapability) and value.retain_history
             for value in persistence_capabilities
         )
-        batch_scopes = BatchWriteScope.scoped_factory()
-        run_store.trace_persistence.bind_batch_scopes(batch_scopes)
         metric_buffer = None if metrics is None else MetricsService(metrics)
         lifecycle.metric_buffer = metric_buffer
         metric_source_namespace = None if metric_buffer is None else namespace

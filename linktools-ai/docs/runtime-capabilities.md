@@ -451,7 +451,13 @@ by [OpenAI](https://developers.openai.com/api/docs/guides/rate-limits) and
 `TraceCapability(commit=CommitPolicy.batch(buffer=buffer, batch_size=128, flush_interval=3.0))` controls observation-only
 flush pressure (counted in observation boundaries) and maximum scheduled delay
 in seconds when `commit.buffer` supplies `append`, `read_batch` and `ack`. Each run owns
-an independent cache-backed recording scope. A policy with `buffer=None`
+an independent payload scope: entries contain immutable projection bytes and selected
+content dependencies, not flush markers. Admission is awaited, rejected/unknown
+admission does not fall back to source writes, and source-confirmed IDs alone
+are acknowledged. Source success is independent of retryable buffer-ack cleanup.
+Size adapter capacity for real bytes and drain old marker producers before upgrading.
+`terminal(buffer=...)` is not enabled by this batch-path migration.
+A policy with `buffer=None`
 awaits publication at each observation boundary; timing options do not create a
 hidden Runtime queue. A lower threshold or interval can make partial trace
 visible sooner at the cost of more writes.

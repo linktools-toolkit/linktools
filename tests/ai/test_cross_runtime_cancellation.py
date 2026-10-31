@@ -112,9 +112,9 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                 worker = backend._tasks[execution.execution_id]
                 run_stores = (owner._run_store, remote._run_store)
                 observation_tasks = {
-                    buffer.scope._writer
+                    buffer.task
                     for store in run_stores for buffer in store.trace_persistence._buffers.values()
-                    if buffer.scope is not None and buffer.scope._writer is not None
+                    if buffer.task is not None
                 }
                 release.set()
                 worker_outcomes = await asyncio.wait_for(
@@ -152,8 +152,8 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                         for store in run_stores:
                             tasks.update(store._background_tasks)
                             tasks.update(
-                                buffer.scope._writer for buffer in store.trace_persistence._buffers.values()
-                                if buffer.scope is not None and buffer.scope._writer is not None
+                                buffer.task for buffer in store.trace_persistence._buffers.values()
+                                if buffer.task is not None
                             )
                         tasks.difference_update(joined)
                         if not tasks:

@@ -25,7 +25,7 @@ from linktools.ai.persistence._transcript_staging import StagedTranscript
 
 def _capture(store: StagingAgentRunStore | None = None) -> tuple[StagingAgentRunStore, CapturedExecutionProjection]:
     store = StagingAgentRunStore() if store is None else store
-    store.register_agent_run_local(AgentRunRecord("run", metadata={"key": "original"}))
+    store.register_agent_run_local(store.get_agent_run_local("run") or AgentRunRecord("run", metadata={"key": "original"}))
     request = ModelRequest(parts=[UserPromptPart("input")])
     response = ModelResponse(parts=[TextPart("output")])
     store.stage_transcript("run", StagedTranscript((request, response), ModelResponse(parts=[TextPart("pending")]), ("part:0",)))
