@@ -164,11 +164,11 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
             publications[-1].append(self.scope_id)
         return await original_publish(self, transaction, prepared)
 
-    async def materialize_recovery(self, *, agent_run_id, require_complete):
+    async def materialize_recovery(self, *, agent_run_id, require_complete, captured=None):
         archive = self.archive
         before = (await archive.list_model_interactions(agent_run_id=agent_run_id)
                   if isinstance(archive, ModelInteractionStateStepArchive) else ())
-        await original_recovery(self, agent_run_id=agent_run_id, require_complete=require_complete)
+        await original_recovery(self, agent_run_id=agent_run_id, require_complete=require_complete, captured=captured)
         if before:
             after = {item.model_request_seq: item for item in await archive.list_model_interactions(
                 agent_run_id=agent_run_id,

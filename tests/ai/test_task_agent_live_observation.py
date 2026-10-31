@@ -21,8 +21,8 @@ from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("producer_count", [1, 2])
-async def test_graph_observes_tools_before_models_finish_and_replays_after_reopen(tmp_path, producer_count):
+@pytest.mark.parametrize(("backend", "producer_count"), [("filesystem", 1), ("sqlite", 1), ("sqlite", 2)])
+async def test_graph_observes_tools_before_models_finish_and_replays_after_reopen(tmp_path, backend, producer_count):
     release = asyncio.Event()
     entered = [asyncio.Event() for _ in range(producer_count)]
     observed = [asyncio.Event() for _ in range(producer_count)]
@@ -47,9 +47,14 @@ async def test_graph_observes_tools_before_models_finish_and_replays_after_reope
         return group
 
     storage_path = tmp_path / "state"
+
+    def storage():
+        if backend == "filesystem":
+            return PersistenceStorage.filesystem(storage_path)
+        return PersistenceStorage.sqlite(storage_path / "runtime.db")
     async with AsyncExitStack() as stack:
         persistence = await stack.enter_async_context(Persistence.open(
-            "graph-live", storage=PersistenceStorage.filesystem(storage_path),
+            "graph-live", storage=storage(),
         ))
         runtimes = [await stack.enter_async_context(Runtime.attach(persistence=persistence, features=features(i)))
                     for i in range(producer_count)]
@@ -85,7 +90,7 @@ async def test_graph_observes_tools_before_models_finish_and_replays_after_reope
     request_count = len(requests)
     async with AsyncExitStack() as stack:
         persistence = await stack.enter_async_context(Persistence.open(
-            "graph-live", storage=PersistenceStorage.filesystem(storage_path),
+            "graph-live", storage=storage(),
         ))
         runtimes = [await stack.enter_async_context(Runtime.attach(persistence=persistence, features=features(i)))
                     for i in range(producer_count)]

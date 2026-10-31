@@ -894,6 +894,7 @@ async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
 
     commands = _Commands()
     backend = object.__new__(LocalExecutionBackend)
+    backend._execution_buffer = None
     backend._pending_turns = _PendingExecutionTurns()
     backend._tenant_id = "tenant"
     backend._namespace = "stream-order"
@@ -1007,6 +1008,7 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
 
     commands = _Commands()
     backend = object.__new__(LocalExecutionBackend)
+    backend._execution_buffer = None
     backend._tenant_id = "tenant"
     backend._pending_audit_events = {"execution": [pending]}
     backend._pending_audit_locks = {}

@@ -196,7 +196,11 @@ async def test_late_control_failure_is_retained_by_runtime() -> None:
         assert caught.value is error
         assert not bundle.storage_closed
     finally:
-        await bundle.runtime.close()
+        with pytest.raises(AIError) as close_error:
+            await bundle.runtime.close()
+        assert close_error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+        assert bundle.engine.persistence.ready
+        assert len(bundle.engine.persistence._task_owners) == 1
 
 
 @pytest.mark.asyncio

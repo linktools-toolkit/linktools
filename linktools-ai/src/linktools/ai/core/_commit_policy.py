@@ -15,7 +15,7 @@ from ._write_buffer import WriteBufferBackend
 class CommitPolicy:
     """Write timing preferences; owner safety boundaries always take precedence.
 
-    Batch borrows its write buffer without owning its lifetime. Buffer identity
+    Batch and terminal borrow their write buffer without owning its lifetime. Buffer identity
     is separate from policy equality and must be included when grouping writers.
     Missing batch buffers select synchronous writes rather than an implicit queue.
     Batch timing may be omitted while authoring; each owner resolves its defaults
@@ -37,8 +37,10 @@ class CommitPolicy:
         ):
             raise TypeError("buffer must provide append, read_batch and ack")
         if self.mode != "batch":
-            if self.batch_size is not None or self.flush_interval is not None or self.buffer is not None:
+            if self.batch_size is not None or self.flush_interval is not None:
                 raise ValueError("only batch commit accepts batch settings")
+            if self.mode == "sync" and self.buffer is not None:
+                raise ValueError("sync commit does not accept a write buffer")
             return
         if self.batch_size is not None and (
             isinstance(self.batch_size, bool) or not isinstance(self.batch_size, int) or self.batch_size < 1
@@ -74,9 +76,13 @@ class CommitPolicy:
         return cls("sync")
 
     @classmethod
-    def terminal(cls) -> CommitPolicy:
-        """Prefer publication at the owner's final atomic boundary."""
-        return cls("terminal")
+    def terminal(cls, *, buffer: WriteBufferBackend | None = None) -> CommitPolicy:
+        """Prefer final atomic publication, optionally borrowing a payload buffer.
+
+        Acceptance by the buffer is not source durability. Without a buffer,
+        owners retain optional writes locally until their publication boundary.
+        """
+        return cls("terminal", buffer=buffer)
 
     @classmethod
     def batch(

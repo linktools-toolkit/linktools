@@ -112,6 +112,7 @@ async def materialize_runtime_storage(
     tenant_id: str,
     object_store: ObjectStore | None,
     read_only: bool = False,
+    local_sqlite_path: Path | None = None,
     capability_routes: Mapping[str, StorageRoute] | None = None,
     register_cleanup: Callable[[tuple[Callable[[], Awaitable[None]], ...]], None],
 ) -> _MaterializedRuntimeStorage:
@@ -157,6 +158,7 @@ async def materialize_runtime_storage(
     register_cleanup((resources.close,))
     await resources.initialize(
         requests, namespace=namespace, tenant_id=tenant_id, read_only=read_only,
+        local_sqlite_path=local_sqlite_path,
     )
     cleanups.append(resources.close)
     for domain, resource in zip(PersistenceDomain, resources.resources):

@@ -11,7 +11,6 @@ from ._runtime_test_helpers import workspace_features
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from linktools.ai.core import CommitPolicy
 from linktools.ai.persistence import Persistence
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
@@ -177,9 +176,8 @@ async def test_runtime_recorder_reports_later_source_failure_after_enrichment_fa
 
 @pytest.mark.asyncio
 async def test_runtimes_sharing_metrics_close_only_their_own_write_scopes() -> None:
-    from linktools.ai.storage import InMemoryCacheBackend
 
-    metrics = Metrics.in_memory(commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)))
+    metrics = Metrics.in_memory()
     features = await RuntimeFeatures("shared-metrics").capture()
     async with Persistence.open('first', storage=PersistenceStorage.in_memory()) as persistence_187, Runtime.attach(persistence=persistence_187, metrics=metrics, features=features) as first:
         async with Persistence.open('second', storage=PersistenceStorage.in_memory()) as persistence_190, Runtime.attach(persistence=persistence_190, metrics=metrics, features=features) as second:
@@ -192,8 +190,8 @@ async def test_runtimes_sharing_metrics_close_only_their_own_write_scopes() -> N
             assert await second._metric_control.try_record(observation)
             await first.close()
             assert second.metrics.status().accepting
-            assert second.metrics.status().pending == 1
-            assert await metrics.get_observation("second-pending") is None
+            assert second.metrics.status().pending == 0
+            assert await metrics.get_observation("second-pending") is not None
             assert (await second.metrics.flush()).completed
     assert await metrics.get_observation("second-pending") is not None
 
@@ -205,62 +203,52 @@ async def test_runtime_cancelled_close_keeps_storage_open_until_metric_sink_sett
     import asyncio
 
     from linktools.ai.observe._memory import InMemoryMetricStore
-    from linktools.ai.storage import InMemoryCacheBackend
-    from linktools.ai.storage import _write_cache as write_cache
 
-    monkeypatch.setattr(write_cache, "_CLOSE_DEADLINE_SECONDS", 0.01)
-    entered = asyncio.Event()
-    cancelling = asyncio.Event()
-    release = asyncio.Event()
-    returned = asyncio.Event()
-    storage_closed = asyncio.Event()
+    entered, release, returned, storage_closed = (asyncio.Event() for _ in range(4))
 
-    class CancellingStore(InMemoryMetricStore):
+    class BlockingStore(InMemoryMetricStore):
         async def put_observations(
             self, namespace: str, observations: tuple[Observation, ...],
         ) -> None:
             entered.set()
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                cancelling.set()
-                await release.wait()
+            await release.wait()
             await super().put_observations(namespace, observations)
             returned.set()
 
-    metrics = Metrics.from_store(CancellingStore(), commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)))
-    storage = PersistenceStorage.in_memory()
-    original_close = Persistence.close
+    metrics = Metrics.from_store(BlockingStore())
+    original_close = Persistence._run_close_actions
 
     async def close_storage(owner) -> None:
         assert returned.is_set()
         storage_closed.set()
         await original_close(owner)
 
-    monkeypatch.setattr(Persistence, "close", close_storage)
-    features = RuntimeFeatures("close-metrics")
-    async with Persistence.open('close-owner', storage=storage) as persistence_249, Runtime.attach(persistence=persistence_249, metrics=metrics, features=features) as runtime:
+    monkeypatch.setattr(Persistence, "_run_close_actions", close_storage)
+    async with Runtime.open(
+        "close-owner", storage=PersistenceStorage.in_memory(), metrics=metrics,
+        features=RuntimeFeatures("close-metrics"),
+    ) as runtime:
         observation = Observation(
             version=1, observation_id="close-inflight", kind="test.metric",
             occurred_at=datetime.now(timezone.utc), source_namespace="close-owner",
             tenant_id="default", status="SUCCEEDED", error_code=None,
             correlation={}, dimensions={}, measurements=(),
         )
-        assert await runtime._metric_control.try_record(observation)
-        await runtime.metrics.flush(timeout_seconds=0)
+        writing = asyncio.create_task(runtime._metric_control.try_record(observation))
         await asyncio.wait_for(entered.wait(), 1)
         closing = asyncio.create_task(runtime.close())
         try:
-            await asyncio.wait_for(cancelling.wait(), 1)
+            await asyncio.sleep(0)
             closing.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await closing
+            assert not writing.done()
             assert not returned.is_set()
             assert not storage_closed.is_set()
-            assert runtime.metrics.status().pending == 1
-            assert runtime.metrics.status().queue_size == 1
+            assert runtime.metrics.status().persisted == 0
         finally:
             release.set()
+            assert await asyncio.wait_for(writing, 1)
             await asyncio.wait_for(runtime.close(), 1)
     assert storage_closed.is_set()
     assert runtime.metrics.status().persisted == 1

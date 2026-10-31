@@ -8,7 +8,7 @@ import json
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Protocol, cast
 
-from ..core import Page
+from ..core import Page, validate_persistence_namespace, validate_resource_id
 from ..errors import AIError, ErrorCode
 from ..storage import (
     create_sql_storage_context,
@@ -31,19 +31,21 @@ from ._codec import (
     observation_envelope,
     observation_payload_digest,
 )
-from ._model import MetricDefinition, MetricSourceKind, Observation
+from ._model import MetricDefinition, MetricSourceKind, Observation, _identifier
 from ._store import (
     _MetricQueryPushdownPlan,
     _MetricQueryPushdownResult,
     _MetricQueryPushdownRow,
     _parse_scan_cursor,
     _scan_cursor,
+    _observation_pruned,
+    _SHA256,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from sqlalchemy import MetaData
+    from sqlalchemy import MetaData, Select
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
     from sqlalchemy.pool import ConnectionPoolEntry, PoolProxiedConnection
 
@@ -104,6 +106,14 @@ def build_metrics_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaDa
         target,
         sql_id_column(),
         Column(
+            "namespace", sql_text_key(256), nullable=False,
+            comment="Original Metrics namespace retained after pruning.",
+        ),
+        Column(
+            "observation_id", sql_text_key(128), nullable=False,
+            comment="Original observation identity retained after pruning.",
+        ),
+        Column(
             "namespace_digest",
             sql_sha256(),
             nullable=False,
@@ -135,17 +145,25 @@ def build_metrics_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaDa
         ),
         Column(
             "payload_json",
-            JSON,
-            nullable=False,
+            JSON(none_as_null=True),
+            nullable=True,
             comment="Versioned canonical immutable ObservationEnvelope payload.",
         ),
+        Column(
+            "active_occurred_at", timestamp_type, nullable=True,
+            comment="Derived occurrence time for active observations only.",
+        ),
+        Column(
+            "pruned_at", timestamp_type, nullable=True,
+            comment="Backend time of the first payload pruning transition.",
+        ),
         *sql_audit_columns(),
-        comment="Immutable metric observations.",
+        comment="Immutable metric observations and retained pruning receipts.",
         **sql_table_options(),
     )
     sql_unique(observations, "observation_digest")
-    sql_query_index(observations, "namespace_digest", "kind", "occurred_at")
-    sql_query_index(observations, "namespace_digest", "occurred_at")
+    sql_query_index(observations, "namespace_digest", "kind", "active_occurred_at")
+    sql_query_index(observations, "namespace_digest", "active_occurred_at")
     sql_audit_indexes(observations)
     return target
 
@@ -174,6 +192,16 @@ class SqlMetricStore:
         await self._context.initialize(
             metadata=self._metadata if self._validate_schema else None
         )
+
+    def _select_observations(self) -> "Select":
+        from sqlalchemy import Text, cast as sql_cast, select
+
+        # Raw JSON preserves duplicate members for integrity verification.
+        return select(*(
+            sql_cast(column, Text).label("payload_json")
+            if column.name == "payload_json" else column
+            for column in self._observations.c
+        ))
 
     async def _execute_metric_query(
         self,
@@ -231,7 +259,7 @@ class SqlMetricStore:
         namespace_key: str,
         plan: _MetricQueryPushdownPlan,
     ) -> int:
-        from sqlalchemy import Text, cast as sql_cast, func, select
+        from sqlalchemy import func, select
 
         start = plan.start.astimezone(timezone.utc)
         end = plan.end.astimezone(timezone.utc)
@@ -240,19 +268,13 @@ class SqlMetricStore:
             end = end.replace(tzinfo=None)
         columns = self._observations.c
         bounded = (
-            select(
-                columns.namespace_digest,
-                columns.observation_digest,
-                columns.payload_digest,
-                columns.kind,
-                columns.occurred_at,
-                sql_cast(columns.payload_json, Text).label("payload_json"),
-            )
+            self._select_observations()
             .where(
                 columns.namespace_digest == namespace_key,
                 columns.kind == plan.observation_kind,
-                columns.occurred_at >= start,
-                columns.occurred_at < end,
+                columns.pruned_at.is_(None),
+                columns.active_occurred_at >= start,
+                columns.active_occurred_at < end,
             )
             .limit(plan.max_scanned_observations + 1)
             .subquery("metric_verification")
@@ -266,16 +288,7 @@ class SqlMetricStore:
                 if scanned_count > plan.max_scanned_observations:
                     raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
                 try:
-                    # Read JSON text so driver decoding cannot erase duplicate
-                    # members before the codec and SQL extract different values.
-                    payload = json.loads(
-                        row["payload_json"],
-                        object_pairs_hook=_unique_json_pairs,
-                        parse_constant=_reject_json_constant,
-                    )
-                    _decode_observation_record(
-                        namespace, namespace_key, {**row, "payload_json": payload}
-                    )
+                    _decode_observation_record(namespace, namespace_key, row)
                 except (TypeError, ValueError, RecursionError) as error:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         finally:
@@ -402,8 +415,6 @@ class SqlMetricStore:
         namespace: str,
         observations: tuple[Observation, ...],
     ) -> None:
-        from sqlalchemy import select
-
         await self._initialize()
         collapsed: dict[str, tuple[str, Observation]] = {}
         for observation in observations:
@@ -418,11 +429,15 @@ class SqlMetricStore:
         namespace_key = namespace_digest(namespace)
         rows = [
             {
+                "namespace": namespace,
+                "observation_id": observation.observation_id,
                 "namespace_digest": namespace_key,
                 "observation_digest": identity,
                 "payload_digest": payload,
                 "kind": observation.kind,
                 "occurred_at": observation.occurred_at,
+                "active_occurred_at": observation.occurred_at,
+                "pruned_at": None,
                 "payload_json": observation_envelope(namespace, observation),
             }
             for identity, (payload, observation) in collapsed.items()
@@ -440,18 +455,33 @@ class SqlMetricStore:
                 return
             result = (
                 await self._context.run_statement(session.execute(
-                    select(
-                        self._observations.c.observation_digest,
-                        self._observations.c.payload_digest,
-                    ).where(self._observations.c.observation_digest.in_(identities))
+                    self._select_observations().where(
+                        self._observations.c.observation_digest.in_(identities)
+                    )
                 ))
-            ).all()
-            existing = {str(row[0]): str(row[1]) for row in result}
+            ).mappings().all()
+            existing = {str(row["observation_digest"]): row for row in result}
             if len(existing) != len(collapsed):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            for identity, (payload, _) in collapsed.items():
-                if existing.get(identity) != payload:
+            for identity, (payload, observation) in collapsed.items():
+                row = existing[identity]
+                if row["payload_digest"] != payload:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
+                _validate_observation_identity(namespace, namespace_key, row)
+                if row["observation_id"] != observation.observation_id:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if (
+                    row["kind"] != observation.kind
+                    or _utc_database_datetime(cast(datetime, row["occurred_at"]))
+                    != observation.occurred_at
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            pruned = False
+            for row in existing.values():
+                if self._decode_observation_row(namespace, namespace_key, row) is None:
+                    pruned = True
+            if pruned:
+                raise _observation_pruned()
 
         await self._context.run_mutation(write_and_validate, domain="metrics.observation")
 
@@ -460,13 +490,11 @@ class SqlMetricStore:
         namespace: str,
         observation_id: str,
     ) -> Observation | None:
-        from sqlalchemy import select
-
         await self._initialize()
         namespace_key = namespace_digest(namespace)
         identity = observation_digest(namespace, observation_id)
         statement = (
-            select(self._observations)
+            self._select_observations()
             .where(self._observations.c.observation_digest == identity)
             .limit(1)
         )
@@ -474,17 +502,25 @@ class SqlMetricStore:
             row = (await self._context.run_statement(session.execute(statement))).mappings().first()
         if row is None:
             return None
-        observation = self._decode_observation_row(namespace, namespace_key, row)
-        if observation.observation_id != observation_id:
+        if row["observation_id"] != observation_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return observation
+        return self._decode_observation_row(namespace, namespace_key, row)
 
     def _decode_observation_row(
         self,
         namespace: str,
         namespace_key: str,
         row: "Mapping[str, object]",
-    ) -> Observation:
+    ) -> Observation | None:
+        if row["pruned_at"] is not None:
+            _validate_observation_identity(namespace, namespace_key, row)
+            if (
+                not isinstance(row["pruned_at"], datetime)
+                or row["payload_json"] is not None
+                or row["active_occurred_at"] is not None
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return None
         return _decode_observation_record(namespace, namespace_key, row)
 
 
@@ -498,17 +534,18 @@ class SqlMetricStore:
         cursor: str | None,
         limit: int,
     ) -> Page[Observation]:
-        from sqlalchemy import and_, or_, select
+        from sqlalchemy import and_, or_
 
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
         await self._initialize()
         namespace_key = namespace_digest(namespace)
-        statement = select(self._observations).where(
+        statement = self._select_observations().where(
             self._observations.c.namespace_digest == namespace_key,
             self._observations.c.kind == kind,
-            self._observations.c.occurred_at >= start,
-            self._observations.c.occurred_at < end,
+            self._observations.c.pruned_at.is_(None),
+            self._observations.c.active_occurred_at >= start,
+            self._observations.c.active_occurred_at < end,
         )
         if cursor is not None:
             after_time, after_digest = _parse_scan_cursor(cursor)
@@ -531,7 +568,7 @@ class SqlMetricStore:
         has_more = len(rows) > limit
         selected = rows[:limit]
         values = [
-            self._decode_observation_row(namespace, namespace_key, row)
+            _decode_observation_record(namespace, namespace_key, row)
             for row in selected
         ]
 
@@ -545,21 +582,56 @@ class SqlMetricStore:
         return Page(tuple(values), next_cursor)
 
     async def prune_observations(self, namespace: str, *, before: datetime) -> int:
-        from sqlalchemy import delete
+        from sqlalchemy import and_, or_, update
 
         await self._initialize()
         namespace_key = namespace_digest(namespace)
 
-        async def delete_rows(session: "AsyncSession") -> int:
-            result = await self._context.run_statement(session.execute(
-                delete(self._observations).where(
-                    self._observations.c.namespace_digest == namespace_key,
-                    self._observations.c.occurred_at < before,
+        async def prune_rows(session: "AsyncSession") -> int:
+            if not self._context.dialect.single_writer:
+                await self._context.dialect.begin_consistent_read(session)
+            pruned_at = await self._context.dialect.database_now(session)
+            columns = self._observations.c
+            after: tuple[datetime, str] | None = None
+            count = 0
+            while True:
+                statement = self._select_observations().where(
+                    columns.namespace_digest == namespace_key,
+                    columns.pruned_at.is_(None),
+                    columns.active_occurred_at < before,
                 )
-            ))
-            return int(result.rowcount or 0)
+                if after is not None:
+                    statement = statement.where(or_(
+                        columns.active_occurred_at > after[0],
+                        and_(columns.active_occurred_at == after[0],
+                             columns.observation_digest > after[1]),
+                    ))
+                statement = statement.order_by(
+                    columns.active_occurred_at, columns.observation_digest,
+                ).limit(256)
+                rows = (await self._context.run_statement(
+                    session.execute(statement)
+                )).mappings().all()
+                if not rows:
+                    return count
+                for row in rows:
+                    _decode_observation_record(namespace, namespace_key, row)
+                identities = tuple(row["observation_digest"] for row in rows)
+                result = await self._context.run_statement(session.execute(
+                    update(self._observations).where(
+                        columns.namespace_digest == namespace_key,
+                        columns.observation_digest.in_(identities),
+                        columns.pruned_at.is_(None),
+                    ).values(
+                        pruned_at=pruned_at, payload_json=None,
+                        active_occurred_at=None,
+                    )
+                ))
+                count += int(result.rowcount or 0)
+                last = rows[-1]
+                after = (last["active_occurred_at"], last["observation_digest"])
 
-        return await self._context.run_mutation(delete_rows, domain="metrics.prune")
+        return await self._context.run_mutation(prune_rows, domain="metrics.prune")
 
 
 
@@ -579,7 +651,7 @@ def _configure_sqlite_verifier(
 ) -> None:
     # Pool entry info is cleared when its physical connection is replaced.
     if record.info.get("linktools_metric_verifier") is not _sqlite_record_error:
-        connection.create_function("linktools_metric_verify", 8, _sqlite_record_error)
+        connection.create_function("linktools_metric_verify", 12, _sqlite_record_error)
         record.info["linktools_metric_verifier"] = _sqlite_record_error
 
 
@@ -604,24 +676,29 @@ def _sqlite_record_error(
     kind: str,
     occurred_at: str,
     payload: str,
+    original_namespace: str,
+    observation_id: str,
+    active_occurred_at: str | None,
+    pruned_at: str | None,
 ) -> str | None:
     try:
-        decoded = json.loads(
-            payload,
-            object_pairs_hook=_unique_json_pairs,
-            parse_constant=_reject_json_constant,
-        )
         timestamp = datetime.fromisoformat(occurred_at)
         _decode_observation_record(
             namespace,
             namespace_key,
             {
+                "namespace": original_namespace,
+                "observation_id": observation_id,
                 "namespace_digest": stored_namespace,
                 "observation_digest": stored_identity,
                 "payload_digest": stored_payload,
                 "kind": kind,
                 "occurred_at": timestamp,
-                "payload_json": decoded,
+                "payload_json": payload,
+                "active_occurred_at": (
+                    None if active_occurred_at is None else datetime.fromisoformat(active_occurred_at)
+                ),
+                "pruned_at": None if pruned_at is None else datetime.fromisoformat(pruned_at),
             },
         )
     except AIError as error:
@@ -632,18 +709,54 @@ def _sqlite_record_error(
     return None
 
 
+def _validate_observation_identity(
+    namespace: str,
+    namespace_key: str,
+    row: "Mapping[str, object]",
+) -> None:
+    try:
+        validate_persistence_namespace(cast(str, row["namespace"]))
+        validate_resource_id(cast(str, row["observation_id"]))
+        _identifier(row["kind"], name="observation kind")
+    except (AIError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if (
+        row["namespace"] != namespace
+        or row["namespace_digest"] != namespace_key
+        or row["observation_digest"] != observation_digest(namespace, cast(str, row["observation_id"]))
+        or not isinstance(row["payload_digest"], str)
+        or _SHA256.fullmatch(row["payload_digest"]) is None
+        or not isinstance(row["occurred_at"], datetime)
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
 def _decode_observation_record(
     namespace: str,
     namespace_key: str,
     row: "Mapping[str, object]",
 ) -> Observation:
+    _validate_observation_identity(namespace, namespace_key, row)
+    payload = row["payload_json"]
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(
+                payload, object_pairs_hook=_unique_json_pairs,
+                parse_constant=_reject_json_constant,
+            )
+        except (TypeError, ValueError, RecursionError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     observation = decode_observation_envelope(
-        row["payload_json"], expected_namespace=namespace
+        payload, expected_namespace=namespace
     )
     expected_identity = observation_digest(namespace, observation.observation_id)
     expected_payload = observation_payload_digest(namespace, observation)
     if (
         row["namespace_digest"] != namespace_key
+        or row["observation_id"] != observation.observation_id
+        or row["pruned_at"] is not None
+        or not isinstance(row["active_occurred_at"], datetime)
+        or _utc_database_datetime(row["active_occurred_at"]) != observation.occurred_at
         or row["kind"] != observation.kind
         or _utc_database_datetime(cast("datetime", row["occurred_at"]))
         != observation.occurred_at

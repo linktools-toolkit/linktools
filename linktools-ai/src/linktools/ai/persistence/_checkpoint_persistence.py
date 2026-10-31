@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Checkpoint-owned preparation and recoverable archive materialization."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from ..errors import AIError, ErrorCode
 from ._model_interaction import StagedModelInteraction
@@ -23,10 +23,12 @@ class CheckpointPersistence:
     def __init__(
         self, staging: StagingAgentRunStore, archive: AgentRunStore | None,
         trace_archive: AgentRunStore | None,
+        *, trace_source_only: Callable[[str], bool] | None = None,
     ) -> None:
         self._staging = staging
         self.archive = archive
         self._trace_archive = trace_archive
+        self._trace_source_only = trace_source_only or (lambda _run_id: False)
 
     async def prepare_checkpoint(
         self, archive: StateStepArchive, run: AgentRunRecord,
@@ -87,6 +89,8 @@ class CheckpointPersistence:
         agent_run_id: str,
         after_model_request_seq: int | None = None,
     ) -> tuple[StagedModelInteraction, ...]:
+        if self._trace_source_only(agent_run_id):
+            return ()
         staged = await self._staging.list_model_interactions(
             agent_run_id=agent_run_id,
             after_model_request_seq=after_model_request_seq,
@@ -105,9 +109,23 @@ class CheckpointPersistence:
         return tuple(terminal)
 
 
-    async def materialize_recovery_checkpoint(self, *, agent_run_id: str, require_complete: bool) -> None:
-        checkpoint = await self._staging.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=True)
-        run = await self._staging.get_agent_run(agent_run_id=agent_run_id)
+    async def materialize_recovery_checkpoint(
+        self, *, agent_run_id: str, require_complete: bool,
+        captured: tuple[AgentRunRecord, AgentRunCheckpoint | None] | None = None,
+    ) -> None:
+        if self._trace_source_only(agent_run_id):
+            if require_complete:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            # Required recovery boundaries were published by their own owner;
+            # a rejected Trace tail must not enter through terminal relocation.
+            return
+        if captured is None:
+            checkpoint = await self._staging.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=True)
+            run = await self._staging.get_agent_run(agent_run_id=agent_run_id)
+        else:
+            run, checkpoint = captured
+            if run.agent_run_id != agent_run_id or checkpoint is not None and checkpoint.agent_run_id != agent_run_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         archive = self.archive
         if checkpoint is None or run is None:
             if require_complete:

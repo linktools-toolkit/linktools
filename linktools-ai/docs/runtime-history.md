@@ -24,7 +24,7 @@ checks, including on transient execution routes.
 With durable trace enabled and an explicit `CommitPolicy.batch(buffer=...)`,
 Trace coalesces observation writes through its owned cache-buffer scopes. The
 default batch policy flushes at 128 observation boundaries or after three seconds.
-Without a write-buffer cache, observation writes are synchronous. Each run keeps its own transaction and completion barrier, so a blocked
+In batch mode without a write buffer, observation writes are synchronous. Each run keeps its own transaction and completion barrier, so a blocked
 run does not stop another run's publication. An idle Runtime performs no flush.
 Storage latency and contention can extend publication time. A blocked provider
 or tool does not need to produce another event for that scheduled flush to run.
@@ -37,8 +37,8 @@ While a retained model request is `RUNNING`, its public interaction contains
 identity/status metadata and empty request/response content. The prepared input
 stays with the active request. Separately enabled restart checkpoints preserve
 recovery context without publishing public trace.
-Completion or a controlled abnormal end publishes the actual prepared input and
-any received response. Requesting content early does not force a write or provider completion.
+Completion or a controlled abnormal end makes the actual prepared input and
+received response eligible for the selected Trace publication boundary. Requesting content early does not force a write or provider completion.
 With `TraceCapability(record_http_bodies=True)`, complete outgoing raw HTTP
 input may be captured before provider completion; the deferred body rule excludes
 half-received response fragments. Requests containing `ReferencedContent` instead
@@ -47,12 +47,23 @@ the immutable descriptor. See [recoverable reference inputs](file-tools.md#recov
 Raw HTTP body capture is disabled by default. Model metadata
 may be refined during preparation without changing request identity or start time.
 
+`TraceCapability(commit=CommitPolicy.terminal(buffer=write_buffer))` freezes the
+same eligible projection and dependency bytes but does not publish on a batch
+timer. The verified prefix joins the existing terminal source transaction;
+required safety or explicit publication boundaries remain independent. Without
+a buffer, terminal Trace keeps its existing local staging. Working reads still
+come from that owner, while independent History reads only source-confirmed
+facts. A shared buffer is not an independently readable History archive or a
+restart/takeover mechanism. See [commit boundaries](runtime-capabilities.md#independent-commit-boundaries).
+
 With shared retained backing storage, independently opened
 `History.open(persistence=p)` readers see the committed prefix while the execution
 is active. An immediate read after a live notification can be empty; a fresh
 read after publication includes the new facts. Opted-in recovery checkpoints
-remain durable independently of public observation publication. Terminal handoffs and
-Runtime close drain queued observations before completing. Separate in-memory
+remain durable independently of public observation publication. Terminal handoffs resolve their selected observations with canonical control.
+Runtime close drains eligible queued observations and reports unresolved
+source/control or acknowledgement cleanup; it cannot make an unresolved terminal
+prefix durable by silently changing its publication policy. Separate in-memory
 storage instances do not share state. An explicit TRANSIENT execution route
 exposes active content immediately in its owning Runtime/process and discards
 it according to its handoff policy.
@@ -602,8 +613,11 @@ from trace or checkpoint data: fork reports `CAPABILITY_REQUIRED_MISSING`.
 
 With `ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal())`, eligible
 terminal-only source turns retain this context in the existing final
-owner batch in one database write transaction. Object bodies still have their
-own I/O. Fork and retry executions retain their existing durable-path admission
+owner batch in one database write transaction. An explicit terminal payload
+buffer also freezes the retained final context when Trace is absent. Newly
+captured object bodies are materialized during source preparation and still have
+their own I/O. Buffer admission does not promise one network operation or recovery
+after process loss. Fork and retry executions retain their existing durable-path admission
 and do not inherit that one-write-transaction guarantee.
 
 After an executor crashes, confirm it has stopped, then call the existing
@@ -654,9 +668,12 @@ derive from the graph recovery request, so retrying a partly recovered graph
 does not take over an already recovered child again. A later recovery boundary
 requires a new graph recovery key.
 
-Filesystem execution storage can automatically recover admitted checkpoint-enabled
-executions because its existing writer lock supplies exclusive ownership.
-Storage alone does not grant restart recovery. SQL startup can still finish
+Filesystem execution storage and an exclusively owned local SQLite root can
+automatically recover admitted checkpoint-enabled executions because their live
+resource writer lock supplies exclusive ownership. Select the latter explicitly
+with `PersistenceStorage.from_root(root, exclusive_writer=True)`; ordinary
+`from_root`, `sqlite(path)` and shared SQL retain their existing behavior. The
+request flag or file path alone does not grant restart recovery. Shared SQL startup can still finish
 durably handed-off work, including deferred continuations, prepared terminal
 handoffs, and terminal cleanup. A plain `FINALIZING` status alone is not proof
 that an active producer relinquished ownership.

@@ -11,7 +11,6 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from linktools.ai.core import CommitPolicy
 from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.capability import ExecutionCapability
@@ -88,7 +87,7 @@ async def test_two_runtimes_observe_preview_before_completion(tmp_path) -> None:
 
     backend = _CombinedCache()
     group.capability(ExecutionCapability(), scope="runtime")
-    metrics = Metrics.in_memory(commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=backend))
+    metrics = Metrics.in_memory()
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
 
     async def assert_persisted_metrics(expected: int) -> None:
@@ -132,14 +131,14 @@ async def test_two_runtimes_observe_preview_before_completion(tmp_path) -> None:
             finally:
                 release.set()
                 await observed.aclose()
-            await assert_persisted_metrics(0)
+            await assert_persisted_metrics(1)
             await producer.close()
             await assert_persisted_metrics(1)
             assert not backend.closed
             assert await reader._state.read_object(PersistenceDomain.EXECUTION, reference) == b"shared cached body"
             second = await reader.agents.get().run("another question", timeout_seconds=5)
             assert second.result.output == {"text": "hello world"}
-            await assert_persisted_metrics(1)
+            await assert_persisted_metrics(2)
     await assert_persisted_metrics(2)
     assert backend.open_keys
     assert not backend.closed

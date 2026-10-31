@@ -251,6 +251,25 @@ class StagedModelInteraction:
         object.__setattr__(self, "attachments", tuple(normalized_attachments))
 
 
+    def payload_dependencies(self) -> tuple[tuple[str, int | None], ...]:
+        """Content owned by this staged interaction, excluding durable references."""
+        dependencies: dict[str, int | None] = {}
+        if self.request_envelope_digest is not None:
+            dependencies[self.request_envelope_digest] = None
+        contexts = (self.request_context, self.response_context, *(
+            attempt.response_context for attempt in self.stream_attempts or ()
+        ))
+        for context in contexts:
+            if context is not None:
+                for item in context.items:
+                    if isinstance(item, StagedContextInline):
+                        previous = dependencies.get(item.payload_digest)
+                        if previous is not None and previous != item.size:
+                            raise ValueError("staged payload has conflicting sizes")
+                        dependencies[item.payload_digest] = item.size
+        return tuple(dependencies.items())
+
+
 PayloadIntern = Callable[[bytes], tuple[str, int]]
 
 

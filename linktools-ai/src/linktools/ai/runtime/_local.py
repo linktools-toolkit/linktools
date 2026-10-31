@@ -45,8 +45,11 @@ from ..inputs import (
     stored_input_attachment_views,
 )
 from ._plan import RuntimePlanStore
+from ._execution_payload import _materialize_execution_json, _materialize_execution_payloads
+from ._execution_buffer import _ExecutionPayloadBuffer, _ExecutionPayloadCapture
 from ._pending_turn import _PendingExecutionTurn, _PendingExecutionTurns
 from ..core import (
+    CommitPolicy,
     ExecutionEventType,
     ExecutionMode,
     ExecutionLineageKind,
@@ -280,9 +283,16 @@ class LocalExecutionBackend:
         metric_recorder: "MetricRecorder | None" = None,
         worker_completed: "Callable[[str], Awaitable[None]] | None" = None,
         exclusive_execution_writer: bool = False,
+        commit: CommitPolicy = CommitPolicy.sync(),
+        trace_commit: CommitPolicy | None = None,
         pending_turns: _PendingExecutionTurns | None = None,
         pending_cancel: Callable[[str, Principal], Awaitable[object]] | None = None,
     ) -> None:
+        if not isinstance(commit, CommitPolicy) or commit.mode not in {"sync", "terminal"}:
+            raise ValueError("Execution requires sync or terminal commit")
+        self._commit = commit
+        self._trace_commit = trace_commit
+        self._execution_buffer = None if commit.buffer is None else _ExecutionPayloadBuffer(commit.buffer)
         self._pending_turns = pending_turns or _PendingExecutionTurns()
         self._pending_cancel = pending_cancel
         self._pending_renewals: dict[str, asyncio.Task[None]] = {}
@@ -746,7 +756,7 @@ class LocalExecutionBackend:
     ) -> ExecutionTerminalCommitResult:
         execution_id = commit.execution.execution_id
         async with self._audit_lock(execution_id):
-            pending = tuple(self._pending_audit_events.get(execution_id, ()))
+            pending = await self._source_audit_prefix(execution_id)
             committed = await self._runtime_commands.commit_terminal_checkpoint(
                 commit,
                 session_id=session_id,
@@ -754,7 +764,11 @@ class LocalExecutionBackend:
                 audit_events=pending,
                 background_tasks=self._execution_task_set(execution_id),
             )
-            self._pending_audit_events.pop(execution_id, None)
+            self._confirm_source_audits(execution_id, len(pending))
+            if self._execution_buffer is not None:
+                # This necessary control terminal abandons any candidate payload;
+                # only its selected audit prefix was published by this command.
+                self._execution_buffer.discard(execution_id)
             self._confirm_committed_events(
                 execution_id,
                 pending_count=len(pending),
@@ -810,7 +824,7 @@ class LocalExecutionBackend:
             )
             if current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            pending = tuple(self._pending_audit_events.get(commit.execution_id, ()))
+            pending = await self._source_audit_prefix(commit.execution_id)
             producer_generation = self._agent_run_lifecycle.execution_producer_generation(
                 make_agent_run_id(
                     namespace=self._namespace, tenant_id=self._tenant_id,
@@ -883,7 +897,7 @@ class LocalExecutionBackend:
                 )
             else:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            self._pending_audit_events.pop(commit.execution_id, None)
+            self._confirm_source_audits(commit.execution_id, len(pending))
             cancel_sequence = (
                 effective_commit.expected_event_seq + len(pending) + 1
             )
@@ -934,7 +948,10 @@ class LocalExecutionBackend:
 
     def _can_prepare_initial_attempt(self, execution: ExecutionRecord, binding: AgentBinding | None = None) -> bool:
         if (type(self) is not LocalExecutionBackend or execution.restart_checkpoints
-                or execution.durable_trace or execution.binding_kind != "agent"
+                or execution.durable_trace and (
+                    self._trace_commit is None or self._trace_commit.mode != "terminal"
+                    or self._execution_buffer is None and self._trace_commit.buffer is None)
+                or execution.binding_kind != "agent"
                 or execution.parent_execution_id is not None
                 or execution.requires_task_invocation_capture
                 or execution.input_context is not None or execution.agent_run_seq != 0
@@ -971,7 +988,7 @@ class LocalExecutionBackend:
         session: SessionRecord | None, coordination: TurnCoordination | None,
     ) -> str | None:
         execution = reservation.execution
-        if (coordination is None or self._pending_turns.coordination is None
+        if (self._commit.mode != "terminal" or coordination is None or self._pending_turns.coordination is None
                 or not execution.conversation or not self._can_prepare_initial_attempt(execution, request.resolved_binding)
                 or execution.budget_scope_id is not None or execution.memory_scope is not None
                 or not self._conversation_durable or not self._execution_objects_durable
@@ -1024,6 +1041,8 @@ class LocalExecutionBackend:
                 return turn.execution.execution_id
             turn.coordination = coordination
             turn.promotion_claim_id = coordination.owner_id
+            if self._execution_buffer is not None:
+                await self._execution_buffer.append(_ExecutionPayloadCapture(turn.execution, turn.reservation))
             await coordinator.publish(turn.execution, coordination)
             if not self._accepting:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -1052,6 +1071,9 @@ class LocalExecutionBackend:
         except BaseException:
             if turn is not None:
                 self._pending_turns.release(turn)
+                if self._execution_buffer is not None:
+                    self._execution_buffer.discard(execution.execution_id)
+                    await self._execution_buffer.release(execution.execution_id)
             # Until this method returns an ID, the admission owner retains the
             # lease and releases it on failure.
             raise
@@ -1138,7 +1160,19 @@ class LocalExecutionBackend:
                 raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
 
             await self._check_pending_lease(turn, allow_cancelled=allow_cancelled)
+            reservation = turn.reservation
             context = turn.execution.input_context
+            if self._execution_buffer is not None:
+                captured, _ids = await self._execution_buffer.read(execution_id)
+                if captured.reservation is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                reservation = captured.reservation
+                context = captured.execution.input_context
+            reservation = replace(reservation, execution=await _materialize_execution_payloads(
+                reservation.execution, input_materializer=self._input_materializer,
+                objects=self._execution_objects, keys=ObjectKeyFactory(self._namespace),
+                policy=self._payload_policy, tenant_id=self._tenant_id,
+            ))
             context_write = None
             if context is not None:
                 prepared = await self._context_archive.prepare(await self.load_input_context(context),
@@ -1158,14 +1192,12 @@ class LocalExecutionBackend:
 
             async def confirm() -> None:
                 value = await self._runtime_commands.read_pending_turn_promotion(
-                    turn.reservation, expected_session=turn.session,
+                    reservation, expected_session=turn.session,
                     captured_input_context=context, producer_claim_id=claim,
                 )
                 if value is None:
-                    error = AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"phase": "pending_promotion_not_found"})
-                    self._pending_turns.fail(turn, error)
-                    self._record_worker_failure(execution_id, error)
-                    raise error
+                    # Absence does not prove rollback of the original unknown attempt.
+                    raise turn.failure or AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
                 execution, checkpoint = value
                 failure = turn.failure
                 await accept()
@@ -1185,11 +1217,12 @@ class LocalExecutionBackend:
 
             async def promote_owned() -> None:
                 await self._runtime_commands.promote_pending_turn(
-                    turn.reservation, expected_session=turn.session,
+                    reservation, expected_session=turn.session,
                     captured_input_context=context, producer_claim_id=claim, context_write=context_write,
                 )
                 await accept()
 
+            await self._check_pending_lease(turn, allow_cancelled=allow_cancelled)
             task = asyncio.create_task(promote_owned(), name=f"ai-promote-pending-{execution_id}")
             _result, cancellation = await self._await_checkpoint_task(
                 task, label="pending promotion", execution_id=execution_id,
@@ -1570,6 +1603,8 @@ class LocalExecutionBackend:
             assert failure is not None
             self._pending_turns.fail(turn, failure)
             if not turn.uncertain:
+                if self._execution_buffer is not None:
+                    self._execution_buffer.discard(execution_id)
                 cleanup = asyncio.create_task(self._release_pending_coordination(turn))
                 self._track_checkpoint_task(cleanup, "pending_release", execution_id)
         self._live_broker.complete(execution_id)
@@ -1996,27 +2031,37 @@ class LocalExecutionBackend:
         await self._agent_run_lifecycle.flush_execution_projection(
             continuation.source_agent_run_id, execution_id=execution.execution_id,
         )
-        pending_audit = tuple(
-            self._pending_audit_events.get(execution.execution_id, ())
-        )
-        committed, committed_checkpoint = (
-            await self._runtime_commands.commit_deferred_checkpoint(
-                execution_id=execution.execution_id,
-                tenant_id=self._tenant_id,
-                expected_execution_revision=execution.revision,
-                expected_event_seq=execution.event_seq,
-                expected_recovery_revision=checkpoint.revision,
-                expected_agent_run_seq=execution.agent_run_seq,
-                continuation=continuation,
-                audit_events=pending_audit,
-                approval_records=approval_records,
-                external_records=external_records,
-                occurred_at=occurred_at,
-                background_tasks=self._execution_task_set(execution.execution_id),
-                producer_generation=producer_generation,
+        async with self._audit_lock(execution.execution_id):
+            payload_ids: tuple[str, ...] = ()
+            if self._execution_buffer is not None:
+                captured, payload_ids = await self._execution_buffer.source_prefix(execution.execution_id)
+                if captured is not None and captured.terminal is not None:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+            pending_audit = await self._source_audit_prefix(execution.execution_id)
+            committed, committed_checkpoint = (
+                await self._runtime_commands.commit_deferred_checkpoint(
+                    execution_id=execution.execution_id,
+                    tenant_id=self._tenant_id,
+                    expected_execution_revision=execution.revision,
+                    expected_event_seq=execution.event_seq,
+                    expected_recovery_revision=checkpoint.revision,
+                    expected_agent_run_seq=execution.agent_run_seq,
+                    continuation=continuation,
+                    audit_events=pending_audit,
+                    approval_records=approval_records,
+                    external_records=external_records,
+                    occurred_at=occurred_at,
+                    background_tasks=self._execution_task_set(execution.execution_id),
+                    producer_generation=producer_generation,
+                )
             )
-        )
-        self._pending_audit_events.pop(execution.execution_id, None)
+            if self._execution_buffer is not None:
+                self._execution_buffer.confirm(execution.execution_id, payload_ids)
+            self._confirm_source_audits(execution.execution_id, len(pending_audit))
+            if self._execution_buffer is not None:
+                if producer_generation is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                self._execution_buffer.retire(execution.execution_id, producer_generation)
         if pending_audit:
             self._live_broker.confirm_events(
                 execution.execution_id,
@@ -3176,6 +3221,8 @@ class LocalExecutionBackend:
             )
 
         await self._live_broker.close_shared()
+        if self._execution_buffer is not None:
+            await self._execution_buffer.close()
 
         pending_workers = tuple(
             task for task in self._tasks.values() if not task.done()
@@ -3664,7 +3711,8 @@ class LocalExecutionBackend:
                         )
                     )
                     return
-                await self._append_event(current, emission.event_type, emission.payload)
+                await self._append_event(current, emission.event_type, emission.payload,
+                    producer_generation=producer_generation)
 
             subagent_refs = binding.binding_contract.subagents
             subagent_available = (
@@ -3746,6 +3794,11 @@ class LocalExecutionBackend:
                                 )
                                 pending.history_root = loaded_context.archive_root
                                 pending.history_digest = loaded_context.archive_digest
+                                if self._execution_buffer is not None:
+                                    await self._execution_buffer.append(_ExecutionPayloadCapture(
+                                        current, pending.reservation,
+                                        audit_events=tuple(self._pending_audit_events.get(execution_id, ())),
+                                    ))
                                 assert self._pending_turns.coordination is not None and pending.coordination is not None
                                 await self._pending_turns.coordination.publish(current, pending.coordination)
                             else:
@@ -3787,6 +3840,8 @@ class LocalExecutionBackend:
                     self._live_broker.admit_shared_producer(
                         execution_id, producer_generation, shared_head.producer_claim_id,
                     )
+            if self._execution_buffer is not None:
+                self._execution_buffer.bind_producer(execution_id, producer_generation)
             if isinstance(self._run_store, RuntimeAgentRunStore):
                 self._run_store.bind_execution_producer(
                     agent_run_id,
@@ -3931,10 +3986,29 @@ class LocalExecutionBackend:
                 terminal = current.status in {
                     ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
                 }
+                capability_writes = (self._run_store.capability_writes
+                                     if isinstance(self._run_store, RuntimeAgentRunStore) else None)
+                rejected_capability_write = (
+                    agent_run_id is not None and capability_writes is not None
+                    and capability_writes.is_buffer_rejection(
+                        agent_run_id, execution_id=execution_id, error=error,
+                    )
+                )
+                rejected_execution_payload = (
+                    self._execution_buffer is not None
+                    and self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is None
+                    and await self._execution_buffer.settle_rejection(execution_id, error)
+                )
                 if _is_infrastructure_error(error) and not (
-                    isinstance(error, AIError) and error.code is ErrorCode.STORAGE_CONFLICT and terminal
+                    rejected_execution_payload or rejected_capability_write
+                    or isinstance(error, AIError) and error.code is ErrorCode.STORAGE_CONFLICT and terminal
                 ):
-                    raise
+                    if (terminal or agent_run_id is None or producer_generation is None
+                            or not await self._agent_run_lifecycle.settle_trace_buffer_failure(
+                                agent_run_id, execution_id=execution_id,
+                                producer_generation=producer_generation, error=error,
+                            )):
+                        raise
                 if terminal and producer_generation is not None:
                     await self._discard_terminal_producer_tail(
                         current, agent_run_id=agent_run_id, producer_generation=producer_generation,
@@ -4073,6 +4147,14 @@ class LocalExecutionBackend:
                     publish_readback = True
                 else:
                     try:
+                        if (self._execution_buffer is not None
+                                and self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is None):
+                            await self._execution_buffer.settle_rejection(execution_id, terminal_error)
+                        if producer_generation is not None:
+                            await self._agent_run_lifecycle.settle_trace_buffer_failure(
+                                agent_run_id, execution_id=execution_id,
+                                producer_generation=producer_generation, error=terminal_error,
+                            )
                         committed = await self._commit_failure(
                             persisted,
                             terminal_error,
@@ -4326,12 +4408,38 @@ class LocalExecutionBackend:
         execution: ExecutionRecord,
         event_type: ExecutionEventType,
         payload: JsonValue,
+        *, producer_generation: int | None = None,
     ) -> None:
-        event_payload = payload if isinstance(payload, Mapping) else {"value": payload}
+        normalized = normalize_json_value(payload)
+        event_payload = normalized if isinstance(normalized, Mapping) else {"value": normalized}
         async with self._audit_lock(execution.execution_id):
-            self._pending_audit_events.setdefault(execution.execution_id, []).append(
-                ExecutionEventAppend(event_type, event_payload)
-            )
+            pending_events = self._pending_audit_events.setdefault(execution.execution_id, [])
+            event = ExecutionEventAppend(event_type, event_payload)
+            turn = self._pending_turns.get(execution.execution_id, tenant_id=self._tenant_id)
+            if self._execution_buffer is not None:
+                if producer_generation is not None:
+                    self._execution_buffer.require_producer(execution.execution_id, producer_generation)
+                previous = None
+                if self._execution_buffer.has_scope(execution.execution_id):
+                    previous, _ids = await self._execution_buffer.source_prefix(execution.execution_id)
+                capture_execution = turn.execution if turn is not None else execution
+                reservation = turn.reservation if turn is not None else None
+                if previous is not None:
+                    capture_execution = replace(
+                        capture_execution, stored_user_input=previous.execution.stored_user_input,
+                        repository_instructions=previous.execution.repository_instructions,
+                        input_context=previous.execution.input_context or capture_execution.input_context,
+                    )
+                    reservation = previous.reservation
+                    if previous.terminal is not None:
+                        capture_execution = previous.execution
+                await self._execution_buffer.append(_ExecutionPayloadCapture(
+                    capture_execution, reservation,
+                    terminal=None if previous is None else previous.terminal,
+                    audit_events=(*(previous.audit_events if previous is not None else ()), event),
+                    checkpoint_payload=None if previous is None else previous.checkpoint_payload,
+                ))
+            pending_events.append(event)
             self._live_broker.publish_event(
                 execution.execution_id,
                 event_type,
@@ -4344,6 +4452,91 @@ class LocalExecutionBackend:
             str(event_type),
             len(self._pending_audit_events.get(execution.execution_id, ())),
         )
+
+    async def _source_audit_prefix(self, execution_id: str) -> tuple[ExecutionEventAppend, ...]:
+        if self._execution_buffer is None or not self._execution_buffer.has_scope(execution_id):
+            return tuple(self._pending_audit_events.get(execution_id, ()))
+        if self._execution_buffer.settled(execution_id):
+            return ()
+        captured, _ids = await self._execution_buffer.source_prefix(execution_id)
+        start = self._execution_buffer.audit_position(execution_id)
+        if captured is None:
+            if start:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return ()
+        if start > len(captured.audit_events):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return captured.audit_events[start:]
+
+    def _confirm_source_audits(self, execution_id: str, count: int) -> None:
+        if self._execution_buffer is not None and self._execution_buffer.has_scope(execution_id):
+            self._execution_buffer.confirm_audits(
+                execution_id, start=self._execution_buffer.audit_position(execution_id), count=count,
+            )
+        tail = self._pending_audit_events.get(execution_id)
+        if tail is not None:
+            del tail[:count]
+            if not tail:
+                self._pending_audit_events.pop(execution_id, None)
+
+    async def _prepare_source_terminal_payload(
+        self, current: ExecutionRecord, commit: ExecutionTerminalCommit, *,
+        checkpoint_payload: bytes | None = None,
+    ) -> tuple[ExecutionTerminalCommit, bytes | None, tuple[str, ...]]:
+        buffer = self._execution_buffer
+        if buffer is None:
+            return commit, checkpoint_payload, ()
+        previous = None
+        ids: tuple[str, ...] = ()
+        if buffer.has_scope(current.execution_id):
+            previous, ids = await buffer.source_prefix(current.execution_id)
+        if buffer.rejection_settled(current.execution_id):
+            if commit.execution.status not in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return commit, None if previous is None else previous.checkpoint_payload, ids
+        logical_execution = commit.execution
+        if previous is not None:
+            logical_execution = replace(
+                logical_execution, stored_user_input=previous.execution.stored_user_input,
+                repository_instructions=previous.execution.repository_instructions,
+                input_context=previous.execution.input_context or logical_execution.input_context,
+            )
+        logical_commit = replace(commit, execution=logical_execution)
+        if (previous is not None and previous.terminal is not None
+                and previous.terminal.result.output is not None and commit.result.output is not None
+                and previous.terminal.result.output.digest == commit.result.output.digest):
+            logical_commit = replace(logical_commit,
+                result=replace(logical_commit.result, output=previous.terminal.result.output))
+        try:
+            await buffer.append(_ExecutionPayloadCapture(
+                logical_execution, None if previous is None else previous.reservation,
+                terminal=logical_commit, audit_events=() if previous is None else previous.audit_events,
+                checkpoint_payload=checkpoint_payload,
+            ))
+        except AIError as error:
+            if (commit.execution.status not in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
+                    or not await buffer.settle_rejection(current.execution_id, error)):
+                raise
+            # Only definite rejection of this owner's candidate may settle the
+            # necessary control outcome from its previously accepted prefix.
+            return await self._prepare_source_terminal_payload(current, commit)
+        selected, ids = await buffer.read(current.execution_id)
+        if selected.terminal is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        # Source-owned admission fields may already be materialized (promotion).
+        # Newly produced result bytes always come from the selected buffer entry.
+        selected_commit = replace(selected.terminal, execution=replace(
+            selected.execution, stored_user_input=current.stored_user_input,
+            repository_instructions=current.repository_instructions, input_context=current.input_context,
+        ))
+        output = selected_commit.result.output
+        if output is not None:
+            output = await _materialize_execution_json(
+                output, objects=self._execution_objects, keys=ObjectKeyFactory(self._namespace),
+                policy=self._payload_policy, tenant_id=self._tenant_id,
+            )
+            selected_commit = replace(selected_commit, result=replace(selected_commit.result, output=output))
+        return selected_commit, selected.checkpoint_payload, ids
 
     def _audit_lock(self, execution_id: str) -> asyncio.Lock:
         return self._pending_audit_locks.setdefault(execution_id, asyncio.Lock())
@@ -4428,6 +4621,8 @@ class LocalExecutionBackend:
         )
         async with self._audit_lock(execution.execution_id):
             self._pending_audit_events.pop(execution.execution_id, None)
+            if self._execution_buffer is not None:
+                self._execution_buffer.discard(execution.execution_id)
 
     async def _finish_superseded_worker(
         self, execution_id: str, *, agent_run_id: str | None,
@@ -4463,6 +4658,8 @@ class LocalExecutionBackend:
             )
         async with self._audit_lock(execution_id):
             self._pending_audit_events.pop(execution_id, None)
+            if self._execution_buffer is not None and producer_generation is not None:
+                self._execution_buffer.retire(execution_id, producer_generation, abandon=True)
         self._agent_run_only_worker_exits.add(execution_id)
         self._live_broker.handoff(execution_id)
         _logger.info("local execution producer superseded: execution=%s generation=%s",
@@ -4497,18 +4694,7 @@ class LocalExecutionBackend:
             return current
         if current.status is ExecutionStatus.RECOVERY_REQUIRED:
             return current
-        payload = canonical_json_bytes(output)
-        inline = StoredPayload.inline_json(output)
-        output_payload = inline
-        if not payload_fits_inline(inline, self._payload_policy):
-            object_ref = await put_runtime_object(
-                self._execution_objects,
-                ObjectKeyFactory(self._namespace),
-                PersistenceDomain.EXECUTION,
-                self._tenant_id,
-                payload,
-            )
-            output_payload = StoredPayload.object(object_ref)
+        output_payload = StoredPayload.inline_json(output)
         return await self._commit_terminal(
             current,
             ExecutionStatus.SUCCEEDED,
@@ -4520,7 +4706,7 @@ class LocalExecutionBackend:
             usage=usage,
             producer_generation=producer_generation,
             # Inline serialization has not yielded since this record was read.
-            observed_execution=current if output_payload.kind == "inline" else None,
+            observed_execution=current,
         )
 
     async def _expected_session_cursor(
@@ -4654,9 +4840,15 @@ class LocalExecutionBackend:
                 execution_id=current.execution_id,
             )
         async with self._audit_lock(current.execution_id):
-            pending = tuple(
-                self._pending_audit_events.get(current.execution_id, ())
-            )
+            payload_ids: tuple[str, ...] | None = None
+            if (self._execution_buffer is not None and self._execution_buffer.has_scope(current.execution_id)
+                    and not self._execution_buffer.settled(current.execution_id)):
+                captured, payload_ids = await self._execution_buffer.source_prefix(current.execution_id)
+                if captured is not None and (captured.terminal is not None or captured.checkpoint_payload is not None):
+                    # This control boundary only covers admission and audits,
+                    # not an uncommitted terminal/checkpoint candidate.
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            pending = await self._source_audit_prefix(current.execution_id)
             committed = await self._recovery_commands_for(
                 current.execution_id
             ).commit_recovery_required(
@@ -4666,8 +4858,15 @@ class LocalExecutionBackend:
                 audit_events=pending,
                 producer_generation=producer_generation,
             )
+            if payload_ids is not None:
+                self._execution_buffer.confirm(current.execution_id, payload_ids)
             if pending:
-                self._pending_audit_events.pop(current.execution_id, None)
+                self._confirm_source_audits(current.execution_id, len(pending))
+            if payload_ids is not None:
+                # The executor has stopped (or cancellation has drained it).
+                # Preserve effect recovery, while retiring only source-covered bytes.
+                self._execution_buffer.retire(current.execution_id,
+                    self._execution_buffer.producer_generation(current.execution_id))
             self._confirm_committed_events(
                 current.execution_id,
                 pending_count=len(pending),
@@ -5478,18 +5677,31 @@ class LocalExecutionBackend:
                     and pending.coordination is not None
                     and await coordinator.promotion_requested(pending.coordination)):
                 await self.promote_pending_execution(current.execution_id)
-            if status is ExecutionStatus.SUCCEEDED and output is not None and agent_run_id is not None:
-                async with pending.boundary:
-                    if self._pending_turns.get(current.execution_id, tenant_id=self._tenant_id) is pending:
-                        return await self._commit_pending_success(
-                            current, output, usage or UsageMetrics(), agent_run_id,
-                            producer_generation=producer_generation,
-                        )
-            else:
-                await self.promote_pending_execution(current.execution_id, allow_cancelled=True)
+            async with pending.boundary:
+                if self._pending_turns.get(current.execution_id, tenant_id=self._tenant_id) is pending:
+                    return await self._commit_pending_terminal(
+                        current, status, output, usage or self._captured_usage.get(current.execution_id, UsageMetrics()),
+                        agent_run_id, error_code=error_code, stop_reason=stop_reason,
+                        safe_error_details=safe_error_details, error_diagnostics=error_diagnostics,
+                        producer_generation=producer_generation,
+                    )
             current = await self.load_execution(current.execution_id, tenant_id=self._tenant_id)
             if current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (self._execution_buffer is None and output is not None and output.kind == "inline"
+                and not payload_fits_inline(output, self._payload_policy)):
+            output = await _materialize_execution_json(
+                output, objects=self._execution_objects, keys=ObjectKeyFactory(self._namespace),
+                policy=self._payload_policy, tenant_id=self._tenant_id,
+            )
+            current = await self.load_execution(execution.execution_id, tenant_id=self._tenant_id)
+            if current is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if expected_revision is not None and current.revision != expected_revision:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED,
+                                  ExecutionStatus.CANCELLED, ExecutionStatus.RECOVERY_REQUIRED}:
+                return current
         recovered = await self._check_reconcile_tool_effects(
             current, producer_generation=producer_generation,
         )
@@ -5544,13 +5756,61 @@ class LocalExecutionBackend:
             if recovery_checkpoint.handoff_phase is RecoveryHandoffPhase.NONE:
                 if status is ExecutionStatus.SUCCEEDED and agent_run_id is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                captured_checkpoint = None
+                if self._execution_buffer is not None:
+                    checkpoint_payload = None
+                    if (agent_run_id is not None and producer_generation is not None
+                            and not self._execution_buffer.rejection_settled(current.execution_id)
+                            and not self._agent_run_lifecycle.trace_buffer_failure_settled(
+                                agent_run_id, execution_id=current.execution_id,
+                                producer_generation=producer_generation)):
+                        checkpoint_payload = await self._agent_run_lifecycle.capture_agent_run_checkpoint_payload(
+                            agent_run_id, execution_id=current.execution_id,
+                            producer_generation=producer_generation, include_interrupted=True,
+                        )
+                    candidate = ExecutionTerminalCommit(
+                        current.revision, current.event_seq,
+                        _terminal_record(current, status, now, error_code=error_code,
+                            safe_error_details=safe_error_details, error_diagnostics=error_diagnostics),
+                        ResultRecord(output, stop_reason, captured_usage, now),
+                        ExecutionEventType.EXECUTION_SUCCEEDED if status is ExecutionStatus.SUCCEEDED
+                        else ExecutionEventType.EXECUTION_CANCELLED if status is ExecutionStatus.CANCELLED
+                        else ExecutionEventType.EXECUTION_FAILED,
+                        {"agent_run_id": agent_run_id} if status is ExecutionStatus.SUCCEEDED
+                        else _terminal_error_payload(error_code, safe_error_details or {}, error_diagnostics),
+                        producer_generation=producer_generation,
+                    )
+                    async with self._audit_lock(current.execution_id):
+                        selected, selected_checkpoint, _ids = await self._prepare_source_terminal_payload(
+                            current, candidate, checkpoint_payload=checkpoint_payload,
+                        )
+                    output = selected.result.output
+                    if selected_checkpoint is not None:
+                        if agent_run_id is None or producer_generation is None:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        captured_checkpoint = self._agent_run_lifecycle.decode_agent_run_checkpoint_payload(
+                            selected_checkpoint, agent_run_id=agent_run_id, producer_generation=producer_generation,
+                        )
                 if agent_run_id is not None:
-                    if current.conversation or current.restart_checkpoints or current.durable_trace:
+                    rejected_trace = (
+                        status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
+                        and producer_generation is not None
+                        and self._agent_run_lifecycle.trace_buffer_failure_settled(
+                            agent_run_id, execution_id=current.execution_id,
+                            producer_generation=producer_generation,
+                        )
+                    )
+                    rejected_payload = (self._execution_buffer is not None
+                        and self._execution_buffer.rejection_settled(current.execution_id)
+                        and captured_checkpoint is None)
+                    if (not rejected_trace and not rejected_payload
+                            and (current.conversation or current.restart_checkpoints or current.durable_trace)):
                         await self._agent_run_lifecycle.checkpoint_persistence.materialize_recovery_checkpoint(
                             agent_run_id=agent_run_id,
                             require_complete=status is ExecutionStatus.SUCCEEDED,
+                            captured=captured_checkpoint,
                         )
-                    if producer_generation is not None:
+                    if producer_generation is not None and not rejected_trace:
                         await self._agent_run_lifecycle.flush_execution_projection(
                             agent_run_id, execution_id=current.execution_id,
                             producer_generation=producer_generation,
@@ -5741,40 +6001,127 @@ class LocalExecutionBackend:
         )
         return committed.execution
 
-    async def _commit_pending_success(
-        self, current: ExecutionRecord, output: StoredPayload, usage: UsageMetrics,
-        agent_run_id: str, *, producer_generation: int | None,
+    async def _commit_pending_terminal(
+        self, current: ExecutionRecord, status: ExecutionStatus, output: StoredPayload | None,
+        usage: UsageMetrics, agent_run_id: str | None, *, error_code: str | None,
+        stop_reason: StopReason, safe_error_details: Mapping[str, JsonValue] | None,
+        error_diagnostics: ErrorDiagnostics | None, producer_generation: int | None,
     ) -> ExecutionRecord:
         turn = self._pending_turns.get(current.execution_id, tenant_id=self._tenant_id)
         if turn is None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        run = await self._run_store.get_agent_run(agent_run_id=agent_run_id)
-        checkpoint = await self._run_store.latest_checkpoint(agent_run_id=agent_run_id)
-        if run is None or checkpoint is None:
+        successful = status is ExecutionStatus.SUCCEEDED
+        run = checkpoint = None
+        checkpoint_payload = None
+        if successful:
+            if output is None or agent_run_id is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if self._execution_buffer is None:
+                run = await self._run_store.get_agent_run(agent_run_id=agent_run_id)
+                checkpoint = await self._run_store.latest_checkpoint(agent_run_id=agent_run_id)
+                if run is None or checkpoint is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            else:
+                if producer_generation is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                checkpoint_payload = await self._agent_run_lifecycle.capture_agent_run_checkpoint_payload(
+                    agent_run_id, execution_id=current.execution_id, producer_generation=producer_generation,
+                )
+        elif output is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         history_id = None if turn.session is None else turn.session.history_id or (
             None if turn.session.continuation is None else turn.session.continuation.history_id
         )
-        context = await self.load_input_context(current.input_context)
-        if context is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        prepared_context = await self._context_archive.prepare(context,
-            history_root=turn.history_root, history_digest=turn.history_digest)
+        await self._check_pending_lease(turn, allow_cancelled=not successful)
         now = datetime.now(timezone.utc)
         terminal = replace(
-            _terminal_record(current, ExecutionStatus.SUCCEEDED, now, error_code=None),
-            input_context=prepared_context.reference,
-            conversation_agent_run_id=None if turn.session is None else agent_run_id,
+            _terminal_record(current, status, now, error_code=error_code,
+                             safe_error_details=safe_error_details, error_diagnostics=error_diagnostics),
+            conversation_agent_run_id=agent_run_id if successful and turn.session is not None else None,
         )
         commit = ExecutionTerminalCommit(
             current.revision, current.event_seq, terminal,
-            ResultRecord(output, StopReason.END_TURN, usage, now),
-            ExecutionEventType.EXECUTION_SUCCEEDED, {"agent_run_id": agent_run_id},
+            ResultRecord(output, stop_reason, usage, now),
+            (ExecutionEventType.EXECUTION_SUCCEEDED if successful else
+             ExecutionEventType.EXECUTION_CANCELLED if status is ExecutionStatus.CANCELLED else
+             ExecutionEventType.EXECUTION_FAILED),
+            {"agent_run_id": agent_run_id} if successful else _terminal_error_payload(
+                error_code, safe_error_details or {}, error_diagnostics,
+            ),
             producer_generation=producer_generation,
         )
-        pending_audit = tuple(self._pending_audit_events.get(current.execution_id, ()))
-        await self._check_pending_lease(turn, allow_cancelled=False)
-        turn.begin_commit()
+        reservation = turn.reservation
+        async with self._audit_lock(current.execution_id):
+            pending_audit = tuple(self._pending_audit_events.get(current.execution_id, ()))
+            payload_ids: tuple[str, ...] = ()
+            if self._execution_buffer is not None:
+                await self._execution_buffer.append(_ExecutionPayloadCapture(
+                    terminal, reservation, commit, pending_audit, checkpoint_payload,
+                ))
+                captured, payload_ids = await self._execution_buffer.read(current.execution_id)
+                if captured.terminal is None or captured.reservation is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                commit, reservation, pending_audit = captured.terminal, captured.reservation, captured.audit_events
+                if successful:
+                    if captured.checkpoint_payload is None or agent_run_id is None or producer_generation is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    run, checkpoint = self._agent_run_lifecycle.decode_agent_run_checkpoint_payload(
+                        captured.checkpoint_payload, agent_run_id=agent_run_id, producer_generation=producer_generation,
+                    )
+                    if checkpoint is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        context = await self.load_input_context(commit.execution.input_context)
+        if context is None and successful:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        terminal = await _materialize_execution_payloads(
+            commit.execution, input_materializer=self._input_materializer,
+            objects=self._execution_objects, keys=ObjectKeyFactory(self._namespace),
+            policy=self._payload_policy, tenant_id=self._tenant_id,
+        )
+        reservation = replace(reservation, execution=replace(
+            reservation.execution, stored_user_input=terminal.stored_user_input,
+            repository_instructions=terminal.repository_instructions,
+        ))
+        output = commit.result.output
+        if output is not None:
+            output = await _materialize_execution_json(
+                output, objects=self._execution_objects, keys=ObjectKeyFactory(self._namespace),
+                policy=self._payload_policy, tenant_id=self._tenant_id,
+            )
+        prepared_context = None if context is None else await self._context_archive.prepare(context,
+            history_root=turn.history_root, history_digest=turn.history_digest)
+        commit = replace(commit,
+            execution=replace(terminal, input_context=None if prepared_context is None else prepared_context.reference),
+            result=replace(commit.result, output=output),
+        )
+        plan: ExecutionTerminalSealPlan | None = None
+        try:
+            if current.durable_trace:
+                async def prepare_trace() -> ExecutionTerminalSealPlan:
+                    return await self._agent_run_lifecycle.prepare_execution_terminal_seal(
+                        execution_id=current.execution_id,
+                        agent_run_ids=() if agent_run_id is None else (agent_run_id,),
+                        binding_digest=current.binding_digest,
+                    )
+
+                try:
+                    plan = await prepare_trace()
+                except Exception as trace_error:
+                    if (successful or agent_run_id is None or producer_generation is None
+                            or not await self._agent_run_lifecycle.settle_trace_buffer_failure(
+                                agent_run_id, execution_id=current.execution_id,
+                                producer_generation=producer_generation, error=trace_error,
+                            )):
+                        raise
+                    plan = await prepare_trace()
+            await self._check_pending_lease(turn, allow_cancelled=not successful)
+            if self._execution_buffer is not None:
+                self._execution_buffer.seal(current.execution_id, payload_ids)
+            turn.begin_commit()
+        except BaseException:
+            if plan is not None:
+                await self._agent_run_lifecycle.discard_execution_terminal_seal(plan)
+            raise
 
         async def accept(committed: ExecutionTerminalCommitResult) -> None:
             if committed.execution.execution_id != current.execution_id:
@@ -5785,7 +6132,27 @@ class LocalExecutionBackend:
             turn.failure = None
             self._worker_failures.pop(current.execution_id, None)
             self._pending_turns.release(turn)
-            self._pending_audit_events.pop(current.execution_id, None)
+            if self._execution_buffer is not None:
+                self._execution_buffer.confirm(current.execution_id, payload_ids)
+            if plan is not None:
+                try:
+                    await self._agent_run_lifecycle.finalize_execution_terminal_seal(plan)
+                except BaseException:
+                    _logger.error("pending Trace finalization failed after source confirmation: execution=%s",
+                                  current.execution_id, exc_info=True)
+                    try:
+                        await self._agent_run_lifecycle.reconcile_execution_terminal_seal(plan)
+                    except BaseException:
+                        _logger.error("pending Trace cleanup remains unsettled: execution=%s",
+                                      current.execution_id, exc_info=True)
+            async with self._audit_lock(current.execution_id):
+                audit_tail = self._pending_audit_events.get(current.execution_id)
+                if audit_tail is not None:
+                    del audit_tail[:len(pending_audit)]
+                    if not audit_tail:
+                        self._pending_audit_events.pop(current.execution_id, None)
+            if self._execution_buffer is not None:
+                await self._execution_buffer.release(current.execution_id)
             self._confirm_committed_events(
                 current.execution_id, pending_count=len(pending_audit) + 1,
                 durable_seq=committed.execution.event_seq,
@@ -5799,14 +6166,12 @@ class LocalExecutionBackend:
 
         async def confirm() -> None:
             committed = await self._runtime_commands.read_pending_turn(
-                turn.reservation, expected_session=turn.session,
+                reservation, expected_session=turn.session,
             )
             if committed is None:
-                error = AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"phase": "pending_commit_not_found"})
-                self._pending_turns.fail(turn, error)
-                self._record_worker_failure(current.execution_id, error)
-                raise error
-            if producer_generation is not None:
+                # Absence does not prove rollback of the original unknown attempt.
+                raise turn.failure or AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+            if producer_generation is not None and plan is None:
                 await self._discard_terminal_producer_tail(
                     committed.execution, agent_run_id=agent_run_id,
                     producer_generation=producer_generation,
@@ -5817,14 +6182,15 @@ class LocalExecutionBackend:
 
         async def commit_owned() -> ExecutionTerminalCommitResult:
             committed = await self._runtime_commands.commit_pending_turn(
-                turn.reservation, commit, expected_session=turn.session,
-                context_write=(prepared_context.archive, prepared_context.records),
+                reservation, commit, expected_session=turn.session,
+                context_write=None if prepared_context is None else (prepared_context.archive, prepared_context.records),
                 capability_run_id=agent_run_id,
-                next_cursor=None if turn.session is None else ConversationCursor(agent_run_id, history_id=history_id),
+                next_cursor=None if turn.session is None or not successful else ConversationCursor(agent_run_id, history_id=history_id),
                 conversation_agent_run=None if turn.session is None else run,
                 conversation_checkpoint=None if turn.session is None else checkpoint,
                 recovery_run=run if turn.session is None else None,
                 recovery_agent_run_checkpoint=checkpoint if turn.session is None else None,
+                execution_projections=() if plan is None else plan.projections,
                 audit_events=pending_audit,
             )
             await accept(committed)
@@ -6045,10 +6411,25 @@ class LocalExecutionBackend:
         recovery_agent_run_checkpoint: AgentRunCheckpoint | None = None,
     ) -> ExecutionTerminalCommitResult:
         async def commit_owned() -> ExecutionTerminalCommitResult:
+            nonlocal commit, conversation_agent_run, conversation_checkpoint, recovery_run, recovery_agent_run_checkpoint
+            payload_ids: tuple[str, ...] = ()
+            checkpoint_payload = None
             plan: ExecutionTerminalSealPlan | None = None
             durable_commit = False
             pending_count = 0
+            selected_audit: tuple[ExecutionEventAppend, ...] = ()
             try:
+                if (self._execution_buffer is not None and agent_run_id is not None
+                        and commit.producer_generation is not None
+                        and (conversation_checkpoint is not None or recovery_agent_run_checkpoint is not None)
+                        and not self._execution_buffer.rejection_settled(current.execution_id)
+                        and not self._agent_run_lifecycle.trace_buffer_failure_settled(
+                            agent_run_id, execution_id=current.execution_id,
+                            producer_generation=commit.producer_generation)):
+                    checkpoint_payload = await self._agent_run_lifecycle.capture_agent_run_checkpoint_payload(
+                        agent_run_id, execution_id=current.execution_id,
+                        producer_generation=commit.producer_generation, include_interrupted=True,
+                    )
                 state_archive = current.durable_trace and isinstance(
                     self._run_stores[PersistenceDomain.TRACE],
                     StateStepArchive,
@@ -6067,38 +6448,96 @@ class LocalExecutionBackend:
                         candidate_agent_run_ids = await self._existing_execution_agent_run_ids(
                             candidate_agent_run_ids
                         )
-                        plan = (
-                            await self._agent_run_lifecycle.prepare_execution_terminal_seal(
+                        try:
+                            plan = await self._agent_run_lifecycle.prepare_execution_terminal_seal(
                                 execution_id=current.execution_id,
                                 agent_run_ids=candidate_agent_run_ids,
                                 binding_digest=current.binding_digest,
                             )
-                        )
+                        except Exception as error:
+                            if (commit.execution.status not in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
+                                    or agent_run_id is None or commit.producer_generation is None
+                                    or not await self._agent_run_lifecycle.settle_trace_buffer_failure(
+                                        agent_run_id, execution_id=current.execution_id,
+                                        producer_generation=commit.producer_generation, error=error,
+                                    )):
+                                raise
+                            # Only a known rejected tail can be removed from this
+                            # failure/cancellation plan. Keep its control intent and
+                            # accepted prefix; unknown source outcomes are not retried.
+                            plan = await self._agent_run_lifecycle.prepare_execution_terminal_seal(
+                                execution_id=current.execution_id,
+                                agent_run_ids=candidate_agent_run_ids,
+                                binding_digest=current.binding_digest,
+                            )
                 if agent_run_id is not None and not state_archive:
                     await self._agent_run_lifecycle.flush_execution_projection(
                         agent_run_id,
                         execution_id=current.execution_id,
                     )
                 async with self._audit_lock(current.execution_id):
-                    pending_count = len(
-                        self._pending_audit_events.get(current.execution_id, ())
+                    commit, selected_checkpoint, payload_ids = await self._prepare_source_terminal_payload(
+                        current, commit, checkpoint_payload=checkpoint_payload,
                     )
-                    committed = (
-                        await self._commit_execution_terminal_checkpoint_locked_body(
-                            current,
-                            commit,
-                            agent_run_id=agent_run_id,
-                            expected_cursor=expected_cursor,
-                            conversation_agent_run=conversation_agent_run,
-                            conversation_checkpoint=conversation_checkpoint,
-                            conversation_message_range=conversation_message_range,
-                            recovery_agent_run_checkpoint=recovery_agent_run_checkpoint,
-                            recovery_run=recovery_run,
-                            recovery_checkpoint=recovery_checkpoint,
-                            terminal_plan=plan,
+                    if self._execution_buffer is not None:
+                        if selected_checkpoint is not None:
+                            if agent_run_id is None or commit.producer_generation is None:
+                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                            selected_run, selected_record = self._agent_run_lifecycle.decode_agent_run_checkpoint_payload(
+                                selected_checkpoint, agent_run_id=agent_run_id,
+                                producer_generation=commit.producer_generation,
+                            )
+                            if conversation_checkpoint is not None:
+                                conversation_agent_run, conversation_checkpoint = selected_run, selected_record
+                            if recovery_agent_run_checkpoint is not None:
+                                recovery_run, recovery_agent_run_checkpoint = selected_run, selected_record
+                        elif self._execution_buffer.rejection_settled(current.execution_id):
+                            conversation_agent_run = conversation_checkpoint = None
+                            recovery_run = recovery_agent_run_checkpoint = None
+                        self._execution_buffer.seal(current.execution_id, payload_ids)
+                    selected_audit = await self._source_audit_prefix(current.execution_id)
+                    pending_count = len(selected_audit)
+                    try:
+                        committed = (
+                            await self._commit_execution_terminal_checkpoint_locked_body(
+                                current,
+                                commit,
+                                agent_run_id=agent_run_id,
+                                expected_cursor=expected_cursor,
+                                conversation_agent_run=conversation_agent_run,
+                                conversation_checkpoint=conversation_checkpoint,
+                                conversation_message_range=conversation_message_range,
+                                recovery_agent_run_checkpoint=recovery_agent_run_checkpoint,
+                                recovery_run=recovery_run,
+                                recovery_checkpoint=recovery_checkpoint,
+                                terminal_plan=plan,
+                            )
                         )
-                    )
+                    except AIError as source_error:
+                        if (self._execution_buffer is not None and source_error.code in {
+                                ErrorCode.STORAGE_CONFLICT, ErrorCode.EXECUTION_RESULT_CONFLICT}):
+                            # A code alone is not a receipt: even post-commit
+                            # local settlement may fail. Observe source first.
+                            canonical = await self.load_execution(current.execution_id, tenant_id=self._tenant_id)
+                            if canonical is None:
+                                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from source_error
+                            if canonical.status in {
+                                    ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+                                if canonical.status is commit.execution.status and canonical.result == commit.result:
+                                    # Reuse full canonical/audit readback below;
+                                    # never reopen a possibly committed batch.
+                                    raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from source_error
+                                self._execution_buffer.reject_source(current.execution_id, payload_ids)
+                                self._execution_buffer.discard(current.execution_id)
+                            else:
+                                self._execution_buffer.reject_source(current.execution_id, payload_ids)
+                        raise
                     durable_commit = True
+                    if self._execution_buffer is not None:
+                        self._execution_buffer.confirm(current.execution_id, payload_ids)
+                    self._confirm_source_audits(current.execution_id, pending_count)
+                if self._execution_buffer is not None:
+                    await self._execution_buffer.release(current.execution_id)
                 try:
                     self._confirm_committed_events(
                         current.execution_id,
@@ -6176,14 +6615,35 @@ class LocalExecutionBackend:
                                 await self._runtime_commands.verify_conversation_turn(observed, commit.result)
                             except AIError as publication_error:
                                 raise error from publication_error
+                            if self._execution_buffer is not None:
+                                expected_events = (*selected_audit, ExecutionEventAppend(
+                                    commit.terminal_event_type, commit.terminal_event_payload))
+                                if observed.event_seq != current.event_seq + len(expected_events):
+                                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                                offset = current.event_seq
+                                remaining = expected_events
+                                while remaining:
+                                    page = await self._execution.events.list(
+                                        current.execution_id, tenant_id=self._tenant_id,
+                                        after_event_seq=offset, limit=min(len(remaining), 100),
+                                    )
+                                    if not page.items or len(page.items) > len(remaining):
+                                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                                    for actual, expected in zip(page.items, remaining, strict=False):
+                                        offset += 1
+                                        if (actual.event_seq != offset or actual.event_type != expected.event_type
+                                                or actual.payload != expected.payload):
+                                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                                    remaining = remaining[len(page.items):]
                             committed = ExecutionTerminalCommitResult(
                                 observed,
                                 commit.result,
                             )
-                            self._pending_audit_events.pop(
-                                current.execution_id,
-                                None,
-                            )
+                            durable_commit = True
+                            if self._execution_buffer is not None:
+                                self._execution_buffer.confirm(current.execution_id, payload_ids)
+                                await self._execution_buffer.release(current.execution_id)
+                            self._confirm_source_audits(current.execution_id, pending_count)
                             self._confirm_committed_events(
                                 current.execution_id,
                                 pending_count=pending_count,
@@ -6260,7 +6720,7 @@ class LocalExecutionBackend:
         recovery_agent_run_checkpoint: AgentRunCheckpoint | None = None,
         terminal_plan: ExecutionTerminalSealPlan | None,
     ) -> ExecutionTerminalCommitResult:
-        pending_audit = tuple(self._pending_audit_events.get(current.execution_id, ()))
+        pending_audit = await self._source_audit_prefix(current.execution_id)
         agent_run = None
         step_events: Sequence[StepEvent] = ()
         checkpoints: Sequence[AgentRunCheckpoint] = ()
@@ -6306,7 +6766,6 @@ class LocalExecutionBackend:
             audit_events=pending_audit,
             background_tasks=self._execution_task_set(current.execution_id),
         )
-        self._pending_audit_events.pop(current.execution_id, None)
         return committed
 
     def _capture_usage(self, execution_id: str, usage: UsageMetrics) -> None:

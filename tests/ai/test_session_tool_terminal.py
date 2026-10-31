@@ -1587,6 +1587,8 @@ async def test_unverified_unknown_effect_write_does_not_terminalize_execution(
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open(f'unknown-write-{readback}', storage=state) as persistence_1633, Runtime.attach(persistence=persistence_1633, features=model_features(_ToolModels(), application)) as runtime:
+            source_group = persistence_1633.execution.executions.state_store.storage_group
+            owners = tuple(persistence_1633._runtime_owners)
             repository = runtime._state.recovery.tools
             original_get = repository.get_operation
 
@@ -1664,7 +1666,16 @@ async def test_unverified_unknown_effect_write_does_not_terminalize_execution(
         assert close_error.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
     finally:
         release_tool.set()
-        await runtime._state.close()
+        try:
+            with pytest.raises(AIError) as persistence_error:
+                await persistence_1633.close()
+            assert persistence_error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+            assert persistence_1633.ready and tuple(persistence_1633._runtime_owners) == owners
+        finally:
+            # Keep the unknown effect and producer ownership; dispose only this fixture's source.
+            await source_group.close()
+            await source_group.context.close()
+            assert source_group.context.closed
 
 
 @pytest.mark.asyncio

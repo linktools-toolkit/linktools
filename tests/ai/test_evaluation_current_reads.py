@@ -188,7 +188,8 @@ async def test_current_cursor_rejects_wrong_scope_manifest_and_position(
 ) -> None:
     async with completed(tmp_path) as (evaluations, storage, run, scorer, policy):
         other = await run.rescore(RescoreRequest((rule_scorer(scorer),), "cursor-other"))
-        assert (await other.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
+        result = (await other.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
+        assert result.completion == "complete", result
         await evaluations.close()
         owner = evaluations
         first = await run.current_trials(limit=1)

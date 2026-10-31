@@ -26,7 +26,6 @@ from linktools.ai.asset import (
     AssetStoreReader,
     AssetVersionRef,
     DirectoryAssetBackend,
-    FilesystemAssetBackend,
     InMemoryAssetBackend,
     MaterializedAssets,
     SqlAssetBackend,
@@ -39,7 +38,7 @@ from linktools.ai.migrate import provision_asset_database
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.spec import mcp_tool_selector
-from linktools.ai.storage import StorageOverlay
+from linktools.ai.storage import FilesystemObjectStore, PayloadPolicy, StorageOverlay
 from linktools.ai.workspace import BubblewrapWorkspaceBackend, LocalWorkspaceBackend
 from pydantic_ai.messages import (
     ModelMessage,
@@ -224,14 +223,16 @@ async def _store(kind: str, root: Path) -> AsyncIterator[AssetStore]:
     engine = None
     if kind == "memory":
         backend = InMemoryAssetBackend()
-    elif kind == "filesystem":
-        backend = FilesystemAssetBackend(root / "assets")
-    elif kind == "sqlite":
+    elif kind in {"sqlite", "sqlite-filesystem"}:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         engine = create_async_engine(f"sqlite+aiosqlite:///{root / 'assets.sqlite'}")
         await provision_asset_database(engine)
-        backend = SqlAssetBackend(engine, namespace="stdio")
+        backend = SqlAssetBackend(
+            engine, namespace="stdio",
+            object_store=FilesystemObjectStore(root / "objects") if kind == "sqlite-filesystem" else None,
+            payload_policy=PayloadPolicy(0) if kind == "sqlite-filesystem" else None,
+        )
     else:
         raise AssertionError(kind)
     store = AssetStore(StorageOverlay(backend, writer=backend))
@@ -310,7 +311,7 @@ def _assert_closed(log: Path, root: Path, *, retained: bool = False) -> None:
 @pytest.mark.parametrize(("backend_kind", "sandbox_kind"), (
     ("memory", "default"),
     ("memory", "local"),
-    ("filesystem", "local"),
+    ("sqlite-filesystem", "local"),
     ("sqlite", "local"),
 ))
 async def test_plain_filename_uses_pinned_asset_package_and_preserves_history(

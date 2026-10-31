@@ -9,13 +9,11 @@ from linktools.ai.task.engine import TaskEngine
 from ._runtime_test_helpers import model_features
 
 import asyncio
-from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.core import CommitPolicy
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue, Page, Principal, TaskStatus, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
@@ -29,7 +27,6 @@ from linktools.ai.runtime._agent_executor import AgentExecutor, AgentExecutionRe
 from linktools.ai.persistence._runtime_commands import StateCommands
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.execution import CancelExecutionRequest
-from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.task import (
     LocalTaskGraphLauncher,
     TaskEvent,
@@ -342,29 +339,10 @@ async def test_isolated_task_failure_keeps_results_events_and_metrics_consistent
 
 
 @pytest.mark.asyncio
-async def test_runtime_metric_buffer_is_bounded_and_close_is_fail_open() -> None:
-    store = _BlockingMetricStore()
-    buffer = runtime_metrics.MetricsService(
-        Metrics.from_store(store, namespace="buffer", commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024, max_size=2)))  # type: ignore[arg-type]
-    )
-
-    assert await buffer.try_record(_observation("first")) is True
-    await buffer.flush(timeout_seconds=0)
-    await asyncio.wait_for(store.entered.wait(), timeout=1)
-    assert await buffer.try_record(_observation("second")) is True
-    assert await buffer.try_record(_observation("third")) is False
-
-    store.release.set()
-    await buffer.close()
-    assert await buffer.try_record(_observation("after-close")) is False
-    assert sum(len(batch) for batch in store.batches) == 2
-
-
-@pytest.mark.asyncio
-async def test_runtime_metric_buffer_commit_unknown_uses_facade_exact_replay() -> None:
+async def test_runtime_metric_recorder_commit_unknown_uses_facade_exact_replay() -> None:
     store = _CommitUnknownOnceMetricStore()
     buffer = runtime_metrics.MetricsService(
-        Metrics.from_store(store, namespace="buffer-retry", commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)))  # type: ignore[arg-type]
+        Metrics.from_store(store, namespace="buffer-retry")  # type: ignore[arg-type]
     )
     observation = _observation("retry-stable")
 

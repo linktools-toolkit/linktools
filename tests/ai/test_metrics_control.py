@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from linktools.ai.core import CommitPolicy, JsonValue, TaskStatus
+from linktools.ai.core import JsonValue, TaskStatus
 from linktools.ai.errors import AIError
 from linktools.ai.observe import (
     MetricFlushResult, MetricRecorderStatus, Metrics, MetricsControl, Observation,
@@ -15,7 +15,6 @@ from linktools.ai.observe import (
 )
 from linktools.ai.observe.service import MetricsService
 from linktools.ai.persistence import Persistence, PersistenceStorage
-from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.task.engine import TaskEngine
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
 
@@ -105,9 +104,7 @@ async def test_aggregate_does_not_turn_flush_exception_into_success() -> None:
 
 @pytest.mark.asyncio
 async def test_closed_producer_keeps_cumulative_status_without_owning_dataset() -> None:
-    dataset = Metrics.in_memory(commit=CommitPolicy.batch(
-        buffer=InMemoryCacheBackend(max_bytes=2**20), batch_size=128, flush_interval=60,
-    ))
+    dataset = Metrics.in_memory()
     first, borrowed = MetricsService(dataset), MetricsService(dataset)
     control = MetricsControl(first.status, first.flush)
     aggregate = RuntimeMetricsControl(lambda: (control,))
@@ -119,9 +116,9 @@ async def test_closed_producer_keeps_cumulative_status_without_owning_dataset() 
     try:
         assert await first.try_record(observation)
         assert await borrowed.try_record(replace(observation, observation_id="borrowed"))
-        assert aggregate.status().pending == 1
+        assert aggregate.status().persisted == 1
         assert (await aggregate.flush()).completed
-        assert borrowed.status().pending == 1
+        assert borrowed.status().persisted == 1
         await first.close()
         assert aggregate.status().persisted == 1
         assert not aggregate.status().accepting

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from linktools.ai.persistence import Persistence
-"""Runtime scheduling combines pressure without combining durable owners."""
+"""Metrics recording and Trace batching have independent publication lifetimes."""
 from ._runtime_test_helpers import model_features
 
 import asyncio
@@ -50,82 +50,86 @@ async def _wait_for(predicate):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("sharing", ("same", "different_buffer", "different_timing"))
-async def test_runtime_metrics_and_trace_share_only_matching_buffer_and_timing(sharing):
-    buffer = InMemoryCacheBackend(max_bytes=65536)
-    metric_policy = CommitPolicy.batch(buffer=buffer, batch_size=2, flush_interval=60)
-    trace_policy = CommitPolicy.batch(
-        buffer=InMemoryCacheBackend(max_bytes=65536) if sharing == "different_buffer" else buffer,
-        batch_size=2, flush_interval=30 if sharing == "different_timing" else 60,
-    )
-    metrics = Metrics.in_memory(commit=metric_policy)
-    async with Persistence.open('shared-flush', storage=PersistenceStorage.in_memory()) as persistence_59, Runtime.attach(persistence=persistence_59, features=model_features(_FeatureModels(), _features(TraceCapability(commit=trace_policy))), metrics=metrics) as runtime:
-        store = await _prepare_trace(runtime, trace_policy)
-        archive = store.read_store(PersistenceDomain.TRACE)
-        assert await runtime._metric_control.try_record(_observation("metric"))
-        assert await metrics.get_observation("metric") is None
-        await _observe(store, 1)
-        if sharing == "same":
-            await _wait_for(lambda: metrics.get_observation("metric"))
-            await _wait_for(lambda: archive.list_events(agent_run_id="run"))
-            assert runtime.metrics.status().persisted == 1
-        else:
-            await asyncio.sleep(0.02)
-            assert await metrics.get_observation("metric") is None
-            assert await archive.list_events(agent_run_id="run") == []
-            await runtime.metrics.flush()
-            assert await metrics.get_observation("metric") is not None
-            assert await archive.list_events(agent_run_id="run") == []
-
-
-@pytest.mark.asyncio
-async def test_same_metrics_dataset_and_buffer_do_not_share_pressure_across_runtimes():
+async def test_metrics_writes_and_flush_do_not_publish_pending_trace():
     buffer = InMemoryCacheBackend(max_bytes=65536)
     policy = CommitPolicy.batch(buffer=buffer, batch_size=2, flush_interval=60)
-    metrics = Metrics.in_memory(commit=policy)
+    metrics = Metrics.in_memory()
+    async with Persistence.open("independent-flush", storage=PersistenceStorage.in_memory()) as persistence, Runtime.attach(
+        persistence=persistence, features=model_features(_FeatureModels(), _features(TraceCapability(commit=policy))), metrics=metrics,
+    ) as runtime:
+        store = await _prepare_trace(runtime, policy)
+        archive = store.read_store(PersistenceDomain.TRACE)
+        await _observe(store, 1)
+        assert await archive.list_events(agent_run_id="run") == []
+        assert await runtime._metric_control.try_record(_observation("metric"))
+        assert await metrics.get_observation("metric") is not None
+        assert (await runtime.metrics.flush()).completed
+        assert await archive.list_events(agent_run_id="run") == []
+        await _observe(store, 2)
+        await _wait_for(lambda: archive.list_events(agent_run_id="run"))
+        assert runtime.metrics.status().persisted == 1
+
+
+@pytest.mark.asyncio
+async def test_shared_metrics_does_not_share_trace_pressure_across_runtimes():
+    buffer = InMemoryCacheBackend(max_bytes=65536)
+    policy = CommitPolicy.batch(buffer=buffer, batch_size=2, flush_interval=60)
+    metrics = Metrics.in_memory()
     feature = TraceCapability(commit=policy)
-    async with Persistence.open('same-name', storage=PersistenceStorage.in_memory()) as persistence_87, Runtime.attach(persistence=persistence_87, features=model_features(_FeatureModels(), _features(feature)), metrics=metrics) as first, Persistence.open('same-name', storage=PersistenceStorage.in_memory()) as persistence_90, Runtime.attach(persistence=persistence_90, features=model_features(_FeatureModels(), _features(feature)), metrics=metrics) as second:
-        store = await _prepare_trace(first, policy)
+    async with Persistence.open("first", storage=PersistenceStorage.in_memory()) as first_persistence, Persistence.open(
+        "second", storage=PersistenceStorage.in_memory(),
+    ) as second_persistence, Runtime.attach(
+        persistence=first_persistence, features=model_features(_FeatureModels(), _features(feature)), metrics=metrics,
+    ) as first, Runtime.attach(
+        persistence=second_persistence, features=model_features(_FeatureModels(), _features(feature)), metrics=metrics,
+    ) as second:
+        first_store = await _prepare_trace(first, policy)
+        second_store = await _prepare_trace(second, policy)
+        await _observe(first_store, 1)
+        await _observe(second_store, 1)
         assert await first._metric_control.try_record(_observation("first"))
         assert await second._metric_control.try_record(_observation("second"))
-        await asyncio.sleep(0.02)
-        assert await metrics.get_observation("first") is None
-        assert await metrics.get_observation("second") is None
-        await _observe(store, 1)
-        await _wait_for(lambda: metrics.get_observation("first"))
-        assert await metrics.get_observation("second") is None
-        assert second.metrics.status().pending == 1
+        assert await metrics.get_observation("first") is not None
+        assert await metrics.get_observation("second") is not None
+        assert await first_store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id="run") == []
+        assert await second_store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id="run") == []
+        await _observe(first_store, 2)
+        await _wait_for(lambda: first_store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id="run"))
+        assert await second_store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id="run") == []
 
 
 @pytest.mark.asyncio
-async def test_trace_stop_does_not_flush_other_owner_pending_metrics():
+async def test_trace_stop_does_not_close_metric_recorder():
     buffer = InMemoryCacheBackend(max_bytes=65536)
     policy = CommitPolicy.batch(buffer=buffer, batch_size=10, flush_interval=60)
-    metrics = Metrics.in_memory(commit=policy)
-    async with Persistence.open('local-stop', storage=PersistenceStorage.in_memory()) as persistence_111, Runtime.attach(persistence=persistence_111, features=model_features(_FeatureModels(), _features(TraceCapability(commit=policy))), metrics=metrics) as runtime:
+    metrics = Metrics.in_memory()
+    async with Persistence.open("local-stop", storage=PersistenceStorage.in_memory()) as persistence, Runtime.attach(
+        persistence=persistence, features=model_features(_FeatureModels(), _features(TraceCapability(commit=policy))), metrics=metrics,
+    ) as runtime:
         store = await _prepare_trace(runtime, policy)
-        assert await runtime._metric_control.try_record(_observation("pending"))
         await _observe(store, 1)
         await store.trace_persistence.stop("run")
-        assert await metrics.get_observation("pending") is None
-        assert runtime.metrics.status().pending == 1
-        await runtime.metrics.flush()
-        assert await metrics.get_observation("pending") is not None
+        assert runtime.metrics.status().accepting
+        assert await runtime._metric_control.try_record(_observation("after-trace-stop"))
+        assert await metrics.get_observation("after-trace-stop") is not None
 
 
 @pytest.mark.asyncio
-async def test_metric_source_failure_does_not_prevent_shared_trace_flush():
+async def test_metric_source_failure_does_not_prevent_trace_flush():
     class FailingStore(InMemoryMetricStore):
         async def put_observations(self, namespace, observations):
             raise RuntimeError("metrics source unavailable")
 
     buffer = InMemoryCacheBackend(max_bytes=65536)
     policy = CommitPolicy.batch(buffer=buffer, batch_size=2, flush_interval=60)
-    metrics = Metrics.from_store(FailingStore(), commit=policy)
-    async with Persistence.open('independent-errors', storage=PersistenceStorage.in_memory()) as persistence_134, Runtime.attach(persistence=persistence_134, features=model_features(_FeatureModels(), _features(TraceCapability(commit=policy))), metrics=metrics) as runtime:
+    metrics = Metrics.from_store(FailingStore())
+    async with Persistence.open("independent-errors", storage=PersistenceStorage.in_memory()) as persistence, Runtime.attach(
+        persistence=persistence, features=model_features(_FeatureModels(), _features(TraceCapability(commit=policy))), metrics=metrics,
+    ) as runtime:
         store = await _prepare_trace(runtime, policy)
-        assert await runtime._metric_control.try_record(_observation("failed"))
+        assert not await runtime._metric_control.try_record(_observation("failed"))
         await _observe(store, 1)
+        await _observe(store, 2)
         await _wait_for(lambda: store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id="run"))
         await runtime.metrics.flush()
         assert runtime.metrics.status().write_failures == 1

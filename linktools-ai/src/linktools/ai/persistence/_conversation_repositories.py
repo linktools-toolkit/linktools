@@ -1538,7 +1538,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
 
     async def commit_pending_turn_in_transaction(
         self, transaction: StateTransaction, *, expected: SessionRecord,
-        execution_id: str, next_cursor: ConversationCursor,
+        execution_id: str, next_cursor: ConversationCursor | None,
         start_message_index: int, end_message_index: int,
         stored_user_input: StoredUserInput,
         output: StoredPayload | None,
@@ -1556,7 +1556,15 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         if (current != expected or current.status is not SessionStatus.OPEN
                 or current.active_execution_id is not None):
             raise AIError(ErrorCode.SESSION_BUSY)
-        final = replace(current, continuation=next_cursor, history_quality="complete",
+        successful = status is ExecutionStatus.SUCCEEDED
+        if (status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
+                or successful != (next_cursor is not None)
+                or (output is not None) != successful
+                or not successful and (start_message_index != 0 or end_message_index != 0)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        final = replace(current,
+                        continuation=next_cursor if successful else current.continuation,
+                        history_quality="complete" if successful else current.history_quality,
                         revision=current.revision + 1, updated_at=await transaction.now())
         await _replace_checked(transaction, _projected_record(self, record, final), record.storage_revision)
         sequence_key = self._timeline_sequence_key(current.session_id)

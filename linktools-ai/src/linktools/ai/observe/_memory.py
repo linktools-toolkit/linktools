@@ -5,7 +5,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 
 from ..core import Page
 from ..errors import AIError, ErrorCode
@@ -15,14 +16,25 @@ from ._codec import (
     observation_payload_digest,
 )
 from ._model import MetricDefinition, Observation
-from ._store import _parse_scan_cursor, _scan_cursor
+from ._store import _parse_scan_cursor, _scan_cursor, _observation_pruned
+
+
+@dataclass(frozen=True, slots=True)
+class _ObservationRecord:
+    namespace: str
+    observation_id: str
+    payload_digest: str
+    kind: str
+    occurred_at: datetime
+    observation: Observation | None
+    pruned_at: datetime | None = None
 
 
 class InMemoryMetricStore:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._definitions: dict[tuple[str, str, int], MetricDefinition] = {}
-        self._observations: dict[str, tuple[str, str, Observation]] = {}
+        self._observations: dict[str, _ObservationRecord] = {}
 
     async def put_definition(
         self,
@@ -68,20 +80,33 @@ class InMemoryMetricStore:
         namespace: str,
         observations: tuple[Observation, ...],
     ) -> None:
-        pending: dict[str, tuple[str, str, Observation]] = {}
+        pending: dict[str, _ObservationRecord] = {}
         for observation in observations:
             identity = observation_digest(namespace, observation.observation_id)
             payload = observation_payload_digest(namespace, observation)
-            candidate = (namespace, payload, observation)
+            candidate = _ObservationRecord(
+                namespace, observation.observation_id, payload,
+                observation.kind, observation.occurred_at, observation,
+            )
             existing = pending.get(identity)
-            if existing is not None and existing[1] != payload:
+            if existing is not None and existing.payload_digest != payload:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             pending[identity] = candidate
         async with self._lock:
             for identity, candidate in pending.items():
                 current = self._observations.get(identity)
-                if current is not None and current[1] != candidate[1]:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                if current is not None:
+                    if (current.namespace, current.observation_id) != (
+                        namespace, candidate.observation_id,
+                    ):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if current.payload_digest != candidate.payload_digest:
+                        raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if any(
+                self._observations[identity].pruned_at is not None
+                for identity in pending if identity in self._observations
+            ):
+                raise _observation_pruned()
             for identity, candidate in pending.items():
                 self._observations.setdefault(identity, candidate)
 
@@ -95,9 +120,9 @@ class InMemoryMetricStore:
             current = self._observations.get(identity)
             if current is None:
                 return None
-            if current[0] != namespace:
+            if (current.namespace, current.observation_id) != (namespace, observation_id):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return current[2]
+            return current.observation
 
     async def scan_observations(
         self,
@@ -114,11 +139,13 @@ class InMemoryMetricStore:
         after = None if cursor is None else _parse_scan_cursor(cursor)
         async with self._lock:
             values = [
-                value[2]
+                value.observation
                 for value in self._observations.values()
-                if value[0] == namespace
-                and value[2].kind == kind
-                and start <= value[2].occurred_at < end
+                if value.namespace == namespace
+                and value.pruned_at is None
+                and value.observation is not None
+                and value.kind == kind
+                and start <= value.occurred_at < end
             ]
         values.sort(
             key=lambda item: (
@@ -153,10 +180,14 @@ class InMemoryMetricStore:
             keys = [
                 key
                 for key, value in self._observations.items()
-                if value[0] == namespace and value[2].occurred_at < before
+                if value.namespace == namespace and value.pruned_at is None
+                and value.occurred_at < before
             ]
+            pruned_at = datetime.now(timezone.utc)
             for key in keys:
-                del self._observations[key]
+                self._observations[key] = replace(
+                    self._observations[key], observation=None, pruned_at=pruned_at,
+                )
             return len(keys)
 
 

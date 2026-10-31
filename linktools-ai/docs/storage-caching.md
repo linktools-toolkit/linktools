@@ -13,6 +13,165 @@ provide replaceable source or transport capabilities. These roles are not
 determined by whether a type is a protocol or a concrete implementation, and a
 store does not necessarily imply durable retention.
 
+`Runtime.open` and `Runtime.attach` register their lifetime with Persistence
+before composing producers. An execution filesystem route or an exclusively
+owned local SQLite source admits only one Agent Runtime on that Persistence;
+Task-only Runtimes do not occupy that exclusive execution slot. Shared SQL and
+Memory continue to allow independent Agent Runtimes.
+`TaskEngine(...)` and `TaskEngine.open(...)` also register a borrowed lifetime.
+Definition views share that registration; closing a view does not release the
+engine. Task producers do not occupy the Agent-exclusive slot, and
+read-only Task observation remains available.
+
+`Persistence.close()` rejects active Runtime or TaskEngine borrowers without
+closing their resources. An owning Runtime closes Persistence only after its
+own cleanup and after independent producers have released it. TaskEngine
+releases only after resource cleanup and every close callback succeeds. Failed
+cleanup or notification retains the registration for retry; cancellation of
+the caller does not release an in-flight cleanup.
+This is instance-local protection, not a cross-process lock or a new SQL
+takeover mode. Callers must still finish their own in-flight ordinary Task
+queries before closing the engine. History is not registered by this producer
+mechanism; hosts must await its ordinary queries and close its subscriptions
+before closing Persistence. Filesystem state retirement and retained-history migration
+require their separate recovery and inventory checks.
+
+`PersistenceStorage.from_root(root)` selects `root/runtime.db` and file-backed
+ObjectStore bytes; it does not migrate filesystem state. When that database is
+absent, the factory refuses a root containing recognizable filesystem state
+manifests instead of silently creating an unrelated empty database. Quiesce the
+old writers and explicitly export/restore supported state into a separate empty
+root, then verify the retained records and object references before switching.
+Portable snapshots preserve the core Memory domain, including its operation
+receipts and object-backed content. Arbitrary durable capability partitions remain
+unsupported; this guard does not add their migration support.
+An existing `runtime.db` remains the selected SQLite source even if old files
+coexist. This check neither verifies that database as a completed migration nor
+recognizes every damaged/custom layout, and is not a cross-process ownership
+barrier against a root being changed after configuration.
+
+### Read-only legacy filesystem migration
+
+`FilesystemSnapshotReader` (from `linktools.ai.persistence`) is an offline
+source owner for **clean legacy filesystem state**, not a Runtime backend or a
+reader of portable snapshot archives. It exports the existing storage-snapshot
+format consumed by `Persistence.restore_snapshot`; no second high-level snapshot
+format or Workspace copy is introduced.
+
+```python
+from linktools.ai.persistence import FilesystemSnapshotReader, Persistence
+from linktools.ai.snapshot import SnapshotLimits
+
+reader = FilesystemSnapshotReader(old_root, namespace="app", tenant_id="tenant")
+try:
+    reference = await reader.export_snapshot(
+        object_store=snapshot_objects,
+        limits=SnapshotLimits(max_entries=100_000, max_bytes=100_000_000),
+    )
+finally:
+    await reader.close()
+
+await Persistence.restore_snapshot(
+    reference, object_store=snapshot_objects, root=new_empty_root,
+    limits=SnapshotLimits(max_entries=100_000, max_bytes=100_000_000),
+    exclusive_writer=True,
+)
+```
+
+Keep the reader instance if export or close fails: failed lock release retains
+its exact cleanup responsibility and `reader.close()` can be retried. A closed
+reader cannot export again. The constructor does not create source files;
+export acquires the native group/member writer locks and validates the complete
+standard grouped layout for the explicit namespace and tenant before reading.
+It does not initialize a writable StateStore, repair indexes, replay journals,
+or delete uncommitted staging. A committed recovery journal is an error requiring
+the original recovery procedure, not permission to guess or rewrite its outcome.
+Filesystem read cancellation drains that read before releasing locks; destination
+ObjectStore cancellation is not hidden by shielding the whole export.
+
+The reader preserves typed core records, facts, operation receipts, canonical
+indexes, archive content and their proven object dependencies. Missing members,
+nonstandard/custom layouts, opaque partitions and capability-presence markers
+are rejected rather than exported incompletely. Limits retain the existing
+snapshot-output admission meaning. They are not a bound on every source archive
+record inspected while establishing the reachable closure.
+
+By default, object references are resolved from the original per-domain and
+archive file ObjectStores. For an originally external object resource, pass its
+borrowed instance as `source_object_store`; it is neither closed nor replaced by
+a file-store fallback. Select a separate destination `object_store` if the whole
+source root must remain byte-for-byte unchanged: reader internals write only
+coordination locks, but an explicitly colocated destination still receives the
+requested snapshot objects. Verify the restored records/receipts/content before
+switching consumers. This migration reader does not itself retire the active
+filesystem State routes or provide opaque custom-object closure.
+
+### Exclusively owned local SQLite
+
+`PersistenceStorage.from_root(root, exclusive_writer=True)` selects the same
+`runtime.db` and ObjectStore layout but requests one native filesystem writer
+lock for that database's resource lifetime. The default remains `False`:
+existing and newly created ordinary roots keep shared SQL behavior and do not
+gain active-execution recovery permission merely by using a local path.
+
+A new exclusive database receives its fixed SQLite application ID in the private
+provisioning file, before no-clobber publication. If another writer creates the
+destination first, provisioning fails without replacing it. The application ID
+classifies the file; only the live resource lock and verification of the actual
+SQLite connection grant writer permission. Plain `sqlite(path)`, `sql(engine)`,
+State mutations and schema provisioning cannot write that classified file without
+the owner. Reusing the same engine does not transfer permission. Read-only
+Persistence/History can observe it without taking the writer lock and cannot
+recover active executions.
+
+Publication links the completed file without overwriting the target, then removes
+its temporary name. A crash between those steps can leave an additional hard
+link before initialization has returned or admitted work. A dedicated writer
+fails closed in that case: first verify and remove the known initialization
+alias offline, or retry the original retained cleanup. Do not delete unknown
+aliases or replace the published database to force reopening.
+
+Writable initialization with an explicit exclusive request against an existing
+unclassified shared database fails with `STORAGE_RECOVERY_REQUIRED`; it never
+retags a live source. Read-only initialization makes no writer request, even
+when the option is set, and can still observe an unclassified source. The same
+database remains available through the unchanged default shared configuration.
+For a deliberate conversion, stop every old writer, export supported state and
+use `Persistence.restore_snapshot(..., root=new_empty_root,
+exclusive_writer=True)`, then verify and switch consumers. Core retained history
+and Memory are covered by this offline path; arbitrary custom partition/object
+closure is not. `Snapshot.restore(..., exclusive_writer=True)` also selects this profile for
+new generations. Its default remains shared SQLite. Reusing a generation with
+`replace_policy="same"` requires both matching snapshot contents and the requested
+writer profile; a mismatch is a conflict, not an online conversion. The profile
+does not change the logical snapshot digest. Replacement still requires the
+existing expected-generation and offline-exclusivity safeguards.
+
+`RestoredSnapshot.open_history()` remains a read-only observer. To write an
+exclusive restored generation, open
+`PersistenceStorage.from_root(restored.storage_root, exclusive_writer=True)`;
+the returned location alone does not grant writer permission.
+
+The permission uses the connection's actual main file, including canonical
+symlink resolution, not its URL. Each new physical connection is checked;
+warmed connections reuse the immutable profile fact without additional profile
+queries per mutation. Dedicated files cannot use hard links. Replacing, moving
+or retagging a live database, a creator that changes an existing connection's
+main file, and concurrent older binaries that ignore the profile are outside
+this contract. Quiesce such writers before cutover; this is not a fence against
+arbitrary raw SQLite access.
+
+The owner is retained through active mutations, uncertain Runtime completion
+and failed cleanup. A context refuses close while its owned mutation is active;
+a failed session close retains that exact session for cleanup-only retry, not
+callback or commit replay. Runtime/Task borrower checks still run first. Only
+successful resource cleanup releases the physical writer lock. A new owner may
+recover admitted checkpoint-enabled work after the previous process exits, but
+the lock does not establish whether an external tool effect succeeded: existing
+effect receipts and unknown-outcome recovery rules remain required. This local
+SQL option does not itself remove the filesystem State backend or prove a full
+custom-state migration.
+
 | Interface | Responsibility | Host integration |
 | --- | --- | --- |
 | `CacheBackend` | Store discardable immutable bytes | Supply it to a domain content cache or `PersistenceStorage.sqlite(path, cache=...)` |
@@ -61,8 +220,9 @@ owning domain remains responsible for its retention rules.
 ## Read resources and write policies
 
 `StorageRoute(..., cache=...)` and the PersistenceStorage factories borrow a
-`CacheBackend` for hot reads only. `CommitPolicy.batch(buffer=..., ...)` borrows
-an independent `WriteBufferBackend` for pending writes. The same implementation
+`CacheBackend` for hot reads only. `CommitPolicy.batch(buffer=..., ...)` and
+`CommitPolicy.terminal(buffer=...)` borrow an independent `WriteBufferBackend`
+for pending payloads. The same implementation
 may provide both capabilities, but each use is explicitly configured.
 `PersistenceStorage(..., coordination=...)` separately supplies turn ownership and
 live streams, including the non-authoritative pending-turn view.
@@ -70,26 +230,24 @@ live streams, including the non-authoritative pending-turn view.
 ### Owner defaults for batch writes
 
 Provide only the batch settings you want to override. A buffer-only declaration
-uses Trace's 128-entry / 3-second defaults or Metrics' 128-entry / 60-second
-defaults:
+uses Trace's 128-entry / 3-second defaults:
 
 ```python
 from linktools.ai.capability import TraceCapability
 from linktools.ai.core import CommitPolicy
-from linktools.ai.observe import Metrics
 
 trace = TraceCapability(commit=CommitPolicy.batch(buffer=write_buffer))
-metrics = Metrics.sql(engine, commit=CommitPolicy.batch(buffer=write_buffer))
 ```
 
-Here `write_buffer` is a host-provided `WriteBufferBackend` and `engine` is the
-host's provisioned SQL engine. Omit `buffer` for synchronous source writes,
-without a hidden queue. Explicit `batch_size` and `flush_interval` always win;
+Here `write_buffer` is a host-provided `WriteBufferBackend`. In **batch mode**,
+omit `buffer` for synchronous source writes without a hidden queue.
+`terminal()` without a buffer instead retains the owner's existing local staging
+until its publication boundary. Explicit `batch_size` and `flush_interval` always win;
 for example, `CommitPolicy.batch(buffer=write_buffer, batch_size=32)` changes
 only the size and retains the receiving owner's interval.
 
-`None` for either timing field means an omitted authoring value. Trace and
-Metrics resolve those fields once in their constructors and retain a complete,
+`None` for either timing field means an omitted authoring value. Trace resolves
+those fields once in its constructor and retains a complete,
 immutable policy before any Runtime capture, recorder or write scope uses it.
 The input policy is not mutated, so it can be reused by owners with different
 defaults. The generic policy has no universal batch interval.
@@ -187,79 +345,80 @@ cancellation or close can release ownership. An append error can mean unknown
 admission, so it must not be reported as a definite capacity rejection or
 silently redirected into a local queue.
 
-## Automatic Metrics buffering
+## Automatic Metrics providers
+
+`Metrics` is a synchronous source/query dataset and a default
+`MetricRecorderProvider`. Automatic recording can instead use a host provider
+without creating a SQL dataset in the producer:
 
 ```python
-from linktools.ai.observe import Metrics
-from linktools.ai.core import CommitPolicy
-from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.observe import MetricRecorderProvider, Metrics
 
-cache = InMemoryCacheBackend(max_bytes=8 * 1024 * 1024, max_size=1024)
-metrics = Metrics.sqlite(
-    "metrics.sqlite3",
-    commit=CommitPolicy.batch(buffer=cache, batch_size=64, flush_interval=15.0),
-)
+metrics = Metrics.sqlite("metrics.sqlite3")
 recorder = metrics.recorder()
 try:
     accepted = await recorder.try_record(observation)
     result = await recorder.flush()
 finally:
     await recorder.close()
+
+# telemetry implements MetricRecorderProvider over an already-open host client.
+async with Runtime.open("app", storage=storage, features=features,
+                        metrics=telemetry) as runtime:
+    tasks = await runtime.tasks.bind(*definitions)
 ```
 
-`Runtime.open(..., metrics=dataset)` configures Agent observations and its
-bound TaskEngine recorders, including evaluation work. Each producer owns an isolated
-recorder over the borrowed Metrics dataset;
-explicit application recording uses the dataset independently.
+The provider contract is `recorder() -> MetricRecorder`, with no arguments.
+Every call returns a fresh scope, owned by its Agent or Task producer.
+Construction starts no I/O or background tasks and acquires no asynchronous
+resources. A host recorder may start work on its first `try_record`; its close
+must settle its own work without closing the provider/client or another scope.
+Evaluation borrows its TaskEngine and does not create another recorder.
+`metrics=None` disables automatic observations without creating any dataset.
 
-All Metrics constructors and factories accept `commit`. Their effective default
-is `CommitPolicy.batch(batch_size=128, flush_interval=60.0)`. Use
-`CommitPolicy.sync()` for immediate writes; Metrics supports sync and batch
-policies. A Metrics batch policy requires an integer `batch_size`
-from 1 to 256 and a finite positive `flush_interval` in seconds; booleans are
-invalid for both.
-These settings are validated when creating the dataset and inherited by each
-fresh recorder, including those owned by separate Runtimes. Only automatic recorders
-use `commit.buffer`; without a buffer they await the source in the caller,
-without a hidden local queue. `record`, `record_observations`, and queries keep
-their strong source semantics. Queries never add pending observations.
+`Metrics` constructors/factories have no commit policy, and `recorder()` has no
+batch-scheduler parameter. Both explicit writes and its default automatic
+recorder await source settlement; no SDK queue, timer or threshold is created.
+Queries never include pending host observations. Runtime continues to enrich
+observations with dimensions and correlation while preserving their original
+IDs, source namespace and tenant. The provider binds the target dataset; those
+business-source fields must not silently choose a different destination.
 
-`MetricRecorder.status()` returns `MetricRecorderStatus` in both direct and
-buffered modes. `persisted` counts confirmed source writes; `unconfirmed`
-counts settled attempts without that confirmation, including cancellation or
-an unknown outcome after the source may already have committed. It does not
-mean those observations were definitely lost. `MetricFlushResult.completed`
-reports prefix settlement, not that every observation persisted.
+A host may implement bounded publishing and a separately managed consumer.
+Only the host chooses batching, capacity, retry and client ownership. Broker
+acceptance is not a SQL receipt: `persisted` counts confirmed source writes,
+`unconfirmed` may include successful broker delivery awaiting source proof,
+and `flush.completed` means the recorder's accepted prefix settled, not that
+all consumers committed. Publishing success without SQL proof is not itself a
+write failure. Unknown outcomes must remain visible; do not silently fall back
+to per-observation SQL or disable recording when the broker fails.
 
-`BatchWriteScope` is the lower-level scheduling and settlement extension for
-custom encoded batch sinks. The injected cache owns pending bytes and capacity;
-the scope owns dispatch and its lifetime. Its `BatchWriteStatus.confirmed`
-means only that the sink returned successfully. Metrics maps that count to
-`persisted` because its sink confirms authoritative writes.
-Its `BatchWriteFlushResult` reports settlement of the captured admission prefix,
-with `unconfirmed` preserving failed or unknown source outcomes.
-`StorageBuffer` separately provides final-value reads and writes over a source;
-it reuses the same scheduler rather than defining another pending queue.
+The existing `MetricRecorder` methods (`try_record`, `status`, `flush`, `close`)
+remain unchanged. A direct recorder completes admission after its source call
+settles; flush does not wait for calls still in admission, while close stops
+new admissions and waits for active calls without cancelling their callers.
+Failures are best effort and cancellation propagates without rewriting already
+confirmed business facts. SDK owners close scopes, never the borrowed provider.
 
-Automatic batches flush at the configured entry threshold or interval after
-the first pending admission, whichever comes first (defaults: 128 entries and
-60 seconds); explicit flush and close wake partial batches. These
-are batching defaults, not query TTLs. The cache contains the encoded pending
-bytes using the existing Observation codec. Independent recorders own separate
-scopes and close only their own work; shared cache capacity remains shared.
+### Migrating automatic recording
 
-Admission is best effort, not a durability receipt. A full cache rejects new
-automatic observations; failed/cancelled writes remain visible in status.
-`queue_size` includes unacknowledged in-flight entries; `queue_capacity` is
-`None` because capacity belongs to the adapter and has no common query contract;
-it does not mean unbounded storage. A successful sink is never
-called again merely because acknowledgement failed; an unresolved cleanup
-failure is exposed by flush/close. Caller cancellation does not abandon
-close-owned I/O, and neither recorder close nor Runtime close closes the cache.
-`pending` counts source outcomes not yet settled; `queue_size` counts entries
-not yet acknowledged in the cache. A successful sink followed by an ack failure
-can therefore have `persisted=1`, `pending=0`, and `queue_size=1`; flush/close
-report that cleanup failure without claiming the source write failed.
+Remove `commit=` from Metrics factories and `batch_scopes=` from recorder calls.
+Default, explicit-sync and buffer-free batch calls were already synchronous;
+they retain that behavior. A genuinely buffered caller must switch to a prepared
+host provider/consumer in the same coordinated release, not silently become
+per-item SQL. Drain the old scopes and preserve failed/unknown outcomes before
+switching; owner-local pending bytes are not a recoverable work queue.
+
+Host consumers retain stable observation IDs and submit through
+`Metrics.record_observations`. Advance acknowledgements only after source
+confirmation; duplicates, unknown commits, conflicting payloads, retention and
+consumer reassignment need their own tested settlement policy. Producer-only
+provider support does not prove any broker adapter or deployment is ready.
+
+`BatchWriteScope` and `StorageBuffer` remain available to their other owners.
+Their generic settlement status is not a reliable work-queue acknowledgement
+contract. Trace continues to use its own commit policy and lifecycle, independent
+of automatic Metrics.
 
 ## Asset content digests
 
@@ -376,40 +535,108 @@ require a new per-call cache option or a different Runtime profile.
 
 ## Runtime observation publication
 
-Metrics uses `commit.buffer` with its configurable scheduler (defaults: 60
-seconds or 128 entries). Trace uses the same owner-scoped buffering primitive
-through its own `commit.buffer` (defaults: three seconds or 128 observation
-boundaries). Without a buffer, each observation boundary awaits the existing
-guarded projection commit. The route's hot cache never enables write batching.
+Write timing and storage are independent. `sync()` confirms source writes at the
+owner's existing boundaries; `batch(buffer=...)` schedules admitted payloads;
+`terminal(buffer=...)` defers optional payload publication to the terminal
+boundary. Terminal has no batch size or timer. `terminal()` without a buffer
+keeps local staging; batch without a buffer awaits source writes. Neither a
+hot-read cache nor a coordination backend implicitly enables payload buffering.
 
-The policy borrows its buffer; equality and hashing compare timing values only.
-Within one Runtime, owners using the same buffer object and equal batch size
-and interval share automatic flush scheduling. Their accepted, undispatched
-entries contribute to one threshold; the earliest pending entry sets the
-next deadline, which later admission cannot postpone. A trigger dispatches each
-owner's currently accepted prefix. Entries count queue records: a Trace marker
-is one observation-boundary flush request, not one SQL row.
+### Payload ownership and publication
 
-Each owner keeps its queue, callback, acknowledgement and domain failure
-semantics, including unknown-result readback. Source transactions remain
-separate, even when storage points to the same database. Explicit flush and
-close affect only that owner; they do not wait for unrelated Metrics delivery.
-The last departing owner cancels the shared timer. Different Runtime instances,
-buffers or timing values retain separate schedules. Standalone recorders remain
-independent. Sharing a buffer does not imply cross-process claiming.
+Execution, Trace and explicit `CapabilityPersistence` writers keep independent
+scopes even when they borrow the same backend. Entries carry immutable serialized
+business data, not `None` flush markers or digests that require an unacknowledged
+RAM payload mirror. Execution captures its deferred records, input/context,
+instructions, output and audit facts, including the retained turn context when
+required. Trace captures logical projections and their selected request/response,
+failed-stream and object-content dependencies. Already durable immutable object
+references keep their existing ownership. New object bodies are materialized
+when the owning source publication is prepared, not merely to encode a buffer
+entry. Necessary durable admission/checkpoint/effect preparation may occur earlier.
 
-A Trace queue entry is a flush request, not the sole copy of trace evidence.
-The run's existing staging owner retains facts until atomic publication and
-readback confirm them. Queue acknowledgement is not a durability receipt and
-this owner-local queue does not provide cross-process recovery of pending trace.
-Capacity rejection or cache failure settles owned callbacks before direct
-publication; a source integrity error or unresolved commit remains authoritative.
+Publication reads and verifies the complete fixed admitted prefix from the
+backend before source preparation. Missing, short or corrupt reads do not permit
+using newer staging, publishing a smaller prefix or acknowledging it early.
+Later cumulative snapshots cannot replace previously admitted append-only facts.
+Source sequence assignment, CAS and producer fencing remain in the authoritative
+transaction. Compatible terminal prefixes join the existing Execution terminal
+transaction; each distinct participant scope contributes its full selected prefix.
+There is no distributed transaction across unrelated storage resources.
 
-Required flushes, checkpoints, effect fences and terminal publication retain
-their existing boundaries. Before terminal capture or revoked-producer discard,
-queued requests are quiesced without independently committing the dirty tail.
-Already-running publication settles first. Closing a run drains its owned work
-without closing the borrowed cache.
+Within one Runtime, batch Trace runs using the same buffer object and equal batch
+size and interval share automatic scheduling (defaults: 128 observation
+boundaries / three seconds). Accepted undispatched entries count against that
+threshold; the earliest pending entry sets the deadline. Each run still owns its
+transaction and failure handling. Other Runtime instances have independent
+schedules and scopes. Policy equality excludes buffer identity; grouping writers
+must compare the borrowed instance separately.
+
+### Admission, failures and cleanup
+
+Admission is awaited with `wait=False` and bounded transport waits; terminal
+producers must not wait for a terminal drain that cannot run until they finish.
+Capacity rejection or unresolved append failure fails that write/turn rather than
+silently falling back to ordinary SQL publication, disabling observations, or
+repeating the model request. An uncertain append retains its original ID and
+bytes; readback must resolve that exact entry, not create a replacement ID.
+
+For Trace, terminal-buffered Execution and buffered capability owners, a known rejection
+can isolate the rejected tail only after verifying the complete accepted prefix.
+Already-admitted Execution/Task control must still
+settle safely as FAILED or CANCELLED; it must not remain STARTED merely because
+optional bytes were rejected. Batch Trace can confirm its accepted prefix before
+that control settlement; terminal Trace joins its accepted prefix to the terminal
+transaction. Unadmitted output is not copied into SQL as a fallback. A turn with
+no durable admission may fail and release its pending coordination instead.
+Unknown admission or source outcomes are not treated as known rejection.
+
+Known source rollback retains the fixed payload for explicit retry. Unknown
+source outcomes retain the original plan, IDs and source flight until canonical
+readback resolves them. Only source-covered IDs are acknowledged. After source
+confirmation, acknowledgement is cleanup: failure does not change canonical
+success/failure/cancellation, replay source writes, or prevent the control result
+from becoming visible. The owner retains cleanup for retry. Close reports
+unsettled source/control or cleanup failures and never closes a borrowed backend.
+
+An ordinary explicit Trace publication boundary admits the current dirty tail
+before draining it; it must not claim success for a rejected tail. Once a terminal
+plan owns a fixed prefix, flush/close cannot downgrade it to an unrelated batch
+write after a failed terminal attempt. Canonical settlement or explicit authorized
+revocation must resolve that ownership. Revoked-producer discard first quiesces
+capture/publication and requires the existing source revocation proof. Required
+Task, recovery-checkpoint and tool-effect writes keep their own durable boundaries.
+
+### Reading and deployment limits
+
+Working reads remain with the existing owner-local staging/overlay. Independent
+History readers see source-confirmed data, not arbitrary buffer entries. The
+buffer does not replace SQL retention, hot-read cache policy, authorization,
+coordination leases or effect receipts. It does not provide process-restart
+handover, another Pod's Python callbacks, or Redis-only recovery. Capturing bytes
+does not by itself unload RAM mirrors or promise zero-copy execution.
+
+Automatic Metrics remain independent best-effort observations through their
+provider; they do not own Trace capture or swallow a Trace admission error.
+`metrics=None` does not disable the Trace interaction recorder. Metrics source
+queries remain committed-only. Synchronous SQL publication plus bounded hot-read
+caching remains a valid separate configuration; cache hits do not authorize
+control transitions or resolve unknown source commits.
+
+**Adapter/capacity migration:** stop and drain old marker producers before
+upgrading; their active scopes are not reusable with the payload format. Size
+capacity for real serialized bytes, cumulative snapshots and content context,
+not boundary counts. A host backend must retain accepted entries and provide the
+requested ordered prefix non-destructively until exact-ID acknowledgement. Shared
+capacity pressure must not evict unconfirmed payloads as ordinary hot-cache data.
+
+**Verification scope:** local directed tests exercise payload readback, rejection,
+rollback/unknown outcomes, acknowledgement failure, cancellation and independent
+Runtime lifetimes using the in-memory buffer and local source backends. These do
+not certify a Redis adapter, host failure/reassignment behavior, memory savings,
+or production throughput. Complete Execution/Trace/Capability combinations and
+supported source/dependency matrices require their own exact-head integration
+and CI evidence; the policy declaration alone is not that evidence.
 
 ## Runtime content
 
@@ -511,6 +738,48 @@ contract. Batch reads finish before returning; they do not expose partial
 prefixes or require a stream-closing context. Origin errors propagate instead
 of becoming missing values. Backend metadata batching and shared cache loaders
 remain in use.
+
+## Source-backed turn authority
+
+`linktools.ai.persistence.turns.StateTurnCoordination` implements turn ownership,
+request lookup and authoritative session lookup over an initialized `StateStore`.
+Use the owning Persistence's public `execution.executions.state_store`; its
+session/request/execution records and mutation receipts are included in the
+Execution snapshot contract. This is an alternative authority, not a Redis
+projection or a second writer alongside an existing coordination backend.
+
+The backend supplies **only** the turn interfaces. Runtime selection still
+requires a host-owned object implementing both `CacheBackend` and
+`TurnCoordinationBackend`. Compose those interfaces with explicit delegation:
+create the host object, pass it to `PersistenceStorage(..., coordination=...)`,
+open that single Persistence, bind its ready source backend exactly once, then
+use `Runtime.attach(persistence=...)`. Unbound calls must fail, not fall back to
+another authority. Carry the Persistence's read-only and ready/closed guards;
+never rebind an existing host object to another source or namespace. Runtime
+closes before its Persistence; the host retains ownership of the borrowed cache.
+No new SDK coordination factory or Runtime mode is required.
+
+Claims atomically maintain session exclusion and request/execution identities.
+Lease durations round upward to milliseconds; fences advance per session and
+must be compared with the complete opaque lease key and token. Replays and
+reads never grant a lease or renew it. Cancellation requires a fresh live
+source guard. Expired cross-session request reuse retires all referenced old
+generations in the same transaction. Unknown commits are confirmed only by the
+original retained receipt; missing receipts are not proof of rollback.
+
+Source observations use independent read scopes and a backend-clock sample.
+A consistent empty anchor can report absence at that actual source read, not a
+promise that later claims cannot occur. Reachable broken edges remain errors.
+This does not detect arbitrary external deletion or a partial resource restore.
+Session anchors and execution receipts are retained: budget for their source
+writes and storage growth rather than assuming cache-like expiry or zero SQL.
+
+Switching authorities or restoring their records requires stopping old
+admission, draining producers, resolving unknown mutations, and moving a complete
+source generation. Do not run old and restored authorities concurrently or roll
+a source back beneath live effects. A snapshot does not prove those effects
+have stopped. Tests cover Memory, Filesystem and SQLite; deployment-specific
+strong-source routing, latency and resource capacity still require validation.
 
 ## Ordered live streams
 
@@ -693,7 +962,8 @@ This is a final-value buffer: repeated keys within one dispatch can collapse to
 the last value. Intermediate values need not be persisted. The source receives
 ordinary `StorageChange` PUT/DELETE entries; conditional revisions, RESET,
 metadata changes and business atomic batches are not implicitly queued.
-`Metrics` continues to use append buffering, where every observation matters.
+An observation publisher must preserve every observation rather than use this
+last-value coalescing contract.
 
 A successful `flush` confirms that intentions accepted before the call have
 been persisted, or superseded by a later same-key value that was successfully
@@ -796,3 +1066,45 @@ competing ownership changes must use the conditional operation, and external
 effects still require their own fence/idempotency enforcement. Keep mutation
 callbacks free of external effects and short. Task and Tool renewal use this
 operation; other domain transitions retain their existing authorization checks.
+
+## Offline filesystem member inspection
+
+A filesystem state group's `offline_exclusivity()` retains its existing
+`None`-yielding guard contract. On an uninitialized group it acquires the group
+(or standalone root) writer lock before discovering members, then acquires all
+member locks and validates the complete manifest set. A pending recovery journal,
+changed inventory, or incomplete archive metadata prevents inspection; this
+operation does not repair or provision missing source data.
+
+Within that scope, the owning task can call `describe_offline_members()` for
+immutable domain/root facts, including original opaque dynamic partition keys
+and the archive member. Nested or concurrent entry, initialization and premature
+close are rejected. Cancellation settles owned lock acquisition/release first;
+failed release retains the remaining locks for the same group's `close()` retry.
+Copied descriptors do not retain authorization after the scope exits.
+
+This is a filesystem-specific offline inventory seam, not a portable snapshot
+extension. Custom capability partitions still require their dependency contract;
+archive membership alone does not prove object closure. Existing snapshot and
+opaque-object rejection checks remain in force. It does not retire the filesystem
+backend or grant automatic recovery to a SQL source.
+
+
+## Offline object cleanup and opaque capability state
+
+`Persistence.purge_unreferenced_objects()` requires the caller to quiesce all
+users of the routed state and object stores. Its core reference scan cannot
+interpret arbitrary capability payloads. A currently bound capability partition
+(including a volatile one), or an existing durable capability-presence marker,
+therefore returns the selected candidates as `blocked`, before pruning archive
+records or deleting objects. Cached maintenance operations observe later
+capability bindings. Marker read or integrity failures abort without deletion.
+Ordinary core-only cleanup and volatile-state portable snapshot rules are unchanged.
+
+This is not a complete custom-dependency inventory. Raw custom writes that never
+published a capability marker cannot be rediscovered reliably after the original
+configuration is lost, especially from opaque SQL partition digests. Keep that
+source out of generic cleanup until its original owner supplies a complete
+reference inventory; do not treat an absent marker as proof of no custom data.
+The check adds one source read scope per discovered partition to offline cleanup,
+not to Runtime writes or reads. It neither creates markers nor changes schema.

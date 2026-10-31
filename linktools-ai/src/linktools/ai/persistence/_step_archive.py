@@ -152,6 +152,8 @@ class ExecutionProjectionBatch:
     base_interaction_offset: int = 0
     target_interaction_offset: int = 0
     transcript: StagedTranscript | None = None
+    payloads: tuple[tuple[str, bytes], ...] = ()
+    local_messages: Sequence[ModelMessage] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +270,8 @@ class CapturedExecutionProjection:
     base_message_index: int = 0
     target_message_index: int = 0
     producer_generation: int | None = None
+    payloads: tuple[tuple[str, bytes], ...] = ()
+    local_messages: Sequence[ModelMessage] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -795,6 +799,11 @@ class StagingAgentRunStore(AgentRunStore):
             for sequence in sorted(dirty)
         ) if interactions else ()
         transcript = self.staged_transcript(agent_run_id)
+        local_messages = () if transcript is None else transcript.messages
+        payload_digests = {
+            digest for interaction in captured_interactions for digest, _ in interaction.payload_dependencies()
+        }
+        payloads = tuple((digest, self.staged_payload(agent_run_id, digest)) for digest in sorted(payload_digests))
         target_message_index = offset.transcript_messages
         if transcript is not None:
             target_message_index = len(transcript.messages)
@@ -819,6 +828,8 @@ class StagingAgentRunStore(AgentRunStore):
             offset.interactions,
             interactions[-1].model_request_seq if interactions else offset.interactions,
             transcript,
+            payloads,
+            local_messages,
         )
 
     def _ensure_open(self) -> None:

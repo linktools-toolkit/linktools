@@ -27,6 +27,9 @@ class CapabilityPersistence(Protocol):
     pending callbacks are owner-local, not portable distributed queue consumers.
     Resolve omitted batch timing with CommitPolicy.resolve_batch in the owning
     constructor before registration; Runtime does not supply custom defaults.
+    Terminal buffers contain frozen payload bytes, not transaction callbacks.
+    Submit rejection is not acceptance; admitted writes remain owned until an
+    explicit flush or the terminal source transaction confirms their receipts.
     """
 
     @property

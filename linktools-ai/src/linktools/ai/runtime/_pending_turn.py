@@ -73,16 +73,14 @@ class _PendingExecutionTurn:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     def begin_commit(self) -> None:
-        if self.execution.status is ExecutionStatus.CANCELLING:
-            raise AIError(ErrorCode.EXECUTION_CANCELLED)
-        if self.execution.status is not ExecutionStatus.STARTED or self.committing:
+        if self.execution.status not in {ExecutionStatus.STARTED, ExecutionStatus.CANCELLING} or self.committing:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         self.committing = True
 
     def confirm(self, committed: ExecutionTerminalCommitResult) -> None:
         if not self.committing or self.committed is not None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if committed.execution.status is not ExecutionStatus.SUCCEEDED:
+        if committed.execution.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self.committed = committed
         self.execution = committed.execution

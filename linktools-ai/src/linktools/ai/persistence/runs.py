@@ -44,6 +44,7 @@ from .durability import (
     run_durable_commit,
 )
 from ._model_client import resolve_client_requests
+from ._projection_payload import decode_projection_payload, encode_projection_payload
 from ._plan import PersistenceDomain
 from ._archive import PreparedArchive
 from ._step_archive import (
@@ -130,7 +131,6 @@ class RuntimeAgentRunStore(AgentRunStore):
         self.capability_revisions: dict[str, int] = {}
         self._staging = staging
         self.conversation_persistence = ConversationPersistence(conversation_archive)
-        self.checkpoint_persistence = CheckpointPersistence(staging, recovery_archive, execution_archive)
         self._execution_repository = execution_repository
         self._pending_producer_guard: Callable[[str, int, bool], bool] | None = None
         self._tenant_id = tenant_id
@@ -154,9 +154,14 @@ class RuntimeAgentRunStore(AgentRunStore):
             ensure_ready=self._ensure_business,
             require_mutable=self._ensure_run_mutable,
             has_flight=lambda run_id: run_id in self._durability_flights,
-            flush=self._commit_execution_projection,
             flush_boundary=self.flush_execution_projection,
+            capture=self.capture_buffered_execution_projection,
+            publish=self.publish_buffered_execution_projection,
             background_tasks=self._background_tasks,
+        )
+        self.checkpoint_persistence = CheckpointPersistence(
+            staging, recovery_archive, execution_archive,
+            trace_source_only=self.trace_persistence.failed_admission_settled,
         )
         for archive in self._archives.values():
             if isinstance(archive, StateStepArchive):
@@ -358,7 +363,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                         offset.observation_flush_interval = configured.observation_flush_interval
                     self.trace_persistence.offsets[record.agent_run_id] = offset
                 if offset is None or restored is not None and offset.checkpoints == 0:
-                    self.trace_persistence.dirty.add(record.agent_run_id)
+                    self.trace_persistence.mark_dirty(record.agent_run_id)
                     producer = self._execution_producers.get(record.agent_run_id)
                     if offset is not None and producer is not None:
                         offset.observation_execution_id, offset.observation_producer_generation = producer
@@ -366,6 +371,14 @@ class RuntimeAgentRunStore(AgentRunStore):
 
     async def get_agent_run(self, *, agent_run_id: str) -> AgentRunRecord | None:
         await self._ensure_business()
+        if self.trace_persistence.failed_admission_settled(agent_run_id):
+            for domain in (PersistenceDomain.CHECKPOINT, PersistenceDomain.TRACE):
+                archive = self._archive_for_run(domain, agent_run_id)
+                if archive is not None:
+                    run = await archive.get_agent_run(agent_run_id=agent_run_id)
+                    if run is not None:
+                        return run
+            return None
         return await self._staging.get_agent_run(agent_run_id=agent_run_id)
 
     async def list_agent_runs(
@@ -385,7 +398,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         async with self._history_lock.hold(event.agent_run_id):
             self._ensure_run_mutable(event.agent_run_id)
             self._staging.append_event_local(event)
-            self.trace_persistence.dirty.add(event.agent_run_id)
+            self.trace_persistence.mark_dirty(event.agent_run_id)
 
     async def list_events(self, *, agent_run_id: str) -> list[StepEvent]:
         await self._ensure_business()
@@ -448,7 +461,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                         offset.observation_producer_generation = producer_generation
                     checkpoint = self._staging.save_checkpoint_local(checkpoint)
                     staged_checkpoint_offset = self._staging.checkpoint_count_local(checkpoint.agent_run_id)
-                    self.trace_persistence.dirty.add(checkpoint.agent_run_id)
+                    self.trace_persistence.mark_dirty(checkpoint.agent_run_id)
                     recovery = self._archive_for_run(PersistenceDomain.CHECKPOINT, checkpoint.agent_run_id)
                     recovery_run = self._staging.get_agent_run_local(checkpoint.agent_run_id)
                     recovery_interactions_snapshot = self._staging.capture_interactions_local(checkpoint.agent_run_id)
@@ -610,11 +623,21 @@ class RuntimeAgentRunStore(AgentRunStore):
 
     async def latest_checkpoint(self, *, agent_run_id: str, include_interrupted: bool = False) -> AgentRunCheckpoint | None:
         await self._ensure_business()
+        if self.trace_persistence.failed_admission_settled(agent_run_id):
+            for domain in (PersistenceDomain.CHECKPOINT, PersistenceDomain.TRACE):
+                archive = self._archive_for_run(domain, agent_run_id)
+                if archive is not None:
+                    checkpoint = await archive.latest_checkpoint(
+                        agent_run_id=agent_run_id, include_interrupted=include_interrupted,
+                    )
+                    if checkpoint is not None:
+                        return checkpoint
+            return None
         return await self._staging.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=include_interrupted)
 
     def stage_transcript(self, agent_run_id: str, transcript: StagedTranscript) -> None:
         self._staging.stage_transcript(agent_run_id, transcript)
-        self.trace_persistence.dirty.add(agent_run_id)
+        self.trace_persistence.mark_dirty(agent_run_id)
 
     def staged_transcript(self, agent_run_id: str) -> StagedTranscript | None:
         return self._staging.staged_transcript(agent_run_id)
@@ -630,7 +653,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         agent_run_id = getattr(interaction, "agent_run_id", None)
         if not isinstance(agent_run_id, str) or not agent_run_id:
             raise TypeError("staged model interaction has no AgentRun identity")
-        self.trace_persistence.dirty.add(agent_run_id)
+        self.trace_persistence.mark_dirty(agent_run_id)
         if self._archive_for_run(PersistenceDomain.TRACE, agent_run_id) is None:
             self._publish_model_interaction_change(agent_run_id)
 
@@ -638,7 +661,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._staging.prepare_model_interaction(interaction)
         if not isinstance(interaction, StagedModelInteraction):
             raise TypeError("staged model interaction is invalid")
-        self.trace_persistence.dirty.add(interaction.agent_run_id)
+        self.trace_persistence.mark_dirty(interaction.agent_run_id)
         if self._archive_for_run(PersistenceDomain.TRACE, interaction.agent_run_id) is None:
             self._publish_model_interaction_change(interaction.agent_run_id)
 
@@ -1136,6 +1159,26 @@ class RuntimeAgentRunStore(AgentRunStore):
             await self._settle_durability_flight(flight, operation, readback)
             return
 
+    def trace_buffer_failure_settled(
+        self, agent_run_id: str, *, execution_id: str, producer_generation: int,
+    ) -> bool:
+        """Whether this producer's rejected tail is isolated under its publication policy."""
+        return self.trace_persistence.failed_admission_settled(
+            agent_run_id, execution_id=execution_id, producer_generation=producer_generation,
+        )
+
+    async def settle_trace_buffer_failure(
+        self, agent_run_id: str, *, execution_id: str,
+        producer_generation: int, error: BaseException,
+    ) -> bool:
+        """Settle only this producer's known rejected Trace admission."""
+        return await self._settle_observation_boundary(
+            self.trace_persistence.settle_failed_admission(
+                agent_run_id, execution_id=execution_id,
+                producer_generation=producer_generation, error=error,
+            )
+        )
+
     async def prepare_execution_terminal_seal(
         self, *, execution_id: str, agent_run_ids: Sequence[str], binding_digest: str,
     ) -> ExecutionTerminalSealPlan:
@@ -1158,9 +1201,26 @@ class RuntimeAgentRunStore(AgentRunStore):
         archive = self._archives.get(PersistenceDomain.TRACE)
         if not isinstance(archive, StateStepArchive):
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        ordered_agent_run_ids = tuple(sorted(dict.fromkeys(agent_run_ids)))
+        failed_agent_run_ids = tuple(
+            run_id for run_id, producer in self._execution_producers.items()
+            if producer[0] == execution_id and self.trace_persistence.failed_admission_settled(run_id)
+        )
+        ordered_agent_run_ids = tuple(sorted(dict.fromkeys((*agent_run_ids, *failed_agent_run_ids))))
+        buffered_projections: dict[str, CapturedExecutionProjection | None] = {}
         for agent_run_id in ordered_agent_run_ids:
-            await self.trace_persistence.stop(agent_run_id)
+            producer_generation = self._execution_producers.get(agent_run_id, (None, None))[1]
+            if self.trace_persistence.terminal_buffered(agent_run_id):
+                buffered_projections[agent_run_id] = await self.trace_persistence.prepare_terminal_payload(
+                    agent_run_id, execution_id=execution_id, producer_generation=producer_generation,
+                )
+            elif self.trace_persistence.failed_admission_settled(
+                agent_run_id, execution_id=execution_id, producer_generation=producer_generation,
+            ):
+                continue
+            else:
+                await self.trace_persistence.stop(
+                    agent_run_id, execution_id=execution_id, producer_generation=producer_generation,
+                )
         if not ordered_agent_run_ids:
             _logger.info(
                 "execution terminal seal prepared: execution=%s runs=0",
@@ -1203,7 +1263,20 @@ class RuntimeAgentRunStore(AgentRunStore):
                                 raise AIError(ErrorCode.STORAGE_CONFLICT)
                             captured_seal = seal
                             run = self._staging.get_agent_run_local(agent_run_id)
-                            if run is None:
+                            buffered = buffered_projections.get(agent_run_id)
+                            if buffered is not None:
+                                captured.append((seal, ExecutionProjectionBatch(
+                                    buffered.run, buffered.events, buffered.checkpoints,
+                                    buffered.base_event_offset, buffered.base_checkpoint_offset,
+                                    buffered.target_event_offset, buffered.target_checkpoint_offset,
+                                    buffered.base_message_index, buffered.target_message_index,
+                                    buffered.interactions, buffered.base_interaction_offset,
+                                    buffered.target_interaction_offset, buffered.transcript,
+                                    buffered.payloads, buffered.local_messages,
+                                )))
+                                break
+                            if (run is None or agent_run_id in buffered_projections
+                                    or self.trace_persistence.failed_admission_settled(agent_run_id)):
                                 needs_archive_run = True
                             else:
                                 projection = self._capture_projection_checkpoint_locked(agent_run_id)
@@ -1212,6 +1285,10 @@ class RuntimeAgentRunStore(AgentRunStore):
                     if needs_archive_run:
                         archive_run = await archive.get_agent_run(agent_run_id=agent_run_id)
                         if archive_run is None:
+                            if self.trace_persistence.failed_admission_settled(agent_run_id):
+                                # No Trace packet was admitted. The execution control
+                                # seal must not manufacture a run from the rejected tail.
+                                break
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         if captured_seal is None:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1264,7 +1341,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                 local_base = 0
                 local_count = (projection.target_message_index if projection.transcript is not None
                                else batch.target_transcript_message_count)
-                staged_transcript = self._staging.staged_transcript(projection.run.agent_run_id)
+                payloads = dict(projection.payloads)
                 prepared.append(
                     PreparedExecutionProjection(
                         projection.run,
@@ -1291,14 +1368,10 @@ class RuntimeAgentRunStore(AgentRunStore):
                             await archive.prepare_interactions(
                                 projection.run,
                                 projection.interactions,
-                                lambda digest,
-                                agent_run_id=projection.run.agent_run_id: self._staging.staged_payload(
-                                    agent_run_id,
-                                    digest,
-                                ),
+                                payloads.__getitem__,
                                 local_message_base=local_base,
                                 local_message_count=local_count,
-                                local_messages=() if staged_transcript is None else staged_transcript.messages,
+                                local_messages=projection.local_messages,
                                 prepared=interaction_archive,
                                 **({"baseline": batch.checkpoints[-1].projection}
                                    if batch.checkpoints and type(archive).prepare_interactions is StateStepArchive.prepare_interactions
@@ -1324,8 +1397,8 @@ class RuntimeAgentRunStore(AgentRunStore):
                 binding_digest,
                 tuple(prepared),
                 tuple(
-                    (projection.run.agent_run_id, seal.token)
-                    for seal, projection in captured
+                    (agent_run_id, terminal_attempt_token)
+                    for agent_run_id in installed
                 ),
                 terminal_attempt_token,
             )
@@ -1351,10 +1424,10 @@ class RuntimeAgentRunStore(AgentRunStore):
         archive = self._archives.get(PersistenceDomain.TRACE)
         if not isinstance(archive, StateStepArchive):
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        for projection in plan.projections:
+        projections = {value.run.agent_run_id: value for value in plan.projections}
+        for agent_run_id, _token in plan.seal_tokens:
             await self._settle_committed_terminal_projection(
-                plan,
-                projection,
+                plan, projections.get(agent_run_id), agent_run_id=agent_run_id,
                 require_owned=True,
             )
         _logger.info(
@@ -1367,10 +1440,10 @@ class RuntimeAgentRunStore(AgentRunStore):
         self,
         plan: ExecutionTerminalSealPlan,
     ) -> None:
-        for projection in plan.projections:
+        projections = {value.run.agent_run_id: value for value in plan.projections}
+        for agent_run_id, _token in plan.seal_tokens:
             await self._settle_committed_terminal_projection(
-                plan,
-                projection,
+                plan, projections.get(agent_run_id), agent_run_id=agent_run_id,
                 require_owned=False,
             )
         _logger.warning(
@@ -1383,11 +1456,11 @@ class RuntimeAgentRunStore(AgentRunStore):
     async def _settle_committed_terminal_projection(
         self,
         plan: ExecutionTerminalSealPlan,
-        projection: PreparedExecutionProjection,
+        projection: PreparedExecutionProjection | None,
         *,
+        agent_run_id: str,
         require_owned: bool,
     ) -> None:
-        agent_run_id = projection.run.agent_run_id
         token = plan.token_for(agent_run_id)
         completion: asyncio.Future[None] | None = None
         async with self._history_lock.hold(agent_run_id):
@@ -1412,19 +1485,25 @@ class RuntimeAgentRunStore(AgentRunStore):
                 completion = flight.completion
             if seal is not None:
                 del self._terminal_seals[agent_run_id]
-            offset = self.trace_persistence.offsets.setdefault(
-                agent_run_id,
-                _ProjectionOffset(),
-            )
-            offset.events = max(offset.events, projection.target_event_offset)
-            offset.checkpoints = max(offset.checkpoints, projection.target_checkpoint_offset)
-            offset.transcript_messages = max(
-                offset.transcript_messages,
-                projection.target_transcript_message_count,
-            )
-            offset.interactions = max(
-                offset.interactions,
-                projection.target_interaction_offset,
+            if projection is not None:
+                offset = self.trace_persistence.offsets.setdefault(
+                    agent_run_id,
+                    _ProjectionOffset(),
+                )
+                offset.events = max(offset.events, projection.target_event_offset)
+                offset.checkpoints = max(offset.checkpoints, projection.target_checkpoint_offset)
+                offset.transcript_messages = max(
+                    offset.transcript_messages,
+                    projection.target_transcript_message_count,
+                )
+                offset.interactions = max(
+                    offset.interactions,
+                    projection.target_interaction_offset,
+                )
+            if self.trace_persistence.terminal_buffered(agent_run_id):
+                self.trace_persistence.confirm_terminal_payload(agent_run_id, execution_id=plan.execution_id)
+            self.trace_persistence.confirm_failed_admission_terminal(
+                agent_run_id, execution_id=plan.execution_id,
             )
             self.trace_persistence.dirty.discard(agent_run_id)
             self._trim_checkpoint_staging_locked(agent_run_id)
@@ -1436,9 +1515,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self,
         plan: ExecutionTerminalSealPlan,
     ) -> None:
-        for agent_run_id in dict.fromkeys(
-            projection.run.agent_run_id for projection in plan.projections
-        ):
+        for agent_run_id, _token in plan.seal_tokens:
             await self._release_terminal_seal_if_owned(
                 agent_run_id,
                 execution_id=plan.execution_id,
@@ -1495,6 +1572,104 @@ class RuntimeAgentRunStore(AgentRunStore):
         if agent_run_id in self._terminal_seals:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
 
+    async def capture_agent_run_checkpoint_payload(
+        self, agent_run_id: str, *, execution_id: str, producer_generation: int,
+        include_interrupted: bool = False,
+    ) -> bytes:
+        """Freeze only the run and latest checkpoint for a pending source boundary."""
+        await self._ensure_business()
+        async with self._history_lock.hold(agent_run_id):
+            self._ensure_run_mutable(agent_run_id)
+            if (self._execution_producers.get(agent_run_id) != (execution_id, producer_generation)
+                    or self.trace_persistence.failed_admission_settled(agent_run_id)):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            run = self._staging.get_agent_run_local(agent_run_id)
+            if run is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            checkpoint = self._staging.latest_checkpoint_local(agent_run_id, include_interrupted=include_interrupted)
+            checkpoints = () if checkpoint is None else (checkpoint,)
+            return encode_projection_payload(CapturedExecutionProjection(
+                run, (), checkpoints, 0, 0, 0, len(checkpoints), (), 0, 0,
+                None, 0, 0, producer_generation, (), (),
+            ))
+
+    def decode_agent_run_checkpoint_payload(
+        self, content: bytes, *, agent_run_id: str, producer_generation: int,
+    ) -> tuple[AgentRunRecord, AgentRunCheckpoint | None]:
+        """Restore a buffer-owned checkpoint without looking up mutable staging."""
+        captured = decode_projection_payload(content)
+        if (captured.run.agent_run_id != agent_run_id
+                or captured.producer_generation != producer_generation
+                or captured.events or captured.interactions or captured.payloads or captured.local_messages
+                or captured.transcript is not None or len(captured.checkpoints) > 1
+                or (captured.base_event_offset, captured.target_event_offset,
+                    captured.base_checkpoint_offset, captured.base_interaction_offset,
+                    captured.target_interaction_offset, captured.base_message_index,
+                    captured.target_message_index) != (0, 0, 0, 0, 0, 0, 0)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return captured.run, None if not captured.checkpoints else captured.checkpoints[0]
+
+    async def capture_buffered_execution_projection(
+        self, agent_run_id: str, *, execution_id: str, producer_generation: int | None,
+    ) -> bytes | None:
+        """Freeze buffer data without materializing objects or installing a source flight."""
+        await self._ensure_business()
+        async with self._history_lock.hold(agent_run_id):
+            self._ensure_run_mutable(agent_run_id)
+            producer = self._execution_producers.get(agent_run_id)
+            if producer is not None and producer != (execution_id, producer_generation):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if agent_run_id not in self.trace_persistence.dirty:
+                return None
+            projection = self._capture_projection_checkpoint_locked(agent_run_id)
+            return encode_projection_payload(CapturedExecutionProjection(
+                projection.run, projection.events, projection.checkpoints,
+                projection.base_event_offset, projection.base_checkpoint_offset,
+                projection.target_event_offset, projection.target_checkpoint_offset,
+                projection.interactions, projection.base_interaction_offset, projection.target_interaction_offset,
+                projection.transcript, projection.base_message_index, projection.target_message_index,
+                producer_generation, projection.payloads, projection.local_messages,
+            ))
+
+    async def publish_buffered_execution_projection(
+        self, captured: CapturedExecutionProjection, *, execution_id: str,
+    ) -> None:
+        """Publish only a buffer-read snapshot, rebased against confirmed source coverage."""
+        await self._ensure_business()
+        agent_run_id = captured.run.agent_run_id
+        while True:
+            async with self._history_lock.hold(agent_run_id):
+                existing = self._durability_flights.get(agent_run_id)
+                if existing is not None:
+                    completion = existing.completion
+                else:
+                    self._ensure_run_mutable(agent_run_id)
+                    offset = self.trace_persistence.offsets.setdefault(agent_run_id, _ProjectionOffset())
+                    if (not captured.base_event_offset <= offset.events <= captured.target_event_offset
+                            or not captured.base_checkpoint_offset <= offset.checkpoints <= captured.target_checkpoint_offset
+                            or not captured.base_interaction_offset <= offset.interactions <= captured.target_interaction_offset
+                            or not captured.base_message_index <= offset.transcript_messages <= captured.target_message_index):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Trace buffer source frontier is inconsistent")
+                    # Admission can overlap an earlier fixed source prefix. Drop only
+                    # its known-confirmed range, never fill this snapshot from staging.
+                    transcript = captured.transcript
+                    if transcript is not None:
+                        transcript = replace(transcript, messages=tuple(transcript.messages)[
+                            offset.transcript_messages - captured.base_message_index:
+                        ])
+                    captured = replace(
+                        captured,
+                        events=captured.events[offset.events - captured.base_event_offset:],
+                        checkpoints=tuple(captured.checkpoints)[offset.checkpoints - captured.base_checkpoint_offset:],
+                        base_event_offset=offset.events, base_checkpoint_offset=offset.checkpoints,
+                        base_interaction_offset=offset.interactions,
+                        transcript=transcript, base_message_index=offset.transcript_messages,
+                    )
+                    flight = self._install_durability_flight_locked(agent_run_id, _AgentRunDurabilityKind.PROJECTION)
+                    break
+            await asyncio.shield(completion)
+        await self.commit_captured_execution_projection(captured, flight, execution_id=execution_id)
+
     async def capture_execution_projection(
         self,
         agent_run_id: str,
@@ -1540,6 +1715,8 @@ class RuntimeAgentRunStore(AgentRunStore):
                         projection.base_message_index,
                         projection.target_message_index,
                         self._execution_producers.get(agent_run_id, (None, None))[1],
+                        projection.payloads,
+                        projection.local_messages,
                     )
                     _logger.debug(
                         "projection flight captured: agent_run=%s token=%s "
@@ -1753,14 +1930,14 @@ class RuntimeAgentRunStore(AgentRunStore):
             )
             local_count = (captured.target_message_index if captured.transcript is not None
                            else prepared.target_transcript_message_count)
-            staged_transcript = self._staging.staged_transcript(captured.run.agent_run_id)
+            payloads = dict(captured.payloads)
             interactions = await archive.prepare_interactions(
                 captured.run,
                 captured.interactions,
-                lambda digest: self._staging.staged_payload(captured.run.agent_run_id, digest),
+                payloads.__getitem__,
                 local_message_base=0,
                 local_message_count=local_count,
-                local_messages=() if staged_transcript is None else staged_transcript.messages,
+                local_messages=captured.local_messages,
                 prepared=interaction_archive,
             )
             checkpoint_values, observation, interaction_archive = archive.combine_projection_archives(
@@ -1961,11 +2138,14 @@ class RuntimeAgentRunStore(AgentRunStore):
                 producer_generation=producer_generation,
             )
             return
-        await self.trace_persistence.stop(agent_run_id)
-        await self._commit_execution_projection(
-            agent_run_id, execution_id=execution_id,
-            producer_generation=producer_generation,
+        await self.trace_persistence.stop(
+            agent_run_id, execution_id=execution_id, producer_generation=producer_generation,
         )
+        if not self.trace_persistence.buffered(agent_run_id):
+            await self._commit_execution_projection(
+                agent_run_id, execution_id=execution_id,
+                producer_generation=producer_generation,
+            )
 
     async def _commit_execution_projection(
         self, agent_run_id: str, *, execution_id: str,
@@ -2073,7 +2253,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                 return
             if self._execution_producers.get(agent_run_id) != (execution_id, producer_generation):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-        await self.trace_persistence.stop(agent_run_id)
+        await self.trace_persistence.stop(agent_run_id, publish=False)
         await self.wait_projection_flight(agent_run_id)
         archive = self._archives.get(PersistenceDomain.TRACE)
         if not isinstance(archive, StateStepArchive):
@@ -2084,6 +2264,7 @@ class RuntimeAgentRunStore(AgentRunStore):
             execution_id=execution_id, producer_generation=producer_generation,
             terminal_execution=terminal_execution,
         )
+        await self.trace_persistence.discard(agent_run_id)
         async with self._history_lock.hold(agent_run_id):
             if (self._execution_producers.get(agent_run_id) != (execution_id, producer_generation)
                     or agent_run_id in self._durability_flights):
@@ -2165,7 +2346,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         archive = self._archives.get(runtime_domain)
         if archive is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        await self.trace_persistence.stop(agent_run_id)
+        await self.trace_persistence.stop(agent_run_id, publish=False)
         while True:
             completion: asyncio.Future[None] | None = None
             flight: _AgentRunDurabilityFlight | None = None
@@ -2176,9 +2357,6 @@ class RuntimeAgentRunStore(AgentRunStore):
                 else:
                     if runtime_domain is PersistenceDomain.TRACE:
                         self._ensure_run_mutable(agent_run_id)
-                    self.trace_persistence.offsets.pop(agent_run_id, None)
-                    self.trace_persistence.release(agent_run_id)
-                    self.trace_persistence.dirty.discard(agent_run_id)
                     flight = self._install_durability_flight_locked(
                         agent_run_id,
                         _AgentRunDurabilityKind.RELEASE,
@@ -2207,6 +2385,10 @@ class RuntimeAgentRunStore(AgentRunStore):
                 )
 
             await self._settle_durability_flight(flight, operation, readback)
+            await self.trace_persistence.discard(agent_run_id)
+            self.trace_persistence.offsets.pop(agent_run_id, None)
+            self.trace_persistence.release(agent_run_id)
+            self.trace_persistence.dirty.discard(agent_run_id)
             return
 
     def _install_durability_flight_locked(

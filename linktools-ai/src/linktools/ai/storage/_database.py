@@ -6,12 +6,14 @@ import asyncio
 import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from time import monotonic
-from typing import TYPE_CHECKING, NoReturn, TypeVar
+from typing import TYPE_CHECKING, ClassVar, NoReturn, TypeVar
 
 from linktools.core import environ
 
 from ..errors import AIError, ErrorCode
+from ._sqlite_owner import _LOCAL_PROFILE, _SqliteFileOwner, _connection_file, _finish_owned_io, require_sqlite_write
 from ._dialects import (
     SqlAlchemyDialect,
     SqlTransactionDisposition,
@@ -38,6 +40,9 @@ class SqlStorageContext:
     sessions: "async_sessionmaker[AsyncSession]"
     dialect: SqlAlchemyDialect
     owns_engine: bool = False
+    LOCAL_SQLITE_APPLICATION_ID: ClassVar[int] = _LOCAL_PROFILE
+    _sqlite_owner: _SqliteFileOwner | None = field(default=None, init=False, repr=False)
+    _local_mutations: dict["AsyncSession", bool] = field(default_factory=dict, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
     _initialize_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _engine_configured: bool = field(default=False, init=False, repr=False)
@@ -64,13 +69,61 @@ class SqlStorageContext:
         async with self._initialize_lock:
             if self._closed:
                 return
+            if any(self._local_mutations.values()):
+                raise AIError(ErrorCode.STORAGE_CONFLICT, "Local SQLite mutations must settle before close")
             self._closed = True
+            if self._sqlite_owner is not None:
+                self._sqlite_owner.stop_writes()
             try:
+                for session in tuple(self._local_mutations):
+                    await _finish_owned_io(asyncio.create_task(session.close()))
+                    self._local_mutations.pop(session)
                 if self.owns_engine:
                     await self.engine.dispose()
+                if self._sqlite_owner is not None:
+                    await self._sqlite_owner.close()
             except BaseException:
                 self._closed = False
                 raise
+
+    async def acquire_local_sqlite(self, path: str | Path) -> None:
+        """Hold the native writer lock before provisioning or opening a local source."""
+        async with self._initialize_lock:
+            if self._closed:
+                raise AIError(ErrorCode.STORAGE_CLOSED)
+            if not self.owns_engine or self.engine.dialect.name != "sqlite":
+                raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+            if self._sqlite_owner is None:
+                self._sqlite_owner = _SqliteFileOwner(path)
+            elif self._sqlite_owner.path != Path(path).expanduser().resolve():
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._sqlite_owner.acquire()
+
+    async def is_local_sqlite_source(self, path: str | Path) -> bool:
+        """Inspect an existing fixed profile without granting writer permission."""
+        if self._closed:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        if self.engine.dialect.name != "sqlite":
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        async with self.engine.connect() as connection:
+            source = await _connection_file(connection)
+        if source.path != Path(path).expanduser().resolve():
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return source.profile == _LOCAL_PROFILE
+
+    @property
+    def exclusive_writer(self) -> bool:
+        return not self._closed and self._sqlite_owner is not None and self._sqlite_owner.active
+
+    async def require_write_access(self) -> None:
+        """Check a writer on its actual connection, not its engine URL."""
+        if self._closed:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        if self._sqlite_owner is not None:
+            self._sqlite_owner.require_open()
+        if self.engine.dialect.name == "sqlite" or self._sqlite_owner is not None:
+            async with self.engine.connect() as connection:
+                await require_sqlite_write(connection, self._sqlite_owner)
 
     async def run_statement(self, operation: Awaitable[ValueT]) -> ValueT:
         """Settle SQLite statement I/O before propagating caller cancellation.
@@ -107,14 +160,32 @@ class SqlStorageContext:
         if retry_limit < 1:
             raise ValueError("retry_limit must be positive")
         started = monotonic()
+        retry_delay = 0.005
         for attempt in range(retry_limit):
+            if attempt and self.dialect.single_writer:
+                # Release the previous snapshot/session before giving another
+                # SQLite writer time to finish instead of reacquiring read locks.
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 0.05)
+            if self._closed:
+                raise AIError(ErrorCode.STORAGE_CLOSED)
+            if self._sqlite_owner is not None:
+                self._sqlite_owner.require_open()
             session = self.sessions()
             transaction = session.begin()
+            if self._sqlite_owner is not None:
+                self._local_mutations[session] = True
             entered = False
             try:
                 await transaction.__aenter__()
                 entered = True
                 try:
+                    if self.engine.dialect.name == "sqlite" or self._sqlite_owner is not None:
+                        await require_sqlite_write(await session.connection(), self._sqlite_owner)
+                    if self.dialect.single_writer:
+                        # SQLite's legacy driver otherwise defers BEGIN until the
+                        # first write, allowing prerequisite reads to disagree.
+                        await self.dialect.begin_consistent_read(session)
                     result = await callback(session)
                 except BaseException as error:
                     disposition = self.dialect.classify_transaction_error(
@@ -168,9 +239,20 @@ class SqlStorageContext:
                 )
                 return result
             finally:
-                if not entered:
-                    await transaction.__aexit__(*sys.exc_info())
-                await session.close()
+                try:
+                    if not entered:
+                        await transaction.__aexit__(*sys.exc_info())
+                finally:
+                    if self._sqlite_owner is None:
+                        await session.close()
+                    else:
+                        try:
+                            await _finish_owned_io(asyncio.create_task(session.close()))
+                        except BaseException:
+                            self._local_mutations[session] = False
+                            raise
+                        else:
+                            self._local_mutations.pop(session)
         raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
     @property
@@ -200,6 +282,7 @@ async def provision_sql(engine: "AsyncEngine", metadata: "MetaData") -> None:
     if not metadata.tables:
         return
     async with engine.begin() as connection:
+        await require_sqlite_write(connection)
         await connection.run_sync(metadata.create_all)
     await validate_sql(engine, metadata)
     _logger.info("SQL metadata provisioned: dialect=%s tables=%s", engine.dialect.name, len(metadata.tables))

@@ -1,8 +1,8 @@
 # Storage 缓存与缓冲写入统一设计
 
-状态：已确认的框架实现与定向验收已完成；精确代码基线、测量范围和未认证环境见第9至12节。
-日期：2026-10-17
-范围：Issue #190 / PR #191
+状态：本文分别记录当前存储合同与历史验证基线；第9至12节是原有发布证据，不构成后续写缓冲、指标 provider 或宿主部署的整体完成声明。
+更新日期：2026-10-31
+范围：存储缓存、领域 payload 缓冲与独立指标 provider
 
 ## 1. 目标与边界
 
@@ -41,7 +41,7 @@ ObjectStore 和 CacheBackend 不能为了词形一致合并。get 返回可缺�
 | Runtime 内容注入 | cache | 保留 Runtime 的引用、租户和来源验证 |
 | 内容摘要 | digest | SHA-256 内容完整性 |
 | 物理记录修订 | storage_revision / expected_storage_revision | 与业务 revision 区分 |
-| 写缓存 | CommitPolicy.buffer 的 append/read_batch/ack；既有 BatchWriteScope 调度 | 待写字节属于所注入实例，scope 只拥有该调用者的调度和结算，见第8节 |
+| 写缓存 | CommitPolicy.buffer 的 append/read_batch/ack；各数据 owner 调度 | 待写字节属于所注入实例，scope 只拥有该调用者的调度和结算，见第8节 |
 
 其他名称只有真实职责歧义时才调整，不为了字面整齐改变公开接口。本轮不同时推行另一组未实施的路径、metadata或revision方法改名。
 
@@ -78,7 +78,7 @@ StoredRecord.storage_revision 与 Observed.storage_revision 是物理 CAS token�
 
 已有：CacheBackend、内存/文件/Tiered实现、ObjectStore、StorageOverlay。PR191已实现并验证：PersistenceStorage 快捷构造器的 cache 参数及内部读取路由（当前缓存由各 StorageRoute 持有）。Storage 与 Asset 批读沿用第3节的分层合同；当前术语见第3节，已确认的写缓存公开形状在第8节。
 
-配置分为两组：StorageRoute.cache 只借用 get/put/delete 热点读取能力；CommitPolicy.batch(buffer=..., batch_size=..., flush_interval=...) 借用 append/read_batch/ack 写缓存并声明提交时机。PersistenceStorage.coordination 独立借用 turn/stream 与 pending-turn 所需能力。同一底层实例可以分别注入多个用途，但不会因实现某组方法而隐式启用它。无写 buffer 时保持领域原有直接源写入路径，不创建隐藏队列；无热点 cache 时直接回源。宿主无需继承全能力包装或提供无用空方法。
+配置分为两组：StorageRoute.cache 只借用 get/put/delete 热点读取能力；CommitPolicy.batch(buffer=..., batch_size=..., flush_interval=...) 与 CommitPolicy.terminal(buffer=...) 借用 append/read_batch/ack 写缓存并声明提交时机；terminal 不接受批量阈值或定时参数。PersistenceStorage.coordination 独立借用 turn/stream 与 pending-turn 所需能力。同一底层实例可以分别注入多个用途，但不会因实现某组方法而隐式启用它。batch 无写 buffer 时同步确认源，不创建隐藏队列；terminal 无 buffer 时保留领域原有本地 staging。无热点 cache 时直接回源。宿主无需继承全能力包装或提供无用空方法。
 
 SQL Runtime 在 mutation 确认提交后，可以把事务实际写入或 guard 的完整 session/execution 记录写入同一 singleton 热点 key。no-op mutation 不失效也不重发已有观察。每个 store 最多持有一个受管发布任务，忙时丢弃后续填充，不新增待写队列；缓存错误不能改变源提交结果，关闭等待该任务的取消清理。未确认或结果未知的提交不发布，整批读取仍独立捕获完整快照，不拼接 singleton。期限始终从原事务 capture 起算3秒，commit、延迟发布及跨层读取都不续期；本 owner 失效阻止旧本地填充，跨 owner 晚到的旧快照在其原期限内仍可能覆盖较新的缓存，不承诺全局单调。该优化仅覆盖这两种 SQL metadata 热点，其他 backend 保持原 read-through；节省源查询可能增加 cache put 和传输字节，须分别计量。
 
@@ -219,59 +219,41 @@ max_bytes 只保留在各实例内存中。每次成功写入的put持共享锁�
 
 预算继续是已提交payload逻辑计费，空内容至少1字节，并非OS实际块分配或临时文件峰值。纯文件共享计量已实现并通过定向验证，随 PR #191 发布；SQLite和持久最小quota均已否决，不是备选待确认项。
 
-## 8. 同一 cache 实例上的缓冲批写
+## 8. 通用缓冲与自动指标
 
-热点读取与缓冲写入使用独立配置入口。自动观测指标接受 best-effort 延迟和进程退出时的丢失风险；审计、恢复、控制、检查点及显式强写保持原有持久保证。数据库原生批量 API、原子事务和业务既有强 staging 不因此移除。
+### 8.1 通用写缓冲与领域数据 owner
 
-### 读资源与写策略配对
+`WriteBufferBackend.append/read_batch/ack` 是借用的有序、非破坏读取能力；待写真实 bytes 和容量属于 backend。`CommitPolicy.terminal(buffer=...)` 只增加可选 buffer，不增加 Runtime mode、writer、flush 或 receipt API。`BatchWriteScope` 仍是独立的通用 owner-local 调度/结算工具，callback 失败后的结算不等于 source 确认，不能把它当数据库 receipt。`StorageBuffer` 保留自己的显式读取可见性和 source 写入合同。
 
-    from linktools.ai.core import CommitPolicy
-    from linktools.ai.observe import Metrics
-    from linktools.ai.persistence import PersistenceStorage
-    from linktools.ai.storage import InMemoryCacheBackend
+Execution、Trace、显式 Capability 各自拥有 payload scope。Execution 冻结延期记录、输入/上下文、指令、输出和审计事实；需要 Conversation 时包含最终上下文。Trace 的 `batch(buffer=...)` 与 `terminal(buffer=...)` 都准入不可变 projection 与选取的依赖 bytes，不再写 `None` marker，也不复用通用 scope 失败后 ack 的路径。新增大对象在对应 source 准备时物化；已有持久不可变引用仍按原 owner 合同使用。
 
-    cache = InMemoryCacheBackend(max_bytes=8 * 1024 * 1024, max_size=1024)
-    direct = Metrics.sqlite("metrics-direct.sqlite3")
-    metrics = Metrics.sqlite("metrics-cached.sqlite3", commit=CommitPolicy.batch(
-        buffer=cache, batch_size=128, flush_interval=60,
-    ))
-    storage = PersistenceStorage.in_memory(cache=cache)
+同 Runtime、相同 buffer identity 与 timing 的 batch Trace runs 共享阈值/最早期限；terminal 无自动批量定时器。每个 run 只发布 backend 读回并校验的固定完整前缀；后续累计 snapshot 不能替换先前已准入的 append-only 事实。同组 terminal 事务聚合各参与 scope 的全部选定前缀，并在源事务内检查 sequence、CAS 和 producer fence；不宣称跨资源分布式事务。
 
-Metrics 的工厂通过 commit.buffer 配置自动批写；Runtime 仍只接收 metrics，不另传指标缓存。PersistenceStorage 工厂的 cache 参数仅配置热点读取。相同 cache 可以在两组配置中显式复用；仅设置热点 cache 不启用批写。CommitPolicy 不拥有 buffer 生命周期，值相等与哈希不包括资源。同一 Runtime 内，显式复用同一 buffer 实例且 batch_size、flush_interval 均相同的 owner 共享自动 flush 调度：合计已接纳且未派发的条目达到阈值，或最早 pending 条目的期限到达时，分别唤醒各 owner 当前已接纳的前缀。Trace 的条目是观察边界标记，不是 SQL 行。后续入队不重置最早期限，在途前缀不重复计数。各 owner 仍拥有独立队列、回调、结算和 SQL 事务；显式 flush/close 仅影响自己，最后成员退出时清理 timer。不同 Runtime 即使共用 buffer 也不共享调度，不提供跨 Pod 消费 claim。本阶段不实现同一 SQL 事务合批，也不据此承诺数据库 IO 进一步下降。
+准入使用 `wait=False` 和有界 transport 等待，不能等终态 drain 造成互锁。明确拒绝或未解决的 append 错误使该次写入/执行失败，不普通 SQL fallback、不自动关闭 Trace、不重发 provider 请求。Trace、terminal-buffered Execution 与显式 buffered Capability 只有完整读回已准入前缀，才可隔离明确被拒尾部并继续必要的 FAILED/CANCELLED 控制结算；尚未 durable admission 的 pending turn 可失败并释放协调。未知 append/source 不能伪装成明确失败，保留原 ID、bytes、plan/flight 供同身份核验。已确认 canonical 后 ack 只是精确 ID 清理，失败不改业务终态；close 保留并报告未结算错误，不关闭借用 backend。
 
-Metrics.record、record_observations 与 MetricStore.put_observations 保留确认写入合同；仅自动 recorder 走批写接纳。Metrics.query/get_observation 读取权威已提交数据，不混入 pending，不因注入缓存增加查询 TTL。
+Task、真正 Checkpoint、tool effect、授权/幂等/恢复控制仍在必要源边界确认。工作读取仍用原本的 staging/overlay，独立 History 读取已提交源；buffer 不是热缓存、可靠任务队列或进程重启后的接管凭据。纯 bytes capture 不等于 RAM 卸载、零拷贝或仅靠 Redis 可恢复。Metrics best-effort provider 独立，不吞 Trace 准入错误；`metrics=None` 也不禁用 Trace interaction recorder。
 
-Metrics.recorder() 返回独立 MetricRecorder。每个 recorder 内部复用既有 BatchWriteScope，借用注入实例的 append/read_batch/ack 存取待写字节；领域使用现有 Observation codec 编解码及 observation_id 识别内容。不新建 DTO、公共 Policy/Protocol 或管理层。scope 的身份与接纳顺序由框架生成，普通业务不用拼 key 或 ID。
+升级须停止并 drain 旧 marker producer，不能复用旧活动 scope。容量按真实序列化 bytes（含累计 snapshot/上下文重复量）配置，不能沿用 marker 条数估算或逐出未确认条目。无 buffer 的原有语义保持：batch 同步源写，terminal 本地 staging。同步 SQL 与有界热点读缓存仍可单独使用，缓存不放宽控制、授权或 unknown readback。
 
-cache 的批写组接收 scope、唯一条目 ID、领域 key 与 bytes/删除值；append 异常可能已经接纳，必须暴露未知结果，不能计作确定满额拒绝或另放隐藏队列。read_batch 非破坏性返回有序未 ack 前缀，ack 只移除指定 ID。缓存不得用热点逐出语义丢弃已接纳 pending。回调成功之后 ack 失败只能重试 ack，不再次调用已成功的 sink；未能清理的 pending 必须通过 flush/close 明确暴露。
+本地定向验收使用内存 buffer 与本地 source，不能代替完整组合的精确 head CI、真实 Redis adapter、宿主故障/接管或性能验收。精确生命周期和故障合同见 [Runtime observation publication](storage-caching.md#runtime-observation-publication)。
 
-### 容量、窗口和结果
+### 8.2 自动指标与宿主写入节奏
 
-InMemoryCacheBackend 的 max_bytes 与可选 max_size 是同一实例的共同预算，包含热点项、queued、组批以及 inflight 未 ack 项。热点项可逐出，已接纳 pending 不可逐出。自动 recorder 满载拒新；StorageBuffer 的显式 enqueue 可以等待容量。单项超过后端总容量时，append 即使 wait=True 也立即返回 False；StorageBuffer.enqueue 报容量拒绝，但后续合法条目仍可接纳。仅临时满额等待，不永久挂起。append 返回 False 必须确定未接纳；接纳前取消不发布，已经接纳则先结算真实结果，不能随调用者取消遗失所有权。没有额外本地队列或“队列外再多一批”的隐藏容量。
+热点读取、Trace 缓冲和自动指标各有独立 owner。`Metrics` 是同步 source/query dataset，同时结构化满足 `MetricRecorderProvider`；`Runtime.open/attach` 与独立 `TaskEngine` 继续通过已有 `metrics=` 接收 provider。只有 `recorder() -> MetricRecorder` 一个无参组合点，不要求 producer 创建 SQL dataset，不添加具体中间件依赖。
 
-自动 recorder 使用固定默认 128 条或首条接纳后 60 秒先到提交，后续接纳不重置首条窗口。flush 和正常 close 主动唤醒不足一批的项。60 秒是正常调度下的组批窗口，不是查询 TTL，也不包括排队和 sink 耗时。每 scope 单 writer 保序；幂等、事务与提交未知读回仍由 sink 原有领域 owner 负责。显式强写的 256 条和 16 MiB 上限保持不变。
+每次 recorder 调用返回独立 scope，创建时不启动 I/O 或任务；producer 关闭自身 scope，不关闭共享 provider/client。Runtime 的 Agent 和 TaskEngine 各自拥有 scope，Evaluation 借 TaskEngine。自动观测保留原 observation ID、tenant/source namespace 与 enrichment；宿主固定目标 dataset，不能把业务来源字段当成投递目标。
 
-通用状态沿用 accepting、accepted、confirmed、unconfirmed、pending、rejected、queue_size、queue_capacity、high_watermark、write_failures、last_failure_code。queue_size 包含全部未 ack 条目；容量归后端且没有统一容量查询契约，queue_capacity 为 None，不表示无界，也不能虚报独立本地额度。rejected 不计入 accepted；confirmed 只说明 sink 回调成功，不把缓存写入本身说成持久成功。指标状态 MetricRecorderStatus 将 confirmed 映射为 persisted，因为指标 sink 已确认权威提交；unconfirmed 保持未确认含义，不等于确定丢失。无 buffer 方法组的直接模式 queue_size 与 queue_capacity 为 0。pending 统计尚未结算的源结果，queue_size 统计尚未 ack 的缓存项；sink 成功后 ack 失败可以 confirmed=1、pending=0、queue_size=1，flush/close 报清理失败，不能说源未写。
+`Metrics` 构造/factory 的 `commit=`、recorder 的 `batch_scopes=` 以及 SDK 指标定时/阈值缓冲已移除。默认、显式 sync、无 buffer 的 batch 调用原本同步，迁移仅删除冗余配置。实际提供 buffer 的调用须在同一协同发布中切换到已准备的宿主 provider/consumer；不能静默改成高频 SQL，也不能把旧 owner-local pending 当可靠队列。宿主负责有界等待、容量、重试及独立消费生命周期，故障不得自动回退逐条 SQL 或关闭观测。
 
-### flush、关闭和取消
+`Metrics.record/record_observations` 仍确认 source，`query/get_observation` 只读已提交内容。`persisted` 只计 source 已确认；broker 接纳不等于落库，`unconfirmed` 不等于确定丢失，`flush.completed` 只确认 recorder 的接纳前缀结算。消费确认必须等待稳定 ID 的真实 source 结果，重复、unknown、冲突、保留期及 assignment 变化均需宿主验证。
 
-MetricRecorder.try_record 是异步接纳操作，bool 不能当持久提交凭据。无缓存直接模式在源调用结算后计 accepted；flush 不等待正在执行的直接调用，也不是全局写屏障。close 等待本 recorder 已进入的源调用退出，但不接管 caller 的取消。
+同步 recorder 在 source 调用结算后完成 admission；flush 不等待仍在 admission 中的调用，close 停新入并等待已开始调用，不接管 caller 取消。业务终态和副作用先完成原交接，再在事务/锁外等待观测；指标失败不改写已确认业务事实。Trace 的 CommitPolicy、通用 BatchWriteScope 和 StorageBuffer 不随 Metrics 清理删除。
 
-缓冲 flush 捕获当时 accepted 前缀，主动唤醒组批并等待该前缀结算。completed 不等于所有项成功提交；状态仍保留未确认和失败。等待超时返回 completed=False；取消等待者不取消 writer，也不撤销已接纳项。
+完整契约、示例及迁移要求见 [Automatic Metrics providers](storage-caching.md#automatic-metrics-providers)。此处说明 SDK 组合，不宣称任何真实消息 adapter 或部署验收通过。
 
-沿用 5 秒单批写预算和 10 秒关闭预算。这是停止/合作取消预算，不是任意回调的硬终止保证。callback 实际退出前仍持有工作及资源；取消请求后正常返回的真实成功仍被确认。关闭先停接纳，再排空或明确结算；不能让队尾失败掩盖前缀仍在执行。
+## 9. 验证与完成矩阵（历史基线）
 
-同一 scope 的关闭有一个所有者，重复 close 共用清理结果；取消某个等待者不丢失后台工作的所有权。Runtime 等自己的 recorder 真正结束后才关闭其存储。共享 Metrics、cache、宿主连接始终是 borrowed，关闭一个 recorder 或 Runtime 不关闭它们，也不清除别的 scope 的待写项。
-
-### 自动指标生产者的交接顺序
-
-无缓存意味着真实新增 await。必须先完成原业务要求的交接：模型 journal/staging 与请求事件发布；工具 bridge 的成功/失败/未知结算；agent usage sink；执行终态 readback、audit、seal 和发布。随后在业务事务和锁之外等待指标。各观测在自身指标 I/O 之前冻结原业务完成时间；外层 agent/run 的 wallclock 仍可能包含内部调用的直接指标 I/O，不引入跨层扣时机制。
-
-普通指标错误 fail-open；外部取消继续传播，但不能重写已交接的成功事实，尤其不能将成功工具误记为效果未知。Task graph/node 投影同样采用 awaited 调用，不用原后台 task 继续隐藏无缓存 I/O；事实收集与记录分别遵守自己的生命周期。
-
-已执行的定向验证涵盖：无缓存实际等待且无隐藏队列、显式缓存接纳、128/60首条窗口、主动flush、前缀后接纳、直接并发、scope独立关闭、未知提交、组批/写入取消及成功业务交接后的指标取消。这些结果按第9节精确代码基线归档，不将设计确认替代执行证据。
-
-## 9. 验证与完成矩阵
+以下记录对应所列旧提交，不代表当前 provider 改造或宿主消息适配的验证结论。旧 Metrics 自动批写已由第 8 节的 provider 合同替代。
 
 本次实现基线为 PR191 `69535dc05ca4b76c2e37813fabe2881cd1b7c9da`，tree 为 `c53d25217803a4981c1a2371cdbf03dde1c0ab44`。统一 cache 注入、自动 Metrics 批写和 StorageBuffer 两种读取可见性已发布，不再是本地待实现草案。该精确 head 的自然 CI run39022486641 全部9项成功，包含 Python 3.10 与 3.x 的 runtime、evaluation-recovery 和最终 gate。
 
@@ -323,7 +305,9 @@ MetricRecorder.try_record 是异步接纳操作，bool 不能当持久提交凭�
 
 本稿记录已执行的精确代码基线；若后续实现改动，原结果不能替代新head验证。
 
-## 12. 已发布范围设计复审结论
+## 12. 历史已发布范围设计复审结论
+
+本节的章节引用对应第9节列出的历史代码基线，不是后来替换后的 payload owner 或 Metrics provider 的新验收证据。
 
 适用规则：根目录及 linktools-ai/AGENTS.md，尤其公共接口、单一所有权、revision/version 词汇、当前格式双端一致及 filelock 协调规则。审查覆盖本稿职责、名称、批读、多级缓存、修订提示、共享文件预算、写缓冲前缀与生命周期合同。
 
@@ -334,6 +318,8 @@ MetricRecorder.try_record 是异步接纳操作，bool 不能当持久提交凭�
 ## 13. 缓冲写入与读取可见性
 
 ### 已确认：接纳、持久确认、读取可见性相互独立
+
+下表比较通用 `StorageBuffer` 的两种读视图及其 `BatchWriteScope` callback 结算，不替代第8.1节的领域 source-confirmation 合同。Execution/Trace/Capability 遇 source unknown 时仍保留原前缀与 ID，不能据通用 callback 失败就清空或 ack。
 
 两种路径都可以接纳尚未持久化的数据，并由同一个批写机制合并写入。区别在读视图，不在是否允许排队，也不能从读视图反推崩溃后的交付保证。
 
@@ -372,7 +358,7 @@ BatchWriteScope.confirmed 只表示回调成功返回。用于已提交读视图
 
 | 场景 | 当前合同与读取 owner | 两条路径如何落位 |
 |---|---|---|
-| 自动观测指标 | 现有异步 best-effort 写入；Metrics 查询通过 MetricStore | 对应“可缓冲写、只读已提交”。首批提炼 BatchWriteScope 不把 pending 自动加入聚合查询 |
+| 自动观测指标 | Metrics 同步 source/query；自动 producer 可注入宿主 provider | 宿主掌握投递/组批节奏；pending 不自动加入聚合查询 |
 | 活跃执行 transcript / interaction / payload | StagingAgentRunStore / AgentRunStore 持有同 owner 未落库事实；projection 按捕获高水位交接 | 已有领域可读暂存路径；保持其更强的恢复/终态合同，不降级成失败可丢 |
 | 独立 DURABLE History | archive / 权威对象 reader | 只读已提交；不保证看到另一实例尚未落库的 staging |
 | revision 提示与能力元数据 | 已提交 head、RevisionSource、Capability reader | 读缓存/失效问题，不是需要批量写库的 pending 事实；继续单飞与生命周期修复 |
@@ -393,9 +379,9 @@ append/聚合查询则不能套按 key 覆盖：inflight 与持久结果可能�
 
 ### 当前公开接口结论与设计状态
 
-第8节 BatchWriteScope 保留 append 接纳、批写和结算合同。通用按 key 最终值视图由第14节 StorageBuffer 提供，复用同一调度机制；两种读取模式在构造时选择，不暴露 pending_items 让消费者自行合并。既有强 staging 继续由领域 owner 持有，不能以通用可丢缓冲替代。
+第8.1节的 BatchWriteScope 保留 append 接纳、批写和结算合同。通用按 key 最终值视图由第14节 StorageBuffer 提供，复用同一调度机制；两种读取模式在构造时选择，不暴露 pending_items 让消费者自行合并。既有强 staging 继续由领域 owner 持有，不能以通用可丢缓冲替代。
 
-两种读取可见性都支持共同批写机制，仅已提交可读不要求同步逐项写入。第14节的最终值缓存和第8节的 append 缓冲保持不同的数据语义。验收必须覆盖：pending 不污染 committed cache、提交结果未知但源可见、旧批结算遇新写、源读跨完整接纳/结算窗口、删除暂存、聚合去重/交接、不拆业务原子批与两种路径的取消/关闭行为。
+两种读取可见性都支持共同批写机制，仅已提交可读不要求同步逐项写入。第14节的最终值缓存和第8.1节的 append 缓冲保持不同的数据语义。验收必须覆盖：pending 不污染 committed cache、提交结果未知但源可见、旧批结算遇新写、源读跨完整接纳/结算窗口、删除暂存、聚合去重/交接、不拆业务原子批与两种路径的取消/关闭行为。
 
 ## 14. 通用按 key 可读缓冲
 

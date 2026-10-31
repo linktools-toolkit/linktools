@@ -150,6 +150,7 @@ class _StartCommands:
 def _backend() -> LocalExecutionBackend:
     record = _record()
     backend = object.__new__(LocalExecutionBackend)
+    backend._execution_buffer = None
     backend._pending_turns = _PendingExecutionTurns()
     backend._pending_renewals = {}
 

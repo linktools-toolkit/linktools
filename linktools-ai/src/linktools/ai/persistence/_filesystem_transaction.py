@@ -232,6 +232,11 @@ class _FilesystemTransaction:
         candidate = transition.apply(current, datetime.now(timezone.utc))
         if candidate is None:
             return None
+        if transition.operation in ("guard", "guard_available"):
+            self.records[key] = candidate
+            self.guarded_record_keys.add(key)
+            self._write(_record_path(candidate), encode_record(candidate))
+            return candidate
         if not await self.update_record_lease(
             key, expected_storage_revision=expected_storage_revision,
             lease_owner=candidate.lease_owner, lease_fence=candidate.lease_fence,

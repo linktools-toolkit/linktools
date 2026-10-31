@@ -15,12 +15,15 @@ from linktools.ai.asset import (
     AssetStore,
     AssetVersionRef,
     DirectoryAssetBackend,
-    FilesystemAssetBackend,
     InMemoryAssetBackend,
+    SqlAssetBackend,
 )
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.migrate import provision_asset_database
 from linktools.ai.storage import (
+    FilesystemObjectStore,
     InMemoryCacheBackend,
+    PayloadPolicy,
     StorageChange,
     StorageEntryStatus,
     StorageEntryRevision,
@@ -48,7 +51,7 @@ class CountingAssetBackend(InMemoryAssetBackend):
 
 
 def make_store(
-    backend: "InMemoryAssetBackend | FilesystemAssetBackend | DirectoryAssetBackend",
+    backend: "InMemoryAssetBackend | SqlAssetBackend | DirectoryAssetBackend",
 ) -> "tuple[AssetStore, StorageOverlay[AssetKey, bytes, AssetInfo]]":
     storage = StorageOverlay(backend, writer=backend)
     return AssetStore(storage), storage
@@ -147,20 +150,44 @@ def test_read_only_asset_storage_can_cold_start() -> None:
     asyncio.run(run())
 
 
-def test_filesystem_asset_store_recovers_history_after_restart(tmp_path: Path) -> None:
+def test_sql_asset_store_recovers_pinned_history_with_file_objects(tmp_path: Path) -> None:
     async def run() -> None:
-        root = AssetRoot("file", str(tmp_path))
-        backend = FilesystemAssetBackend(root)
-        store, _ = make_store(backend)
-        await store.initialize()
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'assets.db'}"
+        engine = create_async_engine(url)
+        objects = FilesystemObjectStore(tmp_path / "objects")
         key = AssetKey("sample", "one")
-        await store.put(key, b"first")
-        await store.put(key, b"second")
-        restarted = FilesystemAssetBackend(root)
+        try:
+            await provision_asset_database(engine)
+            backend = SqlAssetBackend(
+                engine, namespace="restart", object_store=objects, payload_policy=PayloadPolicy(0),
+            )
+            store, _ = make_store(backend)
+            await store.initialize()
+            try:
+                await store.put(key, b"first")
+                pinned = (await store.resolve_versions((key,)))[0]
+                await store.put(key, b"second")
+            finally:
+                await store.close()
+        finally:
+            await engine.dispose()
+
+        restarted_engine = create_async_engine(url)
+        restarted = SqlAssetBackend(
+            restarted_engine, namespace="restart",
+            object_store=FilesystemObjectStore(tmp_path / "objects"), payload_policy=PayloadPolicy(0),
+        )
         restarted_store, _ = make_store(restarted)
-        await restarted_store.initialize()
-        assert await restarted_store.get(key) == b"second"
-        assert len(await restarted.list_versions(key)) == 2
+        try:
+            await restarted_store.initialize()
+            assert await restarted_store.get(key) == b"second"
+            assert len(await restarted.list_versions(key)) == 2
+            assert await restarted_store.read_versions((pinned,)) == (b"first",)
+        finally:
+            await restarted_store.close()
+            await restarted_engine.dispose()
 
     asyncio.run(run())
 

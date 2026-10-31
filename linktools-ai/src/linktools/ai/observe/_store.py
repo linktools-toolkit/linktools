@@ -22,6 +22,13 @@ from ._model import (
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
+def _observation_pruned() -> AIError:
+    return AIError(
+        ErrorCode.STORAGE_CONFLICT, retryable=False,
+        safe_details={"reason": "metric_observation_pruned"},
+    )
+
+
 def _scan_cursor(occurred_at: datetime, observation_digest: str) -> str:
     if occurred_at.tzinfo is None or _SHA256.fullmatch(observation_digest) is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -100,6 +107,16 @@ class MetricStore(Protocol):
     Observation identity is the namespace-scoped ``observation_id``. A batch
     write is atomic: identical replays are idempotent and any conflicting
     identity fails the whole batch with ``STORAGE_CONFLICT``.
+
+    Pruning removes payloads but retains original identities and payload digests.
+    A same-payload replay of a pruned identity fails with non-retryable
+    ``STORAGE_CONFLICT`` and reason ``metric_observation_pruned``; a different
+    payload always conflicts without that reason. Only a single-item original
+    identity/payload call establishes an individual deletion proof. A batch
+    error never establishes the outcome of its other items.
+
+    Pruned records are excluded from all reads and query limits. Pruning counts
+    only active-to-pruned transitions and does not refresh existing receipts.
 
     ``scan_observations`` returns only the requested namespace/kind and the
     half-open interval ``[start, end)`` in strict ascending

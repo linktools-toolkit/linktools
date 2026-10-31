@@ -409,6 +409,7 @@ async def test_terminal_commit_cancellation_still_finalizes_after_durable_commit
 
     lifecycle = Lifecycle()
     backend = object.__new__(LocalExecutionBackend)
+    backend._execution_buffer = None
     backend._run_stores = {
         PersistenceDomain.TRACE: object.__new__(ModelInteractionStateStepArchive),
         PersistenceDomain.CONVERSATION: object(),

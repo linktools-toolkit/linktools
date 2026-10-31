@@ -44,6 +44,7 @@ from ..agent import (
 )
 from ..core import (
     BudgetUsage,
+    CommitPolicy,
     AuthorizationAction,
     AuthorizationPolicy,
     CorrelationData,
@@ -86,10 +87,10 @@ from ..storage import (
     PayloadPolicy,
     StoredPayload,
     TurnCoordination,
-    payload_fits_inline,
 )
 from ._conversation_service import ConversationService
-from ..inputs import ExecutionContextArchive, PreparedExecutionContext
+from ._execution_payload import _materialize_execution_payloads
+from ..inputs import ExecutionContextArchive
 from ..capability import ToolResponseFixture
 from ._tool_response_fixture import _load_tool_response_fixture
 from ..core import HandoffGate, HandoffState
@@ -99,7 +100,7 @@ from ..inputs import (
     input_intent,
     validate_user_input,
 )
-from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
+from ..persistence.objects import ObjectKeyFactory, read_runtime_object
 from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
 from ..execution import (
     CancelExecutionRequest,
@@ -109,6 +110,8 @@ from ..execution import (
     ExecutionHistoryReader,
     ExecutionHistoryService,
     ExecutionRequest,
+    ExecutionInputContext,
+    RuntimePayloadRef,
     ExecutionResult,
     ExecutionTraceItem,
     ExecutionView,
@@ -144,7 +147,6 @@ from ..persistence.contracts import ExecutionRepositories, SessionRepository, Ta
 if TYPE_CHECKING:
     from ..persistence.state import StateTransaction
     from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
-    from ..execution import RuntimePayloadRef
     from ..session import SessionRecord
     from ..spec import RepositoryInstructionResolver
 
@@ -375,11 +377,11 @@ class DefaultExecutionService(TaskExecutionService):
         restart_checkpoints: bool = False,
         durable_trace: bool = False,
         conversation: bool = False,
-        terminal_commit: bool = False,
+        commit: CommitPolicy = CommitPolicy.sync(),
         context_archive: ExecutionContextArchive | None = None,
     ) -> None:
         if any(not isinstance(value, bool) for value in (
-            restart_checkpoints, durable_trace, conversation, terminal_commit,
+            restart_checkpoints, durable_trace, conversation,
         )):
             raise TypeError("execution persistence guarantees must be bool")
         self._state = state
@@ -399,7 +401,9 @@ class DefaultExecutionService(TaskExecutionService):
         self._restart_checkpoints = restart_checkpoints
         self._durable_trace = durable_trace
         self._conversation = conversation
-        self._terminal_commit = terminal_commit
+        if not isinstance(commit, CommitPolicy) or commit.mode not in {"sync", "terminal"}:
+            raise ValueError("Execution requires sync or terminal commit")
+        self._commit = commit
         self._context_archive = context_archive
         self._tool_responses = tool_responses
         self._catalog = catalog
@@ -462,30 +466,12 @@ class DefaultExecutionService(TaskExecutionService):
     def abandon_prepared_stream(self, execution_id: str) -> None:
         self._live_broker.abandon_prepared_local_producer(execution_id)
 
-    async def _materialize_repository_instructions(
-        self,
-        instructions: RepositoryInstructions,
-        *,
-        tenant_id: str,
-    ) -> "RuntimePayloadRef":
-        from ..execution import RuntimePayloadRef
-
-        if self._object_key_factory is None or self._payload_policy is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        payload = instructions.to_payload()
-        inline = StoredPayload.inline_json(payload)
-        if payload_fits_inline(inline, self._payload_policy):
-            stored = inline
-        else:
-            reference = await put_runtime_object(
-                self._object_store,
-                self._object_key_factory,
-                PersistenceDomain.EXECUTION,
-                tenant_id,
-                canonical_json_bytes(payload),
-            )
-            stored = StoredPayload.object(reference)
-        return RuntimePayloadRef(stored, PersistenceDomain.EXECUTION)
+    def _capture_repository_instructions(
+        self, instructions: RepositoryInstructions,
+    ) -> RuntimePayloadRef:
+        return RuntimePayloadRef(
+            StoredPayload.inline_json(instructions.to_payload()), PersistenceDomain.EXECUTION,
+        )
 
     def _validate_tool_response_mode(
         self, reference: AssetVersionRef | None, *, session_id: str | None,
@@ -574,10 +560,7 @@ class DefaultExecutionService(TaskExecutionService):
                 context.canonical_files,
             )
             validate_model_inputs(binding.compiled_agent.model, canonical)
-            stored = await self._input_materializer.store(
-                canonical,
-                tenant_id=request.principal.tenant_id,
-            )
+            stored = self._input_materializer.capture(canonical)
         return replace(
             context,
             request=replace(request, user_prompt=canonical, files=()),
@@ -1389,18 +1372,18 @@ class DefaultExecutionService(TaskExecutionService):
         request = context.request
 
         input_context = None
-        prepared_context = None
         repository_instructions = None
         if request.input_context is not None:
             if session_id is not None:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             if self._context_archive is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            prepared_context = await self._context_archive.prepare(request.input_context)
-            input_context = prepared_context.reference
+            input_context = RuntimePayloadRef(
+                StoredPayload.inline_json(request.input_context.to_payload()), PersistenceDomain.EXECUTION,
+            )
             if request.input_context.repository_instructions is not None:
-                repository_instructions = await self._materialize_repository_instructions(
-                    RepositoryInstructions.from_payload(request.input_context.repository_instructions), tenant_id=request.principal.tenant_id)
+                repository_instructions = self._capture_repository_instructions(
+                    RepositoryInstructions.from_payload(request.input_context.repository_instructions))
         elif self._instruction_resolver is not None:
             if lineage_kind is ExecutionLineageKind.SUBAGENT:
                 if parent is None:
@@ -1425,8 +1408,8 @@ class DefaultExecutionService(TaskExecutionService):
                             documents.setdefault(document.source, document)
                     resolved_instructions = RepositoryInstructions(tuple(documents.values()))
                     self._instruction_resolver.validate(resolved_instructions)
-                    repository_instructions = await self._materialize_repository_instructions(
-                        resolved_instructions, tenant_id=request.principal.tenant_id,
+                    repository_instructions = self._capture_repository_instructions(
+                        resolved_instructions,
                     )
             else:
                 instruction_path: str = "."
@@ -1454,9 +1437,8 @@ class DefaultExecutionService(TaskExecutionService):
                 resolved_instructions = RepositoryInstructions(tuple(documents.values()))
                 self._instruction_resolver.validate(resolved_instructions)
                 repository_instructions = (
-                    await self._materialize_repository_instructions(
+                    self._capture_repository_instructions(
                         resolved_instructions,
-                        tenant_id=request.principal.tenant_id,
                     )
                 )
 
@@ -1518,7 +1500,6 @@ class DefaultExecutionService(TaskExecutionService):
         )
         return await self._admit_execution_start(
             request, proposed_reservation, binding, session,
-            prepared_context=prepared_context,
             prepare_local_stream=prepare_local_stream,
             dependency_hold_id=dependency_hold_id,
             requires_task_invocation_capture=requires_task_invocation_capture,
@@ -1533,7 +1514,6 @@ class DefaultExecutionService(TaskExecutionService):
         binding: AgentBinding,
         session: "SessionRecord | None",
         *,
-        prepared_context: PreparedExecutionContext | None = None,
         prepare_local_stream: bool,
         dependency_hold_id: str | None,
         requires_task_invocation_capture: bool,
@@ -1571,7 +1551,7 @@ class DefaultExecutionService(TaskExecutionService):
                     )
             transferred = False
             try:
-                if (self._terminal_commit and execution.conversation
+                if (self._commit.mode == "terminal" and execution.conversation
                         and dependency_hold_id is None
                         and self._runtime_bridge.pending_start is not None):
                     pending_id = await ConversationService.prepare_turn(
@@ -1584,7 +1564,6 @@ class DefaultExecutionService(TaskExecutionService):
                         return ExecutionHandle(pending_id)
                 return await self._reserve_and_launch_start(
                     request, proposed_reservation, binding,
-                    prepared_context=prepared_context,
                     prepare_local_stream=prepare_local_stream,
                     dependency_hold_id=dependency_hold_id,
                     requires_task_invocation_capture=requires_task_invocation_capture,
@@ -1679,13 +1658,28 @@ class DefaultExecutionService(TaskExecutionService):
         proposed_reservation: ExecutionStartReservation,
         binding: AgentBinding,
         *,
-        prepared_context: PreparedExecutionContext | None = None,
         prepare_local_stream: bool,
         dependency_hold_id: str | None,
         requires_task_invocation_capture: bool,
         budget_scope_id: str | None,
         capture_metric: Callable[[_TerminalMetricDelivery], None] | None,
     ) -> ExecutionHandle:
+        proposed_reservation = replace(proposed_reservation, execution=await _materialize_execution_payloads(
+            proposed_reservation.execution, input_materializer=self._input_materializer,
+            objects=self._object_store, keys=self._object_key_factory,
+            policy=self._payload_policy, tenant_id=request.principal.tenant_id,
+        ))
+        prepared_context = None
+        captured_context = proposed_reservation.execution.input_context
+        if captured_context is not None:
+            if self._context_archive is None or captured_context.payload.kind != "inline":
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            prepared_context = await self._context_archive.prepare(
+                ExecutionInputContext.from_payload(captured_context.payload.decode()),
+            )
+            proposed_reservation = replace(proposed_reservation, execution=replace(
+                proposed_reservation.execution, input_context=prepared_context.reference,
+            ))
         identity = proposed_reservation.idempotency
         scope = identity.scope
         idempotency_key_digest = identity.idempotency_key_digest

@@ -163,8 +163,10 @@ async def test_write_only_cache_batches_trace_without_hot_content_operations(
     archive = store.read_store(PersistenceDomain.TRACE)
     original = archive.sync_prepared_projection
     source_error = AIError(ErrorCode.STORAGE_UNAVAILABLE)
+    attempted = asyncio.Event()
 
     async def fail_source(*args, **kwargs):
+        attempted.set()
         raise source_error
 
     if source_fails:
@@ -173,9 +175,11 @@ async def test_write_only_cache_batches_trace_without_hot_content_operations(
         await _observe(state, 1)
         assert await archive.list_events(agent_run_id="run") == []
         await _observe(state, 2)
-        await asyncio.wait_for(cache.acknowledged.wait(), 2)
+        await asyncio.wait_for((attempted if source_fails else cache.acknowledged).wait(), 2)
         assert cache.accepted == 2
         if source_fails:
+            assert not cache.acknowledged.is_set()
+            assert cache._queue._pending_count == 2
             assert await archive.list_events(agent_run_id="run") == []
             with pytest.raises(AIError) as caught:
                 await store.flush_execution_projection("run", execution_id="execution", producer_generation=1)

@@ -71,10 +71,12 @@ class StorageResourceScope:
         namespace: str,
         tenant_id: str,
         read_only: bool = False,
+        local_sqlite_path: Path | None = None,
     ) -> "StorageResourceScope":
         scope = cls()
         try:
-            await scope.initialize(requests, namespace=namespace, tenant_id=tenant_id, read_only=read_only)
+            await scope.initialize(requests, namespace=namespace, tenant_id=tenant_id,
+                                   read_only=read_only, local_sqlite_path=local_sqlite_path)
         except BaseException as primary_error:
             try:
                 await await_stream_cleanup(scope.close(), None)
@@ -90,6 +92,7 @@ class StorageResourceScope:
         namespace: str,
         tenant_id: str,
         read_only: bool = False,
+        local_sqlite_path: Path | None = None,
     ) -> None:
         if len({request.name for request in requests}) != len(requests):
             raise ValueError("storage resource request names must be unique")
@@ -153,19 +156,27 @@ class StorageResourceScope:
             if key[0] == "sqlite":
                 if route.path is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if not read_only:
-                    await asyncio.to_thread(route.path.parent.mkdir, parents=True, exist_ok=True)
-                    async with FilesystemMutationLock(route.path.with_name(route.path.name + ".init.lock")):
-                        if not route.path.exists():
-                            await _provision_sqlite_database(
-                                route.path, metadata, register_cleanup=self._close_actions.append,
-                            )
                 from sqlalchemy import URL
                 from sqlalchemy.ext.asyncio import create_async_engine
 
                 engine = create_async_engine(URL.create("sqlite+aiosqlite", database=str(route.path)))
                 context = create_sql_storage_context(engine, owns_engine=True)
                 self._close_actions.append(context.close)
+                if not read_only:
+                    await asyncio.to_thread(route.path.parent.mkdir, parents=True, exist_ok=True)
+                    async with FilesystemMutationLock(route.path.with_name(route.path.name + ".init.lock")):
+                        if not route.path.exists():
+                            local = route.path == local_sqlite_path
+                            if local:
+                                await context.acquire_local_sqlite(route.path)
+                            await _provision_sqlite_database(
+                                route.path, metadata, register_cleanup=self._close_actions.append, local=local,
+                            )
+                        elif route.path == local_sqlite_path:
+                            if not await context.is_local_sqlite_source(route.path):
+                                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                                    "Shared SQLite cannot be upgraded online; restore offline into a new exclusive root")
+                            await context.acquire_local_sqlite(route.path)
             else:
                 if route.engine is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -190,6 +201,7 @@ class StorageResourceScope:
 async def _provision_sqlite_database(
     path: Path, metadata: "MetaData", *,
     register_cleanup: Callable[[Callable[[], Awaitable[None]]], None],
+    local: bool = False,
 ) -> None:
     from sqlalchemy import URL
     from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -203,15 +215,12 @@ async def _provision_sqlite_database(
     temporary = Path(name)
     engine: AsyncEngine | None = None
     context: SqlStorageContext | None = None
-    published = False
-
     async def cleanup() -> None:
         if context is not None:
             await context.close()
         elif engine is not None:
             await engine.dispose()
-        if not published:
-            await asyncio.to_thread(_cleanup_sqlite_temporary, temporary)
+        await asyncio.to_thread(_cleanup_sqlite_temporary, temporary)
 
     register_cleanup(cleanup)
     try:
@@ -220,17 +229,21 @@ async def _provision_sqlite_database(
         await context.initialize()
         async with context.engine.begin() as connection:
             await connection.run_sync(metadata.create_all)
+            if local:
+                await connection.exec_driver_sql(f"PRAGMA main.application_id={SqlStorageContext.LOCAL_SQLITE_APPLICATION_ID}")
         await context.close()
         _ensure_sqlite_database_is_self_contained(temporary)
-        await asyncio.to_thread(_sync_file, temporary)
-        try:
-            await asyncio.to_thread(os.replace, temporary, path)
-            published = True
-            await asyncio.to_thread(sync_directory, path.parent)
-        except BaseException as error:
-            if published:
+        await await_stream_cleanup(asyncio.to_thread(_sync_file, temporary), None)
+
+        def publish() -> None:
+            # A writer using another entry point need not hold our init lock.
+            os.link(temporary, path)
+            try:
+                sync_directory(path.parent)
+            except BaseException as error:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
-            raise
+
+        await await_stream_cleanup(asyncio.to_thread(publish), None)
     except BaseException as primary_error:
         try:
             await await_stream_cleanup(cleanup(), None)

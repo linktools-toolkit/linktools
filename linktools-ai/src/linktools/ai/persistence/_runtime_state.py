@@ -72,6 +72,7 @@ class Persistence:
         if not isinstance(storage, PersistenceStorage):
             raise TypeError("storage must be PersistenceStorage")
         self._coordination_backend = storage.coordination
+        self._local_sqlite_path = storage.local_sqlite_path
         self._plan = storage.plan
         self._external_object_store = storage.object_store
         self._lifecycle = _RuntimeStateLifecycle.NEW
@@ -79,6 +80,8 @@ class Persistence:
         self._close_task: asyncio.Task[None] | None = None
         self._close_cursor = 0
         self._close_actions: tuple[Callable[[], Awaitable[None]], ...] = ()
+        self._runtime_owners: dict[object, bool] = {}
+        self._task_owners: set[object] = set()
         self._namespace: str | None = None
         self._tenant_id: str | None = None
         self._conversation: ConversationRepositories | None = None
@@ -254,6 +257,63 @@ class Persistence:
         return store
 
     @property
+    def exclusive_execution_writer(self) -> bool:
+        """Whether this live resource owns the physical Execution writer permission."""
+        self._require_ready()
+        if self._read_only:
+            return False
+        from ._sql import SqlStateStorageGroup
+
+        group = self.execution.executions.state_store.storage_group
+        if isinstance(group, SqlStateStorageGroup):
+            return group.context.exclusive_writer
+        return self._plan.route(PersistenceDomain.EXECUTION).kind == "filesystem"
+
+    async def bind_runtime(
+        self, *, execution_producer: bool, owns_persistence: bool,
+    ) -> Callable[[], Awaitable[None]]:
+        """Admit a Runtime and return its retryable lifetime cleanup.
+
+        The caller releases only after its producers have fully stopped. An
+        owning Runtime also closes the physical resources before releasing.
+        This admission does not replace a backend's cross-process ownership.
+        """
+        owner = object()
+        async with self._lock:
+            self._require_ready()
+            if self._read_only:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "Persistence is read-only")
+            if (
+                execution_producer
+                and self.exclusive_execution_writer
+                and any(self._runtime_owners.values())
+            ):
+                raise AIError(
+                    ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                    "Persistence already has an exclusive execution producer",
+                )
+            self._runtime_owners[owner] = execution_producer
+
+        async def cleanup() -> None:
+            if owns_persistence:
+                await self._close(runtime_owner=owner)
+            async with self._lock:
+                self._runtime_owners.pop(owner, None)
+
+        return cleanup
+
+    def bind_task_engine(self) -> Callable[[], None]:
+        """Retain a TaskEngine lifetime until its synchronous close notifications finish."""
+        self._require_ready()
+        owner = object()
+        self._task_owners.add(owner)
+
+        def release() -> None:
+            self._task_owners.discard(owner)
+
+        return release
+
+    @property
     def retention(self) -> "RuntimeRetentionController":
         return self._require_materialized(self._retention)
 
@@ -286,6 +346,7 @@ class Persistence:
                     tenant_id=tenant_id,
                     object_store=self._external_object_store,
                     read_only=read_only,
+                    local_sqlite_path=self._local_sqlite_path,
                     capability_routes=self._plan.capability_routes,
                     register_cleanup=self._register_initialization_cleanup,
                 )
@@ -313,12 +374,20 @@ class Persistence:
         self._close_actions = (*actions, *self._close_actions)
 
     async def close(self) -> None:
+        await self._close()
+
+    async def _close(self, *, runtime_owner: object | None = None) -> None:
         async with self._lock:
             if self._lifecycle is _RuntimeStateLifecycle.NEW:
                 self._lifecycle = _RuntimeStateLifecycle.CLOSED
                 return
             if self._lifecycle is _RuntimeStateLifecycle.CLOSED:
                 return
+            if self._task_owners or any(owner is not runtime_owner for owner in self._runtime_owners):
+                raise AIError(
+                    ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                    "Persistence still has active Runtime or TaskEngine owners",
+                )
             self._lifecycle = _RuntimeStateLifecycle.CLOSING
             task = self._close_task
             if task is None or task.done():
@@ -471,6 +540,7 @@ class Persistence:
             object_stores={domain: self.object_store(domain) for domain in PersistenceDomain
                            if runtime_domain_uses_object_store(domain)},
             archive_object_stores={domain: self.archive_object_store(domain) for domain in PersistenceDomain},
+            capability_stores=self.capability_stores,
             read_only=self.read_only,
             portable_export=not self.durable_capability_ids,
         )
@@ -484,10 +554,11 @@ class Persistence:
     @classmethod
     async def restore_snapshot(
         cls, ref: ObjectRef, *, object_store: ObjectStore, root: str | Path, limits: SnapshotLimits,
+        exclusive_writer: bool = False,
     ) -> None:
         @asynccontextmanager
         async def open_target(path: Path, namespace: str, tenant_id: str) -> AsyncIterator[SnapshotResources]:
-            state = cls(PersistenceStorage.from_root(path))
+            state = cls(PersistenceStorage.from_root(path, exclusive_writer=exclusive_writer))
             try:
                 await state.initialize(namespace=namespace, tenant_id=tenant_id)
                 yield state.snapshot_resources()
