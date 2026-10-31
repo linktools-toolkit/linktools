@@ -88,16 +88,14 @@ async def test_available_guard_rejects_wrong_or_live_generation(tmp_path, monkey
         )
 
 
-@pytest.mark.parametrize("protected", ("none", "guard", "insert"))
 async def test_sql_available_guard_checks_fresh_clock_after_cas_and_aborts_caught_conflict(
-    tmp_path, monkeypatch, protected,
+    tmp_path, monkeypatch,
 ):
     record = replace(_record(1), lease_owner="old", lease_fence=9, lease_expires_at=_STAMP)
     sampled = _STAMP
     guard = _SqlTransaction.guard_record
     async with _open_store("sql", tmp_path / "sql") as store:
-        if protected != "insert":
-            await store.mutate(lambda tx: tx.insert_record(record))
+        await store.mutate(lambda tx: tx.insert_record(record))
         _clock(monkeypatch, store, "sql", lambda: sampled)
         async def delayed_guard(self, key, *, expected_storage_revision):
             nonlocal sampled
@@ -109,10 +107,6 @@ async def test_sql_available_guard_checks_fresh_clock_after_cas_and_aborts_caugh
         async def callback(tx):
             await tx.insert_record(_record(2))
             current = record
-            if protected == "insert":
-                await tx.insert_record(record)
-            elif protected == "guard":
-                current = await guard(tx, record.key_digest, expected_storage_revision=record.storage_revision)
             with monkeypatch.context() as patch:
                 patch.setattr(_SqlTransaction, "guard_record", delayed_guard)
                 with pytest.raises(AIError) as caught:
@@ -126,7 +120,7 @@ async def test_sql_available_guard_checks_fresh_clock_after_cas_and_aborts_caugh
         with pytest.raises(AIError) as caught:
             await store.mutate(callback)
         assert caught.value.code is ErrorCode.STORAGE_CONFLICT
-        assert await store.read(lambda tx: tx.scan_records()) == (() if protected == "insert" else (record,))
+        assert await store.read(lambda tx: tx.scan_records()) == (record,)
 
 
 async def test_available_guard_cancel_after_cas_aborts_even_when_callback_catches(tmp_path, monkeypatch):

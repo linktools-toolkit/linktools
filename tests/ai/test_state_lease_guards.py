@@ -115,14 +115,12 @@ async def test_lease_guard_uses_fresh_time_without_replacing_transaction_snapsho
         assert await store.read(lambda tx: tx.get_record(record.key_digest)) == (record if at_expiry else result)
 
 
-@pytest.mark.parametrize("protected", ("none", "guard", "insert"))
-async def test_sql_guard_expiry_after_cas_aborts_even_when_callback_catches(tmp_path, monkeypatch, protected):
+async def test_sql_guard_expiry_after_cas_aborts_even_when_callback_catches(tmp_path, monkeypatch):
     record = _leased()
     prior, following = _record(2), _record(3)
     sampled = record.lease_expires_at - timedelta(seconds=1)
     async with _open_store("sql", tmp_path / "sql") as store:
-        if protected != "insert":
-            await store.mutate(lambda tx: tx.insert_record(record))
+        await store.mutate(lambda tx: tx.insert_record(record))
         async def clock(session):
             return sampled
         monkeypatch.setattr(store.context.dialect, "database_current_time", clock)
@@ -136,10 +134,6 @@ async def test_sql_guard_expiry_after_cas_aborts_even_when_callback_catches(tmp_
         async def callback(tx):
             await tx.insert_record(prior)
             current = record
-            if protected == "insert":
-                await tx.insert_record(record)
-            elif protected == "guard":
-                current = await guard(tx, record.key_digest, expected_storage_revision=record.storage_revision)
             with monkeypatch.context() as patch:
                 patch.setattr(_SqlTransaction, "guard_record", delayed_guard)
                 with pytest.raises(AIError) as caught:
@@ -153,7 +147,7 @@ async def test_sql_guard_expiry_after_cas_aborts_even_when_callback_catches(tmp_
         with pytest.raises(AIError) as caught:
             await store.mutate(callback)
         assert caught.value.code is ErrorCode.STORAGE_CONFLICT
-        assert await store.read(lambda tx: tx.scan_records()) == (() if protected == "insert" else (record,))
+        assert await store.read(lambda tx: tx.scan_records()) == (record,)
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)

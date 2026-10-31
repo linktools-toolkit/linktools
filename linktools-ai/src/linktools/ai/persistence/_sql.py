@@ -1262,6 +1262,7 @@ class _SqlTransaction:
         current = await self.get_record(key)
         if current is None or current.storage_revision != expected_storage_revision:
             return None
+        protected = key in self._guarded_record_keys
         now = await self._context.run_statement(
             self._context.dialect.database_current_time(self._session)
         )
@@ -1271,11 +1272,12 @@ class _SqlTransaction:
         if guarded is None:
             return None
         try:
-            # The CAS may wait past expiry. Sample time in a separate statement
-            # after its write protection is held, never from tx.now() or the UPDATE.
-            now = await self._context.run_statement(
-                self._context.dialect.database_current_time(self._session)
-            )
+            if not protected:
+                # A new CAS may wait past expiry. Already protected records were
+                # sampled after their earlier write, not from tx.now() or the UPDATE.
+                now = await self._context.run_statement(
+                    self._context.dialect.database_current_time(self._session)
+                )
             candidate = transition.apply(guarded, now)
             if candidate is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)

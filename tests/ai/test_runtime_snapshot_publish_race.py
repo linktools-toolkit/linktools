@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.persistence import Persistence
+from linktools.ai.persistence import Persistence, PersistenceStorage
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.snapshot import Snapshot, SnapshotTargetInfo
@@ -58,10 +58,12 @@ async def test_same_snapshot_concurrent_restore_publishes_one_generation(
         object_store,
         root: str | Path,
         limits: SnapshotLimits,
+        exclusive_writer: bool = False,
     ) -> None:
         nonlocal arrivals
         del cls, ref, object_store, limits
-        Path(root).mkdir(parents=True, exist_ok=False)
+        async with Persistence.open("namespace", storage=PersistenceStorage.from_root(root, exclusive_writer=exclusive_writer), tenant_id="tenant"):
+            pass
         arrivals += 1
         if arrivals == 2:
             ready.set()
@@ -162,9 +164,11 @@ async def test_collect_temporary_skips_active_restore_generation(
         object_store,
         root: str | Path,
         limits: SnapshotLimits,
+        exclusive_writer: bool = False,
     ) -> None:
         del cls, ref, object_store, limits
-        Path(root).mkdir(parents=True, exist_ok=False)
+        async with Persistence.open("namespace", storage=PersistenceStorage.from_root(root, exclusive_writer=exclusive_writer), tenant_id="tenant"):
+            pass
         entered.set()
         await release.wait()
 
@@ -239,9 +243,11 @@ async def test_current_pointer_commit_unknown_keeps_published_generation(
         object_store,
         root: str | Path,
         limits: SnapshotLimits,
+        exclusive_writer: bool = False,
     ) -> None:
         del cls, ref, object_store, limits
-        Path(root).mkdir(parents=True, exist_ok=False)
+        async with Persistence.open("namespace", storage=PersistenceStorage.from_root(root, exclusive_writer=exclusive_writer), tenant_id="tenant"):
+            pass
 
     monkeypatch.setattr(
         Snapshot,

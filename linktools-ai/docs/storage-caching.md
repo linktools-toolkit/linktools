@@ -84,9 +84,17 @@ For a deliberate conversion, stop every old writer, export supported state and
 use `Persistence.restore_snapshot(..., root=new_empty_root,
 exclusive_writer=True)`, then verify and switch consumers. Core retained history
 and Memory are covered by this offline path; arbitrary custom partition/object
-closure is not. The higher-level generation restore API does not select this
-profile, and an existing generation must not be treated as converted merely
-because its snapshot identity matches.
+closure is not. `Snapshot.restore(..., exclusive_writer=True)` also selects this profile for
+new generations. Its default remains shared SQLite. Reusing a generation with
+`replace_policy="same"` requires both matching snapshot contents and the requested
+writer profile; a mismatch is a conflict, not an online conversion. The profile
+does not change the logical snapshot digest. Replacement still requires the
+existing expected-generation and offline-exclusivity safeguards.
+
+`RestoredSnapshot.open_history()` remains a read-only observer. To write an
+exclusive restored generation, open
+`PersistenceStorage.from_root(restored.storage_root, exclusive_writer=True)`;
+the returned location alone does not grant writer permission.
 
 The permission uses the connection's actual main file, including canonical
 symlink resolution, not its URL. Each new physical connection is checked;

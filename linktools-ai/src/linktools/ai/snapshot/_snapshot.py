@@ -34,7 +34,9 @@ from ..storage import (
     ObjectRef,
     ObjectStore,
     read_object,
+    create_sql_storage_context,
 )
+from ..observe.stream import await_stream_cleanup
 from ..history import History
 from ..persistence.snapshots import (
     SnapshotExclusiveGuard,
@@ -300,9 +302,12 @@ class Snapshot:
         tenant_id: str,
         limits: SnapshotLimits,
         replace_policy: str = "same",
+        exclusive_writer: bool = False,
         expected_generation: str | None = None,
         exclusive: SnapshotExclusiveGuard | None = None,
     ) -> RestoredSnapshot:
+        if not isinstance(exclusive_writer, bool):
+            raise TypeError("exclusive_writer must be a bool")
         manifest = await cls._verified_manifest(ref, object_store, limits)
         resolved_namespace = validate_persistence_namespace(namespace)
         resolved_tenant = validate_tenant_id(tenant_id)
@@ -330,7 +335,9 @@ class Snapshot:
             )
             if inspection.status != "matching":
                 raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-            return _restored_runtime(root, current)
+            restored = _restored_runtime(root, current)
+            await _require_restored_writer_profile(restored, exclusive_writer)
+            return restored
         if replace_policy == "replace" and (
             expected_generation is None or exclusive is None
         ):
@@ -359,6 +366,7 @@ class Snapshot:
                     object_store=object_store,
                     root=storage_root,
                     limits=limits,
+                    exclusive_writer=exclusive_writer,
                 )
                 workspace_root = await _restore_workspace(
                     manifest.get("workspace"),
@@ -397,7 +405,9 @@ class Snapshot:
                             )
                             if inspection.status != "matching":
                                 raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-                            return _restored_runtime(root, latest)
+                            restored = _restored_runtime(root, latest)
+                            await _require_restored_writer_profile(restored, exclusive_writer)
+                            return restored
                         if replace_policy == "replace":
                             if (
                                 latest is None
@@ -880,6 +890,38 @@ def _resolve_workspace_entry_kind(
         if not isinstance(target, str):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         current = _safe_symlink_target(current, target)
+
+
+async def _require_restored_writer_profile(restored: RestoredSnapshot, expected: bool) -> None:
+    from sqlalchemy import URL
+    from sqlalchemy.exc import SQLAlchemyError
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    path = restored.storage_root / "runtime.db"
+    if not path.is_file():
+        raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+    engine = create_async_engine(URL.create(
+        "sqlite+aiosqlite", database=path.as_uri(), query={"mode": "ro", "uri": "true"},
+    ))
+    context = create_sql_storage_context(engine, owns_engine=True)
+    primary_error: BaseException | None = None
+    try:
+        actual = await context.is_local_sqlite_source(path)
+        if actual != expected:
+            raise AIError(ErrorCode.SNAPSHOT_CONFLICT, "Restored SQLite writer profile does not match")
+    except (OSError, SQLAlchemyError) as error:
+        primary_error = AIError(ErrorCode.STORAGE_UNAVAILABLE)
+        raise primary_error from error
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        try:
+            await await_stream_cleanup(context.close(), primary_error)
+        except BaseException as cleanup_error:
+            if primary_error is not None:
+                raise primary_error from cleanup_error
+            raise
 
 
 async def _verify_restored_generation(
