@@ -531,26 +531,28 @@ class RecordLeaseTransition:
     """Conditional lease change using the backend's current time.
 
     Acquire requires an available lease and advances the expected fence once.
-    Renew and release require the matching live owner and fence. Ordinary record
+    Renew, release and guard require the matching live owner and fence. Guard
+    leaves ownership, fence and expiry unchanged, while allowing the backend to
+    advance the physical revision for optimistic write protection. Ordinary record
     reads are snapshots, not authorization to execute work. The returned expiry
     may already have passed when a transaction commits or its response arrives;
     callers still need fencing/idempotency at their effect boundary.
     """
 
-    operation: Literal["acquire", "renew", "release"]
+    operation: Literal["acquire", "renew", "release", "guard"]
     owner: str
     fence: int
     lease_seconds: int | None = None
 
     def __post_init__(self) -> None:
-        if self.operation not in ("acquire", "renew", "release"):
+        if self.operation not in ("acquire", "renew", "release", "guard"):
             raise ValueError("invalid lease operation")
         if not isinstance(self.owner, str) or not self.owner.strip():
             raise ValueError("lease owner is required")
         _require_nonnegative_int(self.fence, "fence")
-        if self.operation == "release":
+        if self.operation in ("release", "guard"):
             if self.lease_seconds is not None:
-                raise ValueError("release does not accept a lease duration")
+                raise ValueError(f"{self.operation} does not accept a lease duration")
         elif (isinstance(self.lease_seconds, bool)
               or not isinstance(self.lease_seconds, int) or self.lease_seconds <= 0):
             raise ValueError("lease_seconds must be a positive integer")
@@ -569,6 +571,8 @@ class RecordLeaseTransition:
         elif (not live or record.lease_owner != self.owner
               or record.lease_expires_at is None):
             return None
+        if self.operation == "guard":
+            return replace(record, storage_revision=record.storage_revision + 1)
         return replace(
             record,
             storage_revision=record.storage_revision + 1,
@@ -607,6 +611,8 @@ class StateTransaction(Protocol):
         with STORAGE_CONFLICT when a condition stops holding during the CAS
         wait; even a caught conflict must roll back that mutation. Successful
         physical revision increments are backend owned, not domain revisions.
+        Guard preserves the lease and proves liveness only at the fresh check;
+        it does not extend that proof across later awaits or commit completion.
         """
         ...
 
