@@ -288,7 +288,6 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
                     runtime,
                     "hello",
                     "default",
-                    "default",
                     False,
                     False,
                     False,

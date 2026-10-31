@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """SDK-facing responses are safe before history and interrupted-stream capture."""
 
+import asyncio
+from collections import Counter
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -9,9 +11,12 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-from pydantic_ai import RunContext
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.exceptions import FallbackExceptionGroup, ModelRequestTimeout
 from pydantic_ai.messages import ModelMessage, ModelRequestAttempt, ModelResponse, TextPart
 from pydantic_ai.models import CompletedStreamedResponse, Model, ModelRequestParameters, StreamedResponse
+from pydantic_ai.models.fallback import FallbackModel
+from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import RequestUsage
 
@@ -66,7 +71,7 @@ class _SnapshotModel(Model):
             )
 
 
-def _prepared(source: _SnapshotModel, omission: str | None) -> PreparedRequestModel:
+def _prepared(source: Model, omission: str | None) -> PreparedRequestModel:
     async def prepare(
         messages: Sequence[ModelMessage], settings: ModelSettings | None,
         parameters: ModelRequestParameters, streaming: bool,
@@ -147,3 +152,66 @@ async def test_partial_stream_snapshots_remain_fresh_and_include_post_exit_conti
     assert final.failed_attempts[0].error is None
     assert source.stream.response.failed_attempts[0].error == "ProviderError: referenced document content"
     assert original.metadata is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_native_fallback_preserves_prepared_stream_first_event(fallback: bool) -> None:
+    async def stream(messages, info):
+        yield "first "
+        yield "second"
+
+    events = []
+
+    async def consume(ctx, source):
+        async for event in source:
+            events.append(event)
+
+    model = _prepared(FunctionModel(stream_function=stream), None)
+    result = await Agent(FallbackModel(model) if fallback else model).run(
+        "synthetic", event_stream_handler=consume,
+    )
+    assert result.output == "first second"
+    assert events[0].event_kind == "part_start"
+    assert events[0].part.content == "first "
+    assert Counter(type(event).__name__ for event in events) == {
+        "PartStartEvent": 1, "PartDeltaEvent": 1, "PartEndEvent": 1, "FinalResultEvent": 1,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize("setting,before_first", [
+    ("request_timeout", False), ("request_timeout", True), ("first_event_timeout", True),
+])
+async def test_prepared_stream_preserves_request_deadline(
+    fallback: bool, setting: str, before_first: bool,
+) -> None:
+    if setting not in ModelSettings.__annotations__:
+        pytest.skip("installed SDK does not expose this deadline setting")
+    async def stream(messages, info):
+        if not before_first:
+            yield "first "
+        await asyncio.Event().wait()
+
+    source = FunctionModel(stream_function=stream)
+
+    async def prepare(messages, settings, parameters, streaming):
+        return source
+
+    async def consume(ctx, events):
+        async for _ in events:
+            pass
+
+    provider_errors = []
+    model = PreparedRequestModel(source, prepare, provider_errors.append)
+    expected = FallbackExceptionGroup if before_first and fallback else ModelRequestTimeout
+    with pytest.raises(expected) as caught:
+        await asyncio.wait_for(Agent(FallbackModel(model) if fallback else model).run(
+            "synthetic", model_settings={setting: 0.02}, event_stream_handler=consume,
+        ), 1)
+    if expected is FallbackExceptionGroup:
+        assert len(caught.value.exceptions) == 1
+        assert isinstance(caught.value.exceptions[0], ModelRequestTimeout)
+    # Deadline cancellation is not an independent provider failure eligible for retry.
+    assert provider_errors == []

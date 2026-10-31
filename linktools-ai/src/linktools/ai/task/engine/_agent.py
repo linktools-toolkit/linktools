@@ -80,7 +80,6 @@ class AgentTaskRunner(Generic[AppT]):
         start_execution: Callable[..., Awaitable[object]],
         get_execution: Callable[[str, Principal], Awaitable[object]],
         acquire_execution_hold: Callable[[str, Principal, str], Awaitable[None]],
-        release_execution_hold: Callable[[str, Principal, str], Awaitable[None]],
         result_reader: Callable[[TaskNodeInvocation, str], Awaitable[JsonValue]],
         result_ref_reader: Callable[[TaskNodeInvocation, str], Awaitable[TaskResultRef]],
         get_prepared_input: Callable[
@@ -116,7 +115,6 @@ class AgentTaskRunner(Generic[AppT]):
         self._record_invocation = record_invocation
         self._get_execution = get_execution
         self._acquire_execution_hold = acquire_execution_hold
-        self._release_execution_hold = release_execution_hold
         self._result_reader = result_reader
         self._result_ref_reader = result_ref_reader
         self._get_prepared_input = get_prepared_input
@@ -331,7 +329,6 @@ class AgentTaskRunner(Generic[AppT]):
                         "parameters": dict(task_input.parameters),
                         "files": list(files),
                         "session_id": task_input.session_id,
-                        "memory_scope": task_input.memory_scope,
                         "planning": planning,
                         "thinking": thinking,
                         "output_contract": _node_output_contract(invocation),
@@ -347,7 +344,6 @@ class AgentTaskRunner(Generic[AppT]):
             prompt,
             files=files,
             session_id=task_input.session_id,
-            memory_scope=task_input.memory_scope,
             planning=planning,
             thinking=thinking,
             idempotency_key=request_identity,
@@ -363,7 +359,6 @@ class AgentTaskRunner(Generic[AppT]):
         *,
         files: tuple[str, ...],
         session_id: str | None,
-        memory_scope: str | None,
         planning: bool,
         thinking: ThinkingValue,
         idempotency_key: str,
@@ -374,7 +369,6 @@ class AgentTaskRunner(Generic[AppT]):
             prompt,
             files=files,
             session_id=session_id,
-            memory_scope=memory_scope,
             planning=planning,
             thinking=thinking,
             idempotency_key=idempotency_key,
@@ -388,7 +382,6 @@ class AgentTaskRunner(Generic[AppT]):
         *,
         files: tuple[str, ...],
         session_id: str | None,
-        memory_scope: str | None,
         planning: bool,
         thinking: ThinkingValue,
         idempotency_key: str,
@@ -400,7 +393,6 @@ class AgentTaskRunner(Generic[AppT]):
                 prompt,
                 files=files,
                 session_id=session_id,
-                memory_scope=memory_scope,
                 planning=planning,
                 thinking=thinking,
                 idempotency_key=idempotency_key,
@@ -427,11 +419,6 @@ class AgentTaskRunner(Generic[AppT]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await control.handoff_execution(execution_id)
         await self._capture_invocation(execution, execution_id, invocation)
-        await self._release_execution_hold(
-            execution_id,
-            invocation.principal,
-            hold_id,
-        )
         return execution, execution_id
 
     async def _capture_invocation(
@@ -695,7 +682,6 @@ def _agent_task_request_identity(
                 "files": list(task_input.files),
                 "final_input_digest": final_input_digest,
                 "session_id": task_input.session_id,
-                "memory_scope": task_input.memory_scope,
                 "planning": task_input.planning,
                 "thinking": task_input.thinking,
                 "output_contract": _node_output_contract(invocation),

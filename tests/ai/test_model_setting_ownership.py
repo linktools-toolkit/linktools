@@ -275,7 +275,11 @@ def test_sdk_setting_owners_have_explicit_protocol_classification() -> None:
     from linktools.ai.model._anthropic import _REQUEST_SETTING_FIELDS
     from linktools.ai.model._openai import _CHAT_REQUEST_SETTING_FIELDS, _RESPONSES_REQUEST_SETTING_FIELDS
 
+    from pydantic_ai.settings import ModelSettings
+
     operational = {"timeout", "request_timeout", "max_retries", "extra_headers", "extra_body"}
+    if "first_event_timeout" in ModelSettings.__annotations__:
+        operational.add("first_event_timeout")
     fallback = {"thinking", "cache"}
     request_owned = {"tool_choice", "citations"}
     cases = (

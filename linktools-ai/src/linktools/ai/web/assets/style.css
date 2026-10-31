@@ -105,11 +105,8 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;height:100dvh}
 .composer>textarea:focus{outline:0}
 .composer:focus-within{border-color:#8aa698}
 .composer-bar{display:flex;gap:10px;align-items:center;justify-content:space-between;margin-top:5px}
-.composer-bar>#options-toggle{border:0;font-size:12px;padding-left:3px}
 .composer-bar>div{display:flex;gap:7px}
 .hint{font-size:10px;color:var(--muted);margin:10px 0 0}
-.toggles{display:flex;align-items:center;gap:16px}
-.toggles label{flex-direction:row;align-items:center;gap:6px;font-size:12px}
 .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding-top:15px}
 .inspector{position:fixed;z-index:30;top:0;right:0;bottom:0;display:flex;flex-direction:column;width:min(480px,100vw);min-height:0;border-left:1px solid var(--line);background:#fff;padding:20px;box-shadow:-12px 0 40px #20252c12}
 .inspector-heading{display:flex;align-items:center;gap:7px}
@@ -182,7 +179,7 @@ dialog details>summary{font-size:12px;color:var(--muted);cursor:pointer}
 .markdown h1,.markdown h2,.markdown h3{font-size:1.15em;letter-spacing:0;margin:1.2em 0 .5em}
 .markdown p,.markdown ul,.markdown ol,.markdown blockquote,.markdown pre{margin:.7em 0}
 .markdown a{text-decoration:underline;color:var(--accent)}
-.markdown code,.message-source pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.9em}
+.markdown code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.9em}
 .markdown :not(pre)>code{background:#eef0f1;padding:.1em .3em;border-radius:4px}
 .markdown pre{white-space:pre;overflow:auto;background:#f4f5f6;border-radius:8px;padding:14px}
 .markdown blockquote{border-left:3px solid var(--line);padding-left:14px;color:var(--muted)}
@@ -192,9 +189,6 @@ dialog details>summary{font-size:12px;color:var(--muted);cursor:pointer}
 .markdown .align-center{text-align:center}
 .markdown .align-right{text-align:right}
 .copy-message{font-size:11px;margin-top:8px;padding:4px 7px}
-.message-source{margin:8px 0 0;font-size:11px;color:var(--muted)}
-.message-source summary,.user-input>details summary{cursor:pointer}
-.message-source pre{white-space:pre-wrap;overflow-wrap:anywhere}
 .user-input>details{font-size:11px;color:var(--muted);margin:8px 0 14px}
 .attachments{list-style:none;padding:0;font-size:12px;overflow-wrap:anywhere;color:var(--muted)}
 .attachments li{border:1px solid var(--line);border-radius:7px;padding:8px 10px;margin:6px 0}
@@ -289,3 +283,14 @@ dialog details>summary{font-size:12px;color:var(--muted);cursor:pointer}
 .source-warning{font-size:12px;line-height:1.7;color:#896628;overflow-wrap:anywhere}.native-reader>.quiet{font-size:11px;margin-right:10px}.native-response button{font-size:11px}.inspector:not(.execution-page) .native-message{grid-template-columns:1fr;gap:8px}.inspector .native-toolbar .native-request{max-width:100%}
 .reader-actions{margin-left:auto;display:flex;align-items:center}.conversation-nav .reader-actions button{padding:6px 10px;border-radius:6px;border:0;font-size:12px;background:#fff1ee;color:#a53a2a}.reading .conversation{padding-top:8px}
 @media(max-width:620px){.conversation-nav{padding:0 16px;gap:22px}.conversation-nav button{font-size:12px}.native-toolbar{gap:8px;min-height:50px}.native-toolbar select{font-size:11px}.native-turn{max-width:75px}.native-status{font-size:10px}.native-message{grid-template-columns:1fr;gap:8px;padding:14px 0}.native-text{font-size:14px;line-height:23px}.native-literal{font-size:12px}.native-tool-heading{font-size:12px}.native-tool-result>.native-text{font-size:12px;line-height:20px}}
+
+.composer-bar>.composer-settings{display:flex;align-items:center;gap:20px;min-width:0;flex-wrap:wrap}
+.thinking-control{display:grid;grid-template-columns:auto auto;gap:4px 12px;font-size:12px;min-width:145px}
+.thinking-control output{color:var(--muted);text-align:right}
+.thinking-control input{grid-column:1/-1;width:100%;margin:0;padding:0;accent-color:var(--accent)}
+.planning-control{display:flex;flex-direction:row;align-items:center;gap:6px;white-space:nowrap;font-size:12px}
+.live-tools{margin:10px 0}
+.live-tool{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding:7px 0;border-bottom:1px solid var(--line);font-size:12px;overflow-wrap:anywhere}
+.live-tool .tool-name{font-weight:600;min-width:0}.live-tool .tool-status{color:var(--muted);text-align:right;min-width:0}
+.live-tool.error .tool-status{color:var(--danger)}
+@media(max-width:600px){.composer-bar>.composer-settings{gap:12px}.thinking-control{min-width:125px}.composer-bar{flex-wrap:wrap}.live-tool{gap:8px}}

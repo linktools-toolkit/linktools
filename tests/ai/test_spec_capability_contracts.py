@@ -45,7 +45,7 @@ from linktools.ai.asset import (
 from linktools.ai.core import canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 
-from linktools.ai.runtime._harness_memory import select_harness_memory_tools
+from linktools.ai.capability import MemoryCapability
 from linktools.ai.runtime._mcp import (
     _MCPModelToolset,
     _MCPBinding,
@@ -479,9 +479,9 @@ async def test_asset_skill_source_rejects_mismatched_source_ref() -> None:
 
 
 def test_memory_owner_selects_only_its_declared_tools() -> None:
-    assert select_harness_memory_tools(("write_plan",)) == ()
-    assert select_harness_memory_tools(("read_memory",)) == ("read_memory",)
-    assert select_harness_memory_tools(("*",)) == (
+    assert MemoryCapability.select_tools(("write_plan",)) == ()
+    assert MemoryCapability.select_tools(("read_memory",)) == ("read_memory",)
+    assert MemoryCapability.select_tools(("*",)) == (
         "delete_memory",
         "read_memory",
         "search_memory",

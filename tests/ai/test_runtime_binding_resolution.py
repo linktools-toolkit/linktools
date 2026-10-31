@@ -391,16 +391,14 @@ async def test_runtime_start_admits_resolved_binding(monkeypatch: pytest.MonkeyP
             monkeypatch.setattr(runtime._execution_service, "start", execution.start)
 
             compiled_agent = fixture.catalog.root_agent("parent")
-            started = await runtime._start_for_agent(
-                compiled_agent.spec.id,
-                compiled_agent.spec.revision,
+            port = runtime._agent_execution_port(compiled_agent.spec.id, compiled_agent.spec.revision)
+            started = await port.start(
                 "prompt",
                 files=(),
                 output=None,
                 principal=None,
                 session_id=None,
                 idempotency_key="runtime-resolution",
-                memory_scope=None,
                 mode="run",
                 planning=None,
                 thinking=None,

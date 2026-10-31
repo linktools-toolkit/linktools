@@ -60,12 +60,14 @@ from ._filesystem import (
 )
 from ..spec import mcp_server_selector, mcp_tool_selector
 
+from ._memory import MemoryCapability
 from ._session import SessionCapability
 from ._execution import ExecutionCapability
 
 __all__ = [
     "ReferencedInputsCapability",
     "SessionCapability",
+    "MemoryCapability",
     "ExecutionCapability",
     "ToolResponseFixture",
     "CheckpointCapability", "TraceCapability",

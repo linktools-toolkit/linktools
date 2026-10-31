@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Harness Planning adapter for the Runtime-owned plan store."""
+"""Planning tools borrowing the host-owned plan store."""
 
 from collections.abc import Callable
 from typing import Any, cast
@@ -10,12 +10,13 @@ from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai_harness.planning import (
     PlanItem as HarnessPlanItem,
     Planning,
+    PlanStore,
     TaskStatus,
 )
 
-from ..capability import ToolCallRetry, tool_metadata
+from ._tool_signal import ToolCallRetry
+from ._tool_metadata import tool_metadata
 from ..errors import AIError, ErrorCode
-from ._harness import HarnessPlanStoreAdapter
 
 _PLANNING_CAPABILITY_ID = "linktools.ai.planning"
 _PLANNING_TOOL_NAME = "write_plan"
@@ -109,6 +110,11 @@ def _validate_model_plan(items: object) -> None:
 class HarnessPlanning(Planning[None]):
     """Expose only the Runtime-supported Planning tool with its semantics."""
 
+    @classmethod
+    def bind(cls, store_resolver: Callable[[PydanticRunContext[None]], PlanStore]) -> "HarnessPlanning":
+        """Bind the supported tool surface to an execution's native store resolver."""
+        return cls(id=_PLANNING_CAPABILITY_ID, tools=(_PLANNING_TOOL_NAME,), store_resolver=store_resolver)
+
     def get_toolset(self) -> AbstractToolset[None] | None:
         toolset = super().get_toolset()
         if toolset is not None:
@@ -122,18 +128,4 @@ class HarnessPlanning(Planning[None]):
         return None
 
 
-def build_harness_planning(
-    store_resolver: Callable[
-        [PydanticRunContext[None]],
-        HarnessPlanStoreAdapter,
-    ],
-) -> HarnessPlanning:
-    """Build the Runtime-owned Planning capability."""
-    return HarnessPlanning(
-        id=_PLANNING_CAPABILITY_ID,
-        tools=(_PLANNING_TOOL_NAME,),
-        store_resolver=store_resolver,
-    )
-
-
-__all__ = ["HarnessPlanning", "build_harness_planning"]
+__all__ = ["HarnessPlanning"]

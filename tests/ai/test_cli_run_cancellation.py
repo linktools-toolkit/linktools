@@ -76,7 +76,7 @@ async def test_ai_run_json_interrupt_cancels_owned_execution() -> None:
     from linktools.commands.ai.run import _emit_result
 
     task = asyncio.create_task(
-        _emit_result(Runtime(), "prompt", "session", "memory", True, False, False)
+        _emit_result(Runtime(), "prompt", "session", True, False, False)
     )
     await started.wait()
     task.cancel()

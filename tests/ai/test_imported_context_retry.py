@@ -112,7 +112,10 @@ async def test_retry_imported_context_matches_native_fork_history(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_retry_imported_memory_uses_fresh_isolated_scope(tmp_path: Path) -> None:
+    from linktools.ai.capability import MemoryCapability
+
     group = RuntimeFeatures("retry-memory")
+    group.capability(MemoryCapability(scope="production"))
     group.agent("default", model="default", allow_tools=("*",), allow_skills=(), allow_subagents=())
     storage = PersistenceStorage.filesystem(tmp_path)
     context = ExecutionInputContext.from_messages((), memory={
@@ -121,9 +124,8 @@ async def test_retry_imported_memory_uses_fresh_isolated_scope(tmp_path: Path) -
     async with Persistence.open('retry-memory', storage=storage) as persistence_116, Runtime.attach(persistence=persistence_116, features=model_features(_NoToolsModels(), group)) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         agent = runtime.agents.get()
-        with pytest.raises(AIError) as raised:
+        with pytest.raises(TypeError, match="memory_scope"):
             await agent.start("question", principal=principal, input_context=context, memory_scope="production")
-        assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
         source = await agent.start("question", principal=principal, input_context=context)
         assert ((await source.wait()).result).status is ExecutionStatus.SUCCEEDED
         source_record = await runtime._state.execution.executions.get(source.execution_id, tenant_id=principal.tenant_id)

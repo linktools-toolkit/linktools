@@ -14,7 +14,7 @@ from pydantic_ai_harness.planning import (
 from linktools.ai.capability import ToolCallRetry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._harness import HarnessPlanStoreAdapter
-from linktools.ai.runtime._harness_planning import HarnessPlanning
+from linktools.ai.capability.planning import HarnessPlanning
 
 pytestmark = pytest.mark.asyncio
 

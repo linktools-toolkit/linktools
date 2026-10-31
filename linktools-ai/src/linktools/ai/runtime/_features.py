@@ -45,6 +45,7 @@ from ..capability import (
     tool_metadata,
     filesystem_tool_declarations,
     ShellCapability,
+    MemoryCapability,
 )
 
 AppT = TypeVar("AppT")
@@ -220,6 +221,7 @@ class RuntimeFeatures(Generic[AppT]):
         )
         filesystem_capabilities: list[FileSystem] = []
         shells: list[ShellCapability] = []
+        memories: list[MemoryCapability] = []
         asset_capabilities: list[AssetCapability[AppT]] = []
         response_capabilities: list[ToolResponsesCapability[AppT]] = []
 
@@ -235,6 +237,8 @@ class RuntimeFeatures(Generic[AppT]):
                 asset_capabilities.append(value)
             elif isinstance(value, ShellCapability):
                 shells.append(value)
+            elif isinstance(value, MemoryCapability):
+                memories.append(value)
             elif isinstance(value, FileSystem):
                 filesystem_capabilities.append(value)
             else:
@@ -246,6 +250,8 @@ class RuntimeFeatures(Generic[AppT]):
                         response_capabilities.append(leaf)
                     elif isinstance(leaf, ShellCapability):
                         shells.append(leaf)
+                    elif isinstance(leaf, MemoryCapability):
+                        memories.append(leaf)
                     elif isinstance(leaf, FileSystem):
                         filesystem_capabilities.append(leaf)
                     elif isinstance(leaf, AssetCapability):
@@ -265,12 +271,20 @@ class RuntimeFeatures(Generic[AppT]):
                               "AssetCapability requires Runtime scope")
             if self._asset_capability is not None or len(asset_capabilities) != 1:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        workspace_tools: list[CapabilityContribution[AppT]] = []
+        runtime_tools: list[CapabilityContribution[AppT]] = []
+        if memories:
+            if scope != "runtime":
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "MemoryCapability requires Runtime scope")
+            for memory in memories:
+                runtime_tools.extend(
+                    CapabilityContribution.from_opaque("tool", tool.name, tool)
+                    for tool in memory.tool_definitions()
+                )
         if shells:
             if scope != "runtime":
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "ShellCapability requires Runtime scope")
             for shell in shells:
-                workspace_tools.extend(
+                runtime_tools.extend(
                     CapabilityContribution.from_opaque("tool", tool.name, tool)
                     for tool in shell.tool_definitions()
                 )
@@ -289,8 +303,8 @@ class RuntimeFeatures(Generic[AppT]):
                 for tool in workspace_capability.tool_definitions()
             )
             self._workspace = workspace_capability.workspace
-            workspace_tools.extend(tools)
-        self._contributions.extend(workspace_tools)
+            runtime_tools.extend(tools)
+        self._contributions.extend(runtime_tools)
         if asset_capabilities:
             self._asset_capability = asset_capabilities[0]
         self._tool_responses_registered |= bool(response_capabilities)

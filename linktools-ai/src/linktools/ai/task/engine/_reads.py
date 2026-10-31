@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
-from ...core import BudgetUsage, Principal
+from ...core import BudgetUsage, ExecutionStatus, Principal
 from ...errors import AIError, ErrorCode
 from ...execution import ExecutionResult, ExecutionService, ExecutionView, TaskExecutionService
 if TYPE_CHECKING:
@@ -72,6 +72,25 @@ class TaskExecutionReads:
 
     async def release_dependency_hold(self, execution_id: str, *, tenant_id: str, hold_id: str) -> None:
         service = await self._service(execution_id, tenant_id)
+        await service.release_dependency_hold(execution_id, tenant_id=tenant_id, hold_id=hold_id)
+
+    async def release_settled_dependency_hold(self, execution_id: str, *, tenant_id: str, hold_id: str) -> None:
+        """Repeat terminal Task cleanup without requiring an already-finished producer."""
+        try:
+            service = await self._service(execution_id, tenant_id)
+        except AIError as error:
+            if error.code is not ErrorCode.BINDING_NOT_REGISTERED:
+                raise
+            record = await self._tasks.load_source_execution(execution_id, tenant_id=tenant_id)
+            if (record is not None and record.execution_id == execution_id
+                    and record.binding_kind == "agent" and self._ports
+                    and execution_id not in self._ports and record.root_execution_id not in self._ports
+                    and record.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
+                    and record.retention_closed and hold_id not in record.dependency_hold_ids):
+                # Only the durable hold obligation is complete. This does not
+                # substitute for producer-owned result reads or object cleanup.
+                return
+            raise
         await service.release_dependency_hold(execution_id, tenant_id=tenant_id, hold_id=hold_id)
 
     async def request_terminal_handoff(self, execution_id: str, *, tenant_id: str, terminal_commit: bool = False) -> None:
