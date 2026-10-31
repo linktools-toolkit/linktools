@@ -282,11 +282,13 @@ class RuntimeSessions(Generic[AppT]):
 
     async def wait_inactive(
         self, session_id: str, *, principal: Principal, timeout_seconds: float | None = None,
+        observation_timeout_seconds: float | None = None,
     ) -> SessionView:
         """Wait for a non-consuming, point-in-time inactive session observation."""
         self._ensure_open()
         return await self._service.wait_inactive(
             session_id, principal=principal, timeout_seconds=timeout_seconds,
+            observation_timeout_seconds=observation_timeout_seconds,
         )
 
     async def refresh(self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100, max_age: float = 0) -> SessionDetail:

@@ -199,17 +199,26 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
     async def wait_inactive(
         self, session_id: str, *, principal: Principal,
         timeout_seconds: float | None = None,
+        observation_timeout_seconds: float | None = None,
     ) -> SessionView:
         """Observe authoritative inactivity without consuming or reconciling a turn.
 
         Success is a point-in-time observation, not an admission reservation.
         A local worker completion is only a wake-up hint. Remote observations
         retain a bounded fallback; timeout/cancellation stop only this observer.
+        The optional observation budget excludes passive waits and raises
+        TimeoutError rather than the overall deadline's WAIT_TIMEOUT.
         """
         self.require_available()
         if (timeout_seconds is not None and (
             isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
             or not math.isfinite(timeout_seconds) or timeout_seconds < 0
+        )):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if (observation_timeout_seconds is not None and (
+            isinstance(observation_timeout_seconds, bool)
+            or not isinstance(observation_timeout_seconds, (int, float))
+            or not math.isfinite(observation_timeout_seconds) or observation_timeout_seconds < 0
         )):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         sessions, executions = self._runtime_conversation.sessions, self._runtime_executions
@@ -246,48 +255,65 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
                 return record, stored.storage_revision
             return await executions.state_store.read(read)
 
+        async def observe_once() -> tuple[SessionView | None, str | None]:
+            first, session_revision = await read_session()
+            header = ResourceRef(ResourceKind.SESSION, session_id, principal.tenant_id, first.owner_principal_id)
+            await self._runtime_authorization.authorize(principal, AuthorizationAction.SESSION_READ, header)
+            local, epoch = observe(session_id, tenant_id=principal.tenant_id)
+            if local is not None and (local.session_id != session_id or local.parent_execution_id is not None):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            execution, execution_revision = (
+                (None, None) if first.active_execution_id is None
+                else await read_execution(first.active_execution_id)
+            )
+            active = self.validate_admission(first, execution)
+            if execution is not None:
+                await self._runtime_authorization.authorize(
+                    principal, AuthorizationAction.EXECUTION_READ,
+                    ResourceRef(ResourceKind.EXECUTION, execution.execution_id, principal.tenant_id),
+                )
+            owner = (None if self._read_session_owner is None else
+                     await self._read_session_owner(session_id, tenant_id=principal.tenant_id))
+            if local is None and active is None and owner is None:
+                second, confirmed_revision = await read_session()
+                if (second.owner_principal_id, second.history_id, second.created_at) != (
+                    first.owner_principal_id, first.history_id, first.created_at,
+                ):
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                stable = session_revision == confirmed_revision
+                if stable and execution is not None:
+                    confirmed, revision = await read_execution(execution.execution_id)
+                    stable = (revision == execution_revision and confirmed.execution_id == execution.execution_id
+                              and confirmed.session_id == session_id and confirmed.status is execution.status
+                              and confirmed.principal_id == execution.principal_id
+                              and confirmed.created_at == execution.created_at)
+                pending, confirmed_epoch = observe(session_id, tenant_id=principal.tenant_id)
+                if stable and pending is None and epoch == confirmed_epoch:
+                    return await self.project_view(second, principal, active=None, authorized_header=header), None
+                return None, None
+            execution_id = (local.execution_id if local is not None else
+                            active.execution_id if active is not None else owner.execution_id)
+            return None, execution_id
+
         async def observe_inactivity() -> SessionView:
             retry_delay = 1.0
             while True:
-                first, session_revision = await read_session()
-                header = ResourceRef(ResourceKind.SESSION, session_id, principal.tenant_id, first.owner_principal_id)
-                await self._runtime_authorization.authorize(principal, AuthorizationAction.SESSION_READ, header)
-                local, epoch = observe(session_id, tenant_id=principal.tenant_id)
-                if local is not None and (local.session_id != session_id or local.parent_execution_id is not None):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                execution, execution_revision = (
-                    (None, None) if first.active_execution_id is None
-                    else await read_execution(first.active_execution_id)
-                )
-                active = self.validate_admission(first, execution)
-                if execution is not None:
-                    await self._runtime_authorization.authorize(
-                        principal, AuthorizationAction.EXECUTION_READ,
-                        ResourceRef(ResourceKind.EXECUTION, execution.execution_id, principal.tenant_id),
-                    )
-                owner = (None if self._read_session_owner is None else
-                         await self._read_session_owner(session_id, tenant_id=principal.tenant_id))
-                if local is None and active is None and owner is None:
-                    second, confirmed_revision = await read_session()
-                    if (second.owner_principal_id, second.history_id, second.created_at) != (
-                        first.owner_principal_id, first.history_id, first.created_at,
-                    ):
-                        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-                    stable = session_revision == confirmed_revision
-                    if stable and execution is not None:
-                        confirmed, revision = await read_execution(execution.execution_id)
-                        stable = (revision == execution_revision and confirmed.execution_id == execution.execution_id
-                                  and confirmed.session_id == session_id and confirmed.status is execution.status
-                                  and confirmed.principal_id == execution.principal_id
-                                  and confirmed.created_at == execution.created_at)
-                    pending, confirmed_epoch = observe(session_id, tenant_id=principal.tenant_id)
-                    if stable and pending is None and epoch == confirmed_epoch:
-                        return await self.project_view(second, principal, active=None, authorized_header=header)
+                observation = asyncio.timeout(observation_timeout_seconds)
+                try:
+                    async with observation:
+                        view, execution_id = await observe_once()
+                except TimeoutError as error:
+                    if not observation.expired():
+                        raise
+                    raise TimeoutError("session inactivity observation timed out") from error
+                if observation.expired():
+                    raise TimeoutError("session inactivity observation timed out")
+                if view is not None:
+                    return view
+                if execution_id is None:
                     await asyncio.sleep(retry_delay)
                     retry_delay = min(30.0, retry_delay * 2)
                     continue
-                execution_id = (local.execution_id if local is not None else
-                                active.execution_id if active is not None else owner.execution_id)
                 waiter = self._local_waiter
                 if waiter is not None and waiter.owns_execution(execution_id, tenant_id=principal.tenant_id):
                     wake = asyncio.timeout(30)
@@ -304,7 +330,10 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         deadline = asyncio.timeout(timeout_seconds)
         try:
             async with deadline:
-                return await observe_inactivity()
+                view = await observe_inactivity()
+            if deadline.expired():
+                raise TimeoutError("session inactivity wait timed out")
+            return view
         except TimeoutError as error:
             if not deadline.expired():
                 raise

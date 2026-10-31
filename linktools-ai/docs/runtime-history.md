@@ -818,6 +818,7 @@ rather than deleting sessions or hand-modifying their payloads.
 ```python
 view = await runtime.sessions.wait_inactive(
     session_id, principal=principal, timeout_seconds=60,
+    observation_timeout_seconds=5,
 )
 assert view.active_execution_id is None
 ```
@@ -828,6 +829,23 @@ another request can be admitted immediately afterwards. It never consumes a
 result, performs terminal handoff, reconciles admission, renews a lease or
 cancels an execution. `RECOVERY_REQUIRED`, `PENDING_START` and
 `WAITING_DEFERRED` remain busy, not successful inactivity observations.
+
+`timeout_seconds` bounds the overall wait and reports `AIError(WAIT_TIMEOUT)`.
+The optional `observation_timeout_seconds` instead budgets each complete
+observation pass: source reads, authorization, live-admission lookup, stability
+confirmation and final view projection share one budget. It does not include
+passive worker waiting, the remote fallback interval or instability backoff.
+Its expiry raises `TimeoutError("session inactivity observation timed out")`;
+underlying dependency errors remain unchanged. If both deadlines have expired
+when a timeout is reported, the overall deadline takes precedence and reports
+`WAIT_TIMEOUT`, including when cancellation cleanup outlasts the observation
+budget. A failed observation is not
+retried or reported as inactive. Both deadlines accept finite nonnegative
+seconds or `None` (no deadline); zero schedules an immediate deadline, not a
+promise that no synchronous work or I/O can begin. The observation budget defaults
+to `None`, preserving the original behavior. Cancellation can wait for in-flight
+backend operations to settle, so neither budget guarantees a hard physical I/O
+or connection-release deadline. Cancelling this observer never cancels its worker.
 
 Every observation rechecks session permission; observing a canonical execution
 also checks execution-read permission. The session and execution identities remain
