@@ -229,7 +229,6 @@ class TaskEngine(Generic[AppT]):
             *,
             files: Sequence[str],
             session_id: str | None,
-            memory_scope: str | None,
             planning: bool,
             thinking: ThinkingValue,
             idempotency_key: str,
@@ -270,7 +269,6 @@ class TaskEngine(Generic[AppT]):
                 principal=invocation.principal,
                 session_id=session_id,
                 idempotency_key=idempotency_key,
-                memory_scope=memory_scope,
                 mode="run",
                 planning=planning,
                 thinking=thinking,
@@ -305,17 +303,6 @@ class TaskEngine(Generic[AppT]):
                 hold_id=hold_id,
             )
 
-        async def release_execution_hold(
-            execution_id: str,
-            principal: Principal,
-            hold_id: str,
-        ) -> None:
-            await port.service.release_dependency_hold(
-                execution_id,
-                tenant_id=principal.tenant_id,
-                hold_id=hold_id,
-            )
-
         async def store_prepared_prompt(
             value: CanonicalUserInput, *, files: Sequence[str], tenant_id: str,
         ) -> StoredUserInput:
@@ -341,7 +328,6 @@ class TaskEngine(Generic[AppT]):
             ),
             get_execution=get_execution,
             acquire_execution_hold=acquire_execution_hold,
-            release_execution_hold=release_execution_hold,
             result_reader=lambda *args, **kwargs: self._task_node_runtime.read_input_result(*args, **kwargs),
             result_ref_reader=lambda *args, **kwargs: self._task_node_runtime.read_input_result_ref(*args, **kwargs),
             get_prepared_input=lambda *args, **kwargs: self._task_node_runtime.get_prepared_agent_input(*args, **kwargs),

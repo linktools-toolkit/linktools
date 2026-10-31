@@ -255,7 +255,7 @@ security, persisted history and explicit recovery of stopped executors.
 ```python
 from linktools.ai import RuntimeFeatures, Runtime, Workspace
 from linktools.ai.capability import FileSystem
-from linktools.ai.capability import ShellCapability
+from linktools.ai.capability import MemoryCapability, ShellCapability
 from linktools.ai.model import create_model
 from linktools.ai.persistence import PersistenceStorage
 
@@ -266,16 +266,35 @@ features = RuntimeFeatures("workspace")
 features.model("default", binding)
 features.capability(FileSystem(workspace))
 features.capability(ShellCapability())
+features.capability(MemoryCapability())
 
 async with Runtime.open("default", storage=storage,
     features=features,
 ) as runtime:
     result = (await runtime.agents.get("default").run(
         "review this change",
-        memory_scope="default",
         planning=True,
     )).result
 ```
+
+Memory is selected once through `MemoryCapability(scope="default")` in Runtime features,
+not through Agent, Session or Task invocation arguments. Its `read_memory`, `search_memory`,
+`write_memory` and `delete_memory` tools join the same Agent candidates as other capability
+tools. The default `allow_tools=("*",)` exposes them automatically; an explicit selection
+such as `allow_tools=("read_memory",)` restricts them, and `allow_tools=()` exposes none.
+Omitting the declaration disables memory for ordinary SDK executions; local CLI commands
+register the default declaration. Memory content is read and changed through these tools,
+not automatically injected into every model request.
+Admitted executions retain their scope across recovery, while imported input contexts
+use isolated captured memory. Task inputs do not configure memory; new executions use
+the Runtime declaration, while recovery retains the execution's admitted scope.
+
+A Task-bound execution retains its result until the Task node is durably settled,
+not merely until an observer finishes or shuts down. Recovery must reacquire the hold
+before consuming its existing execution result; it cannot reopen closed retention or
+rerun the Agent to replace a missing result. Terminal graph access through wait,
+recovery or cancellation also completes any outstanding hold release; this is not a
+background garbage-collection guarantee for graphs that are never accessed again.
 
 `Runtime.open()` is the public composition root. The Runtime composition is immutable for the lifetime of the context; registrations are completed before it opens.
 

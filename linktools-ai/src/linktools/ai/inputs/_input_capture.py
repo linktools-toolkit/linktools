@@ -625,7 +625,6 @@ class InputCaptures:
                 captured_input_files(accepted, len(normalized["files"])))
             normalized["files"] = []
         normalized["session_id"] = None
-        normalized["memory_scope"] = None
         normalized.pop("capture_context", None)
         if context is not None:
             normalized["capture_context"] = context.to_payload()
@@ -669,10 +668,9 @@ class InputCaptures:
         agent_input = isinstance(reference, AgentInputCaptureRef) or contract.binding.get("type") == "agent"
         if agent_input and input_mode == "reproject_input":
             self.require_reprojectable_input(normalized)
-        # A new Agent invocation never inherits its source session or memory scope.
+        # A new Agent invocation never inherits its source session.
         if agent_input and normalized.get("kind") == "agent-task-input":
             normalized["session_id"] = None
-            normalized["memory_scope"] = None
         excluded = tuple(sorted(set(contract.excluded_dependencies) | set(exclude_dependencies)))
         contract = replace(contract, input=normalized, input_mode=input_mode,
                            dependencies=tuple(item for item in contract.dependencies if item.name not in excluded),
@@ -775,14 +773,12 @@ class InputCaptures:
                     original_input = dict(node.original_input if node.original_input is not None else node.input)
                     original_input.pop("capture_context", None)
                     original_input["session_id"] = None
-                    original_input["memory_scope"] = None
                     if previous is not None:
                         clean_input = dict(previous.input)
                         original_input = dict(previous.original_input)
                         for value in (clean_input, original_input):
                             value.pop("capture_context", None)
                             value["session_id"] = None
-                            value["memory_scope"] = None
                         contract = replace(previous, input=clean_input, original_input=original_input)
                         input_capture = await self.create_task_input(contract, principal=principal,
                             source_capture=input_capture,
@@ -827,7 +823,6 @@ class InputCaptures:
                 if request.context_policy == "clean":
                     body.pop("capture_context", None)
                 body["session_id"] = None
-                body["memory_scope"] = None
                 prompt = body.get("prompt")
                 if isinstance(prompt, Mapping) and prompt.get("kind") == "stored-user-content-v1":
                     stored = decode_domain(prompt["value"], StoredUserInput)

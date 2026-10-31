@@ -352,11 +352,10 @@ class _ResultAgent:
         prompt: str,
         *,
         session_id: str,
-        memory_scope: str,
         planning: bool,
         thinking: bool,
     ) -> _ResultExecution:
-        del prompt, session_id, memory_scope, planning, thinking
+        del prompt, session_id, planning, thinking
         return _ResultExecution(self._result)
 
 
@@ -424,11 +423,10 @@ class _StreamingAgent:
         prompt: str,
         *,
         session_id: str,
-        memory_scope: str,
         planning: bool,
         thinking: bool,
     ) -> _StreamingExecution:
-        del prompt, session_id, memory_scope, planning, thinking
+        del prompt, session_id, planning, thinking
         return _StreamingExecution()
 
 
@@ -451,7 +449,6 @@ async def test_cli_json_failed_result_uses_result_contract_without_event_scan(
             runtime,  # type: ignore[arg-type]
             "prompt",
             "session",
-            "memory",
             True,
             False,
             False,
@@ -477,7 +474,6 @@ async def test_cli_json_success_result_uses_result_contract_without_event_scan(
         _ResultRuntime(result),  # type: ignore[arg-type]
         "prompt",
         "session",
-        "memory",
         True,
         False,
         False,
@@ -500,7 +496,6 @@ async def test_cli_streaming_uses_execution_handle(
         _StreamingRuntime(),  # type: ignore[arg-type]
         "prompt",
         "session",
-        "memory",
         False,
         False,
         False,

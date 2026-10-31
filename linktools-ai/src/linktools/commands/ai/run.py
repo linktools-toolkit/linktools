@@ -59,12 +59,10 @@ class Command(BaseCommand):
 
     def run(self, args: Namespace) -> int:
         workspace = _load_workspace(args.project)
-        memory_scope = args.memory if args.memory is not None else "default"
         _logger.info(
-            "ai run session selected: namespace=%s session=%s memory_scope=%s",
+            "ai run session selected: namespace=%s session=%s",
             "default",
             "default",
-            memory_scope,
         )
 
         async def execute() -> int:
@@ -76,7 +74,6 @@ class Command(BaseCommand):
                     runtime,
                     args.prompt,
                     "default",
-                    memory_scope,
                     args.json,
                     args.planning,
                     args.thinking,
@@ -89,7 +86,6 @@ async def _emit_result(
     runtime: "Runtime",
     prompt: str,
     session_id: str,
-    memory_scope: str,
     as_json: bool,
     planning: bool,
     thinking: bool | None,
@@ -97,7 +93,6 @@ async def _emit_result(
     execution = await runtime.agents.get().start(
         prompt,
         session_id=session_id,
-        memory_scope=memory_scope,
         planning=planning,
         thinking=thinking,
     )

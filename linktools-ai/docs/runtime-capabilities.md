@@ -53,6 +53,20 @@ borrows its TaskEngine.
 Conversation, Checkpoint and Trace persistence owners keep their existing
 module-specific reads, buffers and commit boundaries.
 
+Tool-owning capabilities supply their tool declarations and native binding together.
+`MemoryCapability`, `ShellCapability` and `FileSystem` contribute ordinary Agent tool
+candidates: the default `allow_tools=("*",)` includes available tools, and explicit
+`allow_tools` or the candidate filter can narrow them. Runtime owns the borrowed storage
+or workspace, not a second tool-name registry. An admitted execution retains its captured
+memory scope and selected native tools even if a later host removes the Memory declaration.
+Imported execution contexts keep their isolated captured memory; they do not acquire the
+host's current scope. An ordinary business tool using a memory tool's name is not silently
+replaced when an imported context enables memory.
+
+Skill discovery and delegation use `allow_skills` and `allow_subagents`, respectively.
+Planning uses the invocation's independent `planning` / plan-mode setting, so `write_plan`
+can remain available with empty `allow_tools`. These are not ordinary tool-name selectors.
+
 Module storage routes are validated during Runtime or read-only assembly,
 before storage initialization. Invalid route values do not start storage I/O.
 Session identity and combined execution-history queries remain owned by

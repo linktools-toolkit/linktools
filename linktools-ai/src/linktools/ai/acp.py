@@ -27,7 +27,6 @@ from .core import (
     ExecutionStatus,
     JsonValue,
     Principal,
-    validate_memory_scope,
 )
 from .errors import AIError, ErrorCode
 from .execution import CancelExecutionRequest, ExecutionTreeEvent, ListSessionRequest
@@ -48,14 +47,9 @@ class ACPTextContent(Protocol):
 class ACPAgent:
     """Translate ACP requests into Runtime calls and durable event reads."""
 
-    def __init__(self, runtime: Runtime, *, principal: Principal, memory_scope: str) -> None:
-        try:
-            validate_memory_scope(memory_scope)
-        except AIError as error:
-            raise ValueError("memory scope is invalid") from error
+    def __init__(self, runtime: Runtime, *, principal: Principal) -> None:
         self._runtime = runtime
         self._principal = principal
-        self._memory_scope = memory_scope
         self._connection: ACPConnection | None = None
         self._initialized = False
 
@@ -158,7 +152,6 @@ class ACPAgent:
             text,
             principal=self._principal,
             session_id=session_id,
-            memory_scope=self._memory_scope,
         )
         async def on_event(item: ExecutionTreeEvent) -> None:
             if item.depth != 0:
@@ -249,7 +242,7 @@ class ACPApplication:
             ExecutionCapability(retain_history=True) if self.execution is None else self.execution
         )
 
-    async def serve(self, *, memory_scope: str) -> None:
+    async def serve(self) -> None:
         async with Runtime.open(
             "default", storage=self.storage, features=self.features,
             authorization=self.authorization,
@@ -258,7 +251,6 @@ class ACPApplication:
                 ACPAgent(
                     runtime,
                     principal=runtime.default_principal,
-                    memory_scope=memory_scope,
                 )
             )
 

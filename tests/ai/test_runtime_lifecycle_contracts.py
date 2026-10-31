@@ -58,6 +58,7 @@ class _Components:
     binding_resolver = None
     input_captures = None
     history = None
+    memory_scope = None
 
     def __init__(self, close_callback) -> None:
         self.close_callback = close_callback

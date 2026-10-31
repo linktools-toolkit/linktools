@@ -274,7 +274,7 @@ async def test_clean_recapture_replays_unstarted_fixed_projected_graph(
             for value in (agent.input, agent.original_input):
                 assert "capture_context" not in value
                 assert value["session_id"] is None
-                assert value["memory_scope"] is None
+                assert "memory_scope" not in value
 
             ready = True
             replay_dataset = await evaluations.publish_dataset(DatasetSpec(DatasetRef("replay", 1), (

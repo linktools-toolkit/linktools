@@ -279,18 +279,60 @@ if(process.argv[3]==='attempts') {
   await select('#session=b');assert.doesNotMatch(node('conversation').textContent,/winning answer|abandoned answer|stored failed partial/);
   console.log('Attempt UI isolates active answers, retains failed trace, reconnects and keeps historical selection separate');process.exit(0);
 }
+if(process.argv[3]==='tools') {
+  const id='a-tools';sessions.get('a').active_execution_id=id;executions.set(id,{...info(id,'a'),status:'STARTED'});
+  timelineOverrides.set('a',{items:[{execution_id:id,status:'STARTED',user_input:'Use tools',conversation_committed:false,items:[]}],next_cursor:null});
+  streamBlocks.set(id,{});await select('#session=a');await until('tool stream opened',()=>streamBlocks.get(id).controller);
+  const emit=(event_type,payload,execution_id=id,depth=0)=>streamBlocks.get(id).controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id,agent_id:depth?'child-agent':'default',depth,event:{event_type,payload}},cursor:null})+'\n\n'));
+  const tools=()=>node('live').children.find(item=>item.className==='live-tools');
+  const call={agent_run_seq:1,call_id:'same-call',tool_name:'lookup'};
+  node('prompt').focus();emit('TOOL_CALL_STARTED',call);
+  await until('visible running tool before any final response',()=>tools()?.textContent.includes('lookupStarted · awaiting result'));
+  assert.equal(node('live-activity').open,false);assert.equal(document.activeElement,node('prompt'));
+  const first=tools().children[0];assert.equal(first.status.getAttribute('aria-live'),'polite');
+  emit('TOOL_CALL_STARTED',call);emit('TOOL_CALL_STARTED',call,'child',1);
+  await until('independent child call',()=>tools()?.children.length===2);assert.equal(tools().children[0],first);
+  emit('TOOL_CALL_FINISHED',{...call,status:'SUCCEEDED'});emit('TOOL_CALL_STARTED',call);
+  emit('TOOL_CALL_FINISHED',{...call,status:'FAILED',error_code:'TOOL_RETRY_REQUIRED'},'child',1);
+  await until('separate observed results',()=>tools()?.textContent.includes('Failed · TOOL_RETRY_REQUIRED'));
+  assert.equal(first.status.textContent,'Completed','replayed starts cannot reopen a completed call');
+  emit('TOOL_CALL_STARTED',{...call,agent_run_seq:2,tool_name:'next lookup'});
+  await until('new agent run call remains distinct',()=>tools()?.children.length===3);
+  for(let seq=0;seq<110;seq++)emit('MODEL_REQUEST_STARTED',{agent_run_seq:2,model_request_seq:seq});
+  await until('activity limit crossed',()=>node('live-activity').textContent.includes('model request started'));
+  assert.match(tools().textContent,/next lookupStarted · awaiting result/,'a long-lived call survives activity trimming');
+  emit('TOOL_CALL_STARTED',{...call,call_id:'child-pending',tool_name:'child pending'},'child',1);
+  emit('EXECUTION_FAILED',{},'child',1);
+  await until('child boundary preserves uncertain outcome',()=>tools()?.textContent.includes('child pending · child-agentOutcome unconfirmed'));
+  emit('EXECUTION_RESUMED',{},'child',1);emit('TOOL_CALL_STARTED',{...call,call_id:'child-pending',tool_name:'child pending'},'child',1);
+  await new Promise(resolve=>setTimeout(resolve,30));assert.match(tools().textContent,/child pending · child-agentOutcome unconfirmed/);
+  executions.set(id,{...info(id,'a'),status:'RECOVERY_REQUIRED'});
+  streamBlocks.get(id).controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(executions.get(id))+'\n\n'));
+  streamBlocks.get(id).controller.close();
+  await until('root recovery snapshot leaves result unconfirmed',()=>tools()?.textContent.includes('next lookupOutcome unconfirmed'));
+  assert.equal(first.status.textContent,'Completed');
+  executions.set(id,{...info(id,'a'),status:'STARTED'});await refresh();
+  assert.match(tools().textContent,/next lookupOutcome unconfirmed/,'resuming does not invent a result for an old call');
+  await select('#session=b');assert.doesNotMatch(node('conversation').textContent,/next lookup|TOOL_RETRY_REQUIRED/);
+  console.log('Live tool calls are visible during work, replay-safe, scoped and never inferred successful');process.exit(0);
+}
 if(process.argv[3]==='thinking') {
-  assert.equal(node('thinking').value,'','a new draft inherits model defaults');
-  node('thinking').value='max';await refresh();assert.equal(node('thinking').value,'max');
-  node('thinking').value='false';await refresh();
-  assert.equal(node('thinking').value,'false');assert.equal(node('thinking').disabled,false);
-  node('thinking').value='true';await refresh();
-  assert.equal(node('thinking').value,'true');assert.equal(node('thinking').disabled,false);
+  assert.equal(node('thinking').value,'0','the first visible effort is Low');
+  assert.match(html, /id="thinking" type="range" min="0" max="4" step="1"/);
+  const efforts=['low','medium','high','xhigh','max'],labels=['Low','Medium','High','Extra high','Maximum'];
+  for(const [index,effort] of efforts.entries()) {
+    node('thinking').value=String(index);node('thinking').oninput();
+    assert.equal(node('thinking-value').textContent,labels[index]);
+    assert.equal(node('thinking').getAttribute('aria-valuetext'),labels[index]);
+    await refresh();assert.equal(node('thinking').value,String(index));
+    node('prompt').value='Effort '+effort;node('planning').checked=true;await node('composer').requestSubmit();
+    const request=calls.findLast(call=>call.method==='POST' && call.key==='/api/sessions/a/messages');
+    assert.equal(request.body.thinking,effort);assert.equal(request.body.planning,true);
+    assert.equal(Object.hasOwn(request.body,'memory_scope'),false);assert.equal(Object.hasOwn(request.body,'files'),false);
+  }
   sessions.get('a').status='CLOSED';await refresh();assert.equal(node('thinking').disabled,true);
   sessions.get('a').status='OPEN';await refresh();assert.equal(node('thinking').disabled,false);
-  node('prompt').value='Hello';await node('composer').requestSubmit();
   const submitted=calls.findLast(call=>call.method==='POST' && call.key==='/api/sessions/a/messages');
-  assert.equal(submitted.body.thinking,true);
   console.log('THINKING_REQUEST='+JSON.stringify(submitted.body));
   console.log('Thinking keeps the request selection without hiding returned content');process.exit(0);
 }
@@ -390,10 +432,10 @@ if(process.argv[3]==='streaming') {
   await until('queued live update',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));
   assert.equal(frames.size,1,'Incoming deltas share a pending frame');assert.doesNotMatch(node('live').textContent,/Hello/);
   flushFrame();let expected='**Hello 你好🌱**';
-  const message=node('live').children.find(item=>item.className.split(' ').includes('message')),body=message.children[0],original=message.children[1],copy=original.children[1];
-  original.open=true;copy.focus();emit('ASSISTANT_TEXT_DELTA','\n\n- one');emit('ASSISTANT_THINKING_DELTA','thinking');
+  const message=node('live').children.find(item=>item.className.split(' ').includes('message')),body=message.children[0],copy=message.children[1];
+  copy.focus();emit('ASSISTANT_TEXT_DELTA','\n\n- one');emit('ASSISTANT_THINKING_DELTA','thinking');
   await until('next live frame',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected+='\n\n- one';
-  assert.equal(message.parentElement,node('live'));assert.equal(original.open,true);assert.equal(document.activeElement,copy);
+  assert.equal(message.parentElement,node('live'));assert.equal(message.children.length,2);assert.equal(document.activeElement,copy);
   const thinking=node('live').children.find(item=>item.className==='tool-message');thinking.open=true;
   emit('ASSISTANT_THINKING_DELTA',' continued');emit('ASSISTANT_TEXT_DELTA','\n- two');
   await until('thinking and Markdown frame',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected+='\n- two';
@@ -412,7 +454,7 @@ if(process.argv[3]==='streaming') {
   node('conversation').clientHeight=1;node('conversation').scrollTop=0;copy.focus();
   emit('ASSISTANT_TEXT_DELTA',' discarded');emit('STREAM_RESET','');emit('ASSISTANT_TEXT_DELTA','**Restart 你好🌱**',true);
   await until('reset coalesced with latest text',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected='**Restart 你好🌱**';
-  assert.equal(body.innerHTML,renderMarkdown(expected));assert.equal(original.open,true);assert.equal(document.activeElement,copy);assert.equal(thinking.isConnected,false);
+  assert.equal(body.innerHTML,renderMarkdown(expected));assert.equal(message.children.length,2);assert.equal(document.activeElement,copy);assert.equal(thinking.isConnected,false);
   assert.equal(node('conversation').scrollTop,0,'Streaming respects a reader away from the bottom');node('conversation').clientHeight=300;
   await copy.click();assert.equal(copied,expected);
   // A final snapshot flushes pending text even while animation frames are paused.
@@ -476,7 +518,7 @@ if(process.argv[3]==='resume') {
 if(process.argv[3]==='minimal') {
   const descendants=node=>[node,...node.children.flatMap(descendants)];
   assert.ok(!descendants(node('conversation')).some(item=>item.tagName==='BUTTON' && ['Details','Model requests'].includes(item.textContent)),'Default turns have no duplicate diagnostic navigation');
-  assert.equal(node('native-mode').className.includes('active'),false);assert.equal(node('composer-options').hidden,true);
+  assert.equal(node('native-mode').className.includes('active'),false);assert.equal(document.getElementById('composer-options'),null);
   const a=timeline('a').items[0],b={...a,execution_id:'a-two',created_at:'2026-01-02T00:00:00Z',user_input:'second'};
   timelineOverrides.set('a',{items:[a,b],next_cursor:null});executions.set('a-two',info('a-two','a'));
   await select('#session=a');await node('inspector-toggle').click();
@@ -742,14 +784,13 @@ const afterDetails=calls.length;node('inspector-close').click();assert.equal(doc
 assert.equal(node('inspector').hidden,true);assert.equal(calls.length,afterDetails,'Closing Details does not fetch another view');
 node('action-menu').open=true;node('action-menu').onkeydown({key:'Escape'});
 assert.equal(node('action-menu').open,false);assert.equal(document.activeElement,node('actions-toggle'));
-node('options-toggle').click();assert.equal(node('composer-options').hidden,false);
-assert.equal(node('options-toggle').getAttribute('aria-expanded'),'true');node('options-toggle').click();
-for(const id of ['planning','thinking','memory','files','rename-session','fork-session','close-session','retry','fork-run','end-stopped','export','detail-more','turns-more','list-more'])assert.ok(node(id),`missing retained control ${id}`);
+for(const id of ['options-toggle','composer-options','files','memory'])assert.equal(document.getElementById(id),null,`removed composer control ${id}`);
+for(const id of ['planning','thinking','rename-session','fork-session','close-session','retry','fork-run','end-stopped','export','detail-more','turns-more','list-more'])assert.ok(node(id),`missing retained control ${id}`);
 assert.match(html,/<details id="action-menu"[\s\S]*?id="rename-session"[\s\S]*?id="close-session"[\s\S]*?<\/details>/);
 assert.match(html,/<details id="open-tools"[\s\S]*?id="open-record"[\s\S]*?<\/details>/);
 assert.deepEqual(all.filter(item=>item.dataset.tab).map(item=>item.dataset.tab).sort(),['overview','history','transcript','models','sdkmodels','trace','recovery'].sort(),'All inspection functions remain reachable through the single view picker');
 if(readOnly){
-  for(const id of ['send','prompt','planning','thinking','memory','files','new-session','retry','fork-run','end-stopped','rename-session','fork-session','close-session'])assert.equal(node(id).disabled,true,id);
+  for(const id of ['send','prompt','planning','thinking','new-session','retry','fork-run','end-stopped','rename-session','fork-session','close-session'])assert.equal(node(id).disabled,true,id);
   assert.equal(node('connection').hidden,false);assert.equal(node('connection').textContent,'Read-only');
   node('inspector-toggle').click();assert.equal(node('inspector').hidden,false);assert.equal(node('export').disabled,false);
   await detail('history',/History marker/);assert.match(node('inspector-content').textContent,/History marker/);
@@ -957,15 +998,17 @@ if(process.argv[3]==='workspace'){
   const rendered=descendants(node('conversation')).filter(item=>item.className==='markdown').map(item=>item.innerHTML).join('');
   assert.match(rendered,/<h2>Question/);assert.match(rendered,/<table>/);
   assert.match(node('conversation').textContent,/src\/example.py/);
+  assert.doesNotMatch(node('conversation').textContent,/Original input|Markdown source/);
+  assert.equal(descendants(node('conversation')).some(item=>item.className==='message-source'),false);
   let copied;Object.defineProperty(globalThis,'navigator',{value:{clipboard:{writeText:async value=>{copied=value;}}},configurable:true});
-  await descendants(node('conversation')).find(item=>item.textContent==='Copy Markdown' && item.tagName==='BUTTON').click();assert.equal(copied,markdown);
-  node('prompt').value='Unsent **Alpha**';node('files').value='src/a.py';node('planning').checked=true;node('memory').value='alpha-memory';
+  await descendants(node('conversation')).find(item=>item.textContent==='Copy' && item.tagName==='BUTTON').click();assert.equal(copied,markdown);
+  node('prompt').value='Unsent **Alpha**';node('planning').checked=true;
   await select('#session=b');assert.equal(node('prompt').value,'');node('prompt').value='Beta draft';
   await select('#session=a');
-  assert.equal(node('prompt').value,'Unsent **Alpha**');assert.equal(node('files').value,'src/a.py');assert.equal(node('planning').checked,true);assert.equal(node('memory').value,'alpha-memory');
+  assert.equal(node('prompt').value,'Unsent **Alpha**');assert.equal(node('planning').checked,true);
   const rejected=deferred('POST /api/sessions/a/messages'),rejectedSend=node('composer').requestSubmit();await rejected.requested;
   rejected({code:'SESSION_BUSY'},409);await rejectedSend;
-  assert.equal(node('prompt').value,'Unsent **Alpha**');assert.equal(node('files').value,'src/a.py');
+  assert.equal(node('prompt').value,'Unsent **Alpha**');
   const sends=calls.filter(item=>item.key==='/api/sessions/a/messages').length;
   sessions.get('a').active_execution_id='a-live';executions.set('a-live',{...info('a-live','a'),status:'STARTED'});
   timelineOverrides.set('a',{items:[old,{...old,execution_id:'a-live',status:'STARTED',conversation_committed:false,user_input:'Current question',items:[]}],next_cursor:null});

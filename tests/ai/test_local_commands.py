@@ -30,7 +30,7 @@ def test_ai_command_group_exposes_only_execution_acp_and_web() -> None:
 
 
 def test_ai_local_commands_share_runtime_arguments() -> None:
-    common = {"project", "api_key", "base_url", "model", "memory"}
+    common = {"project", "api_key", "base_url", "model"}
     for command in (run_command, acp_command):
         parser = command.create_parser()
         actions = {action.dest: action for action in parser._actions}
@@ -47,14 +47,15 @@ def test_ai_local_commands_share_runtime_arguments() -> None:
         )
 
 
-def test_ai_local_memory_scope_argument_is_consistent() -> None:
+def test_ai_local_commands_do_not_expose_memory_scope() -> None:
     cases = (
         (run_command, ["prompt"], ["prompt", "--memory", "custom"]),
         (acp_command, [], ["--memory", "custom"]),
     )
     for command, default_args, custom_args in cases:
-        assert command.create_parser().parse_args(default_args).memory is None
-        assert command.create_parser().parse_args(custom_args).memory == "custom"
+        assert "memory" not in vars(command.create_parser().parse_args(default_args))
+        with pytest.raises(SystemExit):
+            command.create_parser().parse_args(custom_args)
 
 
 def test_ai_acp_uses_shared_local_runtime_composition(

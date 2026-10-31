@@ -78,11 +78,10 @@ class _StreamingAgent:
         prompt: str,
         *,
         session_id: str,
-        memory_scope: str,
         planning: bool,
         thinking: bool,
     ) -> _StreamingExecution:
-        del prompt, session_id, memory_scope, planning, thinking
+        del prompt, session_id, planning, thinking
         return _StreamingExecution(self._events)
 
 
@@ -132,7 +131,6 @@ async def test_cli_stream_consumes_string_event_types(
         _StreamingRuntime(events),  # type: ignore[arg-type]
         "prompt",
         "session",
-        "memory",
         False,
         False,
         False,
@@ -188,7 +186,6 @@ async def test_cli_stream_reads_string_terminal_failure(
             runtime,  # type: ignore[arg-type]
             "prompt",
             "session",
-            "memory",
             False,
             False,
             False,
@@ -373,9 +370,8 @@ class _ACPAgentRuntime:
                 *,
                 principal: Principal,
                 session_id: str,
-                memory_scope: str,
             ) -> Execution:
-                del prompt, principal, session_id, memory_scope
+                del prompt, principal, session_id
                 return execution.handle
 
         return BoundAgent()
@@ -399,7 +395,6 @@ async def test_acp_prompt_uses_authoritative_stop_reason(
     agent = ACPAgent(
         _ACPAgentRuntime(execution),  # type: ignore[arg-type]
         principal=Principal("principal", "tenant", "service"),
-        memory_scope="memory",
     )
     agent._initialized = True
     monkeypatch.setattr(
@@ -459,7 +454,6 @@ async def test_acp_surfaces_sanitized_execution_failures(
     agent = ACPAgent(
         _ACPAgentRuntime(execution),  # type: ignore[arg-type]
         principal=Principal("principal", "tenant", "service"),
-        memory_scope="memory",
     )
     agent._initialized = True
     monkeypatch.setattr(
@@ -486,7 +480,6 @@ async def test_acp_early_stream_eof_waits_for_authoritative_failure(
     agent = ACPAgent(
         _ACPAgentRuntime(execution),  # type: ignore[arg-type]
         principal=Principal("principal", "tenant", "service"),
-        memory_scope="memory",
     )
     agent._initialized = True
     monkeypatch.setattr(
@@ -526,7 +519,6 @@ async def test_acp_streamed_chunks_are_not_repeated_from_final_result(
     agent = ACPAgent(
         _ACPAgentRuntime(execution),  # type: ignore[arg-type]
         principal=Principal("principal", "tenant", "service"),
-        memory_scope="memory",
     )
     agent._initialized = True
     monkeypatch.setattr(
@@ -554,7 +546,6 @@ async def test_acp_caller_cancellation_does_not_return_success(
     agent = ACPAgent(
         _ACPAgentRuntime(execution),  # type: ignore[arg-type]
         principal=Principal("principal", "tenant", "service"),
-        memory_scope="memory",
     )
     agent._initialized = True
     monkeypatch.setattr(
@@ -599,7 +590,6 @@ async def test_acp_protocol_rejections_use_supported_error_factories(
     agent = ACPAgent(
         SimpleNamespace(),  # type: ignore[arg-type]
         principal=Principal("principal", "tenant", "service"),
-        memory_scope="memory",
     )
     monkeypatch.setattr("linktools.ai.acp._require_acp", lambda: (acp, schema))
     with pytest.raises(acp.RequestError) as error:
@@ -633,7 +623,6 @@ async def test_acp_optional_sdk_serializes_terminal_prompt_outcomes(
     agent = ACPAgent(
         _ACPAgentRuntime(_ACPExecution(result)),  # type: ignore[arg-type]
         principal=Principal("principal", "tenant", "service"),
-        memory_scope="memory",
     )
     initialized = await agent.initialize(acp.PROTOCOL_VERSION)
     assert initialized.protocol_version == acp.PROTOCOL_VERSION

@@ -85,7 +85,6 @@ async def test_cancelled_wait_leaves_handed_off_execution_for_graph_recovery() -
         start_execution=start_execution,
         get_execution=unused,
         acquire_execution_hold=hold,
-        release_execution_hold=hold,
         result_reader=unused,
         result_ref_reader=unused,
         get_prepared_input=unused,
@@ -173,7 +172,6 @@ async def test_cancelled_start_defers_binding_to_idempotent_recovery() -> None:
         start_execution=start_execution,
         get_execution=unused,
         acquire_execution_hold=hold,
-        release_execution_hold=hold,
         result_reader=unused,
         result_ref_reader=unused,
         get_prepared_input=unused,
@@ -251,11 +249,12 @@ async def test_cancelled_handoff_keeps_hold_until_recovery_rebinds() -> None:
 
     execution = Execution()
     acquired: list[tuple[str, str]] = []
-    released: list[tuple[str, str]] = []
+    held: set[tuple[str, str]] = set()
 
     async def start_execution(*args: object, **kwargs: object) -> object:
         del args
         assert kwargs["dependency_hold_id"] == "task:graph:node"
+        held.add(("execution", "task:graph:node"))
         return execution
 
     async def get_execution(
@@ -271,13 +270,7 @@ async def test_cancelled_handoff_keeps_hold_until_recovery_rebinds() -> None:
         hold_id: str,
     ) -> None:
         acquired.append((execution_id, hold_id))
-
-    async def release_hold(
-        execution_id: str,
-        _principal: Principal,
-        hold_id: str,
-    ) -> None:
-        released.append((execution_id, hold_id))
+        held.add((execution_id, hold_id))
 
     async def unused(*args: object, **kwargs: object) -> object:
         raise AssertionError("literal Agent Task does not use this callback")
@@ -304,7 +297,6 @@ async def test_cancelled_handoff_keeps_hold_until_recovery_rebinds() -> None:
         start_execution=start_execution,
         get_execution=get_execution,
         acquire_execution_hold=acquire_hold,
-        release_execution_hold=release_hold,
         result_reader=unused,
         result_ref_reader=unused,
         get_prepared_input=unused,
@@ -332,7 +324,7 @@ async def test_cancelled_handoff_keeps_hold_until_recovery_rebinds() -> None:
     with pytest.raises(asyncio.CancelledError):
         await running
 
-    assert released == []
+    assert held == {("execution", "task:graph:node")}
 
     recovered = TaskNodeInvocation(
         node=node,
@@ -346,4 +338,4 @@ async def test_cancelled_handoff_keeps_hold_until_recovery_rebinds() -> None:
 
     assert result.execution_id == "execution"
     assert acquired == [("execution", "task:graph:node")]
-    assert released == [("execution", "task:graph:node")]
+    assert held == {("execution", "task:graph:node")}

@@ -1506,12 +1506,25 @@ class LocalTaskGraphLauncher:
 
     async def _finish_execution_hold(
         self, execution_id: str, *, tenant_id: str, hold_id: str,
+        graph_id: str, node_id: str, expected_fence: int,
     ) -> None:
-        # A durable terminal node may be quiesced while its hold is still being
-        # released. Its owner must finish that release before leaving the task.
-        cleanup = asyncio.create_task(self._release_execution_hold(
-            execution_id, tenant_id=tenant_id, hold_id=hold_id,
-        ))
+        async def release_settled() -> None:
+            state = await self._repository.graph_state(graph_id, tenant_id=tenant_id)
+            current = next((item for item in state.node_states if item.node_id == node_id), None) if state is not None else None
+            if current is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if current.fence < expected_fence:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            settled = current.status in _TERMINAL
+            superseded = (current.fence > expected_fence and current.execution_id is not None
+                          and current.execution_id != execution_id)
+            if not settled and not superseded:
+                return
+            await self._release_execution_hold(execution_id, tenant_id=tenant_id, hold_id=hold_id)
+
+        # A stopped observer is not a durable node settlement. Keep its hold so
+        # recovery can consume the same result after an unknown commit outcome.
+        cleanup = asyncio.create_task(release_settled())
         cancelled = False
         try:
             while not cleanup.done():
@@ -1539,9 +1552,7 @@ class LocalTaskGraphLauncher:
         tenant_id = request.principal.tenant_id
         hold_id = f"task:{graph_id}:{node.node_id}"
         await self._acquire_execution_hold(
-            execution_id,
-            tenant_id=tenant_id,
-            hold_id=hold_id,
+            execution_id, tenant_id=tenant_id, hold_id=hold_id,
         )
         try:
             await self._settle_bound_node(
@@ -1555,6 +1566,7 @@ class LocalTaskGraphLauncher:
                 execution_id,
                 tenant_id=tenant_id,
                 hold_id=hold_id,
+                graph_id=graph_id, node_id=node.node_id, expected_fence=expected_fence,
             )
 
     async def _settle_bound_node(
@@ -2140,6 +2152,8 @@ class LocalTaskGraphLauncher:
                     execution_id,
                     tenant_id=tenant_id,
                     hold_id=f"task:{graph_id}:{node.node_id}",
+                    graph_id=graph_id, node_id=node.node_id,
+                    expected_fence=lease_state.lease.fence,
                 )
 
     async def _completion_committed(
