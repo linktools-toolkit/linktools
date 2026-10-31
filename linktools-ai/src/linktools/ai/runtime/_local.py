@@ -1195,10 +1195,8 @@ class LocalExecutionBackend:
                     captured_input_context=context, producer_claim_id=claim,
                 )
                 if value is None:
-                    error = AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"phase": "pending_promotion_not_found"})
-                    self._pending_turns.fail(turn, error)
-                    self._record_worker_failure(execution_id, error)
-                    raise error
+                    # Absence does not prove rollback of the original unknown attempt.
+                    raise turn.failure or AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
                 execution, checkpoint = value
                 failure = turn.failure
                 await accept()
@@ -6167,10 +6165,8 @@ class LocalExecutionBackend:
                 reservation, expected_session=turn.session,
             )
             if committed is None:
-                error = AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"phase": "pending_commit_not_found"})
-                self._pending_turns.fail(turn, error)
-                self._record_worker_failure(current.execution_id, error)
-                raise error
+                # Absence does not prove rollback of the original unknown attempt.
+                raise turn.failure or AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
             if producer_generation is not None and plan is None:
                 await self._discard_terminal_producer_tail(
                     committed.execution, agent_run_id=agent_run_id,
