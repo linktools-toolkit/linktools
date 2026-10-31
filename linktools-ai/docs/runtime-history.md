@@ -668,9 +668,12 @@ derive from the graph recovery request, so retrying a partly recovered graph
 does not take over an already recovered child again. A later recovery boundary
 requires a new graph recovery key.
 
-Filesystem execution storage can automatically recover admitted checkpoint-enabled
-executions because its existing writer lock supplies exclusive ownership.
-Storage alone does not grant restart recovery. SQL startup can still finish
+Filesystem execution storage and an exclusively owned local SQLite root can
+automatically recover admitted checkpoint-enabled executions because their live
+resource writer lock supplies exclusive ownership. Select the latter explicitly
+with `PersistenceStorage.from_root(root, exclusive_writer=True)`; ordinary
+`from_root`, `sqlite(path)` and shared SQL retain their existing behavior. The
+request flag or file path alone does not grant restart recovery. Shared SQL startup can still finish
 durably handed-off work, including deferred continuations, prepared terminal
 handoffs, and terminal cleanup. A plain `FINALIZING` status alone is not proof
 that an active producer relinquished ownership.

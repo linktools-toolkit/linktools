@@ -92,7 +92,8 @@ async def test_existing_sqlite_root_keeps_its_explicit_source_with_filesystem_st
 
 
 @pytest.mark.asyncio
-async def test_filesystem_snapshot_restores_retained_run_into_a_new_sqlite_root(tmp_path: Path) -> None:
+@pytest.mark.parametrize("exclusive_writer", (False, True))
+async def test_filesystem_snapshot_restores_retained_run_into_a_new_sqlite_root(tmp_path: Path, exclusive_writer: bool) -> None:
     root, target = tmp_path / "source", tmp_path / "restored"
     retained = await _write_retained_run(PersistenceStorage.filesystem(root), "retained-run")
     objects = InMemoryObjectStore()
@@ -101,8 +102,9 @@ async def test_filesystem_snapshot_restores_retained_run_into_a_new_sqlite_root(
                                 tenant_id="tenant", read_only=True) as persistence:
         reference = await persistence.export_snapshot(object_store=objects, limits=limits)
     before = _contents(root)
-    await Persistence.restore_snapshot(reference, object_store=objects, root=target, limits=limits)
-    async with Persistence.open("root-migration", storage=PersistenceStorage.from_root(target),
+    await Persistence.restore_snapshot(reference, object_store=objects, root=target, limits=limits,
+                                       exclusive_writer=exclusive_writer)
+    async with Persistence.open("root-migration", storage=PersistenceStorage.from_root(target, exclusive_writer=exclusive_writer),
                                 tenant_id="tenant", read_only=True) as persistence:
         assert await _retained_run(persistence, "retained-run") == retained
         assert await persistence.export_snapshot(object_store=objects, limits=limits) == reference
@@ -111,7 +113,8 @@ async def test_filesystem_snapshot_restores_retained_run_into_a_new_sqlite_root(
 
 
 @pytest.mark.asyncio
-async def test_filesystem_snapshot_preserves_core_memory_objects_and_replay_receipts(tmp_path: Path) -> None:
+@pytest.mark.parametrize("exclusive_writer", (False, True))
+async def test_filesystem_snapshot_preserves_core_memory_objects_and_replay_receipts(tmp_path: Path, exclusive_writer: bool) -> None:
     source, target = tmp_path / "source", tmp_path / "target"
     content = "大内容迁移\n" * 5000
     operation = MemoryOperation(id="write-once", fingerprint=hashlib.sha256(content.encode()).hexdigest())
@@ -140,14 +143,15 @@ async def test_filesystem_snapshot_preserves_core_memory_objects_and_replay_rece
     assert len(manifest["domains"]["memory"]["records"]) == 1
     assert len(manifest["domains"]["memory"]["operations"]) == 1
     assert sum(item["domain"] == "memory" for item in manifest["objects"]) == 1
-    await Persistence.restore_snapshot(reference, object_store=objects, root=target, limits=limits)
-    async with Persistence.open("memory-migration", storage=PersistenceStorage.from_root(target),
+    await Persistence.restore_snapshot(reference, object_store=objects, root=target, limits=limits,
+                                       exclusive_writer=exclusive_writer)
+    async with Persistence.open("memory-migration", storage=PersistenceStorage.from_root(target, exclusive_writer=exclusive_writer),
                                 tenant_id="tenant", read_only=True) as persistence:
         assert await memory(persistence).capture() == captured
         assert await persistence.export_snapshot(object_store=objects, limits=limits) == reference
         receipt = await memory(persistence).get_operation(operation)
         assert receipt is not None and receipt.replayed and receipt.version == original.version
-    async with Persistence.open("memory-migration", storage=PersistenceStorage.from_root(target),
+    async with Persistence.open("memory-migration", storage=PersistenceStorage.from_root(target, exclusive_writer=exclusive_writer),
                                 tenant_id="tenant") as persistence:
         replay = await memory(persistence).write("memory/note.md", content, expected_version=None,
                                                 operation=operation)

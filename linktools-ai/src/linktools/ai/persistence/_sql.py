@@ -369,6 +369,8 @@ class SqlStateStorageGroup:
         if self._initialized:
             return
         await self._context.initialize()
+        if not self._read_only:
+            await self._context.require_write_access()
         self._initialized = True
         _logger.info(
             "SQL StateStorageGroup initialized: dialect=%s tables=%s",

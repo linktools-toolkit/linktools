@@ -72,6 +72,7 @@ class Persistence:
         if not isinstance(storage, PersistenceStorage):
             raise TypeError("storage must be PersistenceStorage")
         self._coordination_backend = storage.coordination
+        self._local_sqlite_path = storage.local_sqlite_path
         self._plan = storage.plan
         self._external_object_store = storage.object_store
         self._lifecycle = _RuntimeStateLifecycle.NEW
@@ -255,6 +256,19 @@ class Persistence:
             raise
         return store
 
+    @property
+    def exclusive_execution_writer(self) -> bool:
+        """Whether this live resource owns the physical Execution writer permission."""
+        self._require_ready()
+        if self._read_only:
+            return False
+        from ._sql import SqlStateStorageGroup
+
+        group = self.execution.executions.state_store.storage_group
+        if isinstance(group, SqlStateStorageGroup):
+            return group.context.exclusive_writer
+        return self._plan.route(PersistenceDomain.EXECUTION).kind == "filesystem"
+
     async def bind_runtime(
         self, *, execution_producer: bool, owns_persistence: bool,
     ) -> Callable[[], Awaitable[None]]:
@@ -271,7 +285,7 @@ class Persistence:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "Persistence is read-only")
             if (
                 execution_producer
-                and self._plan.route(PersistenceDomain.EXECUTION).kind == "filesystem"
+                and self.exclusive_execution_writer
                 and any(self._runtime_owners.values())
             ):
                 raise AIError(
@@ -332,6 +346,7 @@ class Persistence:
                     tenant_id=tenant_id,
                     object_store=self._external_object_store,
                     read_only=read_only,
+                    local_sqlite_path=self._local_sqlite_path,
                     capability_routes=self._plan.capability_routes,
                     register_cleanup=self._register_initialization_cleanup,
                 )
@@ -539,10 +554,11 @@ class Persistence:
     @classmethod
     async def restore_snapshot(
         cls, ref: ObjectRef, *, object_store: ObjectStore, root: str | Path, limits: SnapshotLimits,
+        exclusive_writer: bool = False,
     ) -> None:
         @asynccontextmanager
         async def open_target(path: Path, namespace: str, tenant_id: str) -> AsyncIterator[SnapshotResources]:
-            state = cls(PersistenceStorage.from_root(path))
+            state = cls(PersistenceStorage.from_root(path, exclusive_writer=exclusive_writer))
             try:
                 await state.initialize(namespace=namespace, tenant_id=tenant_id)
                 yield state.snapshot_resources()

@@ -317,17 +317,17 @@ async def test_state_turn_failed_dual_retirement_rolls_back_every_old_edge(tmp_p
         await _expire(store, session="s1")
         await _expire(store, session="s2")
         before = await store.read(lambda tx: tx.scan_records())
-        replace_record = authority._replace
+        retire = authority._retire
         attempted = 0
         unavailable = AIError(ErrorCode.STORAGE_UNAVAILABLE)
-        async def failed(tx, record, **changes):
+        async def failed(tx, graph, **changes):
             nonlocal attempted
             attempted += 1
             if attempted == 2:
                 raise unavailable
-            return await replace_record(tx, record, **changes)
+            return await retire(tx, graph, **changes)
         with monkeypatch.context() as patch:
-            patch.setattr(authority, "_replace", failed)
+            patch.setattr(authority, "_retire", failed)
             with pytest.raises(AIError) as caught:
                 await _claim(authority, session="s1", request="r2", execution="e3", owner="o3")
         assert caught.value is unavailable
@@ -487,3 +487,63 @@ async def test_state_turn_never_borrows_an_existing_read_or_mutation_scope(tmp_p
         for invoke in (store.read, store.mutate):
             await invoke(rejected)
             assert await store.read(lambda tx: tx.scan_records()) == before
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+@pytest.mark.parametrize("failure", ("cas", "cancel_after_batch"))
+async def test_state_turn_retirement_batch_failure_preserves_every_edge(tmp_path, monkeypatch, backend, failure):
+    async with _open_store(backend, tmp_path / backend) as store:
+        authority = _backend(store)
+        claimed = await _claim(authority)
+        before = await store.read(lambda tx: tx.scan_records())
+        async def transaction_type(tx):
+            return type(tx)
+        cls = await store.mutate(transaction_type)
+        original = cls.replace_records
+        batches = []
+        async def fail_retirement(tx, replacements):
+            values = tuple(replacements)
+            if {value.record.kind for value in values} == {"turn_session", "turn_request", "turn_execution"}:
+                batches.append(values)
+                if failure == "cas":
+                    values = tuple(replace(value, expected_storage_revision=value.expected_storage_revision + 1)
+                                   if value.record.kind == "turn_request" else value for value in values)
+                    return await original(tx, values)
+                await original(tx, values)
+                raise asyncio.CancelledError
+            return await original(tx, values)
+        with monkeypatch.context() as patch:
+            patch.setattr(cls, "replace_records", fail_retirement)
+            with pytest.raises(AIError if failure == "cas" else asyncio.CancelledError) as caught:
+                await authority.release_turn(claimed.lease)
+        if failure == "cas":
+            assert caught.value.code is ErrorCode.STORAGE_CONFLICT
+        assert batches
+        assert await store.read(lambda tx: tx.scan_records()) == before
+        assert await authority.read_turn("scope", "e") == replace(claimed, lease=None)
+        assert await authority.release_turn(claimed.lease)
+
+
+async def test_state_turn_sqlite_known_graph_statement_budgets(tmp_path):
+    from collections import Counter
+    from sqlalchemy import event
+
+    async with _open_store("sql", tmp_path / "sql") as store:
+        authority = _backend(store)
+        counts = Counter()
+        def count(connection, cursor, statement, parameters, context, executemany):
+            counts[statement.lstrip().split(None, 1)[0].upper()] += 1
+        engine = store.context.engine.sync_engine
+        event.listen(engine, "before_cursor_execute", count)
+        try:
+            first = await _claim(authority)
+            assert first is not None and first.lease is not None
+            assert counts["SELECT"] <= 3 and counts["INSERT"] <= 2 and counts["UPDATE"] <= 2
+            counts.clear()
+            assert await authority.read_turn_by_session("scope", "s") == replace(first, lease=None)
+            assert counts["SELECT"] <= 5 and counts["UPDATE"] == 0
+            counts.clear()
+            assert await authority.release_turn(first.lease)
+            assert counts["SELECT"] <= 4 and counts["UPDATE"] <= 2
+        finally:
+            event.remove(engine, "before_cursor_execute", count)

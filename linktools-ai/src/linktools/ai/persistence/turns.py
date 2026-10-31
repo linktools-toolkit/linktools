@@ -17,7 +17,7 @@ from ..core import JsonValue, canonical_json_bytes, canonical_sha256, validate_p
 from ..errors import AIError, ErrorCode
 from ..storage import Lease, TurnCoordination
 from .state import (
-    RecordLeaseTransition, StateStore, StateTransaction, StateTransactionNestingError,
+    RecordLeaseTransition, RecordReplacement, StateStore, StateTransaction, StateTransactionNestingError,
     StoredRecord, active_state_scope, record_key_digest, scope_digest,
 )
 
@@ -178,33 +178,37 @@ class StateTurnCoordination:
         record = await tx.get_record(self._records.key(scope, kind, identity))
         return None if record is None else self._records.validate(record)
 
-    async def _graph(self, tx: StateTransaction, execution: StoredRecord) -> _Graph:
-        scope = _text(execution.data["scope"])
-        request = await self._load(tx, scope, "turn_request", _text(execution.data["request_key"]))
-        session = await self._load(tx, scope, "turn_session", _text(execution.data["session_key"]))
-        if request is None or session is None:
-            raise _integrity()
-        return self._records.graph(execution, request, session)
+    async def _graph(self, tx: StateTransaction, anchor: StoredRecord) -> _Graph:
+        scope = _text(anchor.data["scope"])
+        identities = {"turn_execution": _text(anchor.data["execution_id"]),
+                      "turn_request": _text(anchor.data["request_key"]),
+                      "turn_session": _text(anchor.data["session_key"])}
+        keys = {kind: self._records.key(scope, kind, identity)
+                for kind, identity in identities.items() if kind != anchor.kind}
+        found = await tx.get_records(tuple(keys.values()))
+        records = {anchor.kind: anchor}
+        for kind, key in keys.items():
+            record = found.get(key)
+            if record is None:
+                raise _integrity()
+            records[kind] = self._records.validate(record)
+        return self._records.graph(records["turn_execution"], records["turn_request"], records["turn_session"])
 
     async def _anchor(self, tx: StateTransaction, scope: str, kind: str, identity: str) -> _Graph | None:
         anchor = await self._load(tx, scope, kind, identity)
         if anchor is None or anchor.state == "IDLE":
             return None
-        if kind == "turn_execution":
-            execution = anchor
-        else:
-            execution = await self._load(tx, scope, "turn_execution", _text(anchor.data["execution_id"]))
-            if execution is None:
-                raise _integrity()
         if anchor.state == "RETIRED":
-            if execution.state != "RETIRED" or any(
+            execution = (anchor if kind == "turn_execution" else
+                         await self._load(tx, scope, "turn_execution", _text(anchor.data["execution_id"])))
+            if execution is None or execution.state != "RETIRED" or any(
                 anchor.data[key] != execution.data[key]
                 for key in ({"scope", "execution_id"} if kind == "turn_execution"
                             else {"scope", "execution_id", "session_key", "request_key", "request_digest"})
             ):
                 raise _integrity()
             return None
-        return await self._graph(tx, execution)
+        return await self._graph(tx, anchor)
 
     async def _observe(self, scope: str, kind: str, identity: str) -> _Graph | None:
         self._outside_transaction()
@@ -253,14 +257,19 @@ class StateTurnCoordination:
         return candidate
 
     async def _retire(self, tx: StateTransaction, graph: _Graph, *, receipt: str, kind: str) -> StoredRecord:
-        execution = await self._replace(tx, graph.execution, state="RETIRED", data={
-            **graph.execution.data, "receipt_id": receipt, "receipt_kind": kind,
-        })
-        await self._replace(tx, graph.request, state="RETIRED")
-        session = await self._replace(tx, graph.session, state="IDLE", lease_owner=None, lease_expires_at=None,
-                                      data={**graph.session.data, "execution_id": None, "request_key": None})
-        self._records.validate(execution)
-        return self._records.validate(session)
+        execution = replace(graph.execution, storage_revision=graph.execution.storage_revision + 1,
+                            state="RETIRED", data={**graph.execution.data, "receipt_id": receipt, "receipt_kind": kind})
+        request = replace(graph.request, storage_revision=graph.request.storage_revision + 1, state="RETIRED")
+        session = replace(graph.session, storage_revision=graph.session.storage_revision + 1,
+                          state="IDLE", lease_owner=None, lease_expires_at=None,
+                          data={**graph.session.data, "execution_id": None, "request_key": None})
+        for record in (execution, request, session):
+            self._records.validate(record)
+        await tx.replace_records(tuple(
+            RecordReplacement(record, original.storage_revision)
+            for record, original in zip((execution, request, session), (graph.execution, graph.request, graph.session))
+        ))
+        return session
 
     async def _mutation(
         self, callback: Callable[[StateTransaction], Awaitable[_Value]],
@@ -316,9 +325,13 @@ class StateTurnCoordination:
         token = uuid4().hex
 
         async def claim(tx: StateTransaction) -> TurnCoordination | None:
-            session = await self._load(tx, scope, "turn_session", session_key)
-            request = await self._load(tx, scope, "turn_request", request_key)
-            proposed = await self._load(tx, scope, "turn_execution", execution_id)
+            keys = {"turn_session": self._records.key(scope, "turn_session", session_key),
+                    "turn_request": self._records.key(scope, "turn_request", request_key),
+                    "turn_execution": self._records.key(scope, "turn_execution", execution_id)}
+            found = await tx.get_records(tuple(keys.values()))
+            records = {kind: None if found.get(key) is None else self._records.validate(found[key])
+                       for kind, key in keys.items()}
+            session, request, proposed = (records[kind] for kind in ("turn_session", "turn_request", "turn_execution"))
             graphs: dict[bytes, _Graph] = {}
             for kind, anchor in (("turn_session", session), ("turn_request", request)):
                 if anchor is not None and anchor.state == "ACTIVE":
@@ -328,14 +341,13 @@ class StateTurnCoordination:
                     graphs[graph.session.key_digest] = graph
                 elif kind == "turn_request" and anchor is not None:
                     await self._anchor(tx, scope, kind, request_key)
-            snapshot_time = await tx.now()
             protected: dict[bytes, tuple[StoredRecord, bool]] = {}
             sessions = {key: graph.session for key, graph in graphs.items()}
             if session is not None:
                 sessions[session.key_digest] = session
             for key, current in sorted(sessions.items()):
                 live = (current.lease_owner is not None and current.lease_expires_at is not None
-                        and current.lease_expires_at > snapshot_time)
+                        and current.lease_expires_at > await tx.now())
                 guarded = await tx.transition_record_lease(
                     key, expected_storage_revision=current.storage_revision,
                     transition=RecordLeaseTransition("guard" if live else "guard_available",
@@ -384,12 +396,12 @@ class StateTurnCoordination:
                 **common, "owner_id": owner_id, "token": token, "fence": acquired.lease_fence,
                 "cancel_requested": False, "receipt_id": token, "receipt_kind": "claim",
             }, state="ACTIVE")
-            await tx.insert_record(execution)
             request = await self._load(tx, scope, "turn_request", request_key)
             if request is None:
                 request = self._records.make("turn_request", common, state="ACTIVE")
-                await tx.insert_record(request)
+                await tx.insert_records((execution, request))
             else:
+                await tx.insert_record(execution)
                 request = await self._replace(tx, request, data=common, state="ACTIVE")
             session = await self._replace(tx, acquired, state="ACTIVE", data={
                 **acquired.data, "execution_id": execution_id, "request_key": request_key,
@@ -432,7 +444,7 @@ class StateTurnCoordination:
             graph = await self._graph(tx, execution)
             session = await tx.transition_record_lease(
                 graph.session.key_digest, expected_storage_revision=graph.session.storage_revision,
-                transition=RecordLeaseTransition("guard" if kind == "cancel" else kind,
+                transition=RecordLeaseTransition("guard" if kind in {"cancel", "release"} else kind,
                                                  graph.session.lease_owner, graph.session.lease_fence, duration),
             )
             if session is None:

@@ -797,7 +797,7 @@ async def _build_local_components(
     async def worker_completed(execution_id: str) -> None:
         await execution.resume_terminal_handoff(execution_id, tenant_id=tenant_id)
 
-    exclusive_execution_writer = state.plan.route(PersistenceDomain.EXECUTION).kind == "filesystem"
+    exclusive_execution_writer = state.exclusive_execution_writer
     try:
         backend = LocalExecutionBackend(
             state.conversation,

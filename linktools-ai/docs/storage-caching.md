@@ -14,12 +14,13 @@ determined by whether a type is a protocol or a concrete implementation, and a
 store does not necessarily imply durable retention.
 
 `Runtime.open` and `Runtime.attach` register their lifetime with Persistence
-before composing producers. An execution filesystem route admits only one Agent
-Runtime on that Persistence; Task-only Runtimes do not occupy that exclusive
-execution slot. SQL and Memory continue to allow independent Agent Runtimes.
+before composing producers. An execution filesystem route or an exclusively
+owned local SQLite source admits only one Agent Runtime on that Persistence;
+Task-only Runtimes do not occupy that exclusive execution slot. Shared SQL and
+Memory continue to allow independent Agent Runtimes.
 `TaskEngine(...)` and `TaskEngine.open(...)` also register a borrowed lifetime.
 Definition views share that registration; closing a view does not release the
-engine. Task producers do not occupy the filesystem Agent-exclusive slot, and
+engine. Task producers do not occupy the Agent-exclusive slot, and
 read-only Task observation remains available.
 
 `Persistence.close()` rejects active Runtime or TaskEngine borrowers without
@@ -48,6 +49,64 @@ An existing `runtime.db` remains the selected SQLite source even if old files
 coexist. This check neither verifies that database as a completed migration nor
 recognizes every damaged/custom layout, and is not a cross-process ownership
 barrier against a root being changed after configuration.
+
+### Exclusively owned local SQLite
+
+`PersistenceStorage.from_root(root, exclusive_writer=True)` selects the same
+`runtime.db` and ObjectStore layout but requests one native filesystem writer
+lock for that database's resource lifetime. The default remains `False`:
+existing and newly created ordinary roots keep shared SQL behavior and do not
+gain active-execution recovery permission merely by using a local path.
+
+A new exclusive database receives its fixed SQLite application ID in the private
+provisioning file, before no-clobber publication. If another writer creates the
+destination first, provisioning fails without replacing it. The application ID
+classifies the file; only the live resource lock and verification of the actual
+SQLite connection grant writer permission. Plain `sqlite(path)`, `sql(engine)`,
+State mutations and schema provisioning cannot write that classified file without
+the owner. Reusing the same engine does not transfer permission. Read-only
+Persistence/History can observe it without taking the writer lock and cannot
+recover active executions.
+
+Publication links the completed file without overwriting the target, then removes
+its temporary name. A crash between those steps can leave an additional hard
+link before initialization has returned or admitted work. A dedicated writer
+fails closed in that case: first verify and remove the known initialization
+alias offline, or retry the original retained cleanup. Do not delete unknown
+aliases or replace the published database to force reopening.
+
+Writable initialization with an explicit exclusive request against an existing
+unclassified shared database fails with `STORAGE_RECOVERY_REQUIRED`; it never
+retags a live source. Read-only initialization makes no writer request, even
+when the option is set, and can still observe an unclassified source. The same
+database remains available through the unchanged default shared configuration.
+For a deliberate conversion, stop every old writer, export supported state and
+use `Persistence.restore_snapshot(..., root=new_empty_root,
+exclusive_writer=True)`, then verify and switch consumers. Core retained history
+and Memory are covered by this offline path; arbitrary custom partition/object
+closure is not. The higher-level generation restore API does not select this
+profile, and an existing generation must not be treated as converted merely
+because its snapshot identity matches.
+
+The permission uses the connection's actual main file, including canonical
+symlink resolution, not its URL. Each new physical connection is checked;
+warmed connections reuse the immutable profile fact without additional profile
+queries per mutation. Dedicated files cannot use hard links. Replacing, moving
+or retagging a live database, a creator that changes an existing connection's
+main file, and concurrent older binaries that ignore the profile are outside
+this contract. Quiesce such writers before cutover; this is not a fence against
+arbitrary raw SQLite access.
+
+The owner is retained through active mutations, uncertain Runtime completion
+and failed cleanup. A context refuses close while its owned mutation is active;
+a failed session close retains that exact session for cleanup-only retry, not
+callback or commit replay. Runtime/Task borrower checks still run first. Only
+successful resource cleanup releases the physical writer lock. A new owner may
+recover admitted checkpoint-enabled work after the previous process exits, but
+the lock does not establish whether an external tool effect succeeded: existing
+effect receipts and unknown-outcome recovery rules remain required. This local
+SQL option does not itself remove the filesystem State backend or prove a full
+custom-state migration.
 
 | Interface | Responsibility | Host integration |
 | --- | --- | --- |

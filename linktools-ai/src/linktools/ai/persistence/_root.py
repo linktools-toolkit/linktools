@@ -34,6 +34,7 @@ class PersistenceStorage:
             methods = tuple(getattr(coordination, name, None) for name in names)
             if any(method is not None for method in methods) and not all(callable(method) for method in methods):
                 raise TypeError(f"coordination must implement {', '.join(names)} together")
+        self._local_sqlite_path: Path | None = None
         self._coordination = coordination
         self._plan = plan
         self._object_store = object_store
@@ -46,6 +47,11 @@ class PersistenceStorage:
     @property
     def plan(self) -> PersistencePlan:
         return self._plan
+
+    @property
+    def local_sqlite_path(self) -> Path | None:
+        """Physical root source explicitly requesting native exclusive writer ownership."""
+        return self._local_sqlite_path
 
     @property
     def object_store(self) -> ObjectStore | None:
@@ -93,16 +99,22 @@ class PersistenceStorage:
     @classmethod
     def from_root(
         cls, root: "str | Path", *, cache: CacheBackend | None = None,
+        exclusive_writer: bool = False,
         coordination: CacheBackend | TurnCoordinationBackend | StreamBackend | None = None,
     ) -> "PersistenceStorage":
+        if not isinstance(exclusive_writer, bool):
+            raise TypeError("exclusive_writer must be a bool")
         base = _normalize_path(root)
         if not (base / "runtime.db").exists():
             _reject_filesystem_state_root(base)
-        return cls.sqlite(
+        storage = cls.sqlite(
             base / "runtime.db",
             object_store=FilesystemObjectStore(base / "objects"),
             cache=cache, coordination=coordination,
         )
+        if exclusive_writer:
+            storage._local_sqlite_path = base / "runtime.db"
+        return storage
 
     @classmethod
     def sql(

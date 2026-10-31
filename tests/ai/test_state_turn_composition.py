@@ -225,8 +225,9 @@ async def test_readonly_source_turn_binding_never_mutates(tmp_path: Path, backen
 
 @pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
 @pytest.mark.parametrize("active", (False, True))
+@pytest.mark.parametrize("exclusive_writer", (False, True))
 async def test_source_turn_snapshot_roundtrips_complete_graph_and_receipts(
-    tmp_path: Path, backend: str, active: bool,
+    tmp_path: Path, backend: str, active: bool, exclusive_writer: bool,
 ) -> None:
     cache = _BorrowedCache()
     async with _opened(backend, tmp_path / "source", cache) as state:
@@ -245,11 +246,13 @@ async def test_source_turn_snapshot_roundtrips_complete_graph_and_receipts(
         assert await Snapshot.create(persistence=state, object_store=archive, exclusive=Offline(), limits=_LIMITS)
         reference = await state.export_snapshot(object_store=archive, limits=_LIMITS)
     destination = tmp_path / "restored"
-    await Persistence.restore_snapshot(reference, object_store=archive, root=destination, limits=_LIMITS)
+    await Persistence.restore_snapshot(reference, object_store=archive, root=destination,
+                                       limits=_LIMITS, exclusive_writer=exclusive_writer)
     restored_configuration = PersistenceStorage.from_root(
         destination, coordination=_HostCoordination(cache),
     )
     async with Persistence.open("source-turns", storage=restored_configuration, tenant_id="tenant", read_only=True) as restored:
+        assert not restored.exclusive_execution_writer
         restored.coordination_backend.bind(restored)
         actual = await restored.execution.executions.state_store.read(lambda tx: tx.scan_records())
         assert {record.key_digest: record for record in actual} == {record.key_digest: record for record in expected}
@@ -271,9 +274,25 @@ async def test_source_turn_snapshot_roundtrips_complete_graph_and_receipts(
         assert await restored.coordination_backend.read_turn_by_session("scope", "session") == (
             replace(current, lease=None) if active else None
         )
-    writable_configuration = PersistenceStorage.from_root(destination, coordination=_HostCoordination(cache))
+    writable_configuration = PersistenceStorage.from_root(
+        destination, coordination=_HostCoordination(cache), exclusive_writer=exclusive_writer,
+    )
     async with Persistence.open("source-turns", storage=writable_configuration, tenant_id="tenant") as restored:
         restored.coordination_backend.bind(restored)
+        assert restored.exclusive_execution_writer is exclusive_writer
+        if exclusive_writer:
+            contender = Persistence(PersistenceStorage.from_root(destination, exclusive_writer=True))
+            try:
+                with pytest.raises(AIError) as rejected:
+                    await contender.initialize(namespace="source-turns", tenant_id="tenant")
+                assert rejected.value.code is ErrorCode.STORAGE_CONFLICT
+            finally:
+                await contender.close()
+        assert await restored.coordination_backend.read_turn_by_request("scope", "request") == (
+            replace(current, lease=None) if active else None
+        )
+        if active:
+            assert await _claim(restored.coordination_backend, execution="ignored") == replace(current, lease=None)
         assert not await restored.coordination_backend.release_turn(first.lease)
         assert await restored.coordination_backend.release_turn(current.lease) is active
     assert not cache.closed
