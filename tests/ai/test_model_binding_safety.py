@@ -28,6 +28,16 @@ def test_model_binding_contract_excludes_secret_material() -> None:
     assert binding.model_identity == "openai:gpt-test"
 
 
+@pytest.mark.parametrize("setting", ["timeout", "request_timeout", "first_event_timeout"])
+def test_request_deadlines_do_not_change_durable_model_semantics(setting: str) -> None:
+    first = create_model(api="openai", model="gpt-test", model_settings={setting: 1.0, "temperature": 0.2})
+    later = create_model(api="openai", model="gpt-test", model_settings={setting: 9.0, "temperature": 0.2})
+    semantic = create_model(api="openai", model="gpt-test", model_settings={setting: 1.0, "temperature": 0.5})
+    assert first.contract == later.contract
+    assert first.contract != semantic.contract
+    assert setting not in first.contract["settings"]
+
+
 def test_static_connection_values_are_normalized() -> None:
     binding = create_model(api="openai", model="gpt-test",
                            base_url="  https://EXAMPLE.com/v1/  ", api_key="   ")

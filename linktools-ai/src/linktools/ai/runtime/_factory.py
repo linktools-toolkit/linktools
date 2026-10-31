@@ -14,16 +14,18 @@ from pydantic_ai.capabilities import AbstractCapability, WrapperCapability
 from pydantic_ai.workspaces import WorkspaceBackend
 
 from ..asset import AssetStoreReader
-from ..agent import AgentCatalog, AgentCompiler
+from ..agent import AgentBinding, AgentBindingContract, AgentCatalog, AgentCompiler
 from ..capability import (
     ToolResponsesCapability,
     SessionCapability,
+    MemoryCapability,
     ExecutionCapability,
     AgentContext,
     AssetCapability,
     AssetSkillSource,
     CapabilityContribution,
     SkillSourceRegistry,
+    tool_class_from_metadata,
 )
 from ._lifecycle import _RuntimeCloseCoordinator
 from ._features import (
@@ -41,6 +43,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..session import SessionPendingExecutionLookup
 from ..observe import Metrics
+from ..model import ModelBinding
 from ..spec import (
     AgentSpec,
     RuleInstructionResolver,
@@ -118,6 +121,7 @@ class _RuntimeComponents:
     binding_resolver: _AgentBindingResolver
     history: object
     input_captures: InputCaptures
+    memory_scope: str | None
 
 
 class _AgentLifecycle:
@@ -195,6 +199,7 @@ async def compose_runtime_components(
     execution_declared = False
     session_capability = SessionCapability()
     session_declared = False
+    memory_scope: str | None = None
     tool_responses: ToolResponseFixture | None = None
     workspace = None if captured is None else captured.workspace
     workspace_factory = LocalWorkspaceBackend if captured is None else captured.workspace_factory
@@ -229,6 +234,7 @@ async def compose_runtime_components(
                 TraceCapability,
                 ToolResponsesCapability,
                 SessionCapability,
+                MemoryCapability,
                 ExecutionCapability,
             )):
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "Runtime feature capabilities require Runtime scope")
@@ -249,12 +255,17 @@ async def compose_runtime_components(
                 declared_ids.add(leaf.id)
 
         def consume_runtime_declaration(capability: AbstractCapability[AgentContext[AppT]]) -> AbstractCapability[AgentContext[AppT]] | None:
-            nonlocal tool_responses, session_capability, session_declared, execution_capability, execution_declared
+            nonlocal tool_responses, session_capability, session_declared, execution_capability, execution_declared, memory_scope
             if isinstance(capability, ExecutionCapability):
                 if execution_declared:
                     raise AIError(ErrorCode.CAPABILITY_CONFLICT)
                 execution_capability, execution_declared = capability, True
                 return capability
+            if isinstance(capability, MemoryCapability):
+                if memory_scope is not None:
+                    raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+                memory_scope = capability.scope
+                return None
             if isinstance(capability, SessionCapability):
                 if session_declared:
                     raise AIError(ErrorCode.CAPABILITY_CONFLICT)
@@ -342,17 +353,28 @@ async def compose_runtime_components(
         models = {} if captured is None else captured.models
         if "default" not in agents and "default" in models:
             agents["default"] = AgentSpec("default")
-        compiler = AgentCompiler(
-            defaults=None if captured is None else captured.defaults,
-            models=models,
-            candidates=tuple(
-                candidate
-                for candidate in candidates
-                if candidate.kind != "agent"
-            ),
-            agents=agents,
-            capability_filter=None if captured is None else captured.filter,
-        )
+        compile_candidates = tuple(candidate for candidate in candidates if candidate.kind != "agent")
+        compiler_options = dict(defaults=None if captured is None else captured.defaults,
+                                models=models, agents=agents, capability_filter=None if captured is None else captured.filter)
+
+        class _RuntimeAgentCompiler(AgentCompiler):
+            def restore(self, binding_contract: AgentBindingContract, *, model: ModelBinding | None = None) -> AgentBinding:
+                memory_ids = {pin.id for pin in binding_contract.selected
+                              if pin.kind == "tool" and tool_class_from_metadata(pin.contract.get("metadata")) == "memory"}
+                if not memory_ids:
+                    return super().restore(binding_contract, model=model)
+                # Current admission selects host contributions. Admitted Memory pins
+                # retain their native implementation even when the host disables it.
+                memory_candidates = tuple(CapabilityContribution.from_opaque("tool", tool.name, tool)
+                                          for tool in MemoryCapability().tool_definitions() if tool.name in memory_ids)
+                memory_restore_compiler = AgentCompiler(
+                    candidates=tuple(candidate for candidate in compile_candidates
+                                     if candidate.kind != "tool" or candidate.id not in memory_ids) + memory_candidates,
+                    **compiler_options,
+                )
+                return memory_restore_compiler.restore(binding_contract, model=model)
+
+        compiler = _RuntimeAgentCompiler(candidates=compile_candidates, **compiler_options)
         root_agents = {
             agent_id: compiler.compile(agents[agent_id])
             for agent_id in sorted(agents)
@@ -453,6 +475,7 @@ async def compose_runtime_components(
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
             input_materializer=input_materializer,
+            memory_scope=memory_scope,
             session_execution_ready=session_capability.enabled,
             auto_recover=auto_recover,
             tool_responses=tool_responses,
@@ -613,6 +636,7 @@ async def _build_local_components(
     object_key_factory: ObjectKeyFactory,
     payload_policy: PayloadPolicy,
     input_materializer: ExecutionInputMaterializer,
+    memory_scope: str | None,
     session_execution_ready: bool,
     auto_recover: bool,
     tool_responses: ToolResponseFixture | None,
@@ -969,6 +993,7 @@ async def _build_local_components(
         binding_resolver=binding_resolver,
         history=history,
         input_captures=input_captures,
+        memory_scope=memory_scope,
     )
 
 

@@ -30,7 +30,7 @@ from ._client_request import ModelClientRequestRecorder
 _logger = environ.get_logger("ai.model.binding")
 
 # SDK operational controls are not durable model request semantics.
-_TRANSPORT_SETTINGS = frozenset({"timeout", "request_timeout", "max_retries", "extra_headers"})
+_TRANSPORT_SETTINGS = frozenset({"timeout", "request_timeout", "first_event_timeout", "max_retries", "extra_headers"})
 
 @dataclass(frozen=True, slots=True)
 class _ProviderModelBinding:

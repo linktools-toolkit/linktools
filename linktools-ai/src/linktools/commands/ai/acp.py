@@ -28,7 +28,6 @@ class Command(BaseCommand):
 
     def run(self, args: Namespace) -> int:
         workspace = _load_workspace(args.project)
-        memory_scope = args.memory if args.memory is not None else "default"
 
         async def execute() -> int:
             from linktools.ai.acp import ACPAgent, serve_stdio
@@ -41,7 +40,6 @@ class Command(BaseCommand):
                     ACPAgent(
                         runtime,
                         principal=runtime.default_principal,
-                        memory_scope=memory_scope,
                     )
                 )
             return 0

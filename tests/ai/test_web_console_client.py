@@ -99,7 +99,7 @@ def test_web_dom_interactions_ignore_stale_work_and_preserve_mutation_identity()
     root = Path(__file__).parents[2]
     script = Path(__file__).with_name("web_console_dom.mjs")
     assets = root / "linktools-ai/src/linktools/ai/web/assets"
-    for mode in ("writable", "readonly", "workspace", "races", "navigation", "native", "sdk", "protocols", "diagnostics", "thinking", "guided", "details", "minimal", "resume", "streaming", "attempts"):
+    for mode in ("writable", "readonly", "workspace", "races", "navigation", "native", "sdk", "protocols", "diagnostics", "tools", "thinking", "guided", "details", "minimal", "resume", "streaming", "attempts"):
         result = subprocess.run([node, str(script), str(assets), mode], capture_output=True, text=True, timeout=20, check=False)
         assert result.returncode == 0, result.stderr
 
@@ -207,3 +207,4 @@ async def test_thinking_request_reaches_custom_binding(tmp_path: Path, thinking)
             record = await runtime._state.execution.executions.get(
                 execution.execution_id, tenant_id=runtime.tenant_id)
             assert record.thinking == thinking
+            assert record.planning is True, "the visible Plan mode reaches durable admission"

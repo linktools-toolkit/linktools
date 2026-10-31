@@ -25,11 +25,9 @@ from ..execution.handle import ExecutionBinding
 from ..core import (
     RunBudget,
     CorrelationData,
-    ExecutionMode,
     JsonValue,
     Principal,
     PrincipalKind,
-    ThinkingValue,
     normalize_correlation,
     AuthorizationPolicy,
     TenantAuthorizationPolicy,
@@ -52,7 +50,6 @@ from ..execution import Execution
 from ._agent_binding_resolver import _AgentBindingResolver
 from ..observe.stream import ObservationSession, await_stream_cleanup
 from ._domains import RuntimeAgents, RuntimeExecutions, RuntimeMetrics, RuntimeSessions
-from ..execution import ExecutionInputContext
 from ..core import ExecutionContext
 from ..model import normalize_input_files
 from ..inputs import CanonicalUserInput
@@ -264,6 +261,7 @@ class Runtime(Generic[AppT]):
                         close_callback=components.close_callback, handoff_callback=components.handoff_callback,
                         tree_streamer=components.tree_streamer, metric_control=components.metric_control,
                         _binding_resolver=components.binding_resolver, input_captures=components.input_captures,
+                        memory_scope=components.memory_scope,
                     )
                 self._ready = True
             return self
@@ -343,6 +341,7 @@ class Runtime(Generic[AppT]):
         metric_control: "_MetricControl | None" = None,
         _binding_resolver: "_AgentBindingResolver | None" = None,
         input_captures: "InputCaptures | None" = None,
+        memory_scope: str | None = None,
     ) -> None:
         if any(
             value is None
@@ -364,6 +363,7 @@ class Runtime(Generic[AppT]):
         self._compiler = compiler
         self._execution_service = execution
         self._input_captures = input_captures
+        self._memory_scope = memory_scope
         self._executions = RuntimeExecutions(
             execution, self._get_execution, input_captures, ensure_open=self._ensure_open,
         )
@@ -668,40 +668,7 @@ class Runtime(Generic[AppT]):
             self._state, selected, binding_contract,
             self._compiler, self._execution_service, self._session_service, self._execution_binding,
             self._watch_execution_tree, resolver.resolve, self._default_principal, self.correlation,
-            self._input_captures, binding_contract is not None,
-        )
-
-    async def _start_for_agent(
-        self,
-        agent_id: str,
-        agent_revision: int,
-        user_prompt: CanonicalUserInput,
-        *,
-        files: Sequence[str],
-        output: "type[BaseModel] | OutputBinding | None",
-        principal: "Principal | None",
-        session_id: "str | None",
-        idempotency_key: "str | None",
-        memory_scope: "str | None",
-        mode: ExecutionMode,
-        planning: "bool | None",
-        thinking: "ThinkingValue | None",
-        correlation: "Mapping[str, object] | None" = None,
-        compiled_agent: "CompiledAgent | None" = None,
-        binding_contract: AgentBindingContract | None = None,
-        dependency_hold_id: "str | None" = None,
-        requires_task_invocation_capture: bool = False,
-        input_context: ExecutionInputContext | None = None,
-        budget: RunBudget | None = None,
-        budget_scope_id: str | None = None,
-    ) -> "Execution[AppT]":
-        port = self._agent_execution_port(agent_id, agent_revision, compiled_agent, binding_contract)
-        return await port.start(
-            user_prompt, files=files, output=output, principal=principal, session_id=session_id,
-            idempotency_key=idempotency_key, memory_scope=memory_scope, mode=mode, planning=planning,
-            thinking=thinking, correlation=correlation, dependency_hold_id=dependency_hold_id,
-            requires_task_invocation_capture=requires_task_invocation_capture, input_context=input_context,
-            budget=budget, budget_scope_id=budget_scope_id,
+            self._input_captures, self._memory_scope, binding_contract is not None,
         )
 
     async def _retry_execution(
@@ -785,15 +752,13 @@ class Runtime(Generic[AppT]):
     async def _fork_session(
         self,
         agent_id: str,
-        agent_revision: int,
         session_id: str,
         new_session_id: str,
         *,
         principal: "Principal | None",
         idempotency_key: "str | None",
         cwd: "str | None",
-        compiled_agent: "CompiledAgent | None" = None,
-    ) -> "Session[AppT]":
+    ) -> None:
         resolved_principal = self._resolve_principal(principal)
         await self.sessions.fork(
             agent_id,
@@ -804,14 +769,6 @@ class Runtime(Generic[AppT]):
                 secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
                 cwd,
             ),
-        )
-        return Session(
-            self,
-            agent_id,
-            agent_revision,
-            new_session_id,
-            resolved_principal,
-            compiled_agent,
         )
 
     async def _update_session(

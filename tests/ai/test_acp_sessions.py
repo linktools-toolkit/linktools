@@ -58,7 +58,6 @@ async def test_acp_session_listing_advertises_and_preserves_pagination(
     agent = ACPAgent(
         SimpleNamespace(sessions=SimpleNamespace(list=list_sessions)),
         principal=principal,
-        memory_scope="memory",
     )
     initialized = await agent.initialize(acp.PROTOCOL_VERSION)
     initialize_payload = initialized.model_dump(by_alias=True) if sdk else initialized
@@ -133,7 +132,7 @@ async def test_acp_workspace_uses_explicit_execution_coordination(
         served = True
 
     monkeypatch.setattr("linktools.ai.acp.serve_stdio", serve)
-    await application.serve(memory_scope="memory")
+    await application.serve()
     assert served
     assert bool(streams.open_keys) is (coordination == "stream")
     assert bool(cache.open_keys) is (coordination == "combined")
@@ -189,8 +188,8 @@ async def test_acp_application_can_serve_again_after_transport_failure(
     monkeypatch.setattr(acp_module.Runtime, "open", open_runtime)
     monkeypatch.setattr(acp_module, "serve_stdio", serve)
     with pytest.raises(RuntimeError, match="transport disconnected"):
-        await application.serve(memory_scope="memory")
-    await application.serve(memory_scope="memory")
+        await application.serve()
+    await application.serve()
 
     assert len(captures) == len(closed) == 2
     assert captures[0].contributions == captures[1].contributions

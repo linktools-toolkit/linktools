@@ -38,7 +38,7 @@ from ._agent_executor import (
     DurableBoundary,
     LiveDelta,
 )
-from ._harness_memory import select_harness_memory_tools
+from ..capability import MemoryCapability, tool_class_from_metadata
 from ..inputs import (
     CanonicalUserInput,
     ExecutionInputMaterializer,
@@ -948,7 +948,8 @@ class LocalExecutionBackend:
             return False
         binding = self._execution_binding(execution, binding)
         return not (execution.memory_scope is not None
-                    and select_harness_memory_tools(binding.compiled_agent.tool_policy))
+                    and any(tool_class_from_metadata(tool.contract.get("metadata")) == "memory"
+                            for tool in binding.compiled_agent.selected_tools))
 
     async def pending_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
         local = await self._pending_turns.read_execution(execution_id, tenant_id=tenant_id)
@@ -3672,8 +3673,10 @@ class LocalExecutionBackend:
                 and bool(subagent_refs)
             )
             memory = None
-            selected_memory = select_harness_memory_tools(
-                compiled_agent.tool_policy
+            selected_memory = MemoryCapability.select_tools(
+                compiled_agent.tool_policy if current.context_imported
+                else tuple(tool.id for tool in compiled_agent.selected_tools
+                           if tool_class_from_metadata(tool.contract.get("metadata")) == "memory")
             )
             if current.memory_scope is not None and selected_memory:
                 if self._memory_store_factory is None:
@@ -3870,6 +3873,7 @@ class LocalExecutionBackend:
                         history_producer_generation=producer_generation,
                         history_id=history_id,
                         memory_store=memory if selected_memory else None,
+                        memory_tool_names=selected_memory if memory is not None else (),
                         plan_store_resolver=lambda _ctx: plan_store,
                         mode=current.mode,
                         planning=current.planning,
