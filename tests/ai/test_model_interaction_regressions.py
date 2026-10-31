@@ -333,7 +333,8 @@ async def test_interaction_capture_excludes_acknowledged_identities() -> None:
     await store.initialize()
     try:
         await store.register_agent_run(AgentRunRecord("run"))
-        values = tuple(_interaction(sequence) for sequence in (5, 6, 7))
+        digest, _ = store.intern_payload("run", b"{}")
+        values = tuple(replace(_interaction(sequence), request_envelope_digest=digest) for sequence in (5, 6, 7))
         for value in values:
             store.stage_model_interaction(value)
 
@@ -345,6 +346,7 @@ async def test_interaction_capture_excludes_acknowledged_identities() -> None:
 
         assert captured is not None
         assert captured.interactions == values[1:]
+        assert captured.payloads == ((digest, b"{}"),)
         assert captured.base_interaction_offset == 5
         assert captured.target_interaction_offset == 7
     finally:

@@ -115,6 +115,10 @@ class SqlStorageContext:
                 await transaction.__aenter__()
                 entered = True
                 try:
+                    if self.dialect.single_writer:
+                        # SQLite's legacy driver otherwise defers BEGIN until the
+                        # first write, allowing prerequisite reads to disagree.
+                        await self.dialect.begin_consistent_read(session)
                     result = await callback(session)
                 except BaseException as error:
                     disposition = self.dialect.classify_transaction_error(

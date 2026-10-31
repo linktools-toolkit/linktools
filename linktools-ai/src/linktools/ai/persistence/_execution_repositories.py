@@ -1520,11 +1520,18 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         execution = await self.get(current.resource_id, tenant_id=self._tenant_id)
         head = await self.get_history_head(current.resource_id, tenant_id=self._tenant_id)
-        if (current.status is not IdempotencyStatus.COMPLETED or execution is None
-                or execution.status is not ExecutionStatus.SUCCEEDED or execution.result is None
-                or execution.result.output is None or head is None
+        terminal_statuses = {
+            ExecutionStatus.SUCCEEDED: IdempotencyStatus.COMPLETED,
+            ExecutionStatus.FAILED: IdempotencyStatus.FAILED,
+            ExecutionStatus.CANCELLED: IdempotencyStatus.CANCELLED,
+        }
+        if (execution is None or execution.status not in terminal_statuses
+                or current.status is not terminal_statuses[execution.status]
+                or execution.result is None or head is None
                 or head.state is not ExecutionHistoryState.CLOSED
-                or current.result_digest != execution.result.output.digest):
+                or (execution.result.output is not None) != (execution.status is ExecutionStatus.SUCCEEDED)
+                or current.result_digest != (None if execution.result.output is None else execution.result.output.digest)
+                or current.error_code != execution.error_code):
             raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
         return ExecutionTerminalCommitResult(execution, execution.result)
 
@@ -1544,13 +1551,19 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         _require_tenant(commit.execution, self._tenant_id)
         self._idempotency._require_resource_kind(reservation.idempotency)
         execution_id = reservation.execution.execution_id
+        terminal_states = {
+            ExecutionStatus.SUCCEEDED: (ExecutionEventType.EXECUTION_SUCCEEDED, IdempotencyStatus.COMPLETED),
+            ExecutionStatus.FAILED: (ExecutionEventType.EXECUTION_FAILED, IdempotencyStatus.FAILED),
+            ExecutionStatus.CANCELLED: (ExecutionEventType.EXECUTION_CANCELLED, IdempotencyStatus.CANCELLED),
+        }
         if (not reservation.execution.conversation or not commit.execution.conversation
                 or commit.execution.execution_id != execution_id
                 or reservation.idempotency.resource_id != execution_id
                 or reservation.idempotency.status is not IdempotencyStatus.RESERVED
-                or commit.execution.status is not ExecutionStatus.SUCCEEDED
-                or commit.terminal_event_type != ExecutionEventType.EXECUTION_SUCCEEDED
-                or commit.operation is not None or commit.result.output is None):
+                or commit.execution.status not in terminal_states
+                or commit.terminal_event_type != terminal_states[commit.execution.status][0]
+                or commit.operation is not None
+                or (commit.result.output is not None) != (commit.execution.status is ExecutionStatus.SUCCEEDED)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         for name in ("session_id", "binding_digest", "principal_id", "principal_kind", "stored_user_input", "binding",
                      "parent_execution_id", "parent_invocation_id", "root_execution_id", "previous_execution_id",
@@ -1574,8 +1587,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         identity = self._idempotency._identity_key(
             reservation.idempotency.scope, reservation.idempotency.idempotency_key_digest,
         )
-        completed = replace(reservation.idempotency, status=IdempotencyStatus.COMPLETED,
-                            result_digest=commit.result.output.digest, error_code=None,
+        completed = replace(reservation.idempotency, status=terminal_states[commit.execution.status][1],
+                            result_digest=None if commit.result.output is None else commit.result.output.digest,
+                            error_code=commit.execution.error_code,
                             updated_at=await transaction.now())
         head = ExecutionHistoryHeadRecord(execution_id, ExecutionHistoryState.CLOSED, 2, None,
                                           producer_generation=commit.producer_generation or 0)

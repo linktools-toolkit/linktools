@@ -1797,11 +1797,14 @@ class StateCommands:
         recovery = await self._recovery.get_in_transaction(
             group.transaction(self._recovery.state_store), execution.execution_id, tenant_id=self._tenant_id,
         )
+        expected_run_id = (None if execution.agent_run_seq == 0 else agent_run_id(
+            namespace=self._namespace, tenant_id=self._tenant_id,
+            execution_id=execution.execution_id, agent_run_seq=execution.agent_run_seq,
+        ))
         if (recovery is None or recovery.state is not RecoveryCheckpointState.COMPLETED
-                or recovery.agent_run_id != agent_run_id(namespace=self._namespace, tenant_id=self._tenant_id,
-                                                       execution_id=execution.execution_id, agent_run_seq=1)):
+                or recovery.agent_run_id != expected_run_id):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if expected_session is None:
+        if expected_session is None and execution.status is ExecutionStatus.SUCCEEDED:
             if self._recovery_run_store is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             run = await self._recovery_run_store.get_agent_run(agent_run_id=recovery.agent_run_id)
@@ -1825,13 +1828,21 @@ class StateCommands:
             committed = await self._conversation.pending_turn_commit_in_transaction(
                 transaction, session_id=expected_session.session_id, execution_id=execution.execution_id,
             )
-            if (session.history_id != expected_session.history_id
-                    or execution.conversation_agent_run_id is None
-                    or committed.end_message_index <= committed.start_message_index
+            successful = execution.status is ExecutionStatus.SUCCEEDED
+            if (session is None or committed is None or session.history_id != expected_session.history_id
                     or committed.status is not execution.status
                     or committed.stored_user_input.digest != execution.stored_user_input.digest
-                    or committed.output is None or result.result.output is None
-                    or committed.output.digest != result.result.output.digest):
+                    or committed.error_code != execution.error_code
+                    or committed.safe_error_details != execution.safe_error_details
+                    or (committed.output is not None) != successful
+                    or (result.result.output is not None) != successful):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if successful:
+                if (execution.conversation_agent_run_id is None
+                        or committed.end_message_index <= committed.start_message_index
+                        or committed.output.digest != result.result.output.digest):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            elif committed.start_message_index != 0 or committed.end_message_index != 0:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return result
 
@@ -2054,6 +2065,7 @@ class StateCommands:
                 or type(self._recovery) is not RecoveryCheckpointRepositoryImpl):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         execution = commit.execution
+        successful = execution.status is ExecutionStatus.SUCCEEDED
         for candidate in (reservation.execution, execution):
             if (not candidate.conversation or candidate.binding_kind != "agent"
                     or candidate.parent_execution_id is not None
@@ -2061,11 +2073,12 @@ class StateCommands:
                     or candidate.budget_scope_id is not None or candidate.restart_checkpoints
                     or candidate.durable_trace or candidate.dependency_hold_ids):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if (execution.status is not ExecutionStatus.SUCCEEDED or reservation.budget is not None
-                or execution.agent_run_seq != 1
+        if (execution.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
+                or reservation.budget is not None
+                or execution.agent_run_seq not in ({1} if successful else {0, 1})
                 or reservation.execution.status is not ExecutionStatus.PENDING_START
                 or reservation.execution.agent_run_seq != 0 or reservation.execution.event_seq != 0
-                or commit.expected_event_seq != 1 or commit.expected_revision < 2
+                or commit.expected_event_seq != 1 or commit.expected_revision < (2 if successful else 1)
                 or commit.operation is not None):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         stores = [self._execution.state_store, self._recovery.state_store]
@@ -2078,42 +2091,56 @@ class StateCommands:
                         or candidate.lineage_kind is not ExecutionLineageKind.RUN
                         or candidate.root_execution_id != candidate.execution_id):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if (recovery_run is None or recovery_agent_run_checkpoint is None
-                    or recovery_agent_run_checkpoint.state != "complete"
-                    or recovery_agent_run_checkpoint.pending_request_index is not None
-                    or recovery_run.parent_agent_run_id is not None
-                    or recovery_run.agent_id != execution.agent_id
-                    or recovery_run.agent_run_id != agent_run_id(
-                        namespace=self._namespace, tenant_id=self._tenant_id,
-                        execution_id=execution.execution_id, agent_run_seq=1,
-                    )
-                    or any(getattr(recovery_run, name) != getattr(recovery_agent_run_checkpoint, name)
-                           for name in ("agent_run_id", "agent_conversation_id", "agent_id", "parent_agent_run_id"))):
+            if successful:
+                if (recovery_run is None or recovery_agent_run_checkpoint is None
+                        or recovery_agent_run_checkpoint.state != "complete"
+                        or recovery_agent_run_checkpoint.pending_request_index is not None
+                        or recovery_run.parent_agent_run_id is not None
+                        or recovery_run.agent_id != execution.agent_id
+                        or recovery_run.agent_run_id != agent_run_id(
+                            namespace=self._namespace, tenant_id=self._tenant_id,
+                            execution_id=execution.execution_id, agent_run_seq=1,
+                        )
+                        or any(getattr(recovery_run, name) != getattr(recovery_agent_run_checkpoint, name)
+                               for name in ("agent_run_id", "agent_conversation_id", "agent_id", "parent_agent_run_id"))):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if self._recovery_run_store is None:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                stores.extend(self._recovery_run_store.transaction_stores)
+            elif recovery_run is not None or recovery_agent_run_checkpoint is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if self._recovery_run_store is None:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            stores.extend(self._recovery_run_store.transaction_stores)
         else:
-            if recovery_run is not None or recovery_agent_run_checkpoint is not None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if (next_cursor is None or conversation_agent_run is None or conversation_checkpoint is None):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if (type(self._conversation) is not SessionRepositoryImpl
-                    or type(archive) not in {StateStepArchive, ModelInteractionStateStepArchive}
-                    or self._conversation_history is None):
+            if type(self._conversation) is not SessionRepositoryImpl:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            if (conversation_checkpoint.state != "complete" or conversation_checkpoint.pending_request_index is not None
-                    or conversation_agent_run.parent_agent_run_id is not None
-                    or any(getattr(conversation_agent_run, name) != getattr(conversation_checkpoint, name)
-                           for name in ("agent_conversation_id", "agent_id", "parent_agent_run_id"))
-                    or execution.conversation_agent_run_id != conversation_agent_run.agent_run_id
-                    or execution.session_id != expected_session.session_id
-                    or expected_session.active_execution_id is not None
-                    or next_cursor.history_id != expected_session.history_id
-                    or next_cursor.agent_run_id != conversation_agent_run.agent_run_id
-                    or conversation_checkpoint.agent_run_id != conversation_agent_run.agent_run_id):
+            if execution.session_id != expected_session.session_id or expected_session.active_execution_id is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            stores.extend((self._conversation.state_store, archive.state_store))
+            if successful:
+                if recovery_run is not None or recovery_agent_run_checkpoint is not None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if (next_cursor is None or conversation_agent_run is None or conversation_checkpoint is None):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if (type(archive) not in {StateStepArchive, ModelInteractionStateStepArchive}
+                        or self._conversation_history is None):
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                if (conversation_checkpoint.state != "complete" or conversation_checkpoint.pending_request_index is not None
+                        or conversation_agent_run.parent_agent_run_id is not None
+                        or any(getattr(conversation_agent_run, name) != getattr(conversation_checkpoint, name)
+                               for name in ("agent_conversation_id", "agent_id", "parent_agent_run_id"))
+                        or execution.conversation_agent_run_id != conversation_agent_run.agent_run_id
+                        or execution.session_id != expected_session.session_id
+                        or expected_session.active_execution_id is not None
+                        or next_cursor.history_id != expected_session.history_id
+                        or next_cursor.agent_run_id != conversation_agent_run.agent_run_id
+                        or conversation_checkpoint.agent_run_id != conversation_agent_run.agent_run_id):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                stores.extend((self._conversation.state_store, archive.state_store))
+            else:
+                if any(value is not None for value in (
+                    next_cursor, conversation_agent_run, conversation_checkpoint,
+                    recovery_run, recovery_agent_run_checkpoint,
+                )) or execution.conversation_agent_run_id is not None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                stores.append(self._conversation.state_store)
         stores = tuple(_dedupe_stores(stores))
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -2138,7 +2165,7 @@ class StateCommands:
         history = None
         final_cursor = None
         start = end = 0
-        if expected_session is not None:
+        if expected_session is not None and successful:
             assert archive is not None and conversation_agent_run is not None and conversation_checkpoint is not None
             assert next_cursor is not None and self._conversation_history is not None
             _checkpoint, prepared, history = await self._prepare_conversation_checkpoint(
@@ -2150,15 +2177,17 @@ class StateCommands:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             start, end = _timeline_turn_message_range(history, prepared, expected_session.continuation)
             final_cursor = replace(next_cursor, message_count=end)
-        else:
+        elif successful:
             assert self._recovery_run_store is not None and recovery_run is not None
             assert recovery_agent_run_checkpoint is not None
             _checkpoint, prepared_recovery = await self._recovery_run_store.prepare_run_checkpoint(
                 recovery_run, recovery_agent_run_checkpoint,
             )
         recovered = RecoveryCheckpoint(
-            execution.execution_id, agent_run_id(namespace=self._namespace, tenant_id=self._tenant_id,
-                                                execution_id=execution.execution_id, agent_run_seq=1),
+            execution.execution_id, (None if execution.agent_run_seq == 0 else agent_run_id(
+                namespace=self._namespace, tenant_id=self._tenant_id,
+                execution_id=execution.execution_id, agent_run_seq=execution.agent_run_seq,
+            )),
             RecoveryCheckpointState.COMPLETED, 2, reservation.execution.created_at, execution.updated_at,
         )
         resolved: ExecutionTerminalCommitResult | None = None
@@ -2199,27 +2228,29 @@ class StateCommands:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 return winner
             if expected_session is not None:
-                assert history is not None and self._conversation_history is not None
                 conversation_transaction = group.transaction(self._conversation.state_store)
                 current = await self._conversation.get_in_transaction(
                     conversation_transaction, expected_session.session_id, tenant_id=self._tenant_id,
                 )
                 if current != expected_session:
                     raise AIError(ErrorCode.SESSION_BUSY)
-                current_history = await self._conversation_history.get_in_transaction(
-                    conversation_transaction, history.history_id, tenant_id=self._tenant_id,
-                )
-                if current_history != history:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                if successful:
+                    assert history is not None and self._conversation_history is not None
+                    current_history = await self._conversation_history.get_in_transaction(
+                        conversation_transaction, history.history_id, tenant_id=self._tenant_id,
+                    )
+                    if current_history != history:
+                        raise AIError(ErrorCode.STORAGE_CONFLICT)
             final = await repository.insert_pending_turn_in_transaction(
                 execution_transaction, reservation, commit, audit_events=tuple(audit_events),
             )
             if expected_session is not None:
-                assert archive is not None and conversation_agent_run is not None and prepared is not None
-                assert final_cursor is not None
-                await archive.materialize_checkpoint_in_transaction(
-                    group.transaction(archive.state_store), conversation_agent_run, prepared[0],
-                )
+                if successful:
+                    assert archive is not None and conversation_agent_run is not None and prepared is not None
+                    assert final_cursor is not None
+                    await archive.materialize_checkpoint_in_transaction(
+                        group.transaction(archive.state_store), conversation_agent_run, prepared[0],
+                    )
                 await self._conversation.commit_pending_turn_in_transaction(
                     conversation_transaction, expected=expected_session, execution_id=execution.execution_id,
                     next_cursor=final_cursor, start_message_index=start, end_message_index=end,
@@ -2228,7 +2259,7 @@ class StateCommands:
                     updated_at=commit.execution.updated_at, error_code=commit.execution.error_code,
                     safe_error_details=commit.execution.safe_error_details,
                 )
-            else:
+            elif successful:
                 assert self._recovery_run_store is not None and recovery_run is not None
                 assert prepared_recovery is not None
                 await self._recovery_run_store.materialize_checkpoint_in_transaction(

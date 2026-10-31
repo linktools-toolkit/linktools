@@ -255,3 +255,15 @@ def test_legacy_tool_return_class_accepts_explicit_null_retry(monkeypatch: pytes
     assert restored.parts[0].tool_call_id == 'call'
     assert restored.parts[0].content == 'done'
     assert not hasattr(restored.parts[0], 'retry')
+
+
+@pytest.mark.parametrize('name', ['model_id', 'canonical_system'])
+def test_response_optional_sdk_identity_survives_durable_round_trip(name: str) -> None:
+    if name not in {field.name for field in fields(sdk.ModelResponse)}:
+        pytest.skip('installed SDK does not expose this response identity')
+    response = sdk.ModelResponse(parts=[sdk.TextPart('answer')], timestamp=_STAMP, **{name: 'provider:model'})
+    restored = codec.decode_model_messages(codec.encode_model_messages((response,)))
+    assert restored == (response,)
+    assert getattr(restored[0], name) == 'provider:model'
+    original_default = codec.decode_model_messages(codec.encode_model_messages((sdk.ModelResponse(parts=[], timestamp=_STAMP),)))
+    assert getattr(original_default[0], name) is None

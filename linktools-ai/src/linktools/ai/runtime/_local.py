@@ -1200,6 +1200,7 @@ class LocalExecutionBackend:
                 )
                 await accept()
 
+            await self._check_pending_lease(turn, allow_cancelled=allow_cancelled)
             task = asyncio.create_task(promote_owned(), name=f"ai-promote-pending-{execution_id}")
             _result, cancellation = await self._await_checkpoint_task(
                 task, label="pending promotion", execution_id=execution_id,
@@ -5449,12 +5450,6 @@ class LocalExecutionBackend:
         expected_revision: int | None = None,
         observed_execution: ExecutionRecord | None = None,
     ) -> ExecutionRecord:
-        if output is not None and output.kind == "inline" and not payload_fits_inline(output, self._payload_policy):
-            output = await _materialize_execution_json(
-                output, objects=self._execution_objects, keys=ObjectKeyFactory(self._namespace),
-                policy=self._payload_policy, tenant_id=self._tenant_id,
-            )
-            observed_execution = None
         current = observed_execution
         if current is None:
             current = await self.load_execution(
@@ -5480,18 +5475,30 @@ class LocalExecutionBackend:
                     and pending.coordination is not None
                     and await coordinator.promotion_requested(pending.coordination)):
                 await self.promote_pending_execution(current.execution_id)
-            if status is ExecutionStatus.SUCCEEDED and output is not None and agent_run_id is not None:
-                async with pending.boundary:
-                    if self._pending_turns.get(current.execution_id, tenant_id=self._tenant_id) is pending:
-                        return await self._commit_pending_success(
-                            current, output, usage or UsageMetrics(), agent_run_id,
-                            producer_generation=producer_generation,
-                        )
-            else:
-                await self.promote_pending_execution(current.execution_id, allow_cancelled=True)
+            async with pending.boundary:
+                if self._pending_turns.get(current.execution_id, tenant_id=self._tenant_id) is pending:
+                    return await self._commit_pending_terminal(
+                        current, status, output, usage or self._captured_usage.get(current.execution_id, UsageMetrics()),
+                        agent_run_id, error_code=error_code, stop_reason=stop_reason,
+                        safe_error_details=safe_error_details, error_diagnostics=error_diagnostics,
+                        producer_generation=producer_generation,
+                    )
             current = await self.load_execution(current.execution_id, tenant_id=self._tenant_id)
             if current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if output is not None and output.kind == "inline" and not payload_fits_inline(output, self._payload_policy):
+            output = await _materialize_execution_json(
+                output, objects=self._execution_objects, keys=ObjectKeyFactory(self._namespace),
+                policy=self._payload_policy, tenant_id=self._tenant_id,
+            )
+            current = await self.load_execution(execution.execution_id, tenant_id=self._tenant_id)
+            if current is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if expected_revision is not None and current.revision != expected_revision:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED,
+                                  ExecutionStatus.CANCELLED, ExecutionStatus.RECOVERY_REQUIRED}:
+                return current
         recovered = await self._check_reconcile_tool_effects(
             current, producer_generation=producer_generation,
         )
@@ -5743,22 +5750,32 @@ class LocalExecutionBackend:
         )
         return committed.execution
 
-    async def _commit_pending_success(
-        self, current: ExecutionRecord, output: StoredPayload, usage: UsageMetrics,
-        agent_run_id: str, *, producer_generation: int | None,
+    async def _commit_pending_terminal(
+        self, current: ExecutionRecord, status: ExecutionStatus, output: StoredPayload | None,
+        usage: UsageMetrics, agent_run_id: str | None, *, error_code: str | None,
+        stop_reason: StopReason, safe_error_details: Mapping[str, JsonValue] | None,
+        error_diagnostics: ErrorDiagnostics | None, producer_generation: int | None,
     ) -> ExecutionRecord:
         turn = self._pending_turns.get(current.execution_id, tenant_id=self._tenant_id)
         if turn is None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        run = await self._run_store.get_agent_run(agent_run_id=agent_run_id)
-        checkpoint = await self._run_store.latest_checkpoint(agent_run_id=agent_run_id)
-        if run is None or checkpoint is None:
+        successful = status is ExecutionStatus.SUCCEEDED
+        run = checkpoint = None
+        if successful:
+            if output is None or agent_run_id is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            run = await self._run_store.get_agent_run(agent_run_id=agent_run_id)
+            checkpoint = await self._run_store.latest_checkpoint(agent_run_id=agent_run_id)
+            if run is None or checkpoint is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        elif output is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         history_id = None if turn.session is None else turn.session.history_id or (
             None if turn.session.continuation is None else turn.session.continuation.history_id
         )
+        await self._check_pending_lease(turn, allow_cancelled=not successful)
         context = await self.load_input_context(current.input_context)
-        if context is None:
+        if context is None and successful:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         current = await _materialize_execution_payloads(
             current, input_materializer=self._input_materializer,
@@ -5769,26 +5786,33 @@ class LocalExecutionBackend:
             turn.reservation.execution, stored_user_input=current.stored_user_input,
             repository_instructions=current.repository_instructions,
         ))
-        output = await _materialize_execution_json(
-            output, objects=self._execution_objects, keys=ObjectKeyFactory(self._namespace),
-            policy=self._payload_policy, tenant_id=self._tenant_id,
-        )
-        prepared_context = await self._context_archive.prepare(context,
+        if output is not None:
+            output = await _materialize_execution_json(
+                output, objects=self._execution_objects, keys=ObjectKeyFactory(self._namespace),
+                policy=self._payload_policy, tenant_id=self._tenant_id,
+            )
+        prepared_context = None if context is None else await self._context_archive.prepare(context,
             history_root=turn.history_root, history_digest=turn.history_digest)
         now = datetime.now(timezone.utc)
         terminal = replace(
-            _terminal_record(current, ExecutionStatus.SUCCEEDED, now, error_code=None),
-            input_context=prepared_context.reference,
-            conversation_agent_run_id=None if turn.session is None else agent_run_id,
+            _terminal_record(current, status, now, error_code=error_code,
+                             safe_error_details=safe_error_details, error_diagnostics=error_diagnostics),
+            input_context=None if prepared_context is None else prepared_context.reference,
+            conversation_agent_run_id=agent_run_id if successful and turn.session is not None else None,
         )
         commit = ExecutionTerminalCommit(
             current.revision, current.event_seq, terminal,
-            ResultRecord(output, StopReason.END_TURN, usage, now),
-            ExecutionEventType.EXECUTION_SUCCEEDED, {"agent_run_id": agent_run_id},
+            ResultRecord(output, stop_reason, usage, now),
+            (ExecutionEventType.EXECUTION_SUCCEEDED if successful else
+             ExecutionEventType.EXECUTION_CANCELLED if status is ExecutionStatus.CANCELLED else
+             ExecutionEventType.EXECUTION_FAILED),
+            {"agent_run_id": agent_run_id} if successful else _terminal_error_payload(
+                error_code, safe_error_details or {}, error_diagnostics,
+            ),
             producer_generation=producer_generation,
         )
         pending_audit = tuple(self._pending_audit_events.get(current.execution_id, ()))
-        await self._check_pending_lease(turn, allow_cancelled=False)
+        await self._check_pending_lease(turn, allow_cancelled=not successful)
         turn.begin_commit()
 
         async def accept(committed: ExecutionTerminalCommitResult) -> None:
@@ -5833,9 +5857,9 @@ class LocalExecutionBackend:
         async def commit_owned() -> ExecutionTerminalCommitResult:
             committed = await self._runtime_commands.commit_pending_turn(
                 reservation, commit, expected_session=turn.session,
-                context_write=(prepared_context.archive, prepared_context.records),
+                context_write=None if prepared_context is None else (prepared_context.archive, prepared_context.records),
                 capability_run_id=agent_run_id,
-                next_cursor=None if turn.session is None else ConversationCursor(agent_run_id, history_id=history_id),
+                next_cursor=None if turn.session is None or not successful else ConversationCursor(agent_run_id, history_id=history_id),
                 conversation_agent_run=None if turn.session is None else run,
                 conversation_checkpoint=None if turn.session is None else checkpoint,
                 recovery_run=run if turn.session is None else None,

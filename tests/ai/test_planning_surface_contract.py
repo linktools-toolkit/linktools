@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Harness Planning must preserve the intentionally narrow LinkTools surface."""
 
+from copy import deepcopy
 from dataclasses import replace
 
 import pytest
@@ -23,7 +24,9 @@ from linktools.ai.runtime._compaction import CompactionPolicy
 from linktools.ai.persistence.runs import (
     StagingAgentRunStore,
 )
-from pydantic_ai.messages import CachePoint, ModelRequest, ModelResponse, UserPromptPart
+from pydantic_ai import Agent
+from pydantic_ai.messages import CachePoint, ModelRequest, ModelResponse, TextContent, TextPart, UserPromptPart
+from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
@@ -71,57 +74,48 @@ async def test_linktools_planning_registers_only_write_plan() -> None:
     assert tuple(await toolset.get_tools(context)) == ("write_plan",)
 
 
-async def test_harness_planning_prompt_is_request_scoped_and_cache_safe() -> None:
+async def test_harness_planning_prompt_is_visible_without_rewriting_history_or_duplicate_reminders() -> None:
     store = InMemoryPlanStore()
     await store.set_items([PlanItem(content="ship it", status=TaskStatus.in_progress)])
-    capability = Planning(
-        store=store,
-        tools=("write_plan",),
-        id="linktools-planning",
-    )
-    context = RunContext(
-        deps=None,
-        model=TestModel(),
-        usage=RunUsage(),
-        run_id="run",
-    )
-    request_context = ModelRequestContext(
-        model=TestModel(),
-        messages=[ModelRequest(parts=[UserPromptPart("continue")])],
-        model_settings=None,
-        model_request_parameters=ModelRequestParameters(),
-    )
-    captured: list[ModelRequest] = []
+    capability = Planning(store=store, tools=("write_plan",), id="linktools-planning")
+    captured = []
 
-    async def handler(current: ModelRequestContext) -> ModelResponse:
-        assert isinstance(current.messages[-1], ModelRequest)
-        captured.append(current.messages[-1])
-        return ModelResponse(parts=[])
+    async def model(messages, info):
+        captured.append(deepcopy(messages))
+        return ModelResponse(parts=[TextPart("done")])
 
-    await capability.wrap_model_request(
-        context,
-        request_context=request_context,
-        handler=handler,
-    )
-
-    assert len(captured) == 1
-    tokens: list[object] = []
-    for part in captured[0].parts:
-        if not isinstance(part, UserPromptPart):
-            continue
-        if isinstance(part.content, str):
-            tokens.append(part.content)
-        else:
-            tokens.extend(part.content)
-
-    cache_index = next(
-        index for index, item in enumerate(tokens) if isinstance(item, CachePoint)
-    )
-    plan_index = next(
-        index for index, item in enumerate(tokens) if "ship it" in str(item)
-    )
-    assert cache_index < plan_index
-    assert any("continue" in str(item) for item in tokens)
+    agent = Agent(FunctionModel(model), capabilities=[capability])
+    supplied = [ModelRequest(parts=[UserPromptPart("earlier")])]
+    original = deepcopy(supplied)
+    first = await agent.run("continue", message_history=supplied)
+    assert supplied == original
+    history = first.all_messages()
+    frozen_history = deepcopy(history)
+    await agent.run("continue again", message_history=history)
+    assert history == frozen_history
+    await store.set_items([PlanItem(content="verify it", status=TaskStatus.in_progress)])
+    await agent.run("continue with updated plan", message_history=history)
+    assert history == frozen_history
+    assert len(captured) == 3
+    for messages, expected_plan in zip(captured, ("ship it", "ship it", "verify it"), strict=True):
+        tokens = []
+        for message in messages:
+            if not isinstance(message, ModelRequest):
+                continue
+            for part in message.parts:
+                if isinstance(part, UserPromptPart):
+                    tokens.extend([part.content] if isinstance(part.content, str) else part.content)
+            assert expected_plan not in (message.instructions or "")
+        text = [token if isinstance(token, str) else token.content for token in tokens if isinstance(token, (str, TextContent))]
+        assert sum(expected_plan in token for token in text) == 1
+        assert any("continue" in token for token in text)
+        # Older supported Harness uses a request-only reminder after a cache
+        # point. New Harness appends a history reminder only when it changed,
+        # leaving cache policy to the model. Neither may rewrite caller history.
+        cache_points = [index for index, token in enumerate(tokens) if isinstance(token, CachePoint)]
+        if cache_points:
+            plan = next(index for index, token in enumerate(tokens) if expected_plan in str(token))
+            assert max(cache_points) < plan
 
 
 async def test_runtime_plan_persistence_adds_no_arbitrary_size_limit() -> None:

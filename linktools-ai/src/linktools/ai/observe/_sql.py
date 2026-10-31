@@ -588,7 +588,8 @@ class SqlMetricStore:
         namespace_key = namespace_digest(namespace)
 
         async def prune_rows(session: "AsyncSession") -> int:
-            await self._context.dialect.begin_consistent_read(session)
+            if not self._context.dialect.single_writer:
+                await self._context.dialect.begin_consistent_read(session)
             pruned_at = await self._context.dialect.database_now(session)
             columns = self._observations.c
             after: tuple[datetime, str] | None = None
