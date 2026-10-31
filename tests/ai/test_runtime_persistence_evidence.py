@@ -45,7 +45,7 @@ from linktools.ai.persistence.contracts import (
 )
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import FilesystemObjectStore, ObjectRef, StoredPayload
-from linktools.commands.ai.run import _emit_result
+from linktools.commands.ai._output import emit_result
 from pydantic import BaseModel
 from pydantic_ai.models.test import TestModel
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -284,7 +284,7 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
     try:
         async with Persistence.open('default', storage=state) as persistence_286, Runtime.attach(persistence=persistence_286, features=model_features(_PersistenceTestModels(), features)) as runtime:
             task = asyncio.create_task(
-                _emit_result(
+                emit_result(
                     runtime,
                     "hello",
                     "default",

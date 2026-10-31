@@ -49,7 +49,7 @@ from linktools.ai.task import (
     TaskNodeView,
 )
 from linktools.cli import CommandError
-from linktools.commands.ai.run import _emit_result
+from linktools.commands.ai._output import emit_result
 from pydantic_ai.exceptions import (
     ConcurrencyLimitExceeded,
     ContentFilterError,
@@ -445,7 +445,7 @@ async def test_cli_json_failed_result_uses_result_contract_without_event_scan(
 ) -> None:
     runtime = _ResultRuntime(_failed_result(details={"status_code": 429}))
     with pytest.raises(CommandError):
-        await _emit_result(
+        await emit_result(
             runtime,  # type: ignore[arg-type]
             "prompt",
             "session",
@@ -470,7 +470,7 @@ async def test_cli_json_success_result_uses_result_contract_without_event_scan(
         None,
         {},
     )
-    exit_code = await _emit_result(
+    exit_code = await emit_result(
         _ResultRuntime(result),  # type: ignore[arg-type]
         "prompt",
         "session",
@@ -492,7 +492,7 @@ async def test_cli_json_success_result_uses_result_contract_without_event_scan(
 async def test_cli_streaming_uses_execution_handle(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    result = await _emit_result(
+    result = await emit_result(
         _StreamingRuntime(),  # type: ignore[arg-type]
         "prompt",
         "session",

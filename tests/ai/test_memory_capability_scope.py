@@ -126,8 +126,8 @@ async def test_retry_retains_admitted_memory_after_host_configuration_changes(tm
 @pytest.mark.asyncio
 async def test_local_cli_composition_registers_default_memory(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path)
-    async with _open_local_runtime(workspace, model=_FeatureModels()) as runtime:
-        assert runtime.agents.get().execution_port.memory_scope == "default"
+    async with _open_local_runtime(workspace, model=_FeatureModels()) as local:
+        assert local.runtime.agents.get().execution_port.memory_scope == "default"
 
 
 @pytest.mark.asyncio

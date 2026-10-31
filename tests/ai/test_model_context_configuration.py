@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Generic model limits share one API/config vocabulary and effective profile."""
 
+from argparse import Namespace
+
 import pytest
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 
@@ -10,7 +12,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import FallbackBinding, create_model
 from linktools.ai.runtime._compaction import CompactionCapability
 from linktools.ai.workspace import Workspace
-from linktools.commands.ai._common import _local_model, _local_runtime_model
+from linktools.commands.ai._common import _ModelOptions
 from linktools.commands.ai.run import command as run_command
 from linktools.commands.ai.acp import command as acp_command
 from linktools.commands.ai.web import command as web_command
@@ -62,7 +64,7 @@ def test_cli_numeric_options_override_config_environment_and_workspace(monkeypat
         monkeypatch.delenv("LINKTOOLS_MODEL_" + name.upper(), raising=False)
     monkeypatch.setenv("LINKTOOLS_MODEL_CONTEXT_WINDOW", "65536")
     args = command.create_parser().parse_args(arguments + ["--model", "synthetic", "--api-key", "synthetic"])
-    binding = _local_runtime_model(workspace, args)
+    binding = _ModelOptions.load(workspace, args).create_model()
     assert binding.contract["context_window"] == 65536
     assert binding.model_settings["max_tokens"] == 8192 and binding.model_settings["timeout"] == 45
     assert binding.max_retries == 3 and binding.retry_delay == 5
@@ -71,7 +73,7 @@ def test_cli_numeric_options_override_config_environment_and_workspace(monkeypat
     for name, value in values.items():
         options.extend(("--" + name.replace("_", "-"), str(value)))
     args = command.create_parser().parse_args(arguments + ["--model", "synthetic", "--api-key", "synthetic", *options])
-    assert _local_runtime_model(workspace, args).contract["context_window"] == 131072
+    assert _ModelOptions.load(workspace, args).create_model().contract["context_window"] == 131072
 
 
 @pytest.mark.parametrize(("name", "value"), (("context_window", True), ("max_tokens", 0), ("timeout", -1),
@@ -81,7 +83,7 @@ def test_workspace_numeric_limits_use_existing_constructor_validation(monkeypatc
     for option in ("context_window", "max_tokens", "timeout", "max_retries", "retry_delay", "retry_max_delay", "retry_backoff_factor"):
         monkeypatch.delenv("LINKTOOLS_MODEL_" + option.upper(), raising=False)
     with pytest.raises(AIError) as failed:
-        _local_model(Workspace(tmp_path, {"model": "synthetic", name: value}), api_key="synthetic")
+        _ModelOptions.load(Workspace(tmp_path, {"model": "synthetic", name: value}), Namespace(api_key="synthetic")).create_model()
     assert failed.value.code is ErrorCode.MODEL_CONFIG_INVALID
 
 
@@ -89,7 +91,7 @@ def test_missing_generic_configuration_keeps_library_defaults(monkeypatch, tmp_p
     monkeypatch.setattr(run_command.environ, "config", run_command.environ.build_config("default-model-limits", "LINKTOOLS_"))
     for option in ("context_window", "max_tokens", "timeout", "max_retries", "retry_delay", "retry_max_delay", "retry_backoff_factor"):
         monkeypatch.delenv("LINKTOOLS_MODEL_" + option.upper(), raising=False)
-    binding = _local_model(Workspace(tmp_path, {"model": "synthetic"}), api_key="synthetic")
+    binding = _ModelOptions.load(Workspace(tmp_path, {"model": "synthetic"}), Namespace(api_key="synthetic")).create_model()
     assert "context_window" not in binding.contract
     assert "max_tokens" not in binding.model_settings and "timeout" not in binding.model_settings
     assert (binding.max_retries, binding.retry_delay, binding.retry_max_delay, binding.retry_backoff_factor) == (2, 1, 60, 2)
@@ -103,7 +105,7 @@ def test_explicit_cli_zero_is_not_replaced_by_configured_retry_values(monkeypatc
         "hello", "--model", "synthetic", "--api-key", "synthetic",
         "--max-retries", "0", "--retry-delay", "0", "--retry-max-delay", "0", "--retry-backoff-factor", "1",
     ])
-    binding = _local_runtime_model(Workspace(tmp_path, {"max_retries": 2, "retry_delay": 10}), args)
+    binding = _ModelOptions.load(Workspace(tmp_path, {"max_retries": 2, "retry_delay": 10}), args).create_model()
     assert (binding.max_retries, binding.retry_delay, binding.retry_max_delay, binding.retry_backoff_factor) == (0, 0, 0, 1)
 
 
@@ -119,10 +121,10 @@ def test_persisted_model_limit_is_read_before_workspace_without_copying_it(monke
     monkeypatch.setattr(run_command.environ, "config", config)
     monkeypatch.delenv("LINKTOOLS_MODEL_CONTEXT_WINDOW", raising=False)
     workspace = Workspace(tmp_path, {"model": "synthetic", "context_window": 32768})
-    binding = _local_model(workspace, api_key="synthetic")
+    binding = _ModelOptions.load(workspace, Namespace(api_key="synthetic")).create_model()
     assert binding.contract["context_window"] == 65536
     monkeypatch.setenv("LINKTOOLS_MODEL_CONTEXT_WINDOW", "131072")
-    assert _local_model(workspace, api_key="synthetic").contract["context_window"] == 131072
+    assert _ModelOptions.load(workspace, Namespace(api_key="synthetic")).create_model().contract["context_window"] == 131072
     assert persistent.get("MODEL_CONTEXT_WINDOW") == (65536, True)
     assert workspace.config["context_window"] == 32768
 
@@ -133,7 +135,7 @@ def test_invalid_numeric_environment_does_not_silently_fall_back(monkeypatch, tm
     monkeypatch.setattr(run_command.environ, "config", run_command.environ.build_config("bad-model-env", "LINKTOOLS_"))
     monkeypatch.setenv("LINKTOOLS_MODEL_" + name, value)
     with pytest.raises(AIError) as failed:
-        _local_model(Workspace(tmp_path, {"model": "synthetic"}), api_key="synthetic")
+        _ModelOptions.load(Workspace(tmp_path, {"model": "synthetic"}), Namespace(api_key="synthetic")).create_model()
     assert failed.value.code is ErrorCode.MODEL_CONFIG_INVALID
 
 

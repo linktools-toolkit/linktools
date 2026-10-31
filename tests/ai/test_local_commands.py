@@ -2,21 +2,20 @@
 # -*- coding: utf-8 -*-
 """AI command surface checks."""
 
+import json
 import os
 import subprocess
 import sys
 from argparse import Namespace
-from contextlib import asynccontextmanager
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from linktools.ai.workspace import Workspace
+import linktools.commands.ai._common as common_command
 from linktools.cli import CommandError
 from linktools.cli.argparse import ConfigAction
-import linktools.commands.ai.acp as acp_module
-from linktools.commands.ai._common import _local_runtime_model
+from linktools.commands.ai._common import _ModelOptions
 from linktools.commands.ai.acp import command as acp_command
 from linktools.commands.ai.run import command as run_command
 
@@ -58,49 +57,61 @@ def test_ai_local_commands_do_not_expose_memory_scope() -> None:
             command.create_parser().parse_args(custom_args)
 
 
-def test_ai_acp_uses_shared_local_runtime_composition(
+def test_ai_acp_serves_with_the_shared_local_runtime(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     import linktools.ai.acp as acp_adapter
+    from ._runtime_test_helpers import RuntimeUsageModels
 
-    workspace = Workspace.initialize(tmp_path)
-    models = object()
-    opened: list[tuple[Workspace, object]] = []
+    monkeypatch.setattr(common_command._ModelOptions, "create_model", lambda _self: RuntimeUsageModels())
+    monkeypatch.setattr(acp_adapter, "ACPAgent", lambda runtime, **_kwargs: runtime)
 
-    monkeypatch.setattr(acp_module, "_load_workspace", lambda _root: workspace)
-    monkeypatch.setattr(
-        acp_module,
-        "_local_runtime_model",
-        lambda _workspace, _args: models,
-    )
-
-    @asynccontextmanager
-    async def open_local_runtime(
-        runtime_workspace: Workspace,
-        *,
-        model: object,
-    ):
-        opened.append((runtime_workspace, model))
-        yield SimpleNamespace(default_principal=object())
-
-    monkeypatch.setattr(acp_module, "_open_local_runtime", open_local_runtime)
-    monkeypatch.setattr(acp_adapter, "ACPAgent", lambda *_args, **_kwargs: object())
-
-    async def serve_stdio(_agent: object) -> None:
-        return None
+    async def serve_stdio(runtime) -> None:
+        result = await runtime.agents.get().run("hello")
+        assert result.result.output == {"text": "done"}
 
     monkeypatch.setattr(acp_adapter, "serve_stdio", serve_stdio)
 
-    assert acp_command.run(acp_command.create_parser().parse_args([])) == 0
-    assert opened == [(workspace, models)]
+    args = acp_command.create_parser().parse_args(["--project", str(tmp_path)])
+    assert acp_command.run(args) == 0
 
 
-def test_ai_local_runtime_model_fall_back_to_workspace_model(tmp_path: Path) -> None:
+@pytest.mark.parametrize("module,hint", [
+    ("linktools.ai.acp", "agent-client-protocol"), ("uvicorn", "linktools-ai[web]"),
+])
+def test_optional_command_dependencies_fail_before_opening_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, module: str, hint: str,
+) -> None:
+    from linktools.commands.ai.web import command as web_command
+
+    monkeypatch.setitem(sys.modules, module, None)
+    command = acp_command if module == "linktools.ai.acp" else web_command
+    args = command.create_parser().parse_args(["--project", str(tmp_path)])
+    with pytest.raises(CommandError) as error:
+        command.run(args)
+    assert hint in str(error.value)
+    assert not (tmp_path / ".linktools" / "runtime").exists()
+
+
+def test_ai_run_uses_shared_runtime_to_emit_json_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from ._runtime_test_helpers import RuntimeUsageModels
+
+    monkeypatch.setattr(common_command._ModelOptions, "create_model", lambda _self: RuntimeUsageModels())
+    args = run_command.create_parser().parse_args(["hello", "--project", str(tmp_path), "--json"])
+    assert run_command.run(args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "SUCCEEDED"
+    assert result["output"] == {"text": "done"}
+
+
+def test_ai_model_falls_back_to_workspace_model(tmp_path: Path) -> None:
     workspace = Workspace(tmp_path, {"model": "workspace/model"})
     args = Namespace(model_api=None, model=None, base_url=None, api_key=None)
 
-    binding = _local_runtime_model(workspace, args)
+    binding = _ModelOptions.load(workspace, args).create_model()
 
     assert binding.model_identity == "openai:workspace/model"
 
@@ -111,7 +122,7 @@ def test_ai_run_translates_invalid_model_configuration(
 ) -> None:
     workspace = Workspace(tmp_path, {})
     monkeypatch.setattr(
-        "linktools.commands.ai.run._load_workspace",
+        "linktools.commands.ai._common._load_workspace",
         lambda _root: workspace,
     )
     args = run_command.create_parser().parse_args(
@@ -207,7 +218,7 @@ def test_local_input_types_expand_workspace_categories(tmp_path: Path) -> None:
         "model": "opaque-model",
         "input_types": ["audio", "mime:application/x-private", "mime:image/*"],
     })
-    binding = _local_runtime_model(workspace, Namespace(model_api=None, model=None, base_url=None, api_key=None))
+    binding = _ModelOptions.load(workspace, Namespace(model_api=None, model=None, base_url=None, api_key=None)).create_model()
     from typing import get_args
     from linktools.ai.model import AudioMediaType
 
@@ -217,7 +228,7 @@ def test_local_input_types_expand_workspace_categories(tmp_path: Path) -> None:
 
 
 def test_local_input_default_rejects_attachments(tmp_path: Path) -> None:
-    binding = _local_runtime_model(Workspace(tmp_path, {}), Namespace(model_api=None, model="opaque", base_url=None, api_key=None))
+    binding = _ModelOptions.load(Workspace(tmp_path, {}), Namespace(model_api=None, model="opaque", base_url=None, api_key=None)).create_model()
     assert binding.contract["input_mime_types"] == []
 
 
@@ -236,7 +247,7 @@ def test_local_input_types_ignore_unrelated_settings(monkeypatch: pytest.MonkeyP
     else:
         monkeypatch.setenv(source, value)
     workspace.config["input_types"] = ["mime:application/pdf"]
-    binding = _local_runtime_model(workspace, Namespace(model_api=None, model="opaque", base_url=None, api_key=None))
+    binding = _ModelOptions.load(workspace, Namespace(model_api=None, model="opaque", base_url=None, api_key=None)).create_model()
     assert binding.contract["input_mime_types"] == ["application/pdf"]
 
 
@@ -251,14 +262,14 @@ def test_local_input_invalid_configuration_fails_closed(tmp_path: Path, config: 
     from linktools.ai.errors import AIError, ErrorCode
 
     with pytest.raises(AIError) as raised:
-        _local_runtime_model(Workspace(tmp_path, config), Namespace(model_api=None, model="opaque", base_url=None, api_key=None))
+        _ModelOptions.load(Workspace(tmp_path, config), Namespace(model_api=None, model="opaque", base_url=None, api_key=None)).create_model()
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
 
 
 @pytest.mark.parametrize("key", ["input_capabilities", "unknown_inputs", "input_mime_types"])
 def test_local_model_reads_only_input_types(tmp_path: Path, key: str) -> None:
     workspace = Workspace(tmp_path, {key: ["image/png"]})
-    binding = _local_runtime_model(workspace, Namespace(model_api=None, model="opaque", base_url=None, api_key=None))
+    binding = _ModelOptions.load(workspace, Namespace(model_api=None, model="opaque", base_url=None, api_key=None)).create_model()
     assert binding.contract["input_mime_types"] == []
 
 
@@ -267,5 +278,5 @@ def test_local_missing_model_keeps_dependency_error(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
     with pytest.raises(AIError) as raised:
-        _local_runtime_model(Workspace(tmp_path, {}), Namespace(model_api=None, model=None, base_url=None, api_key=None))
+        _ModelOptions.load(Workspace(tmp_path, {}), Namespace(model_api=None, model=None, base_url=None, api_key=None)).create_model()
     assert raised.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY

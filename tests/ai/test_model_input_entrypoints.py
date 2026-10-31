@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.commands.ai._common import _local_model
+from linktools.commands.ai._common import _ModelOptions
 from linktools.ai.workspace import Workspace
 
 
@@ -20,7 +20,7 @@ def test_default_runtime_reads_workspace_inputs_and_environment_model(
     config = tmp_path / ".linktools" / "config.yaml"
     config.parent.mkdir()
     config.write_text("input_types:\n  - audio\n  - document\n  - mime:audio/*\n  - mime:application/pdf\n")
-    binding = _local_model(Workspace.load(tmp_path))
+    binding = _ModelOptions.load(Workspace.load(tmp_path)).create_model()
     assert binding.model_identity == "openai:testing/inputs"
 
 
@@ -39,7 +39,7 @@ def test_default_runtime_ignores_unrelated_environment(
 ) -> None:
     monkeypatch.setenv("OPENAI_MODEL", "testing/inputs")
     monkeypatch.setenv("OPENAI_VISION", "sometimes")
-    binding = _local_model(Workspace.load(tmp_path))
+    binding = _ModelOptions.load(Workspace.load(tmp_path)).create_model()
     assert binding.contract["input_mime_types"] == []
 
 
@@ -52,6 +52,6 @@ def test_workspace_configuration_rejects_invalid_input_types(
     config.parent.mkdir()
     config.write_text("input_types: image/png\n")
     with pytest.raises(AIError) as raised:
-        _local_model(Workspace.load(tmp_path))
+        _ModelOptions.load(Workspace.load(tmp_path)).create_model()
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
     assert raised.value.safe_details == {"reason": "model_input_configuration_invalid"}

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai.models.function import FunctionModel
+import linktools.commands.ai._common as common_command
 
 from .test_live_history_readback_integration import _Models
 from .test_web_console import client, _HEADERS
@@ -91,7 +92,7 @@ def test_web_command_delivers_text_before_model_completion(monkeypatch: pytest.M
                     await asyncio.gather(observing, return_exceptions=True)
 
     if provider == 'function':
-        monkeypatch.setattr(web_command, '_local_model', lambda *_, **__: _Models(FunctionModel(stream_function=model)))
+        monkeypatch.setattr(common_command._ModelOptions, 'create_model', lambda _self: _Models(FunctionModel(stream_function=model)))
     else:
         import httpx2
         from openai import DefaultAsyncHttpxClient

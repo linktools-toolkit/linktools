@@ -23,7 +23,7 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode, ErrorDiagnostics
 from linktools.ai.execution import Execution, ExecutionResult, ExecutionStreamEvent, ExecutionTreeEvent
 from linktools.cli import CommandError
-from linktools.commands.ai.run import _emit_result
+from linktools.commands.ai._output import emit_result
 
 
 def _tree_event(
@@ -127,7 +127,7 @@ async def test_cli_stream_consumes_string_event_types(
         ),
     )
 
-    result = await _emit_result(
+    result = await emit_result(
         _StreamingRuntime(events),  # type: ignore[arg-type]
         "prompt",
         "session",
@@ -182,7 +182,7 @@ async def test_cli_stream_reads_string_terminal_failure(
     runtime = _StreamingRuntime((_tree_event(event_type, payload, sequence=1),))
 
     with pytest.raises(CommandError) as raised:
-        await _emit_result(
+        await emit_result(
             runtime,  # type: ignore[arg-type]
             "prompt",
             "session",

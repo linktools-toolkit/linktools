@@ -13,8 +13,9 @@ from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, Pre
 
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import AssetCapability, CapabilityContribution
-from linktools.ai.runtime import RuntimeFeatures
+from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.errors import AIError
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.spec import AgentSpec, MCPServerSpec, MCPServerSpecCodec
 from linktools.ai.storage import StorageOverlay
 
@@ -31,6 +32,115 @@ def _features(store, *, capability=None):
     assets = AssetCapability(store) if capability is None else capability
     features.capability(assets, scope="runtime")
     return features, assets
+
+
+@pytest.mark.asyncio
+async def test_asset_capability_open_keeps_captured_reads_available_through_runtime() -> None:
+    from ._runtime_test_helpers import RuntimeUsageModels
+
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    key = AssetKey("rule", "base.md")
+
+    async with AssetCapability.open(store) as assets:
+        await store.put(key, b"runtime instructions")
+        features, _ = _features(store, capability=assets)
+        model_features(RuntimeUsageModels(), features)
+        capture = await features.capture()
+        async with Runtime.open(
+            "managed-assets", storage=PersistenceStorage.in_memory(), features=capture,
+        ) as runtime:
+            assert await capture.asset_reader.get(key) == b"runtime instructions"
+            assert (await runtime.agents.get().run("question")).result.output == {"text": "done"}
+        assert await capture.asset_reader.get(key) == b"runtime instructions"
+
+    assert not store.ready
+    with pytest.raises(AIError):
+        await capture.asset_reader.get(key)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", (False, True))
+async def test_asset_capability_open_closes_after_capture_failure_or_cancellation(cancelled: bool) -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    entered = asyncio.Event()
+    failure = ValueError("loader failed")
+
+    class Loader:
+        async def load(self, context: object) -> tuple[CapabilityContribution, ...]:
+            entered.set()
+            if cancelled:
+                await asyncio.Event().wait()
+            raise failure
+
+    async def capture() -> None:
+        async with AssetCapability.open(store) as assets:
+            assets.loader("custom", Loader())
+            features, _ = _features(store, capability=assets)
+            await features.capture()
+
+    task = asyncio.create_task(capture())
+    await entered.wait()
+    if cancelled:
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError if cancelled else ValueError) as error:
+        await task
+    if not cancelled:
+        assert error.value is failure
+    assert not store.ready
+    with pytest.raises(AIError, match="STORAGE_CLOSED"):
+        await store.initialize()
+
+
+@pytest.mark.asyncio
+async def test_asset_capability_open_cleans_partial_initialization() -> None:
+    class Backend(InMemoryAssetBackend):
+        allocated = False
+        fail_cleanup = True
+
+        async def initialize(self) -> None:
+            self.allocated = True
+            raise ValueError("initialize failed")
+
+        async def close(self) -> None:
+            if self.fail_cleanup:
+                self.fail_cleanup = False
+                raise RuntimeError("cleanup failed")
+            self.allocated = False
+
+    backend = Backend()
+    store = AssetStore(StorageOverlay(backend))
+    with pytest.raises(ValueError, match="initialize failed"):
+        async with AssetCapability.open(store):
+            pytest.fail("uninitialized capability must not be available")
+    assert not backend.allocated
+    assert not store.ready
+
+
+@pytest.mark.asyncio
+async def test_asset_capability_open_preserves_primary_error_when_close_fails() -> None:
+    failure = ValueError("capture failed")
+    cleanup_failure = RuntimeError("close failed")
+
+    class Backend(InMemoryAssetBackend):
+        fail_cleanup = True
+
+        async def close(self) -> None:
+            if self.fail_cleanup:
+                raise cleanup_failure
+
+    backend = Backend()
+    store = AssetStore(StorageOverlay(backend))
+    try:
+        with pytest.raises(ValueError) as error:
+            async with AssetCapability.open(store):
+                raise failure
+        assert error.value is failure
+        assert error.value.__cause__ is cleanup_failure
+    finally:
+        backend.fail_cleanup = False
+        await store.close()
 
 
 @pytest.mark.asyncio
@@ -229,5 +339,7 @@ async def test_asset_bootstrap_is_consumed_before_native_agent_hooks():
         async with Persistence.open('asset-bootstrap', storage=PersistenceStorage.in_memory()) as persistence_226, Runtime.attach(persistence=persistence_226, features=capture) as runtime:
             assert (await runtime.agents.get().run("question")).result.output == {"text": "answer"}
             assert native_calls
+        assert store.ready
+        assert await store.get(AssetKey("agent", "default/AGENT.md")) == b"---\nmodel: default\n---\n"
     finally:
         await store.close()

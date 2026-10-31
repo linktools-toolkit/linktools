@@ -660,9 +660,11 @@ ten file tools, including bounded reads and attachments. Register native
 capability discovers Agent, Skill, or
 MCP declarations from Workspace paths.
 
-Agent, Skill, MCP, and repository rule files use one explicit source: pass a ready
-`AssetStore` to `AssetCapability(store)` and register that capability with
-`features.capability(assets)`. A store-backed group
+Agent, Skill, MCP, and repository rule files use one explicit source: register
+`AssetCapability` with `features.capability(assets)`. `AssetCapability.open(store)`
+initializes and closes the store; keep its context open through capture and every
+Runtime using that capture. `AssetCapability(store)` instead borrows an already
+initialized store without closing it. A store-backed group
 captures the declaration metadata visible when capture begins. Assets added
 afterward are ignored for that capture; assets actually read by a loader must
 still match their captured metadata through verification. Conflicting
@@ -672,10 +674,11 @@ identities or layouts fail closed. Omitting `AssetCapability` contributes no Ass
 from linktools.ai.capability import AssetCapability
 from linktools.ai.runtime import RuntimeFeatures
 
-assets = AssetCapability(store)
-features = RuntimeFeatures("application")
-features.capability(assets)
-capture = await features.capture()
+async with AssetCapability.open(store) as assets:
+    features = RuntimeFeatures("application")
+    features.capability(assets)
+    capture = await features.capture()
+    # Open and use Runtime with this capture inside the context.
 ```
 
 Every Asset kind uses `AssetVersionRef` for byte-version reads through
