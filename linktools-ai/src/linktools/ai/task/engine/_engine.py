@@ -292,17 +292,6 @@ class TaskEngine(Generic[AppT]):
             self._agent_execution_ports[execution_id] = port
             return await port.get(execution_id, principal)
 
-        async def acquire_execution_hold(
-            execution_id: str,
-            principal: Principal,
-            hold_id: str,
-        ) -> None:
-            await port.service.acquire_dependency_hold(
-                execution_id,
-                tenant_id=principal.tenant_id,
-                hold_id=hold_id,
-            )
-
         async def store_prepared_prompt(
             value: CanonicalUserInput, *, files: Sequence[str], tenant_id: str,
         ) -> StoredUserInput:
@@ -327,7 +316,7 @@ class TaskEngine(Generic[AppT]):
                 execution_id, principal=principal,
             ),
             get_execution=get_execution,
-            acquire_execution_hold=acquire_execution_hold,
+            acquire_execution_hold=port.acquire_hold,
             result_reader=lambda *args, **kwargs: self._task_node_runtime.read_input_result(*args, **kwargs),
             result_ref_reader=lambda *args, **kwargs: self._task_node_runtime.read_input_result_ref(*args, **kwargs),
             get_prepared_input=lambda *args, **kwargs: self._task_node_runtime.get_prepared_agent_input(*args, **kwargs),
