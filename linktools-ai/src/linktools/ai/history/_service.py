@@ -572,8 +572,6 @@ class DefaultExecutionHistoryService:
             execution_id,
             tenant_id=principal.tenant_id,
         )
-        if record is None and isinstance(self._executions, ExecutionRepositoryImpl):
-            record = await self._executions.get_fresh(execution_id, tenant_id=principal.tenant_id)
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return record
