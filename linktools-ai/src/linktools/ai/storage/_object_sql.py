@@ -29,6 +29,7 @@ from ._object import (
     _STORE_ID_MAX_LENGTH,
     _finish_owned_task,
     _key_digest,
+    _settle_task,
     _spool_file,
     _track_object_task,
     _validate_key,
@@ -41,6 +42,9 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
     from ._database import SqlStorageContext
+
+
+_STAGING_CHUNK_LIMIT = 4
 
 
 class SqlObjectStore:
@@ -344,17 +348,23 @@ class SqlObjectStore:
                 await stream.aclose()
             return
 
-        temporary = await asyncio.to_thread(tempfile.TemporaryFile)
+        temporary, cancelled = await _settle_task(
+            asyncio.create_task(asyncio.to_thread(tempfile.TemporaryFile))
+        )
         try:
+            if cancelled:
+                raise asyncio.CancelledError
             await self._stage_open(key, temporary)
-            await asyncio.to_thread(temporary.seek, 0)
+            await _finish_owned_task(asyncio.create_task(asyncio.to_thread(temporary.seek, 0)))
             while True:
-                value = await asyncio.to_thread(temporary.read, _CHUNK_SIZE)
+                value = await _finish_owned_task(
+                    asyncio.create_task(asyncio.to_thread(temporary.read, _CHUNK_SIZE))
+                )
                 if not value:
                     break
                 yield value
         finally:
-            await asyncio.to_thread(temporary.close)
+            await _finish_owned_task(asyncio.create_task(asyncio.to_thread(temporary.close)))
 
     async def _stream_open(self, key: str) -> AsyncIterator[bytes]:
         from sqlalchemy import case, or_, select
@@ -420,11 +430,29 @@ class SqlObjectStore:
 
     async def _stage_open(self, key: str, handle: BinaryIO) -> None:
         stream = self._stream_open(key)
+        prefix: list[bytes] = []
+        prefix_size = 0
+        buffering = True
         try:
             async for value in stream:
-                await asyncio.to_thread(handle.write, value)
+                if buffering:
+                    if (
+                        len(prefix) < _STAGING_CHUNK_LIMIT
+                        and prefix_size + len(value) <= _STAGING_CHUNK_LIMIT * _CHUNK_SIZE
+                    ):
+                        prefix.append(value)
+                        prefix_size += len(value)
+                        continue
+                    buffering = False
+                    for chunk in prefix:
+                        await _finish_owned_task(asyncio.create_task(asyncio.to_thread(handle.write, chunk)))
+                    prefix.clear()
+                await _finish_owned_task(asyncio.create_task(asyncio.to_thread(handle.write, value)))
         finally:
-            await stream.aclose()
+            await _finish_owned_task(asyncio.create_task(stream.aclose()))
+        # Buffered objects release their verified SQL snapshot before file I/O.
+        for chunk in prefix:
+            await _finish_owned_task(asyncio.create_task(asyncio.to_thread(handle.write, chunk)))
 
     def open(self, key: str) -> AsyncIterator[bytes]:
         return self._open(key)

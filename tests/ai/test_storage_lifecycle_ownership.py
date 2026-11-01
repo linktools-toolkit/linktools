@@ -7,11 +7,13 @@ import hashlib
 import threading
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
+from typing import BinaryIO
 
 import pytest
 from aiosqlite import Cursor
 import linktools.ai.storage._object as object_contract
 import linktools.ai.storage._object_filesystem as object_module
+import linktools.ai.storage._object_sql as object_sql_module
 from linktools.ai.asset import (
     AssetContentCache,
     AssetKey,
@@ -28,12 +30,58 @@ from linktools.ai.storage import (
     create_sql_storage_context,
 )
 from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy import event, insert
 
 pytestmark = pytest.mark.asyncio
 
 
 async def _chunks(value: bytes) -> AsyncIterator[bytes]:
     yield value
+
+
+class _StagingFiles:
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, operation: str = "write") -> None:
+        self.operation = operation
+        self.entered = asyncio.Event()
+        self.release = threading.Event()
+        self.handles: list[BinaryIO] = []
+        self.loop = asyncio.get_running_loop()
+        original = object_sql_module.tempfile.TemporaryFile
+
+        def temporary_file() -> "_StagingFile":
+            handle = original()
+            self.handles.append(handle)
+            self.pause("create")
+            return _StagingFile(self, handle)
+
+        monkeypatch.setattr(object_sql_module.tempfile, "TemporaryFile", temporary_file)
+
+    def pause(self, operation: str) -> None:
+        if operation == self.operation and not self.entered.is_set():
+            self.loop.call_soon_threadsafe(self.entered.set)
+            self.release.wait()
+
+
+class _StagingFile:
+    def __init__(self, files: _StagingFiles, handle: BinaryIO) -> None:
+        self.files = files
+        self.handle = handle
+
+    def write(self, value: bytes) -> int:
+        self.files.pause("write")
+        return self.handle.write(value)
+
+    def seek(self, offset: int) -> int:
+        self.files.pause("seek")
+        return self.handle.seek(offset)
+
+    def read(self, size: int) -> bytes:
+        self.files.pause("read")
+        return self.handle.read(size)
+
+    def close(self) -> None:
+        self.files.pause("close")
+        self.handle.close()
 
 
 async def test_filesystem_object_put_settles_before_propagating_cancellation(
@@ -255,6 +303,224 @@ async def test_sqlite_object_open_does_not_hold_reader_while_consumer_pauses(
         if delete_task is not None and not delete_task.done():
             await delete_task
         await engine.dispose()
+
+
+@pytest.mark.parametrize("size", (3 * object_contract._CHUNK_SIZE + 17, 4 * object_contract._CHUNK_SIZE))
+async def test_sqlite_object_staging_write_does_not_block_another_object_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    size: int,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'objects.db'}")
+    context = create_sql_storage_context(engine, owns_engine=True)
+    store = SqlObjectStore.from_context(context)
+    await provision_database(engine)
+    payload = b"x" * size
+    digest = hashlib.sha256(payload).hexdigest()
+    await store.put("source", _chunks(payload), expected_size=len(payload), expected_digest=digest)
+
+    files = _StagingFiles(monkeypatch)
+    writing = files.entered
+    release = files.release
+
+    async def consume() -> bytes:
+        stream = store.open("source")
+        try:
+            return b"".join([chunk async for chunk in stream])
+        finally:
+            await stream.aclose()
+
+    reader = asyncio.create_task(consume())
+    writer = None
+    try:
+        await asyncio.wait_for(writing.wait(), 5)
+        writer = asyncio.create_task(store.put(
+            "writer", _chunks(b"writer"), expected_size=6,
+            expected_digest=hashlib.sha256(b"writer").hexdigest(),
+        ))
+        await asyncio.wait_for(asyncio.shield(writer), 15)
+        assert not release.is_set()
+        release.set()
+        assert await asyncio.wait_for(reader, 5) == payload
+        assert all(handle.closed for handle in files.handles)
+        assert store.pending_background_tasks == ()
+        assert await store.stat("writer") is not None
+    finally:
+        release.set()
+        await asyncio.gather(reader, *(() if writer is None else (writer,)), return_exceptions=True)
+        await context.close()
+        assert context.closed
+        assert engine.sync_engine.pool.checkedout() == 0
+
+
+async def test_sqlite_large_object_staging_keeps_one_query_and_original_bytes_during_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'objects.db'}")
+    context = create_sql_storage_context(engine, owns_engine=True)
+    store = SqlObjectStore.from_context(context)
+    await provision_database(engine)
+    payload = b"x" * (8 * object_contract._CHUNK_SIZE + 17)
+    digest = hashlib.sha256(payload).hexdigest()
+    await store.put("source", _chunks(payload), expected_size=len(payload), expected_digest=digest)
+    files = _StagingFiles(monkeypatch)
+    original_stream = store._stream_open
+    consumed = 0
+    complete = False
+    selects: list[str] = []
+
+    async def stream(key: str) -> AsyncIterator[bytes]:
+        nonlocal consumed, complete
+        source = original_stream(key)
+        try:
+            async for chunk in source:
+                consumed += len(chunk)
+                yield chunk
+            complete = True
+        finally:
+            await source.aclose()
+
+    def capture(_connection, _cursor, statement, _parameters, _execution_context, _many) -> None:
+        if statement.lstrip().upper().startswith("SELECT") and "ai_object_chunks.content" in statement:
+            selects.append(statement)
+
+    original_commit = engine.sync_engine.dialect.do_commit
+
+    def commit(connection) -> None:
+        files.release.set()
+        original_commit(connection)
+
+    async def consume() -> bytes:
+        source = store.open("source")
+        try:
+            return b"".join([chunk async for chunk in source])
+        finally:
+            await source.aclose()
+
+    monkeypatch.setattr(store, "_stream_open", stream)
+    monkeypatch.setattr(engine.sync_engine.dialect, "do_commit", commit)
+    event.listen(engine.sync_engine, "before_cursor_execute", capture)
+    reader = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(files.entered.wait(), 5)
+        assert not complete and 0 < consumed < len(payload)
+        assert await asyncio.wait_for(store.delete_object("source", expected_digest=digest), 15)
+        replacement = b"replacement"
+        await store.put("source", _chunks(replacement), expected_size=len(replacement),
+                        expected_digest=hashlib.sha256(replacement).hexdigest())
+        assert await asyncio.wait_for(reader, 5) == payload
+        assert complete and len(selects) == 1
+        assert all(handle.closed for handle in files.handles)
+        event.remove(engine.sync_engine, "before_cursor_execute", capture)
+        assert b"".join([chunk async for chunk in store.open("source")]) == replacement
+    finally:
+        files.release.set()
+        await asyncio.gather(reader, return_exceptions=True)
+        if event.contains(engine.sync_engine, "before_cursor_execute", capture):
+            event.remove(engine.sync_engine, "before_cursor_execute", capture)
+        await context.close()
+        assert engine.sync_engine.pool.checkedout() == 0
+
+
+@pytest.mark.parametrize("chunk", (b"", b"x"), ids=("empty", "tiny"))
+async def test_sqlite_object_staging_bounds_buffered_chunk_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    chunk: bytes,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'objects.db'}")
+    context = create_sql_storage_context(engine, owns_engine=True)
+    store = SqlObjectStore.from_context(context)
+    await provision_database(engine)
+    metadata = object_sql_module.build_object_sql_metadata()
+    key_digest = object_contract._key_digest(store.store_id, "source").hex()
+    payload = chunk * 64
+    async with engine.begin() as connection:
+        await connection.execute(insert(metadata.tables["ai_objects"]).values(
+            key_digest=key_digest, store_id=store.store_id, object_key="source",
+            content_digest=hashlib.sha256(payload).hexdigest(), size=len(payload),
+        ))
+        await connection.execute(insert(metadata.tables["ai_object_chunks"]), [
+            {"key_digest": key_digest, "chunk_index": index, "content": chunk}
+            for index in range(64)
+        ])
+    files = _StagingFiles(monkeypatch)
+    original_stream = store._stream_open
+    consumed = 0
+
+    async def stream(key: str) -> AsyncIterator[bytes]:
+        nonlocal consumed
+        source = original_stream(key)
+        try:
+            async for value in source:
+                consumed += 1
+                yield value
+        finally:
+            await source.aclose()
+
+    async def consume() -> bytes:
+        source = store.open("source")
+        try:
+            return b"".join([value async for value in source])
+        finally:
+            await source.aclose()
+
+    monkeypatch.setattr(store, "_stream_open", stream)
+    reader = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(files.entered.wait(), 5)
+        assert 0 < consumed < 64
+        files.release.set()
+        assert await asyncio.wait_for(reader, 5) == payload
+        assert all(handle.closed for handle in files.handles)
+    finally:
+        files.release.set()
+        await asyncio.gather(reader, return_exceptions=True)
+        await context.close()
+        assert engine.sync_engine.pool.checkedout() == 0
+
+
+@pytest.mark.parametrize("operation", ("create", "write", "seek", "read", "close"))
+async def test_cancelled_sqlite_object_file_io_settles_before_closing_handle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'objects.db'}")
+    context = create_sql_storage_context(engine, owns_engine=True)
+    store = SqlObjectStore.from_context(context)
+    await provision_database(engine)
+    payload = b"object"
+    digest = hashlib.sha256(payload).hexdigest()
+    await store.put("source", _chunks(payload), expected_size=len(payload), expected_digest=digest)
+    files = _StagingFiles(monkeypatch, operation)
+    stream = store.open("source")
+
+    async def consume() -> None:
+        async for _chunk in stream:
+            pass
+
+    reader = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(files.entered.wait(), 5)
+        reader.cancel()
+        done, _ = await asyncio.wait({reader}, timeout=0.05)
+        assert reader not in done
+        assert all(not handle.closed for handle in files.handles)
+        await asyncio.wait_for(store.put("writer", _chunks(payload), expected_size=len(payload), expected_digest=digest), 15)
+        files.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(reader, 5)
+        assert all(handle.closed for handle in files.handles)
+        assert store.pending_background_tasks == ()
+        assert await store.stat("writer") is not None
+    finally:
+        files.release.set()
+        await asyncio.gather(reader, return_exceptions=True)
+        await stream.aclose()
+        await context.close()
+        assert engine.sync_engine.pool.checkedout() == 0
 
 
 async def test_asset_store_close_owns_backend_lifecycle(
