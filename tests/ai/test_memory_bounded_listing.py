@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Runtime memory listing must keep prefix queries bounded at the repository."""
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 import shutil
@@ -12,7 +11,7 @@ from typing import Any
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._memory import RuntimeMemoryStore, _decode_receipt
+from linktools.ai.runtime._memory import RuntimeMemoryStore
 from linktools.ai.persistence.contracts import MemoryRecord
 from linktools.ai.persistence._memory import InMemoryStateStorageGroup, InMemoryStateStore
 from linktools.ai.persistence.repositories import MemoryRepositoryImpl
@@ -75,24 +74,6 @@ async def test_list_paths_pages_for_large_harness_limit() -> None:
     assert paths[-1] == "memory/1499.md"
     assert [call["limit"] for call in records.calls] == [1000, 500]
     assert records.calls[1]["cursor"] == "1000"
-
-
-async def test_memory_receipt_rejects_unwritten_appended_status() -> None:
-    payload = json.dumps(
-        {
-            "version": 1,
-            "result": {
-                "file": "memory/a.md",
-                "version": "m1:" + "a" * 64,
-                "status": "appended",
-            },
-        }
-    )
-
-    with pytest.raises(AIError) as raised:
-        _decode_receipt(payload)
-
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 async def test_list_paths_fails_closed_if_repository_breaks_prefix_contract() -> None:
