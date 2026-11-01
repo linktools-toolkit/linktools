@@ -29,6 +29,8 @@ class PendingTurnCoordination:
     Both capability groups must belong to the same borrowed object. There is no
     implicit process-local substitute for an incomplete configured cache.
     Observation failures propagate to the caller; they never authorize a claim.
+    Only releases explicitly requested by this instance are retried before the
+    same session's next claim; lifecycle decisions remain with the caller.
     """
 
     def __init__(self, cache: CacheBackend, backend: TurnCoordinationBackend, *, namespace: str, tenant_id: str) -> None:
@@ -39,6 +41,8 @@ class PendingTurnCoordination:
         self._scope = canonical_json_bytes([
             "runtime-pending-turn", self._namespace, self._tenant_id,
         ]).decode("utf-8")
+        self._claimed_sessions: dict[Lease, str] = {}
+        self._pending_releases: dict[str, set[Lease]] = {}
 
     @classmethod
     def select(
@@ -52,11 +56,18 @@ class PendingTurnCoordination:
         self, *, session_key: str, request_key: str, request_digest: str,
         execution_id: str, owner_id: str, lease_seconds: float,
     ) -> TurnCoordination | None:
-        return await self._backend.claim_turn(
+        # Only an earlier explicit release authorizes this retry. A missing
+        # observation or failed worker never grants permission to release.
+        for lease in tuple(self._pending_releases.get(session_key, ())):
+            await self.release(lease)
+        claim = await self._backend.claim_turn(
             self._scope, session_key=session_key, request_key=request_key,
             request_digest=request_digest, execution_id=execution_id,
             owner_id=owner_id, lease_seconds=lease_seconds,
         )
+        if claim is not None and claim.lease is not None:
+            self._claimed_sessions[claim.lease] = session_key
+        return claim
 
     async def publish(
         self, record: ExecutionRecord, coordination: TurnCoordination,
@@ -229,7 +240,20 @@ class PendingTurnCoordination:
         return await self._backend.renew_turn(lease, lease_seconds=lease_seconds)
 
     async def release(self, lease: Lease) -> bool:
-        return await self._backend.release_turn(lease)
+        session_key = self._claimed_sessions.get(lease)
+        if session_key is not None:
+            # Retain the exact fencing proof before an ambiguous write or
+            # caller cancellation; a later claim must not infer its outcome.
+            self._pending_releases.setdefault(session_key, set()).add(lease)
+        released = await self._backend.release_turn(lease)
+        if session_key is not None:
+            self._claimed_sessions.pop(lease, None)
+            pending = self._pending_releases.get(session_key)
+            if pending is not None:
+                pending.discard(lease)
+                if not pending:
+                    self._pending_releases.pop(session_key, None)
+        return released
 
     async def cancel(self, execution_id: str, *, tenant_id: str) -> bool:
         if tenant_id != self._tenant_id:

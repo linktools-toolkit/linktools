@@ -539,3 +539,138 @@ async def test_existing_coordination_backend_remains_selected_without_admission_
         await helper.read_request_execution("request", tenant_id="tenant")
     assert unsupported.value.code is ErrorCode.REQUEST_FIELD_INVALID
     assert unsupported.value.safe_details == {"reason": "admission_lookup_not_supported"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ("unavailable", "lost_ack", "cancelled"))
+async def test_claim_retries_only_previously_requested_exact_release(
+    monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    cache = _ObservedCache()
+    helper = _helper(cache)
+    old = await _claim(helper)
+    assert old.lease is not None
+    release = cache.release_turn
+    entered = asyncio.Event()
+
+    async def fail(lease):
+        if failure == "lost_ack":
+            await release(lease)
+        if failure == "cancelled":
+            entered.set()
+            await asyncio.Event().wait()
+        raise OSError("release unavailable")
+
+    monkeypatch.setattr(cache, "release_turn", fail)
+    if failure == "cancelled":
+        operation = asyncio.create_task(helper.release(old.lease))
+        await entered.wait()
+        operation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+    else:
+        with pytest.raises(OSError, match="release unavailable"):
+            await helper.release(old.lease)
+    # Retrying the same session during the outage preserves failure semantics.
+    if failure != "cancelled":
+        with pytest.raises(OSError, match="release unavailable"):
+            await _claim(helper, execution_id="not-started", owner_id="not-started")
+    # An unrelated session never retries another session's failed release.
+    unrelated = await helper.claim(
+        session_key="other-session", request_key="other-request", request_digest="other-digest",
+        execution_id="other", owner_id="other", lease_seconds=30,
+    )
+    assert unrelated is not None and unrelated.lease is not None
+    monkeypatch.setattr(cache, "release_turn", release)
+    successor = await _claim(helper, execution_id="successor", owner_id="successor")
+    assert successor is not None and successor.lease is not None
+    assert not await helper.release(old.lease)
+    assert (await helper.read_owner("successor", tenant_id="tenant")).owner_id == "successor"
+    assert (await helper.read_owner("other", tenant_id="tenant")).owner_id == "other"
+    await helper.release(successor.lease)
+    await helper.release(unrelated.lease)
+
+
+@pytest.mark.asyncio
+async def test_delayed_release_retry_cannot_remove_another_owners_successor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = _ObservedCache()
+    owner, remote = _helper(cache), _helper(cache)
+    old = await _claim(owner)
+    assert old.lease is not None
+    release = cache.release_turn
+
+    async def lose_ack(lease):
+        await release(lease)
+        raise OSError("release acknowledgement lost")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cache, "release_turn", lose_ack)
+        with pytest.raises(OSError):
+            await owner.release(old.lease)
+    successor = await _claim(remote, execution_id="successor", owner_id="remote-owner")
+    assert successor is not None and successor.lease is not None
+    # The old instance retries its recorded lease; False only settles that
+    # release. A normal claim must still respect the remote successor.
+    assert await owner.claim(
+        session_key="session", request_key="third-request", request_digest="third-digest",
+        execution_id="third", owner_id="third-owner", lease_seconds=30,
+    ) is None
+    observed = await remote.read_owner("successor", tenant_id="tenant")
+    assert observed is not None and observed.owner_id == "remote-owner"
+    await remote.release(successor.lease)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_release_retries_preserve_single_successor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = _ObservedCache()
+    helper = _helper(cache)
+    old = await _claim(helper)
+    assert old.lease is not None
+    release = cache.release_turn
+
+    async def unavailable(lease):
+        raise OSError("release unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cache, "release_turn", unavailable)
+        with pytest.raises(OSError):
+            await helper.release(old.lease)
+    entered, proceed = asyncio.Event(), asyncio.Event()
+    waiting = 0
+
+    async def held_release(lease):
+        nonlocal waiting
+        waiting += 1
+        if waiting == 2:
+            entered.set()
+        await proceed.wait()
+        return await release(lease)
+
+    async def claim(identity):
+        return await helper.claim(
+            session_key="session", request_key=identity, request_digest=identity,
+            execution_id=identity, owner_id=identity, lease_seconds=30,
+        )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cache, "release_turn", held_release)
+        candidates = [asyncio.create_task(claim(identity)) for identity in ("left", "right")]
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            proceed.set()
+            results = await asyncio.gather(*candidates)
+        finally:
+            proceed.set()
+            await asyncio.gather(*candidates, return_exceptions=True)
+    winners = [result for result in results if result is not None]
+    assert len(winners) == 1 and winners[0].lease is not None
+    winner = winners[0]
+    assert not await helper.release(old.lease)
+    observed = await helper.read_owner(winner.execution_id, tenant_id="tenant")
+    assert observed is not None and observed.owner_id == winner.owner_id
+    assert await claim("third") is None
+    await helper.release(winner.lease)
