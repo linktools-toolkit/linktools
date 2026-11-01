@@ -2232,6 +2232,52 @@ class RuntimeAgentRunStore(AgentRunStore):
             candidate_agent_run_ids=candidate_agent_run_ids, execution_id=execution_id,
         ))
 
+    async def discard_unsubmitted_execution_staging(self, execution_id: str) -> None:
+        """Release a stopped pending turn with no submitted source operation.
+
+        The Runtime holds its pending boundary, has joined its worker/renewal and
+        source tasks, and has released its ephemeral claim. Source absence alone
+        cannot establish these preconditions or resolve an unknown submission.
+        """
+        await self._settle_observation_boundary(self._discard_unsubmitted_execution_staging(execution_id))
+
+    async def _discard_unsubmitted_execution_staging(self, execution_id: str) -> None:
+        await self._ensure_business()
+        repository = self._execution_repository
+        if repository is None or self._tenant_id is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        producers = tuple((run_id, producer) for run_id, producer in self._execution_producers.items()
+                          if producer[0] == execution_id)
+        for agent_run_id, producer in producers:
+            if producer[1] != 2 or agent_run_id in self._terminal_seals:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            await self.trace_persistence.stop(agent_run_id, publish=False)
+            await self.wait_projection_flight(agent_run_id)
+
+        async def require_absent(_transaction: StateTransaction) -> None:
+            execution = await repository.get(execution_id, tenant_id=self._tenant_id)
+            head = await repository.get_history_head(execution_id, tenant_id=self._tenant_id)
+            if execution is not None or head is not None:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+        await repository.state_store.read(require_absent)
+        for agent_run_id, producer in producers:
+            async with self._history_lock.hold(agent_run_id):
+                if (self._execution_producers.get(agent_run_id) != producer
+                        or agent_run_id in self._durability_flights or agent_run_id in self._terminal_seals):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+            await self.trace_persistence.discard(agent_run_id)
+        await self.trace_persistence.settle_execution_cleanup(execution_id)
+        for agent_run_id, producer in producers:
+            async with self._history_lock.hold(agent_run_id):
+                if (self._execution_producers.get(agent_run_id) != producer
+                        or agent_run_id in self._durability_flights or agent_run_id in self._terminal_seals):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                self.trace_persistence.dirty.discard(agent_run_id)
+        await self._release_staging_many(
+            candidate_agent_run_ids=tuple(run_id for run_id, _producer in producers), execution_id=execution_id,
+        )
+
     async def discard_revoked_producer_staging(
         self, agent_run_id: str, *, execution_id: str, producer_generation: int,
         terminal_execution: ExecutionRecord | None = None,

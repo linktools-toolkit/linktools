@@ -145,20 +145,28 @@ async def test_pending_source_dispatch_rechecks_ownership_after_context_material
         finally:
             prepare_release.set()
             model_release.set()
-            if interference == "lease":
+            if interference == "lease" and phase == "promotion":
                 with pytest.raises(AIError) as failed_close:
                     await context.__aexit__(None, None, None)
                 assert failed_close.value.code is ErrorCode.STORAGE_CONFLICT
             else:
                 await context.__aexit__(None, None, None)
+                if interference == "lease":
+                    assert await persistence.execution.executions.get(
+                        execution.execution_id, tenant_id=runtime.tenant_id,
+                    ) is None
+                    assert await persistence.execution.executions.get_history_head(
+                        execution.execution_id, tenant_id=runtime.tenant_id,
+                    ) is None
     finally:
         try:
-            if interference == "lease":
+            if interference == "lease" and phase == "promotion":
                 with pytest.raises(AIError) as persistence_error:
                     await persistence.close()
                 assert persistence_error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
                 assert persistence.ready and len(persistence._runtime_owners) == 1
             else:
+                assert not persistence._runtime_owners
                 await persistence.close()
         finally:
             await source_group.close()

@@ -165,7 +165,7 @@ class TracePersistence:
             await self._ack(buffer)
 
     async def settle_execution_cleanup(self, execution_id: str) -> None:
-        """Retry only retired, source-settled buffers owned by this execution."""
+        """Retry only retired, settled buffers owned by this execution."""
         for buffer in tuple(self._cleanup.values()):
             if buffer.key[1] != execution_id:
                 continue
@@ -646,7 +646,7 @@ class TracePersistence:
         self._schedule_changed()
 
     async def discard(self, agent_run_id: str) -> None:
-        """Cleanup after the caller proved revocation or explicitly deleted the archive."""
+        """Cleanup after proof of revocation, no source submission, or archive deletion."""
         buffer = self._buffers.get(agent_run_id)
         if buffer is None:
             return

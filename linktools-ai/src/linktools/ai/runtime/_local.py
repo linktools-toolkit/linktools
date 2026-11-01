@@ -1158,6 +1158,8 @@ class LocalExecutionBackend:
                 return
             if turn.committing:
                 raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+            if turn.failure is not None:
+                raise turn.failure
 
             await self._check_pending_lease(turn, allow_cancelled=allow_cancelled)
             reservation = turn.reservation
@@ -1605,7 +1607,7 @@ class LocalExecutionBackend:
             if not turn.uncertain:
                 if self._execution_buffer is not None:
                     self._execution_buffer.discard(execution_id)
-                cleanup = asyncio.create_task(self._release_pending_coordination(turn))
+                cleanup = asyncio.create_task(self._cleanup_failed_pending_turn(turn))
                 self._track_checkpoint_task(cleanup, "pending_release", execution_id)
         self._live_broker.complete(execution_id)
 
@@ -3228,6 +3230,10 @@ class LocalExecutionBackend:
                 if (error.code is not ErrorCode.STORAGE_RECOVERY_REQUIRED
                         or error.safe_details.get("phase") != "execution_buffer_close"):
                     raise
+        for execution_id in tuple(self._worker_failures):
+            turn = self._pending_turns.get(execution_id, tenant_id=self._tenant_id)
+            if turn is not None:
+                await self._cleanup_failed_pending_turn(turn, forget=True)
         await self._release_revoked_failed_producers()
         if self._execution_buffer is not None:
             await self._execution_buffer.close()
@@ -3314,6 +3320,78 @@ class LocalExecutionBackend:
         self._worker_cancel_requests.clear()
         self._worker_shutdown_requests.clear()
         self._execution_task_map().clear()
+
+    async def _cleanup_failed_pending_turn(
+        self, turn: _PendingExecutionTurn, *, forget: bool = False,
+    ) -> None:
+        """Drop only a stopped turn which never submitted a source boundary."""
+        execution_id = turn.execution.execution_id
+
+        def failed_turn() -> bool:
+            return (self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is turn
+                    and turn.failure is not None and not turn.uncertain
+                    and execution_id in self._worker_failures and not self.worker_installed(execution_id))
+
+        def eligible() -> bool:
+            return (failed_turn() and not turn.committing
+                    and turn.committed is None and turn.reconcile is None)
+
+        def quiescent() -> bool:
+            recovery = self._recovery_reconcile_tasks.get(execution_id)
+            renewal = self._pending_renewals.get(execution_id)
+            return (eligible() and (recovery is None or recovery.done())
+                    and (renewal is None or renewal.done())
+                    and not any(task is not asyncio.current_task() and not task.done()
+                                for task in self._execution_task_map().get(execution_id, ())))
+
+        if not failed_turn():
+            return
+        # A renewal can already be waiting for the turn boundary to promote.
+        # Join it before taking that boundary, retaining its identity on cancellation.
+        renewal = self._pending_renewals.get(execution_id)
+        if renewal is not None and renewal is not asyncio.current_task():
+            renewal.cancel()
+            await asyncio.gather(asyncio.shield(renewal), return_exceptions=True)
+            if self._pending_renewals.get(execution_id) is renewal:
+                self._pending_renewals.pop(execution_id)
+        if not failed_turn():
+            return
+        # A known rollback releases ephemeral admission even when its fixed
+        # source plan must remain for reconciliation. That is not payload discard.
+        if turn.coordination is not None:
+            await self._release_pending_claim(turn.coordination)
+        if not eligible() or not isinstance(self._run_store, RuntimeAgentRunStore):
+            return
+        while True:
+            pending = tuple(task for task in self._execution_task_map().get(execution_id, ())
+                            if task is not asyncio.current_task() and not task.done())
+            if not pending:
+                break
+            await asyncio.gather(*(asyncio.shield(task) for task in pending), return_exceptions=True)
+        async with turn.boundary:
+            if not quiescent():
+                return
+            coordinator = self._pending_turns.coordination
+            if coordinator is None or turn.coordination is None:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            if await coordinator.read_owner(execution_id, tenant_id=self._tenant_id) is not None:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                              safe_details={"phase": "pending_cleanup_owner"})
+            if not quiescent():
+                return
+            if self._execution_buffer is not None:
+                self._execution_buffer.require_unsubmitted(execution_id)
+            await self._run_store.discard_unsubmitted_execution_staging(execution_id)
+            if self._execution_buffer is not None:
+                self._execution_buffer.discard(execution_id)
+                await self._execution_buffer.flush_cleanup(execution_id)
+            async with self._audit_lock(execution_id):
+                self._pending_audit_events.pop(execution_id, None)
+            # Live observers still receive the original failure, not a missing
+            # execution or a fabricated terminal result. Close alone forgets it.
+            if forget:
+                self._pending_turns.release(turn)
+                self._worker_failures.pop(execution_id, None)
 
     async def _release_revoked_failed_producers(self, execution_ids: Sequence[str] | None = None) -> None:
         if not isinstance(self._run_store, RuntimeAgentRunStore):

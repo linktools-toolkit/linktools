@@ -614,6 +614,18 @@ must compare the borrowed instance separately.
 
 ### Admission, failures and cleanup
 
+A failed pending turn that never submitted a source operation can release only
+its own staged payloads while the shared Runtime remains open. Cleanup joins the
+stopped worker's renewal and source tasks, verifies that its ephemeral claim is
+gone, and reads fresh source Execution and history-head absence. Neither an
+absent cache value nor source absence alone proves that an unknown commit failed.
+A sealed source prefix, reconciliation obligation, live owner or read failure
+retains the evidence instead of authorizing discard. Exact-ID acknowledgement
+may be retried after transport failure; other executions and borrowed buffers
+remain open. Existing observers retain the original turn error until Runtime
+close forgets the fully cleaned pending attempt. No durable terminal result or
+external-effect receipt is fabricated, deleted or replayed by this cleanup.
+
 Admission is awaited with `wait=False` and bounded transport waits; terminal
 producers must not wait for a terminal drain that cannot run until they finish.
 Capacity rejection or unresolved append failure fails that write/turn rather than
@@ -633,7 +645,8 @@ Unknown admission or source outcomes are not treated as known rejection.
 
 Known source rollback retains the fixed payload for explicit retry. Unknown
 source outcomes retain the original plan, IDs and source flight until canonical
-readback resolves them. Only source-covered IDs are acknowledged. After source
+readback resolves them. Source publication acknowledges only source-covered IDs;
+explicit discard instead requires the no-submission or revocation proof above. After source
 confirmation, acknowledgement is cleanup: failure does not change canonical
 success/failure/cancellation, replay source writes, or prevent the control result
 from becoming visible. The owner retains cleanup for retry. Close reports

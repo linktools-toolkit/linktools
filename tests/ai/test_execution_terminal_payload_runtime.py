@@ -210,20 +210,34 @@ async def test_pending_payload_dispatch_retains_exact_source_evidence(
             assert calls == 1
         finally:
             prepare_release.set()
-            with pytest.raises(AIError) as close_error:
+            if interference == "late_audit":
+                # No source dispatch occurred; cleanup may release this failed
+                # pending attempt, without reporting the omitted audit as durable.
                 await context.__aexit__(None, None, None)
-            assert close_error.value.code is (ErrorCode.STORAGE_CONFLICT if interference == "late_audit"
-                                              else ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            else:
+                with pytest.raises(AIError) as close_error:
+                    await context.__aexit__(None, None, None)
+                assert close_error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
         if interference == "late_audit":
             assert set(buffer.acknowledged) == set(buffer.accepted)
+            assert await persistence.execution.executions.get(
+                execution.execution_id, tenant_id=runtime.tenant_id,
+            ) is None
+            assert await persistence.execution.executions.get_history_head(
+                execution.execution_id, tenant_id=runtime.tenant_id,
+            ) is None
         else:
             assert not buffer.acknowledged
     finally:
         try:
-            with pytest.raises(AIError) as persistence_error:
+            if interference == "late_audit":
+                assert not persistence._runtime_owners
                 await persistence.close()
-            assert persistence_error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
-            assert persistence.ready and tuple(persistence._runtime_owners) == owners
+            else:
+                with pytest.raises(AIError) as persistence_error:
+                    await persistence.close()
+                assert persistence_error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+                assert persistence.ready and tuple(persistence._runtime_owners) == owners
         finally:
             # Preserve unresolved producer ownership; release only the fixture source.
             await source_group.close()

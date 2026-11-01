@@ -253,6 +253,12 @@ class _ExecutionPayloadBuffer:
                                               safe_details={"phase": "execution_buffer_read"}))
                 raise scope.failure from error
 
+    def require_unsubmitted(self, execution_id: str) -> None:
+        """Reject a source-sealed or successor prefix before any sibling cleanup."""
+        scope = self._scopes.get(execution_id)
+        if scope is not None and (scope.sealed or scope.producer_generation not in {None, 2}):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+
     def has_scope(self, execution_id: str) -> bool:
         return execution_id in self._scopes
 

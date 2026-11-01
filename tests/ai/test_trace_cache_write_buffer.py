@@ -70,6 +70,7 @@ async def test_trace_rejects_partial_write_buffer():
 @pytest.mark.parametrize('code', [ErrorCode.STORAGE_COMMIT_UNKNOWN, ErrorCode.STORAGE_INTEGRITY_ERROR])
 async def test_trace_callback_failure_surfaces_original_source_error(tmp_path, code):
     state = await _setup(tmp_path, 'sqlite')
+    source_group = state.execution.executions.state_store.storage_group
     store = state.run_store
     owner = store.trace_persistence
     original = owner._publish
@@ -94,6 +95,12 @@ async def test_trace_callback_failure_surfaces_original_source_error(tmp_path, c
         assert close_error.value is error
     finally:
         owner._publish = original
+        # Do not replay an UNKNOWN publication to make teardown pass. Its
+        # source outcome stays unresolved; only quiescent SQL resources close.
+        assert all(task.done() for task in owner._background_tasks)
+        await source_group.close()
+        await source_group.context.close()
+        assert source_group.context.closed
 
 
 @pytest.mark.asyncio

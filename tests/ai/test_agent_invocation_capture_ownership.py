@@ -115,89 +115,105 @@ async def test_terminal_capture_failure_quiescence_finishes_dependency_hold_rele
     principal = service_principal("default", "owner")
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     verified = False
-    with pytest.raises(AIError) if release_fails else nullcontext():
-        async with Runtime.open("capture-hold-release", storage=storage,
-                                features=model_features(models, _agents())) as runtime:
-            engine = await runtime.tasks.bind(Task.from_agent("capture.agent", runtime.agents.get()))
-            objects = engine.persistence.object_store(PersistenceDomain.TASK)
-            original_put = objects.put
-            release_entered, release_allowed = asyncio.Event(), asyncio.Event()
-            quiesce_entered, quiesce_allowed = asyncio.Event(), asyncio.Event()
-            cancel_requested, quiesced = asyncio.Event(), asyncio.Event()
-            launcher = engine._launcher
-            original_release = runtime._execution_service.release_dependency_hold
-            original_quiesce = launcher._quiesce_node_owned
+    source_group = None
+    launcher = None
+    try:
+        with pytest.raises(AIError) if release_fails else nullcontext():
+            async with Runtime.open("capture-hold-release", storage=storage,
+                                    features=model_features(models, _agents())) as runtime:
+                source_group = runtime._state.execution.executions.state_store.storage_group
+                engine = await runtime.tasks.bind(Task.from_agent("capture.agent", runtime.agents.get()))
+                objects = engine.persistence.object_store(PersistenceDomain.TASK)
+                original_put = objects.put
+                release_entered, release_allowed = asyncio.Event(), asyncio.Event()
+                quiesce_entered, quiesce_allowed = asyncio.Event(), asyncio.Event()
+                cancel_requested, quiesced = asyncio.Event(), asyncio.Event()
+                launcher = engine._launcher
+                original_release = runtime._execution_service.release_dependency_hold
+                original_quiesce = launcher._quiesce_node_owned
 
-            async def fail_invocation(key: str, *args: object, **kwargs: object) -> object:
-                if key.startswith("v1/input-capture/invocation/"):
-                    await models.entered.wait()
-                    raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
-                return await original_put(key, *args, **kwargs)
+                async def fail_invocation(key: str, *args: object, **kwargs: object) -> object:
+                    if key.startswith("v1/input-capture/invocation/"):
+                        await models.entered.wait()
+                        raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+                    return await original_put(key, *args, **kwargs)
 
-            async def pause_release(*args: object, **kwargs: object) -> None:
-                release_entered.set()
-                await release_allowed.wait()
-                if release_fails:
-                    raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
-                await original_release(*args, **kwargs)
+                async def pause_release(*args: object, **kwargs: object) -> None:
+                    release_entered.set()
+                    await release_allowed.wait()
+                    if release_fails:
+                        raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+                    await original_release(*args, **kwargs)
 
-            async def pause_quiesce(*args: object, **kwargs: object) -> None:
-                await release_entered.wait()
-                inflight = args[3]
-                original_cancel = inflight.task.cancel
+                async def pause_quiesce(*args: object, **kwargs: object) -> None:
+                    await release_entered.wait()
+                    inflight = args[3]
+                    original_cancel = inflight.task.cancel
 
-                def observe_cancel(msg: object = None) -> bool:
-                    result = original_cancel(msg)
-                    cancel_requested.set()
-                    return result
+                    def observe_cancel(msg: object = None) -> bool:
+                        result = original_cancel(msg)
+                        cancel_requested.set()
+                        return result
 
-                monkeypatch.setattr(inflight.task, "cancel", observe_cancel)
-                quiesce_entered.set()
-                await quiesce_allowed.wait()
+                    monkeypatch.setattr(inflight.task, "cancel", observe_cancel)
+                    quiesce_entered.set()
+                    await quiesce_allowed.wait()
+                    try:
+                        await original_quiesce(*args, **kwargs)
+                    finally:
+                        quiesced.set()
+
+                monkeypatch.setattr(objects, "put", fail_invocation)
+                # Fault the shared retention owner, including terminal-graph
+                # compensation, not just the launcher's first release attempt.
+                monkeypatch.setattr(runtime._execution_service, "release_dependency_hold", pause_release)
+                monkeypatch.setattr(launcher, "_quiesce_node_owned", pause_quiesce)
+                run = await engine.start(TaskGraph("source", (
+                    TaskNode("agent", task=engine.definitions[0], input=AgentTaskInput("question")),
+                )), principal=principal, idempotency_key="source")
                 try:
-                    await original_quiesce(*args, **kwargs)
-                finally:
-                    quiesced.set()
-
-            monkeypatch.setattr(objects, "put", fail_invocation)
-            # Fault the shared retention owner, including terminal-graph
-            # compensation, not just the launcher's first release attempt.
-            monkeypatch.setattr(runtime._execution_service, "release_dependency_hold", pause_release)
-            monkeypatch.setattr(launcher, "_quiesce_node_owned", pause_quiesce)
-            run = await engine.start(TaskGraph("source", (
-                TaskNode("agent", task=engine.definitions[0], input=AgentTaskInput("question")),
-            )), principal=principal, idempotency_key="source")
-            try:
-                await asyncio.wait_for(quiesce_entered.wait(), 5)
-                # Observe terminal metadata without triggering another cleanup
-                # consumer while all release attempts are held at the barrier.
-                assert (await run.state()).wait_status is TaskStatus.FAILED
-                quiesce_allowed.set()
-                await asyncio.wait_for(cancel_requested.wait(), 5)
-                release_allowed.set()
-                await asyncio.wait_for(quiesced.wait(), 5)
-                execution = await run.execution("agent")
-                record = await engine.persistence.execution.executions.get(
-                    execution.execution_id, tenant_id=principal.tenant_id,
-                )
-                assert record.status is ExecutionStatus.CANCELLED
-                assert record.dependency_hold_ids == (("task:source:agent",) if release_fails else ())
-                assert models.requests == 1
-                if release_fails:
-                    graph_run = launcher._graphs[(principal.tenant_id, "source")]
-                    await asyncio.gather(graph_run.task, return_exceptions=True)
-                    assert launcher.graph_failure("source", tenant_id=principal.tenant_id).code is ErrorCode.STORAGE_UNAVAILABLE
-                    with pytest.raises(AIError) as cleanup_error:
+                    await asyncio.wait_for(quiesce_entered.wait(), 5)
+                    # Observe terminal metadata without triggering another cleanup
+                    # consumer while all release attempts are held at the barrier.
+                    assert (await run.state()).wait_status is TaskStatus.FAILED
+                    quiesce_allowed.set()
+                    await asyncio.wait_for(cancel_requested.wait(), 5)
+                    release_allowed.set()
+                    await asyncio.wait_for(quiesced.wait(), 5)
+                    execution = await run.execution("agent")
+                    record = await engine.persistence.execution.executions.get(
+                        execution.execution_id, tenant_id=principal.tenant_id,
+                    )
+                    assert record.status is ExecutionStatus.CANCELLED
+                    assert record.dependency_hold_ids == (("task:source:agent",) if release_fails else ())
+                    assert models.requests == 1
+                    if release_fails:
+                        graph_run = launcher._graphs[(principal.tenant_id, "source")]
+                        await asyncio.gather(graph_run.task, return_exceptions=True)
+                        assert launcher.graph_failure("source", tenant_id=principal.tenant_id).code is ErrorCode.STORAGE_UNAVAILABLE
+                        with pytest.raises(AIError) as cleanup_error:
+                            await engine.close()
+                        assert cleanup_error.value.code is ErrorCode.STORAGE_UNAVAILABLE
+                        assert launcher.owns_graph("source", tenant_id=principal.tenant_id)
+                    else:
                         await engine.close()
-                    assert cleanup_error.value.code is ErrorCode.STORAGE_UNAVAILABLE
-                    assert launcher.owns_graph("source", tenant_id=principal.tenant_id)
-                else:
-                    await engine.close()
-                verified = True
-            finally:
-                quiesce_allowed.set()
-                release_allowed.set()
-                models.release.set()
+                    verified = True
+                finally:
+                    quiesce_allowed.set()
+                    release_allowed.set()
+                    models.release.set()
+    finally:
+        if release_fails and source_group is not None:
+            # A permanent hold-release fault intentionally keeps the Runtime
+            # close boundary failed; settle its workers before disposing the
+            # test-owned database, without erasing that failure or its holds.
+            if launcher is not None:
+                assert all(run.task is None or run.task.done()
+                           for run in tuple(launcher._graphs.values()))
+            await runtime._close_agent()
+            await source_group.close()
+            await source_group.context.close()
+            assert source_group.context.closed
     assert verified
 
 

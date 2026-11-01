@@ -255,25 +255,38 @@ async def test_unfinished_standalone_run_never_publishes_a_complete_fork_seed(tm
     group.agent("default", model="default", allow_tools=())
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    with pytest.raises(AIError) as raised:
-        async with Persistence.open('incomplete-fork', storage=storage) as persistence_255, Runtime.attach(persistence=persistence_255, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
-            source = await runtime.agents.get().start("source")
-            await asyncio.wait_for(entered.wait(), 5)
-            if state == "failed":
-                assert (await source.wait()).result.status is ExecutionStatus.FAILED
-            elif state == "cancelled":
-                await source.cancel()
-                assert (await source.wait()).result.status is ExecutionStatus.CANCELLED
-            try:
-                fork = await source.fork("fork")
-                await fork.wait(timeout_seconds=5)
-            finally:
-                run_id = agent_run_id(namespace=runtime.namespace, tenant_id=runtime.tenant_id,
-                                      execution_id=source.execution_id, agent_run_seq=1)
-                archive = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)
-                assert await archive.latest_checkpoint(agent_run_id=run_id) is None
-                if state == "running":
+    source_group = None
+    try:
+        with pytest.raises(AIError) as raised:
+            async with Persistence.open('incomplete-fork', storage=storage) as persistence_255, Runtime.attach(persistence=persistence_255, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+                source_group = persistence_255.execution.executions.state_store.storage_group
+                source = await runtime.agents.get().start("source")
+                await asyncio.wait_for(entered.wait(), 5)
+                if state == "failed":
+                    assert (await source.wait()).result.status is ExecutionStatus.FAILED
+                elif state == "cancelled":
                     await source.cancel()
+                    assert (await source.wait()).result.status is ExecutionStatus.CANCELLED
+                try:
+                    fork = await source.fork("fork")
+                    await fork.wait(timeout_seconds=5)
+                finally:
+                    run_id = agent_run_id(namespace=runtime.namespace, tenant_id=runtime.tenant_id,
+                                          execution_id=source.execution_id, agent_run_seq=1)
+                    archive = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)
+                    assert await archive.latest_checkpoint(agent_run_id=run_id) is None
+                    if state == "running":
+                        await source.cancel()
+    finally:
+        if source_group is not None:
+            # Fork rejection can also fail Runtime.close. Preserve the primary
+            # error, but do not leave its quiescent SQL pool to a later GC.
+            backend = runtime._agent_lifecycle.backend
+            assert all(task.done() for task in backend._tasks.values())
+            assert all(task.done() for task in backend._checkpoint_tasks)
+            await source_group.close()
+            await source_group.context.close()
+            assert source_group.context.closed
     assert raised.value.code is ErrorCode.EXECUTION_HISTORY_UNAVAILABLE
 
 

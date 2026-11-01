@@ -232,15 +232,19 @@ async def test_lost_pending_lease_never_executes_effect(tmp_path: Path) -> None:
             assert effects == []
             assert await runtime._state.execution.executions.state_store.read(lambda _: runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)) is None
         finally:
-            with pytest.raises(AIError) as close_error:
-                await opened.__aexit__(None, None, None)
-            assert close_error.value.code is ErrorCode.STORAGE_CONFLICT
+            await opened.__aexit__(None, None, None)
+        assert effects == []
+        assert not persistence._runtime_owners
+        assert await persistence.execution.executions.get(
+            execution.execution_id, tenant_id=runtime.tenant_id,
+        ) is None
+        assert await persistence.execution.executions.get_history_head(
+            execution.execution_id, tenant_id=runtime.tenant_id,
+        ) is None
+        assert not cache._turns
     finally:
         try:
-            with pytest.raises(AIError) as persistence_error:
-                await persistence.close()
-            assert persistence_error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
-            assert persistence.ready and len(persistence._runtime_owners) == 1
+            await persistence.close()
         finally:
             await source_group.close()
             await source_group.context.close()
