@@ -3,6 +3,7 @@
 """Failure-only lifecycle evidence cannot change or disclose a SQL operation."""
 
 import asyncio
+import gc
 import sqlite3
 from types import SimpleNamespace
 
@@ -13,16 +14,19 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.storage import SqlStorageContext, create_sql_storage_context
 
-from ._sqlite_failure_timeline import _SqliteTimeline, sqlite_failure_timeline
+from . import _sqlite_failure_timeline as timeline_module
+from ._sqlite_failure_timeline import _SqliteTimeline, sqlite_failure_phase, sqlite_failure_timeline
 
 
 @pytest.mark.asyncio
-async def test_sqlite_timeline_preserves_error_and_omits_statement_parameters(tmp_path, capsys):
+async def test_sqlite_timeline_preserves_error_and_omits_statement_parameters(tmp_path, capsys, monkeypatch):
     failure = RuntimeError("private failure message")
     secret = "private SQL parameter"
 
     @sqlite_failure_timeline
     async def exercise(*, backend, producer_count):
+        sqlite_failure_phase("model.entered", producer=1)
+        gc.collect(0)
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'timeline.db'}")
         context = create_sql_storage_context(engine)
         try:
@@ -40,6 +44,19 @@ async def test_sqlite_timeline_preserves_error_and_omits_statement_parameters(tm
             await engine.dispose()
 
     original = SqlStorageContext.run_statement
+    original_gc_callbacks = tuple(gc.callbacks)
+    original_format = _SqliteTimeline.format
+
+    def settled_format(timeline):
+        assert timeline.gc_callback not in gc.callbacks
+        assert timeline.loop_handle.cancelled()
+        assert timeline_module._active_timeline.get() is None
+        count = len(timeline.events)
+        gc.collect(0)
+        assert len(timeline.events) == count
+        return original_format(timeline)
+
+    monkeypatch.setattr(_SqliteTimeline, "format", settled_format)
     with pytest.raises(RuntimeError) as caught:
         await exercise(backend="sqlite", producer_count=2)
     assert caught.value is failure
@@ -50,6 +67,10 @@ async def test_sqlite_timeline_preserves_error_and_omits_statement_parameters(tm
         assert kind in notes
     assert "'verb': 'SELECT'" in notes
     assert SqlStorageContext.run_statement is original
+    assert tuple(gc.callbacks) == original_gc_callbacks
+    assert timeline_module._active_timeline.get() is None
+    assert "phase.model.entered" in notes and "'producer': 1" in notes
+    assert "gc.start" in notes and "gc.stop" in notes and "thread_cpu" in notes
     assert capsys.readouterr() == ("", "")
 
 
@@ -75,6 +96,7 @@ async def test_sqlite_timeline_success_is_silent_and_other_cases_are_untouched(m
 @pytest.mark.asyncio
 async def test_sqlite_timeline_keeps_original_cancellation_and_reports_truncation():
     cancellation = asyncio.CancelledError("caller cancellation")
+    original_gc_callbacks = tuple(gc.callbacks)
 
     @sqlite_failure_timeline
     async def exercise(*, backend, producer_count):
@@ -83,6 +105,8 @@ async def test_sqlite_timeline_keeps_original_cancellation_and_reports_truncatio
     with pytest.raises(asyncio.CancelledError) as caught:
         await exercise(backend="sqlite", producer_count=2)
     assert caught.value is cancellation and cancellation.args == ("caller cancellation",)
+    assert tuple(gc.callbacks) == original_gc_callbacks
+    assert timeline_module._active_timeline.get() is None
     timeline = _SqliteTimeline(capacity=2)
     for i in range(3):
         timeline.emit("synthetic", connection=i)
@@ -118,3 +142,19 @@ async def test_sqlite_timeline_error_never_revalidates_an_invalidated_connection
                 timeline.remove()
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_timeline_loop_lag_is_bounded_and_cleanup_cancels_observation(monkeypatch):
+    timeline = _SqliteTimeline(capacity=2)
+    now = timeline.started + 1
+    monkeypatch.setattr(timeline_module, "monotonic", lambda: now)
+    timeline._loop_tick(now - 0.25)
+    handle = timeline.loop_handle
+    assert timeline.events[-1][1] == "loop.lag"
+    assert timeline.events[-1][-1]["seconds"] == 0.25
+    assert "thread_cpu" in timeline.events[-1][-1]
+    timeline.remove()
+    assert handle.cancelled()
+    sqlite_failure_phase("outside.selected.case", producer=1)
+    assert len(timeline.events) == 1

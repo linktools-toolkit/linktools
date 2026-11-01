@@ -18,7 +18,7 @@ from linktools.ai.task import Task, TaskGraph, TaskNode
 from linktools.ai.task.engine import TaskEngine
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
-from ._sqlite_failure_timeline import sqlite_failure_timeline
+from ._sqlite_failure_timeline import sqlite_failure_phase, sqlite_failure_timeline
 
 
 @pytest.mark.asyncio
@@ -32,12 +32,15 @@ async def test_graph_observes_tools_before_models_finish_and_replays_after_reope
 
     def features(index):
         async def evidence(context: AgentContext[None]) -> str:
+            sqlite_failure_phase("tool.return", producer=index)
             return "synthetic evidence"
 
         async def model(messages, info):
             requests.append(index)
             if not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
+                sqlite_failure_phase("model.first", producer=index)
                 return ModelResponse(parts=[ToolCallPart("evidence", {}, tool_call_id=f"tool-{index}")])
+            sqlite_failure_phase("model.entered", producer=index)
             entered[index].set()
             await release.wait()
             return ModelResponse(parts=[TextPart("done")])
@@ -66,6 +69,7 @@ async def test_graph_observes_tools_before_models_finish_and_replays_after_reope
         graph = TaskGraph("live-tools", tuple(TaskNode(f"node-{i}", task=task, input=AgentTaskInput("inspect"))
                                               for i, task in enumerate(tasks)))
         run = await engine.start(graph, idempotency_key="live-tools")
+        sqlite_failure_phase("graph.started")
         events = []
 
         async def observe(event):
@@ -76,10 +80,13 @@ async def test_graph_observes_tools_before_models_finish_and_replays_after_reope
 
         waiting = asyncio.create_task(run.wait(on_event=observe, include_event_content=True, timeout_seconds=10))
         try:
+            sqlite_failure_phase("entered.wait.begin")
             await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered)), 3)
+            sqlite_failure_phase("entered.wait.done")
             await asyncio.wait_for(asyncio.gather(*(event.wait() for event in observed)), 3)
             assert not release.is_set() and not waiting.done()
         finally:
+            sqlite_failure_phase("models.release")
             release.set()
             outcome = await waiting
         assert outcome.result.status is TaskStatus.SUCCEEDED

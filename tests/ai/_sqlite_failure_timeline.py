@@ -3,11 +3,12 @@
 """Bounded, parameter-free SQL lifecycle evidence for a shared-source test."""
 
 import asyncio
+import gc
 from collections import deque
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from functools import wraps
-from time import monotonic
+from time import monotonic, process_time, thread_time
 
 import pytest
 from sqlalchemy import event
@@ -26,6 +27,8 @@ class _SqliteTimeline:
         self.started = monotonic()
         self.origin = ContextVar("sqlite_timeline_origin", default=None)
         self.listeners = []
+        self.loop_handle = None
+        self.gc_callback = None
 
     def emit(self, kind: str, **fields: object) -> None:
         try:
@@ -45,6 +48,14 @@ class _SqliteTimeline:
     def listen(self, target: object, name: str, listener: Callable) -> None:
         event.listen(target, name, listener)
         self.listeners.append((target, name, listener))
+
+    def _loop_tick(self, expected: float) -> None:
+        now = monotonic()
+        lag = now - expected
+        if lag >= 0.02:
+            self.emit("loop.lag", seconds=round(lag, 6),
+                      process_cpu=process_time(), thread_cpu=thread_time())
+        self.loop_handle = asyncio.get_running_loop().call_later(0.02, self._loop_tick, now + 0.02)
 
     def install(self, patches: pytest.MonkeyPatch) -> None:
         def connection_id(connection):
@@ -137,9 +148,30 @@ class _SqliteTimeline:
 
         patches.setattr(AsyncSession, "close", close)
 
+        def gc_event(phase, info):
+            self.emit("gc." + phase, generation=info["generation"], collected=info["collected"],
+                      process_cpu=process_time(), thread_cpu=thread_time())
+
+        self.gc_callback = gc_event
+        gc.callbacks.append(gc_event)
+        self.loop_handle = asyncio.get_running_loop().call_later(0.02, self._loop_tick, monotonic() + 0.02)
+
     def remove(self) -> None:
+        if self.loop_handle is not None:
+            self.loop_handle.cancel()
+        if self.gc_callback is not None:
+            gc.callbacks.remove(self.gc_callback)
         for target, name, listener in reversed(self.listeners):
             event.remove(target, name, listener)
+
+
+_active_timeline: ContextVar[_SqliteTimeline | None] = ContextVar("sqlite_failure_timeline", default=None)
+
+
+def sqlite_failure_phase(name: str, *, producer: int | None = None) -> None:
+    timeline = _active_timeline.get()
+    if timeline is not None:
+        timeline.emit("phase." + name, producer=producer)
 
 
 def sqlite_failure_timeline(test: Callable[..., Awaitable[object]]) -> Callable[..., Awaitable[object]]:
@@ -149,14 +181,17 @@ def sqlite_failure_timeline(test: Callable[..., Awaitable[object]]) -> Callable[
         if kwargs.get("backend") != "sqlite" or kwargs.get("producer_count") != 2:
             return await test(*args, **kwargs)
         timeline = _SqliteTimeline()
+        token = _active_timeline.set(timeline)
         with pytest.MonkeyPatch.context() as patches:
             try:
-                timeline.install(patches)
-                return await test(*args, **kwargs)
+                try:
+                    timeline.install(patches)
+                    return await test(*args, **kwargs)
+                finally:
+                    timeline.remove()
+                    _active_timeline.reset(token)
             except BaseException as error:
                 error.add_note(timeline.format())
                 raise
-            finally:
-                timeline.remove()
 
     return run
