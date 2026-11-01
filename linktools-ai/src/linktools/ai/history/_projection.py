@@ -300,8 +300,16 @@ class StepExecutionHistoryReader:
         repository = self._executions if executions is None else executions
         if repository is self._executions and self._pending_execution is not None:
             pending = await self._pending_execution(execution_id, tenant_id=tenant_id)
-            if pending is not None:
-                return pending
+            record = await repository.get(execution_id, tenant_id=tenant_id)
+            if isinstance(repository, ExecutionRepositoryImpl) and (pending is not None or record is None):
+                record = await repository.state_store.read(
+                    lambda _transaction: repository.get(execution_id, tenant_id=tenant_id)
+                )
+            if record is not None:
+                if pending is not None and record.principal_id != pending.principal_id:
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                return record
+            return pending
         return await repository.get(execution_id, tenant_id=tenant_id)
 
     def _store_for(self, record: ExecutionRecord) -> _ExecutionHistoryStore:
@@ -1067,7 +1075,9 @@ class StepExecutionHistoryReader:
         if record.binding_kind == "task":
             return UsageSummary()
 
-        boundary = await self.capture_model_interaction_cutoffs(execution_id, tenant_id=tenant_id)
+        boundary = await self._capture_model_interaction_cutoffs(
+            execution_id, record, tenant_id=tenant_id,
+        )
         current_cutoffs = {value.agent_run_seq: value.model_request_seq for value in boundary.cutoffs}
         explicit_cutoffs = _normalize_usage_cutoffs(cutoffs)
         if explicit_cutoffs is None:
@@ -1167,6 +1177,10 @@ class StepExecutionHistoryReader:
             unknown_usage_requests=unknown_usage_requests,
             unknown_duration_requests=unknown_duration_requests,
             transport_retries=None,
+            unrecorded_executions=int(
+                not (boundary.local_staging_available or boundary.durable_history_available)
+                or len(boundary.cutoffs) != record.agent_run_seq
+            ),
             cutoffs=tuple(fixed_cutoffs),
         )
 
