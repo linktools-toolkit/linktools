@@ -30,15 +30,15 @@ def test_input_capture_owner_import_is_independent() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite", "sql"))
 async def test_input_capture_owner_borrows_storage_and_roundtrips_v1(
     tmp_path: Path, backend: str,
 ) -> None:
     engine = None
     if backend == "memory":
         storage = PersistenceStorage.in_memory()
-    elif backend == "filesystem":
-        storage = PersistenceStorage.filesystem(tmp_path / "data")
+    elif backend == "local_sqlite":
+        storage = PersistenceStorage.from_root(tmp_path / "data", exclusive_writer=True)
     elif backend == "sqlite":
         storage = PersistenceStorage.sqlite(tmp_path / "data.sqlite")
     else:

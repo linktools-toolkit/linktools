@@ -613,7 +613,7 @@ async def test_runtime_storage_snapshot_preserves_asset_version_refs(
 ) -> None:
     fixture = await _fixture()
     storage_root = tmp_path / "state"
-    state = Persistence(PersistenceStorage.filesystem(storage_root))
+    state = Persistence(PersistenceStorage.from_root(storage_root, exclusive_writer=True))
     await state.initialize(namespace="namespace", tenant_id="tenant")
     try:
         resolved = await fixture.resolver.resolve(fixture.binding)
@@ -657,7 +657,7 @@ async def test_runtime_storage_snapshot_preserves_asset_version_refs(
     )
 
     snapshot_store = InMemoryObjectStore("snapshot")
-    read_state = Persistence(PersistenceStorage.filesystem(storage_root))
+    read_state = Persistence(PersistenceStorage.from_root(storage_root, exclusive_writer=True))
     await read_state.initialize(
         namespace="namespace",
         tenant_id="tenant",
@@ -724,7 +724,7 @@ async def test_runtime_storage_snapshot_restores_task_binding_capture(
         },
     )
     storage_root = tmp_path / "task-state"
-    state = Persistence(PersistenceStorage.filesystem(storage_root))
+    state = Persistence(PersistenceStorage.from_root(storage_root, exclusive_writer=True))
     await state.initialize(namespace="namespace", tenant_id="tenant")
     graph = TaskGraph(
         "graph",
@@ -755,7 +755,7 @@ async def test_runtime_storage_snapshot_restores_task_binding_capture(
         await state.close()
 
     snapshot_store = InMemoryObjectStore("task-snapshot")
-    read_state = Persistence(PersistenceStorage.filesystem(storage_root))
+    read_state = Persistence(PersistenceStorage.from_root(storage_root, exclusive_writer=True))
     await read_state.initialize(
         namespace="namespace",
         tenant_id="tenant",

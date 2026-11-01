@@ -146,8 +146,8 @@ async def _durable_state(
     backend: str,
 ) -> tuple[Persistence, Path]:
     path = tmp_path / f"runtime-{backend}"
-    if backend == "filesystem":
-        return Persistence(PersistenceStorage.filesystem(path)), path
+    if backend == "local_sqlite":
+        return Persistence(PersistenceStorage.from_root(path, exclusive_writer=True)), path
     database = path.with_suffix(".db")
     engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
     await provision_runtime_database(engine)
@@ -162,7 +162,7 @@ async def _durable_state(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("local_sqlite", "sqlite"))
 @pytest.mark.parametrize("status", (
     ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
 ))
@@ -206,8 +206,8 @@ async def test_terminal_results_survive_restart_through_live_and_read_only_apis(
         await state.close()
 
     reopened = (
-        PersistenceStorage.filesystem(durable_path)
-        if backend == "filesystem"
+        PersistenceStorage.from_root(durable_path, exclusive_writer=True)
+        if backend == "local_sqlite"
         else PersistenceStorage.sqlite(
             durable_path,
             object_store=FilesystemObjectStore(tmp_path / "objects"),
@@ -248,8 +248,8 @@ async def test_terminal_results_survive_restart_through_live_and_read_only_apis(
             assert terminal.payload["error_diagnostics"] == diagnostics.to_payload()
 
     history_storage = (
-        PersistenceStorage.filesystem(durable_path)
-        if backend == "filesystem"
+        PersistenceStorage.from_root(durable_path, exclusive_writer=True)
+        if backend == "local_sqlite"
         else PersistenceStorage.sqlite(
             durable_path,
             object_store=FilesystemObjectStore(tmp_path / "objects"),

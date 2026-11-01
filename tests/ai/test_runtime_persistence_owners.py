@@ -17,10 +17,10 @@ from .test_explicit_runtime_features import _FeatureModels
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("auto_recover", (False, True))
-async def test_filesystem_persistence_rejects_second_agent_producer_before_composition(
+async def test_local_sqlite_persistence_rejects_second_agent_producer_before_composition(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, auto_recover: bool,
 ) -> None:
-    async with Persistence.open("producer", storage=PersistenceStorage.filesystem(tmp_path)) as persistence:
+    async with Persistence.open("producer", storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence:
         first = Runtime.attach(persistence=persistence, features=model_features(_FeatureModels()))
         second = Runtime.attach(
             persistence=persistence, features=model_features(_FeatureModels()), auto_recover=auto_recover,
@@ -60,8 +60,8 @@ async def test_shared_persistence_still_accepts_independent_agent_runtimes(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_task_only_runtimes_do_not_take_filesystem_agent_exclusivity(tmp_path: Path) -> None:
-    async with Persistence.open("task-producer", storage=PersistenceStorage.filesystem(tmp_path)) as persistence:
+async def test_task_only_runtimes_do_not_take_local_sqlite_agent_exclusivity(tmp_path: Path) -> None:
+    async with Persistence.open("task-producer", storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence:
         async with Runtime.attach(persistence=persistence), Runtime.attach(persistence=persistence), Runtime.attach(
             persistence=persistence, features=model_features(_FeatureModels()),
         ):
@@ -83,7 +83,7 @@ async def test_persistence_close_rejects_live_runtime_without_closing_resources(
 async def test_failed_borrowed_runtime_cleanup_retains_exclusive_producer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with Persistence.open("retry-producer", storage=PersistenceStorage.filesystem(tmp_path)) as persistence:
+    async with Persistence.open("retry-producer", storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence:
         first = Runtime.attach(persistence=persistence, features=model_features(_FeatureModels()))
         await first.__aenter__()
         original = first._close_agent
@@ -169,7 +169,7 @@ async def test_owned_runtime_cannot_close_a_live_peer_runtime() -> None:
 async def test_cancelled_close_keeps_runtime_permission_until_owned_cleanup_finishes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with Persistence.open("cancel-close", storage=PersistenceStorage.filesystem(tmp_path)) as persistence:
+    async with Persistence.open("cancel-close", storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence:
         runtime = Runtime.attach(persistence=persistence, features=model_features(_FeatureModels()))
         await runtime.__aenter__()
         entered, release = asyncio.Event(), asyncio.Event()
@@ -214,7 +214,7 @@ async def test_composition_cancellation_releases_only_its_own_runtime_permission
         return await original(current)
 
     monkeypatch.setattr(RuntimeFeatures, "capture", capture)
-    async with Persistence.open("cancel-compose", storage=PersistenceStorage.filesystem(tmp_path)) as persistence:
+    async with Persistence.open("cancel-compose", storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence:
         async with Runtime.attach(persistence=persistence):
             runtime = Runtime.attach(persistence=persistence, features=features)
             starting = asyncio.create_task(runtime.__aenter__())
@@ -277,7 +277,7 @@ async def test_failed_composition_and_failed_cleanup_keep_runtime_permission_for
 
     monkeypatch.setattr(factory, "_execution_history_reader", fail_build_once)
     monkeypatch.setattr(ExecutionInputMaterializer, "close", fail_cleanup_once)
-    async with Persistence.open("failed-compose", storage=PersistenceStorage.filesystem(tmp_path)) as persistence:
+    async with Persistence.open("failed-compose", storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence:
         runtime = Runtime.attach(persistence=persistence, features=model_features(_FeatureModels()))
         try:
             with pytest.raises(RuntimeError, match="composition failed") as caught:

@@ -20,7 +20,7 @@ from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRu
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 @pytest.mark.parametrize("status", ("SUCCEEDED", "FAILED", "CANCELLED"))
 async def test_checkpoint_preserves_live_request_until_terminal(
     tmp_path: Path,
@@ -30,8 +30,6 @@ async def test_checkpoint_preserves_live_request_until_terminal(
     storage = Persistence(
         PersistenceStorage.in_memory()
         if backend == "memory"
-        else PersistenceStorage.filesystem(tmp_path / "state")
-        if backend == "filesystem"
         else PersistenceStorage.sqlite(tmp_path / "state.db")
     )
     await storage.initialize(namespace="live-request", tenant_id="tenant")

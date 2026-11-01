@@ -145,11 +145,11 @@ class _FailingModel:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["filesystem", "sqlite"])
+@pytest.mark.parametrize("backend", ["local_sqlite", "sqlite"])
 async def test_actual_failure_full_diagnostics_survive_close_and_public_reopen(tmp_path: Path, backend: str) -> None:
     def storage() -> PersistenceStorage:
-        if backend == "filesystem":
-            return PersistenceStorage.filesystem(tmp_path / "runtime")
+        if backend == "local_sqlite":
+            return PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True)
         return PersistenceStorage.sqlite(tmp_path / "runtime.db", object_store=FilesystemObjectStore(tmp_path / "objects"))
 
     group = RuntimeFeatures("complete-diagnostics")

@@ -45,7 +45,7 @@ from linktools.ai.persistence.contracts import (
 )
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import FilesystemObjectStore, ObjectRef, StoredPayload
-from linktools.commands.ai.run import _emit_result
+from linktools.commands.ai._output import emit_result
 from pydantic import BaseModel
 from pydantic_ai.models.test import TestModel
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -220,13 +220,13 @@ class _PersistenceTestModels(_PersistenceTestModelBinding):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("local_sqlite", "sqlite"))
 async def test_terminal_stream_allows_immediate_runtime_close(
     tmp_path: Path,
     backend: str,
 ) -> None:
-    if backend == "filesystem":
-        state = PersistenceStorage.filesystem(tmp_path / "runtime")
+    if backend == "local_sqlite":
+        state = PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True)
     else:
         database = tmp_path / "runtime.db"
         engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
@@ -284,7 +284,7 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
     try:
         async with Persistence.open('default', storage=state) as persistence_286, Runtime.attach(persistence=persistence_286, features=model_features(_PersistenceTestModels(), features)) as runtime:
             task = asyncio.create_task(
-                _emit_result(
+                emit_result(
                     runtime,
                     "hello",
                     "default",

@@ -34,7 +34,6 @@ class PersistenceStorage:
             methods = tuple(getattr(coordination, name, None) for name in names)
             if any(method is not None for method in methods) and not all(callable(method) for method in methods):
                 raise TypeError(f"coordination must implement {', '.join(names)} together")
-        self._local_sqlite_path: Path | None = None
         self._coordination = coordination
         self._plan = plan
         self._object_store = object_store
@@ -49,11 +48,6 @@ class PersistenceStorage:
         return self._plan
 
     @property
-    def local_sqlite_path(self) -> Path | None:
-        """Physical root source explicitly requesting native exclusive writer ownership."""
-        return self._local_sqlite_path
-
-    @property
     def object_store(self) -> ObjectStore | None:
         """Borrowed object resource; ownership stays with its provider."""
         return self._object_store
@@ -66,20 +60,6 @@ class PersistenceStorage:
         route = StorageRoute.memory(cache=cache)
         return cls(PersistencePlan.from_default(route), coordination=coordination)
 
-    @classmethod
-    def filesystem(
-        cls,
-        path: "str | Path",
-        *,
-        object_store: "ObjectStore | None" = None,
-        cache: CacheBackend | None = None,
-        coordination: CacheBackend | TurnCoordinationBackend | StreamBackend | None = None,
-    ) -> "PersistenceStorage":
-        base = _normalize_path(path)
-        return cls(
-            PersistencePlan.filesystem(base, cache=cache),
-            object_store=object_store, coordination=coordination,
-        )
 
     @classmethod
     def sqlite(
@@ -107,14 +87,11 @@ class PersistenceStorage:
         base = _normalize_path(root)
         if not (base / "runtime.db").exists():
             _reject_filesystem_state_root(base)
-        storage = cls.sqlite(
-            base / "runtime.db",
-            object_store=FilesystemObjectStore(base / "objects"),
-            cache=cache, coordination=coordination,
+        route = StorageRoute.sqlite(base / "runtime.db", cache=cache, exclusive_writer=exclusive_writer)
+        return cls(
+            PersistencePlan.from_default(route),
+            object_store=FilesystemObjectStore(base / "objects"), coordination=coordination,
         )
-        if exclusive_writer:
-            storage._local_sqlite_path = base / "runtime.db"
-        return storage
 
     @classmethod
     def sql(
@@ -176,7 +153,6 @@ def _normalize_path(value: "str | Path") -> Path:
     if not isinstance(value, (str, Path)) or not str(value).strip():
         raise ValueError("PersistenceStorage path is required")
     return Path(value).expanduser().resolve(strict=False)
-
 
 
 __all__ = ["PersistenceStorage"]

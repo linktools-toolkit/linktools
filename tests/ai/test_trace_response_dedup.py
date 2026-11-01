@@ -40,8 +40,6 @@ async def _storage(backend: str, root: Path) -> AsyncIterator[PersistenceStorage
     engine = None
     if backend == "memory":
         storage = PersistenceStorage.in_memory()
-    elif backend == "filesystem":
-        storage = PersistenceStorage.filesystem(root / "state")
     elif backend == "sqlite":
         storage = PersistenceStorage.sqlite(root / "state.db")
     else:
@@ -83,7 +81,7 @@ async def _transcript_content_ids(archive: StateStepArchive, run_id: str) -> tup
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite", "sql"))
 @pytest.mark.parametrize("size", (32, 65536), ids=("short", "long"))
 async def test_trace_response_payload_storage_and_metadata_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, size: int,
@@ -218,7 +216,7 @@ async def test_trace_response_payload_storage_and_metadata_reads(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite", "sql"))
 @pytest.mark.parametrize("outcome", ("FAILED", "CANCELLED"))
 async def test_unsuccessful_requests_without_response_preserve_no_response(
     tmp_path: Path, backend: str, outcome: str,
@@ -247,7 +245,7 @@ async def test_unsuccessful_requests_without_response_preserve_no_response(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite", "sql"))
 async def test_compaction_response_retains_independent_evidence(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -296,7 +294,7 @@ async def test_compaction_response_retains_independent_evidence(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite", "sql"))
 async def test_identical_responses_keep_occurrences_through_checkpoint_reopen_and_cleanup(
     tmp_path: Path, backend: str,
 ) -> None:

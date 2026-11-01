@@ -345,14 +345,14 @@ async def test_reopened_session_and_historical_retry_use_current_host_runtime_ca
     first_backend, next_backend = _Backend(), _Backend()
     models = _Models(_UsageFunctionModel(_immediate))
     first_features = _policies(_group(), _GlobalPolicy(first_backend), ExecutionCapability(retain_history=True))
-    async with Persistence.open('runtime_capability-reopen', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_370, Runtime.attach(persistence=persistence_370, features=model_features(models, first_features)) as runtime:
+    async with Persistence.open('runtime_capability-reopen', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_370, Runtime.attach(persistence=persistence_370, features=model_features(models, first_features)) as runtime:
         first = await runtime.agents.get().start("standalone")
         assert (await first.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         session_first = await runtime.agents.get().session("conversation").start("first")
         assert (await session_first.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
     current = _GlobalPolicy(next_backend)
     current.id = "host.replacement"
-    async with Persistence.open('runtime_capability-reopen', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_380, Runtime.attach(persistence=persistence_380, features=model_features(models, _policies(_group(), current, ExecutionCapability(retain_history=True)))) as runtime:
+    async with Persistence.open('runtime_capability-reopen', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_380, Runtime.attach(persistence=persistence_380, features=model_features(models, _policies(_group(), current, ExecutionCapability(retain_history=True)))) as runtime:
         historical = await runtime.executions.get(first.execution_id)
         retry = await historical.retry("retry")
         assert (await retry.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED

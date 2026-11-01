@@ -14,8 +14,8 @@ determined by whether a type is a protocol or a concrete implementation, and a
 store does not necessarily imply durable retention.
 
 `Runtime.open` and `Runtime.attach` register their lifetime with Persistence
-before composing producers. An execution filesystem route or an exclusively
-owned local SQLite source admits only one Agent Runtime on that Persistence;
+before composing producers. An exclusively owned local SQLite source admits
+only one Agent Runtime on that Persistence;
 Task-only Runtimes do not occupy that exclusive execution slot. Shared SQL and
 Memory continue to allow independent Agent Runtimes.
 `TaskEngine(...)` and `TaskEngine.open(...)` also register a borrowed lifetime.
@@ -33,8 +33,8 @@ This is instance-local protection, not a cross-process lock or a new SQL
 takeover mode. Callers must still finish their own in-flight ordinary Task
 queries before closing the engine. History is not registered by this producer
 mechanism; hosts must await its ordinary queries and close its subscriptions
-before closing Persistence. Filesystem state retirement and retained-history migration
-require their separate recovery and inventory checks.
+before closing Persistence. Runtime state uses Memory or SQL; native file locks,
+file-backed ObjectStore bytes and caches remain separate supported resources.
 
 `PersistenceStorage.from_root(root)` selects `root/runtime.db` and file-backed
 ObjectStore bytes; it does not migrate filesystem state. When that database is
@@ -103,8 +103,11 @@ a file-store fallback. Select a separate destination `object_store` if the whole
 source root must remain byte-for-byte unchanged: reader internals write only
 coordination locks, but an explicitly colocated destination still receives the
 requested snapshot objects. Verify the restored records/receipts/content before
-switching consumers. This migration reader does not itself retire the active
-filesystem State routes or provide opaque custom-object closure.
+switching consumers. Filesystem State writers and routes are removed; this
+reader preserves only offline access to supported clean legacy data. The unused
+`storage.FilesystemJournal` transaction API is removed with those State writers;
+independent atomic-file, file-lock, cache and ObjectStore APIs remain. Opaque
+custom-object closure and journal replay are not provided.
 
 ### Exclusively owned local SQLite
 
@@ -113,6 +116,27 @@ filesystem State routes or provide opaque custom-object closure.
 lock for that database's resource lifetime. The default remains `False`:
 existing and newly created ordinary roots keep shared SQL behavior and do not
 gain active-execution recovery permission merely by using a local path.
+
+For mixed storage, the same request belongs to the SQLite route and survives
+`PersistencePlan` reconstruction and `with_cache(...)`:
+
+```python
+from linktools.ai.persistence import PersistencePlan, PersistenceStorage
+from linktools.ai.storage import StorageRoute
+
+storage = PersistenceStorage(PersistencePlan(
+    execution=StorageRoute.sqlite("execution.db", exclusive_writer=True),
+    conversation=StorageRoute.sqlite("conversation.db"),
+))
+```
+
+The Execution resource can own automatic recovery while the separate
+Conversation resource remains shared. Existing `object_store=...` on
+`PersistenceStorage` supplies borrowed objects without another root factory.
+Routes targeting one SQLite path must agree on `exclusive_writer`; conflicting
+requests fail before resource publication, rather than splitting the physical
+group or selecting the last route. The option is a request, not a durable
+identity or a substitute for acquiring the actual writer permission.
 
 A new exclusive database receives its fixed SQLite application ID in the private
 provisioning file, before no-clobber publication. If another writer creates the
@@ -168,9 +192,8 @@ callback or commit replay. Runtime/Task borrower checks still run first. Only
 successful resource cleanup releases the physical writer lock. A new owner may
 recover admitted checkpoint-enabled work after the previous process exits, but
 the lock does not establish whether an external tool effect succeeded: existing
-effect receipts and unknown-outcome recovery rules remain required. This local
-SQL option does not itself remove the filesystem State backend or prove a full
-custom-state migration.
+effect receipts and unknown-outcome recovery rules remain required. Local SQL
+ownership does not prove a full custom-state migration.
 
 | Interface | Responsibility | Host integration |
 | --- | --- | --- |
@@ -273,7 +296,7 @@ including its hot-read cache. Registering CheckpointCapability or TraceCapabilit
 enables behavior; neither capability accepts a physical storage argument. An explicit archive route must remain
 in the same `StateStorageGroup` as Execution and Recovery, because their safety
 and terminal boundaries require atomic writes. Persistence validates this when it opens. Routes share a group when they use the same SQLite path, the same SQL
-engine instance, or the same filesystem transaction root; memory routes share
+engine instance; memory routes share
 one binding-local group. Separate SQL engine instances targeting the same database do not
 establish a shared SQL group.
 
@@ -501,7 +524,7 @@ Built-in `StateStore.read_record(key)` and `read_records(keys)` use the same
 optional hot-cache group. Records and a complete batch share an absolute
 three-second capture deadline; hits require no source query. The namespace,
 tenant and logical store identify the source view. Sharing the cache therefore
-requires the source-binding rule below, including for filesystem and SQL stores.
+requires the source-binding rule below, including for local SQLite and server SQL stores.
 No cache means direct source reads.
 
 `read(callback)` and `mutate(callback)` retain their source transaction semantics;
@@ -1067,27 +1090,17 @@ effects still require their own fence/idempotency enforcement. Keep mutation
 callbacks free of external effects and short. Task and Tool renewal use this
 operation; other domain transitions retain their existing authorization checks.
 
-## Offline filesystem member inspection
+## Offline legacy filesystem ownership
 
-A filesystem state group's `offline_exclusivity()` retains its existing
-`None`-yielding guard contract. On an uninitialized group it acquires the group
-(or standalone root) writer lock before discovering members, then acquires all
-member locks and validates the complete manifest set. A pending recovery journal,
-changed inventory, or incomplete archive metadata prevents inspection; this
-operation does not repair or provision missing source data.
-
-Within that scope, the owning task can call `describe_offline_members()` for
-immutable domain/root facts, including original opaque dynamic partition keys
-and the archive member. Nested or concurrent entry, initialization and premature
-close are rejected. Cancellation settles owned lock acquisition/release first;
-failed release retains the remaining locks for the same group's `close()` retry.
-Copied descriptors do not retain authorization after the scope exits.
-
-This is a filesystem-specific offline inventory seam, not a portable snapshot
-extension. Custom capability partitions still require their dependency contract;
-archive membership alone does not prove object closure. Existing snapshot and
-opaque-object rejection checks remain in force. It does not retire the filesystem
-backend or grant automatic recovery to a SQL source.
+`FilesystemSnapshotReader` acquires the legacy group lock before discovering
+members, then all member locks before validating the complete manifest set.
+Committed journals, changed inventories, foreign scope, unsupported custom
+partitions and incomplete archive metadata prevent export. It neither
+repairs nor provisions source state. Cancellation settles owned filesystem
+work before releasing locks; failed release retains exact handles for the same
+reader's retryable `close()`. The reader is not a StateStore or a Runtime route.
+Native locks and file-backed objects remain supported independently of the
+removed filesystem State writer.
 
 
 ## Offline object cleanup and opaque capability state

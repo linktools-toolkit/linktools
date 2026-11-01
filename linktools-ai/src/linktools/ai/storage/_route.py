@@ -26,7 +26,6 @@ class _StorageBackendKind(str, Enum):
     __str__ = str.__str__
     __format__ = str.__format__
     MEMORY = "memory"
-    FILESYSTEM = "filesystem"
     SQLITE = "sqlite"
     SQL = "sql"
 
@@ -36,8 +35,8 @@ class StorageRoute:
     _kind: _StorageBackendKind
     _retention: StorageRetentionMode
     _path: "Path | None"
-    _transaction_root: "Path | None"
     _engine: "AsyncEngine | None"
+    _exclusive_writer: bool
     _cache: "CacheBackend | None" = field(compare=False, hash=False, repr=False)
 
     def __init__(self, *args: object, **kwargs: object) -> None:
@@ -50,21 +49,25 @@ class StorageRoute:
         kind: _StorageBackendKind,
         retention: StorageRetentionMode,
         path: "Path | None" = None,
-        transaction_root: "Path | None" = None,
         engine: "AsyncEngine | None" = None,
         cache: "CacheBackend | None" = None,
+        exclusive_writer: bool = False,
     ) -> "StorageRoute":
         value = object.__new__(cls)
         object.__setattr__(value, "_kind", kind)
         object.__setattr__(value, "_retention", retention)
         object.__setattr__(value, "_path", path)
-        object.__setattr__(value, "_transaction_root", transaction_root)
         object.__setattr__(value, "_engine", engine)
         object.__setattr__(value, "_cache", cache)
+        object.__setattr__(value, "_exclusive_writer", exclusive_writer)
         value._validate()
         return value
 
     def _validate(self) -> None:
+        if not isinstance(self._exclusive_writer, bool):
+            raise TypeError("exclusive_writer must be a bool")
+        if self._exclusive_writer and self._kind is not _StorageBackendKind.SQLITE:
+            raise ValueError("exclusive_writer requires a local SQLite route")
         if self._cache is not None and not all(
             callable(getattr(self._cache, name, None)) for name in ("get", "put", "delete")
         ):
@@ -74,31 +77,18 @@ class StorageRoute:
                 self._kind is _StorageBackendKind.MEMORY
                 and self._retention in {StorageRetentionMode.VOLATILE, StorageRetentionMode.TRANSIENT}
                 and self._path is None
-                and self._transaction_root is None
                 and self._engine is None
-            )
-            or (
-                self._kind is _StorageBackendKind.FILESYSTEM
-                and self._retention is StorageRetentionMode.DURABLE
-                and self._path is not None
-                and self._engine is None
-                and (
-                    self._transaction_root is None
-                    or isinstance(self._transaction_root, Path)
-                )
             )
             or (
                 self._kind is _StorageBackendKind.SQLITE
                 and self._retention is StorageRetentionMode.DURABLE
                 and self._path is not None
-                and self._transaction_root is None
                 and self._engine is None
             )
             or (
                 self._kind is _StorageBackendKind.SQL
                 and self._retention is StorageRetentionMode.DURABLE
                 and self._path is None
-                and self._transaction_root is None
                 and self._engine is not None
             )
         )
@@ -118,12 +108,13 @@ class StorageRoute:
         return self._path
 
     @property
-    def transaction_root(self) -> "Path | None":
-        return self._transaction_root
-
-    @property
     def engine(self) -> "AsyncEngine | None":
         return self._engine
+
+    @property
+    def exclusive_writer(self) -> bool:
+        """Request native local SQLite ownership; not proof of a live permit."""
+        return self._exclusive_writer
 
     @property
     def cache(self) -> "CacheBackend | None":
@@ -134,7 +125,8 @@ class StorageRoute:
         """Copy this persistence route while borrowing a different cache."""
         return type(self)._create(
             kind=self._kind, retention=self._retention, path=self._path,
-            transaction_root=self._transaction_root, engine=self._engine, cache=cache,
+            engine=self._engine, cache=cache,
+            exclusive_writer=self._exclusive_writer,
         )
 
     @classmethod
@@ -146,27 +138,14 @@ class StorageRoute:
         return cls._create(kind=_StorageBackendKind.MEMORY, retention=StorageRetentionMode.TRANSIENT, cache=cache)
 
     @classmethod
-    def filesystem(
-        cls,
-        path: "str | Path",
-        *,
-        transaction_root: "str | Path | None" = None,
-        cache: "CacheBackend | None" = None,
+    def sqlite(
+        cls, path: "str | Path", *, cache: "CacheBackend | None" = None, exclusive_writer: bool = False,
     ) -> "StorageRoute":
-        return cls._create(
-            kind=_StorageBackendKind.FILESYSTEM,
-            retention=StorageRetentionMode.DURABLE,
-            path=_normalize_path(path),
-            cache=cache,
-            transaction_root=None if transaction_root is None else _normalize_path(transaction_root),
-        )
-
-    @classmethod
-    def sqlite(cls, path: "str | Path", *, cache: "CacheBackend | None" = None) -> "StorageRoute":
         if not isinstance(path, (str, Path)) or not str(path).strip() or str(path).strip() == ":memory:":
             raise ValueError("StorageRoute.sqlite requires a filesystem path")
         normalized = _normalize_path(path)
-        return cls._create(kind=_StorageBackendKind.SQLITE, retention=StorageRetentionMode.DURABLE, path=normalized, cache=cache)
+        return cls._create(kind=_StorageBackendKind.SQLITE, retention=StorageRetentionMode.DURABLE,
+                           path=normalized, cache=cache, exclusive_writer=exclusive_writer)
 
     @classmethod
     def sql(cls, engine: "AsyncEngine", *, cache: "CacheBackend | None" = None) -> "StorageRoute":

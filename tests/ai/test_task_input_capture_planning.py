@@ -45,7 +45,7 @@ async def _source_capture(engine: TaskEngine) -> TaskInvocationInputRef:
 async def test_derived_input_description_matches_publication_without_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open('input-planning', storage=storage, tenant_id='evaluation-consumers') as persistence_46, TaskEngine.open(persistence=persistence_46, context=CONTEXT) as engine:
         source = await _source_capture(engine)
         captures = engine.inputs
@@ -78,7 +78,7 @@ async def test_derived_input_description_matches_publication_without_writes(
 async def test_derived_input_publication_cannot_replace_its_authorized_source(
     tmp_path: Path, changed: str,
 ) -> None:
-    async with Persistence.open('input-authority', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_79, TaskEngine.open(persistence=persistence_79, context=CONTEXT) as engine:
+    async with Persistence.open('input-authority', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_79, TaskEngine.open(persistence=persistence_79, context=CONTEXT) as engine:
         source = await _source_capture(engine)
         captures = engine.inputs
         contract = await captures.resolve_task_input(source, principal=PRINCIPAL)
@@ -103,7 +103,7 @@ async def test_derived_input_publication_cannot_replace_its_authorized_source(
 async def test_owned_input_expiry_fences_only_its_reserved_derivation(
     tmp_path: Path, materialized: bool,
 ) -> None:
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open('input-fence', storage=storage, tenant_id='evaluation-consumers') as persistence_106, TaskEngine.open(persistence=persistence_106, context=CONTEXT) as engine:
         source = await _source_capture(engine)
         captures = engine.inputs
@@ -137,7 +137,7 @@ async def test_owned_input_expiry_fences_only_its_reserved_derivation(
 
 @pytest.mark.asyncio
 async def test_retained_input_capture_cannot_be_expired_before_object_cleanup(tmp_path: Path) -> None:
-    async with Persistence.open('input-transfer', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_140, TaskEngine.open(persistence=persistence_140, context=CONTEXT) as engine:
+    async with Persistence.open('input-transfer', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_140, TaskEngine.open(persistence=persistence_140, context=CONTEXT) as engine:
         source = await _source_capture(engine)
         captures = engine.inputs
         derived = await captures.task_input(source, principal=PRINCIPAL, idempotency_key="evaluation:submitted")

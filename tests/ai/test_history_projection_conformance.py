@@ -169,7 +169,7 @@ async def test_history_head_requires_open_for_mutations() -> None:
 async def test_execution_projection_paths_reject_a_sealed_history_head(
     tmp_path: Path,
 ) -> None:
-    state = Persistence(PersistenceStorage.filesystem(tmp_path / "runtime"))
+    state = Persistence(PersistenceStorage.from_root(tmp_path / "runtime",exclusive_writer=True))
     await state.initialize(namespace="history-fence", tenant_id="tenant")
     try:
         await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
@@ -270,7 +270,7 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
 async def test_terminal_prepare_accepts_an_unprojected_execution_run(
     tmp_path: Path,
 ) -> None:
-    state = Persistence(PersistenceStorage.filesystem(tmp_path / "runtime"))
+    state = Persistence(PersistenceStorage.from_root(tmp_path / "runtime",exclusive_writer=True))
     await state.initialize(namespace="history-unprojected", tenant_id="tenant")
     terminal_plan = None
     try:
@@ -669,7 +669,7 @@ async def test_in_memory_raw_refs_use_the_same_exact_contract_as_durable() -> No
 async def test_terminal_seal_reuses_durable_projection_after_staging_release(
     tmp_path: Path,
 ) -> None:
-    state = Persistence(PersistenceStorage.filesystem(tmp_path / "runtime"))
+    state = Persistence(PersistenceStorage.from_root(tmp_path / "runtime",exclusive_writer=True))
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         await state.execution.executions.create(_record(ExecutionStatus.SUCCEEDED, 1))
@@ -831,7 +831,7 @@ async def test_public_transcript_rejects_corrupt_chunk_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     objects = FilesystemObjectStore(tmp_path / "objects")
-    state = Persistence(PersistenceStorage.filesystem(tmp_path / "state", object_store=objects))
+    state = Persistence(PersistenceStorage(PersistenceStorage.from_root(tmp_path / "state",exclusive_writer=True).plan, object_store=objects))
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))

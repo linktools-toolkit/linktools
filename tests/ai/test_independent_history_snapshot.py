@@ -23,11 +23,11 @@ class _OfflineGuard:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["filesystem", "sqlite"])
+@pytest.mark.parametrize("backend", ["local_sqlite", "sqlite"])
 async def test_history_snapshot_borrow_persistence_without_execution_producers(
     tmp_path: Path, backend: str,
 ) -> None:
-    storage = (PersistenceStorage.filesystem(tmp_path / "source") if backend == "filesystem"
+    storage = (PersistenceStorage.from_root(tmp_path / "source", exclusive_writer=True) if backend == "local_sqlite"
                else PersistenceStorage.sqlite(tmp_path / "source.sqlite"))
     principal = Principal("reader", "tenant", "service")
     objects = InMemoryObjectStore("portable")
@@ -100,7 +100,7 @@ async def test_history_retains_tenant_authorization_without_a_runtime() -> None:
 async def test_snapshot_limit_failure_keeps_borrowed_persistence_usable(tmp_path: Path) -> None:
     from linktools.ai.errors import AIError, ErrorCode
 
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open("history", storage=storage):
         pass
     async with Persistence.open("history", storage=storage, read_only=True) as persistence:

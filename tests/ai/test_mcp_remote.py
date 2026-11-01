@@ -608,7 +608,7 @@ async def test_lost_remote_result_requires_confirmation_and_recovery_does_not_re
     async with _serve() as remote:
         remote.lose_result = True
         state_path = tmp_path / "runtime"
-        storage = PersistenceStorage.filesystem(state_path)
+        storage = PersistenceStorage.from_root(state_path, exclusive_writer=True)
         features = _group(_spec(remote))
         features.capability(CheckpointCapability(), scope="runtime")
         async with Persistence.open('remote-recovery', storage=storage) as persistence_623, Runtime.attach(persistence=persistence_623, features=model_features(_RemoteModels(), features)) as runtime:
@@ -626,7 +626,7 @@ async def test_lost_remote_result_requires_confirmation_and_recovery_does_not_re
             assert remote.effects == ["committed"]
         await runtime._state.close()
         remote.lose_result = False
-        restored = PersistenceStorage.filesystem(state_path)
+        restored = PersistenceStorage.from_root(state_path, exclusive_writer=True)
         restored_features = _group(_spec(remote, headers={"X-Rotated": "true"}))
         restored_features.capability(CheckpointCapability(), scope="runtime")
         try:

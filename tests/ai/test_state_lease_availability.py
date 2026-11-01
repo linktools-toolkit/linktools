@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSessionTransaction
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence import _filesystem_transaction, _memory_transaction
+from linktools.ai.persistence import _memory_transaction
 from linktools.ai.persistence._sql import _SqlTransaction
 from linktools.ai.persistence.state import RecordLeaseTransition, StateTransactionNestingError
 from linktools.ai.storage import SqlTransactionDisposition, SqlTransactionPhase
@@ -18,7 +18,7 @@ from linktools.ai.storage import SqlTransactionDisposition, SqlTransactionPhase
 from .test_state_batch_delete_backends import _open_store, _record
 
 pytestmark = pytest.mark.asyncio
-_BACKENDS = ("memory", "filesystem", "sql")
+_BACKENDS = ("memory", "sql")
 _STAMP = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
@@ -32,7 +32,7 @@ def _clock(monkeypatch, store, backend, read):
             @staticmethod
             def now(tz):
                 return read()
-        monkeypatch.setattr(_memory_transaction if backend == "memory" else _filesystem_transaction,
+        monkeypatch.setattr(_memory_transaction,
                             "datetime", Clock)
 
 

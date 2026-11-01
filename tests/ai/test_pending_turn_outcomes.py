@@ -43,7 +43,7 @@ async def _publish(state, turn, *, sessionless=False):
     )
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("status", (ExecutionStatus.FAILED, ExecutionStatus.CANCELLED))
 @pytest.mark.parametrize("sessionless", (False, True))
 @pytest.mark.parametrize("sequence", (0, 1))

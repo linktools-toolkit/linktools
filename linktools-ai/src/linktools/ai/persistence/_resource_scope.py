@@ -3,16 +3,13 @@
 """Physical resource groups and ownership for requested state stores."""
 
 import asyncio
-import hashlib
-import json
 import os
 import tempfile
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..observe.stream import await_stream_cleanup
 from ..storage import (
@@ -22,7 +19,6 @@ from ..storage import (
     create_sql_storage_context,
     sync_directory,
 )
-from ._filesystem import FilesystemStateStorageGroup
 from ._memory import InMemoryStateStorageGroup
 from ._sql import SqlStateStorageGroup
 
@@ -34,7 +30,6 @@ if TYPE_CHECKING:
 class StorageResourceRequest:
     name: str
     route: StorageRoute
-    member_path: Path | None = None
     configure_schema: Callable[["MetaData"], None] | None = None
     uses_archive: bool = False
 
@@ -42,12 +37,6 @@ class StorageResourceRequest:
 @dataclass(frozen=True, slots=True)
 class MemoryResource:
     group: InMemoryStateStorageGroup
-
-
-@dataclass(frozen=True, slots=True)
-class FilesystemResource:
-    group: FilesystemStateStorageGroup
-    member_path: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +48,7 @@ class SqlResource:
 
 class StorageResourceScope:
     def __init__(self) -> None:
-        self.resources: tuple[MemoryResource | FilesystemResource | SqlResource, ...] = ()
+        self.resources: tuple[MemoryResource | SqlResource, ...] = ()
         self._close_actions: list[Callable[[], Awaitable[None]]] = []
         self._close_lock = asyncio.Lock()
 
@@ -71,12 +60,11 @@ class StorageResourceScope:
         namespace: str,
         tenant_id: str,
         read_only: bool = False,
-        local_sqlite_path: Path | None = None,
     ) -> "StorageResourceScope":
         scope = cls()
         try:
             await scope.initialize(requests, namespace=namespace, tenant_id=tenant_id,
-                                   read_only=read_only, local_sqlite_path=local_sqlite_path)
+                                   read_only=read_only)
         except BaseException as primary_error:
             try:
                 await await_stream_cleanup(scope.close(), None)
@@ -92,32 +80,21 @@ class StorageResourceScope:
         namespace: str,
         tenant_id: str,
         read_only: bool = False,
-        local_sqlite_path: Path | None = None,
     ) -> None:
         if len({request.name for request in requests}) != len(requests):
             raise ValueError("storage resource request names must be unique")
-        resources: dict[int, MemoryResource | FilesystemResource | SqlResource] = {}
+        resources: dict[int, MemoryResource | SqlResource] = {}
         memory = MemoryResource(InMemoryStateStorageGroup(read_only=read_only))
         self._close_actions.append(memory.group.close)
-        filesystem_groups: dict[Path, list[int]] = {}
         sql_groups: dict[tuple[str, object], list[int]] = {}
-        member_roots: dict[str, Path] = {}
         for index, request in enumerate(requests):
             route = request.route
             if route.kind == "memory":
                 resources[index] = memory
-            elif route.kind == "filesystem":
-                if route.path is None or request.member_path is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                root = route.transaction_root or route.path
-                filesystem_groups.setdefault(root, []).append(index)
-                member_roots[request.name] = request.member_path
             elif route.kind in {"sqlite", "sql"}:
                 if route.kind == "sqlite":
                     if route.path is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    if read_only and not route.path.exists():
-                        raise AIError(ErrorCode.STORAGE_NOT_FOUND)
                     key = ("sqlite", route.path)
                 else:
                     if route.engine is None:
@@ -127,23 +104,9 @@ class StorageResourceScope:
             else:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-        _validate_filesystem_member_roots(member_roots, tuple(filesystem_groups))
-        for root, indices in filesystem_groups.items():
-            route = requests[indices[-1]].route
-            members = {requests[index].name: member_roots[requests[index].name] for index in indices}
-            if read_only and any(not path.is_dir() for path in members.values()):
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            group = FilesystemStateStorageGroup(
-                root,
-                namespace=namespace,
-                tenant_id=tenant_id,
-                scope_digest=_filesystem_group_scope(namespace, tenant_id),
-                read_only=read_only,
-            )
-            self._close_actions.append(group.close)
-            for index in indices:
-                resources[index] = FilesystemResource(group, members[requests[index].name])
-
+        for key, indices in sql_groups.items():
+            if key[0] == "sqlite" and len({requests[index].route.exclusive_writer for index in indices}) != 1:
+                raise ValueError("SQLite routes for the same path must agree on exclusive_writer")
         for key, indices in sql_groups.items():
             from sqlalchemy import MetaData
 
@@ -156,6 +119,8 @@ class StorageResourceScope:
             if key[0] == "sqlite":
                 if route.path is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if read_only and not route.path.exists():
+                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
                 from sqlalchemy import URL
                 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -166,13 +131,13 @@ class StorageResourceScope:
                     await asyncio.to_thread(route.path.parent.mkdir, parents=True, exist_ok=True)
                     async with FilesystemMutationLock(route.path.with_name(route.path.name + ".init.lock")):
                         if not route.path.exists():
-                            local = route.path == local_sqlite_path
+                            local = route.exclusive_writer
                             if local:
                                 await context.acquire_local_sqlite(route.path)
                             await _provision_sqlite_database(
                                 route.path, metadata, register_cleanup=self._close_actions.append, local=local,
                             )
-                        elif route.path == local_sqlite_path:
+                        elif route.exclusive_writer:
                             if not await context.is_local_sqlite_source(route.path):
                                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED,
                                     "Shared SQLite cannot be upgraded online; restore offline into a new exclusive root")
@@ -287,70 +252,4 @@ def _sync_file(path: Path) -> None:
         os.fsync(handle.fileno())
 
 
-def _validate_filesystem_member_roots(
-    member_roots: Mapping[str, Path],
-    group_roots: tuple[Path, ...],
-) -> None:
-    ordered = tuple(
-        sorted(
-            member_roots.items(),
-            key=lambda item: (item[1].as_posix(), item[0]),
-        )
-    )
-    for index, (left_name, left) in enumerate(ordered):
-        for right_name, right in ordered[index + 1 :]:
-            if left == right or left in right.parents or right in left.parents:
-                raise ValueError(
-                    "filesystem StorageRoute member paths overlap: "
-                    f"{left_name}={left} {right_name}={right}"
-                )
-    reserved_roots = tuple(
-        root / reserved
-        for root in dict.fromkeys(group_roots)
-        for reserved in (".state-groups", ".state-archive", ".state-archive-objects", ".state-partitions")
-    )
-    for name, member in ordered:
-        for reserved in reserved_roots:
-            if (
-                member == reserved
-                or member in reserved.parents
-                or reserved in member.parents
-            ):
-                raise ValueError(
-                    "filesystem StorageRoute member path overlaps "
-                    f"coordination storage: {name}={member}"
-                )
-
-
-def _filesystem_group_scope(namespace: str, tenant_id: str) -> str:
-    # The physical transaction root already scopes this metadata locator.
-    # Opening fewer domain routes must not create a new persistent group.
-    return canonical_sha256({"namespace": namespace, "tenant_id": tenant_id})[:32]
-
-
-__all__ = ["reject_filesystem_capability_partitions", "StorageResourceRequest", "StorageResourceScope", "MemoryResource", "FilesystemResource", "SqlResource"]
-
-def reject_filesystem_capability_partitions(routes: Sequence[StorageRoute], namespace: str, tenant_id: str) -> None:
-    """Recognize existing group membership before opening a reduced resource set."""
-    roots = {route.transaction_root or route.path for route in routes if route.kind == "filesystem"}
-    namespace_digest = hashlib.sha256(namespace.encode()).hexdigest()
-    tenant_digest = hashlib.sha256(tenant_id.encode()).hexdigest()
-    for root in roots:
-        if root is None:
-            continue
-        for path in (root / ".state-groups").glob("*/manifest.json"):
-            try:
-                manifest = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if not isinstance(manifest, dict):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if manifest.get("namespace_digest") != namespace_digest or manifest.get("tenant_digest") != tenant_digest:
-                continue
-            members = manifest.get("members")
-            if (manifest.get("format") != "linktools-ai-state-group" or manifest.get("version") != 1
-                    or not isinstance(members, list)
-                    or any(not isinstance(member, dict) or not isinstance(member.get("runtime_domain"), str) for member in members)):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if any(member["runtime_domain"].startswith("capability:") for member in members):
-                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Capability persistence partitions are not supported by portable snapshots")
+__all__ = ["StorageResourceRequest", "StorageResourceScope", "MemoryResource", "SqlResource"]

@@ -471,11 +471,11 @@ async def test_cancel_intent_stays_unknown_until_execution_fact_is_available() -
 
 
 @pytest.mark.asyncio
-async def test_effect_unknown_cancel_is_discovered_after_filesystem_reopen(
+async def test_effect_unknown_cancel_is_discovered_after_local_sqlite_reopen(
     tmp_path: Path,
 ) -> None:
     storage_root = tmp_path / "cancel-effect-unknown"
-    state = PersistenceStorage.filesystem(storage_root)
+    state = PersistenceStorage.from_root(storage_root, exclusive_writer=True)
     state = Persistence(state)
     await state.initialize(namespace="task-service-cancel-reopen", tenant_id="tenant")
     try:
@@ -501,7 +501,7 @@ async def test_effect_unknown_cancel_is_discovered_after_filesystem_reopen(
     finally:
         await state.close()
 
-    reopened = PersistenceStorage.filesystem(storage_root)
+    reopened = PersistenceStorage.from_root(storage_root, exclusive_writer=True)
     reopened = Persistence(reopened)
     await reopened.initialize(namespace="task-service-cancel-reopen", tenant_id="tenant")
     try:

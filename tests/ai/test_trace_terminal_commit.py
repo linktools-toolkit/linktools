@@ -36,8 +36,6 @@ async def _run_observed(path: Path, backend: str, policy: CommitPolicy, monkeypa
     engine = None
     if backend == "memory":
         storage = PersistenceStorage.in_memory( coordination=InMemoryCacheBackend(max_bytes=65536))
-    elif backend == "filesystem":
-        storage = PersistenceStorage.filesystem(path / "state", coordination=InMemoryCacheBackend(max_bytes=65536))
     elif backend == "sqlite":
         storage = PersistenceStorage.sqlite(path / "state.db", coordination=InMemoryCacheBackend(max_bytes=65536))
     else:
@@ -160,7 +158,7 @@ async def _run_observed(path: Path, backend: str, policy: CommitPolicy, monkeypa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite", "sql"))
 async def test_terminal_trace_joins_terminal_transaction_and_reduces_intermediate_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
     deferred = await _run_observed(tmp_path / "terminal", backend, CommitPolicy.terminal(), monkeypatch)
     immediate = await _run_observed(tmp_path / "sync", backend, CommitPolicy.sync(), monkeypatch)

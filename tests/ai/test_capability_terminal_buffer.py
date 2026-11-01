@@ -18,7 +18,7 @@ from .test_capability_atomic_writes import _Buffer, _opened
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 @pytest.mark.parametrize("shared_buffer", (False, True))
 async def test_terminal_payloads_join_source_only_at_completion(tmp_path: Path, monkeypatch, backend, shared_buffer) -> None:
     first = _Buffer()

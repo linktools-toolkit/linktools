@@ -8,21 +8,22 @@ import json
 import shutil
 import threading
 from pathlib import Path
+from datetime import datetime, timezone
 
 import pytest
 from pydantic_ai_harness.memory import MemoryOperation
+from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import FilesystemSnapshotReader, Persistence, PersistenceDomain, PersistenceStorage
-from linktools.ai.persistence._capability_marker import ensure_capability_partition_marker
-from linktools.ai.persistence._filesystem import FilesystemStateStorageGroup
 from linktools.ai.persistence._filesystem_layout import _FilesystemCache
-from linktools.ai.persistence.runs import AgentRunRecord
 from linktools.ai.snapshot import SnapshotLimits
-from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy, read_object
+from linktools.ai.storage import FilesystemObjectStore, FilesystemWriterLock, InMemoryObjectStore, PayloadPolicy, read_object
 from linktools.ai.runtime._memory import RuntimeMemoryStore
 
-from .test_checkpoint_metadata_snapshot_io import _checkpoint
+from ._filesystem_legacy_fixture_helpers import (
+    install_legacy_overlay, legacy_group_root, legacy_provenance, load_legacy_source,
+)
 
 pytestmark = pytest.mark.asyncio
 NAMESPACE, TENANT = "legacy-reader", "tenant"
@@ -42,27 +43,29 @@ def _memory(state: Persistence) -> RuntimeMemoryStore:
     )
 
 
-def _retained_checkpoint():
-    checkpoint = _checkpoint(3)
-    checkpoint.messages[-1].parts[0].content = "archived request body\n" * 5000
-    return checkpoint
+def _retained_messages() -> list[ModelRequest]:
+    return [ModelRequest(parts=[UserPromptPart(
+        str(index) if index < 2 else "archived request body\n" * 5000,
+        timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )]) for index in range(3)]
 
 
-async def _write(root: Path, *, external=None) -> tuple[str, MemoryOperation]:
+async def _source(root: Path, *, external=None) -> tuple[str, MemoryOperation]:
+    load_legacy_source(root)
+    if external is not None:
+        for source_root in (root / "memory" / "objects", root / ".state-archive-objects"):
+            source = FilesystemObjectStore(source_root)
+            async for item in source.list_objects():
+                await external.put(item.key, source.open(item.key), expected_size=item.size, expected_digest=item.digest)
+            # The borrowed source must suffice without silently using the default.
+            shutil.rmtree(source_root)
     content = "迁移内存\n" * 5000
-    operation = MemoryOperation(id="write-once", fingerprint=hashlib.sha256(content.encode()).hexdigest())
-    async with Persistence.open(NAMESPACE, storage=PersistenceStorage.filesystem(root, object_store=external),
-                                tenant_id=TENANT) as state:
-        archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
-        await archive.register_agent_run(AgentRunRecord("run"))
-        await archive.save_checkpoint(_retained_checkpoint())
-        await _memory(state).write("memory/note.md", content, expected_version=None, operation=operation)
-    return content, operation
+    return content, MemoryOperation(id="write-once", fingerprint=hashlib.sha256(content.encode()).hexdigest())
 
 
 @pytest.mark.parametrize("external", (False, True, "false_valued"))
 async def test_legacy_reader_preserves_source_and_restores_typed_archive_and_memory(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, external: bool | str,
+    tmp_path: Path, external: bool | str,
 ) -> None:
     root, target = tmp_path / "source", tmp_path / "target"
     class FalseValuedStore(InMemoryObjectStore):
@@ -71,26 +74,19 @@ async def test_legacy_reader_preserves_source_and_restores_typed_archive_and_mem
 
     source_objects = (FalseValuedStore("source") if external == "false_valued" else
                       InMemoryObjectStore("source") if external else None)
-    content, operation = await _write(root, external=source_objects)
+    content, operation = await _source(root, external=source_objects)
     before = _contents(root)
-    objects = InMemoryObjectStore("snapshot")
-    async with Persistence.open(NAMESPACE, storage=PersistenceStorage.filesystem(root, object_store=source_objects),
-                                tenant_id=TENANT, read_only=True) as state:
-        expected = await state.export_snapshot(object_store=objects, limits=LIMITS)
-    assert _contents(root) == before
-
-    async def forbidden(*args, **kwargs):
-        pytest.fail("offline reader initialized a StateStore writer")
-
+    provenance = legacy_provenance()
+    objects = InMemoryObjectStore(provenance["snapshot_object_store_id"])
     reader = FilesystemSnapshotReader(root, namespace=NAMESPACE, tenant_id=TENANT,
                                        source_object_store=source_objects)
-    with monkeypatch.context() as patch:
-        patch.setattr(FilesystemStateStorageGroup, "initialize", forbidden)
-        try:
-            reference = await reader.export_snapshot(object_store=objects, limits=LIMITS)
-        finally:
-            await reader.close()
-    assert reference == expected
+    try:
+        reference = await reader.export_snapshot(object_store=objects, limits=LIMITS)
+    finally:
+        await reader.close()
+    assert reference.digest == provenance["snapshot_digest"]
+    if source_objects is not None:
+        assert len([item async for item in source_objects.list_objects()]) == 2
     assert _contents(root) == before
     manifest = json.loads(await read_object(objects, reference.key, expected_digest=reference.digest,
                                             expected_size=reference.size))
@@ -101,8 +97,9 @@ async def test_legacy_reader_preserves_source_and_restores_typed_archive_and_mem
     async with Persistence.open(NAMESPACE, storage=PersistenceStorage.from_root(target, exclusive_writer=True),
                                 tenant_id=TENANT) as state:
         checkpoint = await state.run_store.read_store(PersistenceDomain.CHECKPOINT).latest_checkpoint(agent_run_id="run")
-        assert checkpoint is not None and checkpoint.messages == _retained_checkpoint().messages
+        assert checkpoint is not None and checkpoint.messages == _retained_messages()
         captured = await _memory(state).capture()
+        assert captured["memory/note.md"]["content"] == content
         receipt = await _memory(state).get_operation(operation)
         replay = await _memory(state).write("memory/note.md", content, expected_version=None, operation=operation)
         assert receipt is not None and receipt.replayed and replay.replayed and receipt.version == replay.version
@@ -114,13 +111,9 @@ async def test_legacy_reader_preserves_source_and_restores_typed_archive_and_mem
 async def test_legacy_reader_rejects_incomplete_or_unproven_sources_without_writes(tmp_path: Path, damage: str) -> None:
     root = tmp_path / "source"
     if damage != "missing_root":
-        await _write(root)
+        await _source(root)
     if damage in {"custom", "marker", "bad_marker"}:
-        async with Persistence.open(NAMESPACE, storage=PersistenceStorage.filesystem(root), tenant_id=TENANT) as state:
-            if damage == "custom":
-                await state.execution.executions.state_store.storage_group.open_partition(hashlib.sha256(b"opaque").digest(), create=True)
-            else:
-                await state.execution.executions.state_store.mutate(ensure_capability_partition_marker)
+        install_legacy_overlay(root, "custom" if damage == "custom" else "marker")
         if damage == "bad_marker":
             marker = next((root / "execution").rglob("operations/by-key/*/*.json"))
             value = json.loads(marker.read_text())
@@ -161,7 +154,7 @@ async def test_legacy_reader_rejects_incomplete_or_unproven_sources_without_writ
 
 @pytest.mark.parametrize("foreign", ("namespace", "tenant"))
 async def test_legacy_reader_never_guesses_foreign_identity(tmp_path: Path, foreign: str) -> None:
-    await _write(tmp_path)
+    await _source(tmp_path)
     before = _contents(tmp_path)
     reader = FilesystemSnapshotReader(tmp_path, namespace="foreign" if foreign == "namespace" else NAMESPACE,
                                        tenant_id="foreign" if foreign == "tenant" else TENANT)
@@ -177,7 +170,7 @@ async def test_legacy_reader_never_guesses_foreign_identity(tmp_path: Path, fore
 async def test_legacy_reader_cancellation_drains_file_read_before_releasing_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    await _write(tmp_path)
+    await _source(tmp_path)
     before = _contents(tmp_path)
     entered, release = threading.Event(), threading.Event()
     read = _FilesystemCache.scan_records_page
@@ -198,18 +191,19 @@ async def test_legacy_reader_cancellation_drains_file_read_before_releasing_sour
         with pytest.raises(AIError) as active:
             await reader.close()
         assert active.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
-        contender = Persistence(PersistenceStorage.filesystem(tmp_path))
+        contender = FilesystemWriterLock(legacy_group_root(tmp_path) / "state.lock")
         try:
             with pytest.raises(AIError) as busy:
-                await contender.initialize(namespace=NAMESPACE, tenant_id=TENANT)
+                await contender.acquire()
             assert busy.value.code is ErrorCode.STORAGE_CONFLICT
         finally:
-            await contender.close()
+            await contender.release()
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(exporting, 5)
-        async with Persistence.open(NAMESPACE, storage=PersistenceStorage.filesystem(tmp_path), tenant_id=TENANT):
-            pass
+        contender = FilesystemWriterLock(legacy_group_root(tmp_path) / "state.lock")
+        await contender.acquire()
+        await contender.release()
     finally:
         release.set()
         await asyncio.gather(exporting, return_exceptions=True)
@@ -220,7 +214,7 @@ async def test_legacy_reader_cancellation_drains_file_read_before_releasing_sour
 async def test_legacy_reader_retains_failed_unlock_for_explicit_close_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    await _write(tmp_path)
+    await _source(tmp_path)
     before = _contents(tmp_path)
     reader = FilesystemSnapshotReader(tmp_path, namespace=NAMESPACE, tenant_id=TENANT)
     release = reader._group._group_lock.release
@@ -240,21 +234,22 @@ async def test_legacy_reader_retains_failed_unlock_for_explicit_close_retry(
         with pytest.raises(OSError) as close_error:
             await reader.close()
         assert close_error.value is unavailable
-        contender = Persistence(PersistenceStorage.filesystem(tmp_path))
+        contender = FilesystemWriterLock(legacy_group_root(tmp_path) / "state.lock")
         try:
             with pytest.raises(AIError) as busy:
-                await contender.initialize(namespace=NAMESPACE, tenant_id=TENANT)
+                await contender.acquire()
             assert busy.value.code is ErrorCode.STORAGE_CONFLICT
         finally:
-            await contender.close()
+            await contender.release()
         failed = False
         await reader.close()
         await reader.close()
         with pytest.raises(AIError) as closed:
             await reader.export_snapshot(object_store=InMemoryObjectStore(), limits=LIMITS)
         assert closed.value.code is ErrorCode.STORAGE_CLOSED
-        async with Persistence.open(NAMESPACE, storage=PersistenceStorage.filesystem(tmp_path), tenant_id=TENANT):
-            pass
+        contender = FilesystemWriterLock(legacy_group_root(tmp_path) / "state.lock")
+        await contender.acquire()
+        await contender.release()
     finally:
         failed = False
         await reader.close()
@@ -272,7 +267,7 @@ async def test_legacy_reader_close_before_export_is_final(tmp_path: Path) -> Non
 
 @pytest.mark.parametrize("limit", ("entries", "bytes"))
 async def test_legacy_reader_preserves_output_admission_limits(tmp_path: Path, limit: str) -> None:
-    await _write(tmp_path)
+    await _source(tmp_path)
     before = _contents(tmp_path)
     reader = FilesystemSnapshotReader(tmp_path, namespace=NAMESPACE, tenant_id=TENANT)
     limits = SnapshotLimits(max_entries=1 if limit == "entries" else 1000,
@@ -287,7 +282,7 @@ async def test_legacy_reader_preserves_output_admission_limits(tmp_path: Path, l
 
 
 async def test_legacy_reader_ignores_uncommitted_staging_without_deleting_it(tmp_path: Path) -> None:
-    await _write(tmp_path)
+    await _source(tmp_path)
     reader = FilesystemSnapshotReader(tmp_path, namespace=NAMESPACE, tenant_id=TENANT)
     objects = InMemoryObjectStore()
     try:
@@ -306,7 +301,7 @@ async def test_legacy_reader_ignores_uncommitted_staging_without_deleting_it(tmp
 async def test_legacy_reader_keeps_primary_failure_when_unlock_also_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    await _write(tmp_path)
+    await _source(tmp_path)
     reader = FilesystemSnapshotReader(tmp_path, namespace=NAMESPACE, tenant_id=TENANT)
     primary, cleanup = ValueError("destination unavailable"), OSError("unlock failed")
     original = reader._group._group_lock.release
@@ -329,7 +324,7 @@ async def test_legacy_reader_keeps_primary_failure_when_unlock_also_fails(
 
 
 async def test_legacy_reader_does_not_shield_cancelled_destination_io(tmp_path: Path) -> None:
-    await _write(tmp_path)
+    await _source(tmp_path)
     reader = FilesystemSnapshotReader(tmp_path, namespace=NAMESPACE, tenant_id=TENANT)
     entered = asyncio.Event()
 
@@ -344,8 +339,9 @@ async def test_legacy_reader_does_not_shield_cancelled_destination_io(tmp_path: 
         exporting.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(exporting, 5)
-        async with Persistence.open(NAMESPACE, storage=PersistenceStorage.filesystem(tmp_path), tenant_id=TENANT):
-            pass
+        contender = FilesystemWriterLock(legacy_group_root(tmp_path) / "state.lock")
+        await contender.acquire()
+        await contender.release()
     finally:
         exporting.cancel()
         await asyncio.gather(exporting, return_exceptions=True)
@@ -353,16 +349,8 @@ async def test_legacy_reader_does_not_shield_cancelled_destination_io(tmp_path: 
 
 
 async def test_legacy_reader_keeps_other_tenant_state_and_objects_out_of_snapshot(tmp_path: Path) -> None:
-    await _write(tmp_path)
-    async with Persistence.open(NAMESPACE, storage=PersistenceStorage.filesystem(tmp_path), tenant_id="other") as state:
-        foreign = RuntimeMemoryStore(
-            state.memory, object_store=state.object_store(PersistenceDomain.MEMORY), namespace=NAMESPACE,
-            tenant_id="other", execution_id="other-execution", memory_scope="retained",
-            payload_policy=PayloadPolicy(inline_limit_bytes=1),
-        )
-        body = "other tenant private body"
-        await foreign.write("memory/other.md", body, expected_version=None,
-                            operation=MemoryOperation(id="other", fingerprint=hashlib.sha256(body.encode()).hexdigest()))
+    await _source(tmp_path)
+    install_legacy_overlay(tmp_path, "foreign")
     before = _contents(tmp_path)
     objects = InMemoryObjectStore()
     reader = FilesystemSnapshotReader(tmp_path, namespace=NAMESPACE, tenant_id=TENANT)

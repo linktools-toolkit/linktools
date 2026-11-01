@@ -18,7 +18,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionHandle, ExecutionRequest, ResumeSessionRequest
 from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.spec import AgentSpec, MCPServerSpec, SkillSpec
-from linktools.ai.core import Principal, PrincipalKind
+from linktools.ai.core import Principal, PrincipalKind, SessionStatus
 from pydantic_ai.capabilities import AbstractCapability
 
 
@@ -267,7 +267,7 @@ async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
 
     async def _authorized(session_id: str, principal: object, action: object) -> object:
         del session_id, principal, action
-        return SimpleNamespace(agent_id="agent", cwd=None)
+        return SimpleNamespace(agent_id="agent", cwd=None, status=SessionStatus.OPEN)
 
     async def _reconcile(record: object) -> object:
         return record

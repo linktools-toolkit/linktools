@@ -1088,7 +1088,6 @@ async def _put_snapshot_object(
 
 
 from ._capability_marker import ensure_capability_partition_marker
-from ._resource_scope import reject_filesystem_capability_partitions
 from ._snapshot import snapshot_object_ref_from_payload, snapshot_object_ref_payload
 
-__all__ = ['RuntimeSnapshotOperations', 'SnapshotExclusiveGuard', 'SnapshotLimits', 'SnapshotResources', 'ensure_capability_partition_marker', 'has_capability_partition_marker', 'reject_filesystem_capability_partitions', 'restore_snapshot', 'snapshot_object_ref_from_payload', 'snapshot_object_ref_payload']
+__all__ = ['RuntimeSnapshotOperations', 'SnapshotExclusiveGuard', 'SnapshotLimits', 'SnapshotResources', 'ensure_capability_partition_marker', 'has_capability_partition_marker', 'restore_snapshot', 'snapshot_object_ref_from_payload', 'snapshot_object_ref_payload']

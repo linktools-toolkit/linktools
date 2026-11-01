@@ -267,7 +267,7 @@ async def _runtime_deferred_session(root: str, resumed: bool, backend: str) -> N
     features.capability(_DeferredInstructions(), scope="agent")
     features.capability(_ChangingInstructions(state), scope="agent")
     features.agent("default", instructions="Fixed instructions.", allow_tools=(), allow_skills=(), allow_subagents=())
-    storage = PersistenceStorage.sqlite(Path(root) / "runtime.db") if backend == "sqlite" else PersistenceStorage.filesystem(Path(root))
+    storage = PersistenceStorage.sqlite(Path(root) / "runtime.db") if backend == "sqlite" else PersistenceStorage.from_root(Path(root), exclusive_writer=True)
     async with Persistence.open('deferred-instructions', storage=storage) as persistence_239, Runtime.attach(persistence=persistence_239, features=features) as runtime:
         agent = runtime.agents.get()
         session = agent.session("session") if resumed else await agent.create_session("session")
@@ -290,7 +290,7 @@ async def _runtime_deferred_session(root: str, resumed: bool, backend: str) -> N
             (Path(root) / "expected-context.json").write_bytes(encode_model_messages(context))
 
 
-@pytest.mark.parametrize("backend", ["filesystem", "sqlite"])
+@pytest.mark.parametrize("backend", ["local_sqlite", "sqlite"])
 def test_runtime_fresh_process_reopen_retains_instructions_and_deferred_activation(tmp_path: Path, backend: str) -> None:
     script = ("import asyncio, sys; from tests.ai.test_instruction_message_contract import _runtime_deferred_session; "
               "asyncio.run(_runtime_deferred_session(sys.argv[1], sys.argv[2] == 'reopen', sys.argv[3]))")

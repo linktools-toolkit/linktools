@@ -44,9 +44,8 @@ class _DisconnectedStream(httpx2.AsyncByteStream):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
 async def test_child_stream_failure_details_survive_parent_history_and_reopen(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     streams: list[_DisconnectedStream] = []
     feedback: list[str] = []
@@ -85,8 +84,6 @@ async def test_child_stream_failure_details_survive_parent_history_and_reopen(
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
 
     def storage() -> PersistenceStorage:
-        if backend == "filesystem":
-            return PersistenceStorage.filesystem(tmp_path / "state")
         return PersistenceStorage.sqlite(tmp_path / "state.db")
 
     async with Persistence.open('child-stream-failure', storage=storage()) as persistence_89, Runtime.attach(persistence=persistence_89, features=features) as runtime:

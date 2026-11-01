@@ -111,7 +111,7 @@ async def test_failed_replayed_request_keeps_every_received_raw_response_part() 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("sqlite",))
 @pytest.mark.parametrize("completion", ("success", "provider_error", "cancel", "close"))
 async def test_partial_response_is_published_only_at_request_or_shutdown_completion(
     tmp_path: Path, backend: str, completion: str,
@@ -208,7 +208,7 @@ async def test_partial_response_is_published_only_at_request_or_shutdown_complet
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("sqlite",))
 @pytest.mark.parametrize("completion", ("provider_error", "cancel"))
 async def test_interrupted_tool_arguments_remain_raw_without_tool_execution(
     tmp_path: Path, backend: str, completion: str,

@@ -13,7 +13,7 @@ from linktools.ai.persistence._sql import SqlStateStore, _SqlTransaction
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sql"))
 @pytest.mark.parametrize("failure", ("acquire_rejected", "cancel_after_acquire", "final_validation"))
 async def test_initial_claim_never_commits_incomplete_session(tmp_path, monkeypatch, backend, failure):
     async with _open_store(backend, tmp_path / backend) as store:

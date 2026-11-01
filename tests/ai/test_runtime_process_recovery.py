@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from linktools.ai.errors import ErrorCode
+
 from ._runtime_process_test_helpers import _RuntimeProcess
 
 
@@ -87,13 +89,14 @@ def test_sql_startup_completes_a_prepared_terminal_handoff(tmp_path: Path) -> No
             remote.close()
 
 
-def test_filesystem_execution_route_preserves_automatic_crash_recovery(tmp_path: Path) -> None:
-    owner = _RuntimeProcess(tmp_path / "runtime.db", phase="filesystem")
+@pytest.mark.parametrize("phase", ("local_sqlite",))
+def test_exclusive_execution_route_preserves_automatic_crash_recovery(tmp_path: Path, phase: str) -> None:
+    owner = _RuntimeProcess(tmp_path / "runtime.db", phase=phase)
     remote = None
     try:
         owner.crash()
         remote = _RuntimeProcess(
-            tmp_path / "runtime.db", phase="filesystem", execution_id=owner.initial["execution_id"],
+            tmp_path / "runtime.db", phase=phase, execution_id=owner.initial["execution_id"],
         )
         assert remote.initial["generation"] > owner.initial["generation"]
         assert remote.request("await_model")["model_calls"] == 1
@@ -103,3 +106,22 @@ def test_filesystem_execution_route_preserves_automatic_crash_recovery(tmp_path:
         owner.close()
         if remote is not None:
             remote.close()
+
+
+def test_split_local_sqlite_execution_rejects_a_second_live_process(tmp_path: Path) -> None:
+    owner = _RuntimeProcess(tmp_path / "runtime.db", phase="local_sqlite")
+    try:
+        with pytest.raises(AssertionError) as rejected:
+            _RuntimeProcess(tmp_path / "runtime.db", phase="local_sqlite",
+                            execution_id=owner.initial["execution_id"])
+        failure = rejected.value.args[0]
+        assert failure["error"] == "AIError"
+        assert failure["code"] == ErrorCode.STORAGE_CONFLICT.value
+        assert owner.process.is_alive()
+        current = owner.request("await_model")
+        assert current["generation"] == owner.initial["generation"]
+        assert current["model_calls"] == 1
+        assert owner.request("finish")["status"] == "SUCCEEDED"
+        owner.close(check=True)
+    finally:
+        owner.close()

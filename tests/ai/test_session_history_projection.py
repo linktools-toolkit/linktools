@@ -436,7 +436,7 @@ async def test_session_history_reports_missing_committed_checkpoint() -> None:
 
 @pytest.mark.asyncio
 async def test_durable_session_history_survives_runtime_storage_reopen(tmp_path) -> None:
-    state = PersistenceStorage.filesystem(tmp_path / "runtime")
+    state = PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True)
     state = Persistence(state)
     await state.initialize(namespace="session-history-durable", tenant_id="tenant")
     agent_run_id = "session-history-durable-run"
@@ -449,7 +449,7 @@ async def test_durable_session_history_survives_runtime_storage_reopen(tmp_path)
     )
     await state.close()
 
-    reopened = PersistenceStorage.filesystem(tmp_path / "runtime")
+    reopened = PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True)
     reopened = Persistence(reopened)
     await reopened.initialize(namespace="session-history-durable", tenant_id="tenant")
     try:

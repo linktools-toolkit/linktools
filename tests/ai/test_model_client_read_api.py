@@ -41,7 +41,7 @@ from .test_runtime_history_public import _Executions
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "exclusive_sqlite", "sqlite"))
 async def test_public_client_reads_are_independent_authorized_and_cursor_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:

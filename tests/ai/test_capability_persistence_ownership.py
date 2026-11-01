@@ -65,7 +65,7 @@ async def test_conversation_owners_isolate_identical_run_ids_and_preserve_contex
             await archive.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_conversation_owner_reads_committed_state_without_changing_cursor(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -326,7 +326,7 @@ async def test_core_producer_fencing_does_not_require_trace_archive(checkpoint_e
             await store.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_materialized_trace_partition_is_atomic_with_core_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:

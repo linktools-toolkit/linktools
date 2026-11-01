@@ -19,7 +19,7 @@ from .test_incremental_projection_boundaries import _storage
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_children_read_observes_authorization_changes_outside_read_scope(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -90,7 +90,7 @@ async def test_children_metadata_uses_fewer_sql_read_setups_without_skipping_que
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_children_read_fails_closed_when_parent_disappears_after_authorization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
@@ -116,7 +116,7 @@ async def test_children_read_fails_closed_when_parent_disappears_after_authoriza
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("denial", ("policy", "tenant"))
 async def test_children_read_rejects_unauthorized_parent_before_child_query(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, denial: str,
@@ -148,7 +148,7 @@ async def test_children_read_rejects_unauthorized_parent_before_child_query(
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("sqlite",))
 async def test_children_read_works_with_read_only_storage(tmp_path: Path, backend: str) -> None:
     state = _storage(backend, tmp_path)
     state = Persistence(state)

@@ -10,6 +10,7 @@ import pytest
 
 from linktools.ai.runtime import Runtime
 from linktools.ai.web import create_app
+import linktools.commands.ai._common as common_command
 from ._runtime_test_helpers import RuntimeUsageModels
 from .test_web_console import client, _HEADERS
 
@@ -65,7 +66,7 @@ def test_web_command_preserves_terminal_history_after_handoff_and_reopen(
                     assert response.json()['output'] == {'text': 'done'}
 
     monkeypatch.setattr(Runtime, 'open', tracked_open)
-    monkeypatch.setattr(web_command, '_local_model', lambda *_, **__: RuntimeUsageModels())
+    monkeypatch.setattr(common_command._ModelOptions, 'create_model', lambda _self: RuntimeUsageModels())
     monkeypatch.setattr(uvicorn, 'Server', Server)
     for _ in range(2):
         args = web_command.command.create_parser().parse_args([
@@ -85,7 +86,8 @@ async def test_local_runtime_retains_terminal_model_history(
     )
 
     workspace = _load_workspace(str(tmp_path))
-    async with _open_local_runtime(workspace, model=RuntimeUsageModels()) as runtime:
+    async with _open_local_runtime(workspace, model=RuntimeUsageModels()) as local:
+        runtime = local.runtime
         agent = runtime.agents.get('default')
         if session_bound:
             session = await agent.create_session('session')
@@ -116,7 +118,7 @@ def test_run_command_history_is_readable_after_command_close(
     from linktools.ai.history import History
     from linktools.commands.ai._common import _load_workspace, _local_runtime_storage
 
-    monkeypatch.setattr(run_command, '_local_runtime_model', lambda *_: RuntimeUsageModels())
+    monkeypatch.setattr(common_command._ModelOptions, 'create_model', lambda _self: RuntimeUsageModels())
     args = run_command.command.create_parser().parse_args([
         '--project', str(tmp_path), '--model', 'fake', '--json', 'hello',
     ])

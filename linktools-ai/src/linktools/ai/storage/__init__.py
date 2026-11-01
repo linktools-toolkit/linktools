@@ -84,7 +84,6 @@ from ._dialects import (
     sql_unique,
 )
 from ._files import (
-    FilesystemJournal,
     Sha256Digest,
     StorageId,
     StoragePath,
@@ -150,7 +149,6 @@ __all__ = [
     "ContentCache",
     "CacheBackend",
     "FilesystemCacheBackend",
-    "FilesystemJournal",
     "FilesystemLeaseCoordinator",
     "FilesystemMutationLock",
     "FilesystemObjectStore",

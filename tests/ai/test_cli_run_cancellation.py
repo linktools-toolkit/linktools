@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.commands.ai.run import _cancel_interrupted_execution
+from linktools.commands.ai._output import _cancel_interrupted_execution
 
 
 @pytest.mark.asyncio
@@ -73,10 +73,10 @@ async def test_ai_run_json_interrupt_cancels_owned_execution() -> None:
         def get(self):
             return Agent()
 
-    from linktools.commands.ai.run import _emit_result
+    from linktools.commands.ai._output import emit_result
 
     task = asyncio.create_task(
-        _emit_result(Runtime(), "prompt", "session", True, False, False)
+        emit_result(Runtime(), "prompt", "session", True, False, False)
     )
     await started.wait()
     task.cancel()

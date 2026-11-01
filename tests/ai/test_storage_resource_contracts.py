@@ -49,14 +49,13 @@ class _HotOnly:
         self.items.pop(key, None)
 
 
-@pytest.mark.parametrize("kind", ["memory", "transient", "filesystem", "sqlite"])
+@pytest.mark.parametrize("kind", ["memory", "transient", "sqlite"])
 def test_storage_route_borrows_cache_without_changing_backend_identity(kind, tmp_path) -> None:
     factory = getattr(StorageRoute, kind)
     args = () if kind in {"memory", "transient"} else (tmp_path / "state",)
     cache = _HotOnly()
-    options = {"transaction_root": tmp_path} if kind == "filesystem" else {}
-    plain = factory(*args, **options)
-    cached = factory(*args, cache=cache, **options)
+    plain = factory(*args)
+    cached = factory(*args, cache=cache)
     assert cached.cache is cache
     assert plain.cache is None
     assert cached == plain
@@ -68,7 +67,7 @@ def test_storage_route_borrows_cache_without_changing_backend_identity(kind, tmp
     copied = cached.with_cache(replacement)
     assert copied is not cached
     assert copied == cached
-    assert copied.transaction_root == cached.transaction_root
+    assert copied.exclusive_writer == cached.exclusive_writer
     assert copied.cache is replacement
     assert cached.cache is cache
     assert copied.with_cache(None).cache is None

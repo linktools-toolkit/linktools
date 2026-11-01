@@ -330,7 +330,7 @@ async def test_request_raw_part_coordinates_survive_readonly_archive_reopen(tmp_
     group.agent("default", model="default", system_prompt="Coordinate system prompt",
                 instructions=("Coordinate instructions",))
     group.capability(TraceCapability(), scope="runtime")
-    async with Persistence.open('raw-parts', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_334, Runtime.attach(persistence=persistence_334, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+    async with Persistence.open('raw-parts', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_334, Runtime.attach(persistence=persistence_334, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         principal = runtime.default_principal
         execution = await runtime.agents.get("default").start("run both tools")
         try:
@@ -343,7 +343,7 @@ async def test_request_raw_part_coordinates_survive_readonly_archive_reopen(tmp_
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
         await _assert_request_part_coordinates(execution.history)
 
-    async with Persistence.open('raw-parts', storage=PersistenceStorage.filesystem(tmp_path), tenant_id="default", read_only=True) as history_persistence_344, History.open(persistence=history_persistence_344) as archived:
+    async with Persistence.open('raw-parts', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id="default", read_only=True) as history_persistence_344, History.open(persistence=history_persistence_344) as archived:
         async def read_archived(**selectors):
             return await archived.history(execution.execution_id, principal=principal, **selectors)
 

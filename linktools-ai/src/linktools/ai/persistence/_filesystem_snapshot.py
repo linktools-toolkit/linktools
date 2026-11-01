@@ -2,44 +2,19 @@
 # -*- coding: utf-8 -*-
 """Read clean legacy filesystem state without initializing a state writer."""
 
-import asyncio
 import hashlib
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import TypeVar
 
 from ..core import canonical_sha256, validate_persistence_namespace, validate_tenant_id
 from ..errors import AIError, ErrorCode
 from ..storage import FilesystemObjectStore, ObjectRef, ObjectStore, namespace_digest
-from ._filesystem import FilesystemStateStorageGroup
-from ._filesystem_layout import _FilesystemCache, _read_json
+from ._filesystem_reader import _FilesystemOfflineSource, _read_owned
+from ._filesystem_layout import _FilesystemCache
 from ._plan import PersistenceDomain
 from .snapshots import _SnapshotArchive, _SnapshotExportSource, _export_snapshot
 from ._snapshot import SnapshotLimits
 from .state import FactScanCursor, OperationScanCursor, RecordScanCursor, StoredFact, StoredOperation, StoredRecord
-
-_ValueT = TypeVar("_ValueT")
-
-
-async def _read_owned(read: Callable[[], _ValueT]) -> _ValueT:
-    # A cancelled read must finish before the source's offline locks are released.
-    task = asyncio.create_task(asyncio.to_thread(read))
-    cancellation: asyncio.CancelledError | None = None
-    while not task.done():
-        try:
-            await asyncio.wait((task,))
-        except asyncio.CancelledError as error:
-            cancellation = cancellation or error
-    try:
-        result = task.result()
-    except BaseException as error:
-        if cancellation is not None:
-            raise cancellation from error
-        raise
-    if cancellation is not None:
-        raise cancellation
-    return result
-
 
 class _FilesystemSnapshotPartition:
     def __init__(self, root: Path) -> None:
@@ -80,9 +55,9 @@ class FilesystemSnapshotReader:
         self._tenant_id = tenant_id
         self._source_object_store = source_object_store
         self._scope = canonical_sha256({"namespace": namespace, "tenant_id": tenant_id})[:32]
-        self._group = FilesystemStateStorageGroup(
+        self._group = _FilesystemOfflineSource(
             self._root, namespace=namespace, tenant_id=tenant_id,
-            scope_digest=self._scope, read_only=True,
+            scope_digest=self._scope,
         )
 
     async def close(self) -> None:
@@ -97,7 +72,8 @@ class FilesystemSnapshotReader:
         if not isinstance(limits, SnapshotLimits):
             raise TypeError("limits must be SnapshotLimits")
         async with self._group.offline_exclusivity():
-            members = self._group.describe_offline_members()
+            inventory = self._group.describe()
+            members = inventory.members
             if any(member.runtime_domain not in {domain.value for domain in PersistenceDomain} | {"group_archive"}
                    or member.partition_key is not None for member in members):
                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Opaque capability partitions require their original migration owner")
@@ -123,10 +99,8 @@ class FilesystemSnapshotReader:
             async def archives() -> AsyncIterator[_SnapshotArchive]:
                 archive_root = roots.get("group_archive")
                 if archive_root is not None:
-                    metadata = await _read_owned(lambda: _read_json(
-                        self._root / ".state-groups" / self._scope / "archive_scope.json",
-                    ))
-                    yield _SnapshotArchive(metadata["archive_scope_id"],
+                    assert inventory.archive_scope is not None
+                    yield _SnapshotArchive(inventory.archive_scope,
                                            min(PersistenceDomain, key=lambda value: value.value),
                                            _FilesystemSnapshotPartition(archive_root))
 

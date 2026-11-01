@@ -46,7 +46,7 @@ def _storage(path, backend='sqlite', cache=None):
             execution=StorageRoute.sqlite(path / 'execution.db', cache=cache),
         ), coordination=cache)
     return (PersistenceStorage.sqlite(path / 'state.db', cache=cache, coordination=cache) if backend == 'sqlite'
-            else PersistenceStorage.filesystem(path / 'state', cache=cache, coordination=cache))
+            else PersistenceStorage.from_root(path / 'state', exclusive_writer=True, cache=cache, coordination=cache))
 
 
 @asynccontextmanager
@@ -59,7 +59,7 @@ async def _open(path, model, *, retain=False, backend='sqlite', cache=None):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('backend', ['sqlite', 'filesystem'])
+@pytest.mark.parametrize('backend', ['sqlite', 'local_sqlite'])
 async def test_builtin_metadata_lifecycle_survives_feature_and_cache_changes(tmp_path, backend):
     async def model(messages, info):
         raise AssertionError('metadata operations must not execute a model')
@@ -94,7 +94,7 @@ async def test_builtin_metadata_lifecycle_survives_feature_and_cache_changes(tmp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('backend', ['sqlite', 'filesystem', 'split_sqlite'])
+@pytest.mark.parametrize('backend', ['sqlite', 'local_sqlite', 'split_sqlite'])
 async def test_unretained_first_turn_releases_session_but_cannot_resume_after_reopen(tmp_path, backend):
     calls = []
 

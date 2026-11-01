@@ -28,7 +28,7 @@ def _reader(state, *, authorization=None):
     )
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("scope", ("owned", "missing", "other_owner"))
 async def test_session_lookup_uses_point_reads_within_the_list_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, scope: str,

@@ -13,7 +13,7 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models import ModelRequestParameters
 
 from linktools.ai.workspace import Workspace
-from linktools.commands.ai._common import _local_model_options, _local_runtime_model
+from linktools.commands.ai._common import _ModelOptions
 from linktools.commands.ai.run import command as run_command
 from linktools.commands.ai.acp import command as acp_command
 from linktools.commands.ai.web import command as web_command
@@ -35,17 +35,22 @@ def test_cli_protocol_configuration_round_trip(monkeypatch, tmp_path, command, a
     (root / "config.yaml").write_text(f"model_api: {api}\nmodel: workspace-model\n")
     workspace = Workspace.discover(tmp_path)
     args = command.create_parser().parse_args(arguments)
-    options = _local_model_options(workspace, args)
-    assert options == {"api": api, "model": f"{prefix.lower()}-model",
-                       "api_key": f"{prefix.lower()}-fixture-key", "base_url": f"https://{prefix.lower()}.invalid/v1"}
-    binding = _local_runtime_model(workspace, args)
+    options = _ModelOptions.load(workspace, args)
+    binding = options.create_model()
     assert binding.contract.get("api", "openai") == api
+    assert binding.model_identity == binding.provider + f":{prefix.lower()}-model"
+    assert binding.api_key == f"{prefix.lower()}-fixture-key"
+    assert binding.base_url == f"https://{prefix.lower()}.invalid/v1"
     assert "fixture-key" not in json.dumps(binding.contract)
+    assert "fixture-key" not in repr(options)
     explicit = command.create_parser().parse_args(arguments + ["--model-api", "anthropic",
         "--model", "explicit-model", "--base-url", "https://explicit.invalid", "--api-key", "explicit-fixture"])
-    assert _local_model_options(workspace, explicit) == {"api": "anthropic", "model": "explicit-model",
-        "base_url": "https://explicit.invalid", "api_key": "explicit-fixture"}
-    assert _local_model_options(workspace, args) == options
+    overridden = _ModelOptions.load(workspace, explicit).create_model()
+    assert overridden.contract["api"] == "anthropic"
+    assert overridden.model_identity == overridden.provider + ":explicit-model"
+    assert overridden.base_url == "https://explicit.invalid"
+    assert overridden.api_key == "explicit-fixture"
+    assert _ModelOptions.load(workspace, args).create_model().contract == binding.contract
     assert "fixture-key" not in (root / "config.yaml").read_text()
 
 
@@ -71,10 +76,9 @@ async def test_cli_configuration_invokes_native_protocol_offline(monkeypatch, tm
     args = run_command.create_parser().parse_args(["hello", "--model-api", api, "--model", model_name,
         "--base-url", "" if empty_override else base_url,
         "--api-key", "" if empty_override else "fixture-key"])
-    options = _local_model_options(Workspace(tmp_path, {}), args)
-    assert options["base_url"] == base_url
-    assert options["api_key"] == "fixture-key"
-    binding = _local_runtime_model(Workspace(tmp_path, {}), args)
+    binding = _ModelOptions.load(Workspace(tmp_path, {}), args).create_model()
+    assert binding.base_url == base_url
+    assert binding.api_key == "fixture-key"
     async with binding.materialize() as model:
         result = await model.request([ModelRequest(parts=[UserPromptPart("hello")])], {"max_tokens": 128}, ModelRequestParameters())
     assert result.parts[0].content == "answer"
@@ -121,8 +125,10 @@ def test_protocol_cache_selection_does_not_reuse_openai_connection(monkeypatch, 
     monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
     workspace = Workspace(tmp_path, {"model": " workspace-model "})
     args = run_command.create_parser().parse_args(["hello"])
-    assert _local_model_options(workspace, args) == {"api": "anthropic", "model": "workspace-model",
-                                                 "base_url": None, "api_key": None}
+    binding = _ModelOptions.load(workspace, args).create_model()
+    assert binding.contract["api"] == "anthropic"
+    assert binding.model_identity == binding.provider + ":workspace-model"
+    assert binding.base_url is None and binding.api_key is None
 
 
 @pytest.mark.parametrize("api", ["anthropic-messages", "openai-chat", "invalid", ["anthropic"]])
@@ -130,8 +136,7 @@ def test_invalid_workspace_protocol_fails_before_model_assembly(tmp_path, api):
     from linktools.ai.errors import AIError, ErrorCode
     from argparse import Namespace
     with pytest.raises(AIError) as raised:
-        _local_runtime_model(Workspace(tmp_path, {"model_api": api}),
-                              Namespace(model_api=None, model="fixture", base_url=None, api_key=None))
+        _ModelOptions.load(Workspace(tmp_path, {"model_api": api}), Namespace(model_api=None, model="fixture", base_url=None, api_key=None)).create_model()
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
 
 
@@ -167,7 +172,7 @@ import json, sys
 from pathlib import Path
 from linktools.core import environ
 from linktools.ai.workspace import Workspace
-from linktools.commands.ai._common import _local_runtime_model
+from linktools.commands.ai._common import _ModelOptions
 from linktools.commands.ai.run import command as run
 from linktools.commands.ai.acp import command as acp
 from linktools.commands.ai.web import command as web
@@ -179,7 +184,7 @@ before = set(environ.config.persisted_keys())
 workspace = Workspace(Path.cwd(), {"model": "workspace-model"})
 for command, arguments in ((run, ["hello"]), (acp, []), (web, [])):
     args = command.create_parser().parse_args(arguments)
-    binding = _local_runtime_model(workspace, args)
+    binding = _ModelOptions.load(workspace, args).create_model()
     assert binding.contract.get("api", "openai") == api
     assert binding.model_identity == binding.provider + ":source-model"
     assert binding.base_url == "https://source.invalid"
@@ -187,12 +192,12 @@ for command, arguments in ((run, ["hello"]), (acp, []), (web, [])):
     assert "source-fixture-key" not in json.dumps(binding.contract)
     explicit = command.create_parser().parse_args(arguments + ["--model-api", api, "--model", "cli-model",
         "--base-url", "https://cli.invalid", "--api-key", "cli-fixture-key"])
-    overridden = _local_runtime_model(workspace, explicit)
+    overridden = _ModelOptions.load(workspace, explicit).create_model()
     assert overridden.model_identity == overridden.provider + ":cli-model"
     assert overridden.base_url == "https://cli.invalid"
     assert overridden.api_key == "cli-fixture-key"
     assert set(environ.config.persisted_keys()) == before
-    again = _local_runtime_model(workspace, args)
+    again = _ModelOptions.load(workspace, args).create_model()
     assert again.api_key == "source-fixture-key"
     assert again.model_identity == binding.model_identity
 assert not any("API_KEY" in key for key in environ.config.persisted_keys())

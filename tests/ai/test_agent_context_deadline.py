@@ -117,7 +117,7 @@ async def test_cold_recovery_restores_absolute_deadline_once(tmp_path: Path, mon
     contexts: list[AgentContext[None]] = []
     features = _group(contexts)
     features.capability(CheckpointCapability(), scope="runtime")
-    async with Persistence.open('deadline-recovery', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_114, Runtime.attach(persistence=persistence_114, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('deadline-recovery', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_114, Runtime.attach(persistence=persistence_114, features=model_features(RuntimeUsageModels(), features)) as runtime:
         async def interrupted_launch(*args, **kwargs):
             pass
         with monkeypatch.context() as fault:
@@ -125,7 +125,7 @@ async def test_cold_recovery_restores_absolute_deadline_once(tmp_path: Path, mon
             run = await runtime.agents.get().start("recover", budget=RunBudget(deadline_at=_DEADLINE))
         execution_id = run.execution_id
     assert not contexts
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open('deadline-recovery', storage=storage) as persistence_125, Runtime.attach(persistence=persistence_125, features=model_features(RuntimeUsageModels(), features), auto_recover=False) as runtime:
         reads: list[str] = []
         read = runtime._state.execution.budgets.read

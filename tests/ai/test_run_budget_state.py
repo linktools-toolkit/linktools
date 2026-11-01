@@ -23,12 +23,12 @@ from linktools.ai.persistence._snapshot_validation import (
 from linktools.ai.persistence._sql import _SqlTransaction
 
 
-@pytest_asyncio.fixture(params=("memory", "filesystem", "sqlite"))
+@pytest_asyncio.fixture(params=("memory", "local_sqlite", "sqlite"))
 async def budget_storage(request, tmp_path):
     if request.param == "memory":
         storage = PersistenceStorage.in_memory()
-    elif request.param == "filesystem":
-        storage = PersistenceStorage.filesystem(tmp_path / "runtime")
+    elif request.param == "local_sqlite":
+        storage = PersistenceStorage.from_root(tmp_path / "runtime",exclusive_writer=True)
     else:
         storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     storage = Persistence(storage)
@@ -383,10 +383,10 @@ async def test_commit_readback_recovers_own_admission_without_granting_duplicate
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("local_sqlite", "sqlite"))
 async def test_budget_reopen_retains_counts_unknown_and_dispatch_identities(backend, tmp_path):
     def open_storage():
-        return (PersistenceStorage.filesystem(tmp_path / "state") if backend == "filesystem"
+        return (PersistenceStorage.from_root(tmp_path / "state",exclusive_writer=True) if backend == "local_sqlite"
                 else PersistenceStorage.sqlite(tmp_path / "state.db"))
 
     storage = open_storage()
@@ -448,7 +448,7 @@ async def test_shared_budget_counts_across_independent_sqlite_instances(tmp_path
 @pytest.mark.asyncio
 async def test_storage_close_drains_cancelled_budget_commit_before_releasing_backend(tmp_path, monkeypatch):
     path = tmp_path / "state"
-    storage = PersistenceStorage.filesystem(path)
+    storage = PersistenceStorage.from_root(path,exclusive_writer=True)
     storage = Persistence(storage)
     await storage.initialize(namespace="budget-tests", tenant_id="tenant")
     budgets = storage.execution.budgets
@@ -477,7 +477,7 @@ async def test_storage_close_drains_cancelled_budget_commit_before_releasing_bac
     with pytest.raises(AIError) as closed:
         await budgets.admit_model("scope", "next")
     assert closed.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
-    reopened = PersistenceStorage.filesystem(path)
+    reopened = PersistenceStorage.from_root(path,exclusive_writer=True)
     reopened = Persistence(reopened)
     await reopened.initialize(namespace="budget-tests", tenant_id="tenant")
     try:
@@ -488,10 +488,10 @@ async def test_storage_close_drains_cancelled_budget_commit_before_releasing_bac
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("local_sqlite", "sqlite"))
 async def test_budget_reservations_survive_portable_snapshot(backend, tmp_path):
     def open_storage():
-        return (PersistenceStorage.filesystem(tmp_path / "state") if backend == "filesystem"
+        return (PersistenceStorage.from_root(tmp_path / "state",exclusive_writer=True) if backend == "local_sqlite"
                 else PersistenceStorage.sqlite(tmp_path / "state.db"))
 
     storage = open_storage()

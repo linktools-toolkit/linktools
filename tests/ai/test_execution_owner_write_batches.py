@@ -77,7 +77,7 @@ def _assert_semantic_snapshot(batch, scalar, reduced_guards):
             assert replace(actual, storage_revision=expected.storage_revision) == expected
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_final_control_cas_preserves_business_records_and_uses_fewer_writes(tmp_path: Path, backend: str) -> None:
     current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, durable_trace=False)
     states = []
@@ -123,7 +123,7 @@ async def test_final_control_cas_preserves_business_records_and_uses_fewer_write
             await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_producer_final_cas_preserves_generation_and_subclass_guard(tmp_path: Path, backend: str) -> None:
     current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, durable_trace=False)
     snapshots = []
@@ -185,7 +185,7 @@ async def test_closed_terminal_any_member_conflict_rolls_back_every_final_value(
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_closed_final_cas_is_early_fence_and_later_failure_rolls_back(tmp_path: Path, backend: str) -> None:
     state = _storage(backend, tmp_path)
     state = Persistence(state)
@@ -381,7 +381,7 @@ async def test_read_committed_terminal_and_tool_guard_share_execution_first_orde
         await engine.dispose()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_closed_terminal_lost_ack_uses_complete_readback_without_reapplying(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:

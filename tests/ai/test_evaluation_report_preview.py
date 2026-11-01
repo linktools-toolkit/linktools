@@ -28,7 +28,7 @@ from .test_evaluation_persistence import storage_for
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("local_sqlite", "sqlite"))
 async def test_repeated_report_previews_preserve_state_and_objects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:

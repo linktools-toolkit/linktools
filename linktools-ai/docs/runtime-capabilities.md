@@ -197,9 +197,10 @@ namespace. Pass the shared Persistence to `History.open(persistence=...)` and
 activating Agent hooks or Metrics recorders.
 Restored portable generations use their local routes and caches.
 
-Shared filesystem group manifests, locks and empty domain metadata are provisioned
-independently of selected features to preserve atomic recovery and historical reads.
-Unselected modules do not write new business archives or start observation workers.
+Storage resource groups are established independently of selected features to
+preserve atomic recovery and historical reads. Local SQLite initializes its own
+schema; server SQL schemas require explicit provisioning. Unselected modules do
+not write new business archives or start observation workers.
 
 ### Retry defaults
 

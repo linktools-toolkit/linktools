@@ -131,7 +131,7 @@ async def test_newer_producer_keeps_head_only_read(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 async def test_terminal_hint_cannot_replace_current_tenant_proof(tmp_path: Path, backend: str) -> None:
     from .test_model_control_observation import _state
 

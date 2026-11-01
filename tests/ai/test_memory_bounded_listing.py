@@ -5,7 +5,6 @@
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-import shutil
 from types import SimpleNamespace
 from typing import Any
 
@@ -205,165 +204,8 @@ async def test_memory_repository_applies_prefix_before_limit() -> None:
         await state.close()
 
 
-async def test_filesystem_memory_listing_reads_only_requested_record_page(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from linktools.ai.persistence import _filesystem_layout as filesystem
-    from linktools.ai.persistence._filesystem import FilesystemStateStore
-    from linktools.ai.persistence._plan import PersistenceDomain
-
-    root = tmp_path / "memory-state"
-    state = FilesystemStateStore(
-        root,
-        namespace="memory-bounded-fs",
-        tenant_id="tenant",
-        runtime_domain=PersistenceDomain.MEMORY.value,
-        _range_index=True,
-    )
-    await state.initialize()
-    repository = MemoryRepositoryImpl(
-        state,
-        namespace="memory-bounded-fs",
-        tenant_id="tenant",
-    )
-    now = datetime.now(timezone.utc)
-    values = tuple(
-        MemoryRecord(
-            f"memory-{index}",
-            "scope-digest",
-            StoredPayload.inline_text("content"),
-            {"path": f"memory/{index:03d}.md"},
-            1,
-            now,
-            now,
-        )
-        for index in range(40)
-    )
-    await state.mutate(
-        lambda transaction: transaction.insert_records(
-            tuple(
-                repository._stored("memory", value.memory_id, value) for value in values
-            )
-        )
-    )
-    await state.close()
-
-    reopened = FilesystemStateStore(
-        root,
-        namespace="memory-bounded-fs",
-        tenant_id="tenant",
-        runtime_domain=PersistenceDomain.MEMORY.value,
-        _range_index=True,
-    )
-    await reopened.initialize()
-    repository = MemoryRepositoryImpl(
-        reopened,
-        namespace="memory-bounded-fs",
-        tenant_id="tenant",
-    )
-    original_read_json = filesystem._read_json
-    record_reads = 0
-
-    def counting_read_json(path: Path):
-        nonlocal record_reads
-        if "records" in path.parts:
-            record_reads += 1
-        return original_read_json(path)
-
-    monkeypatch.setattr(filesystem, "_read_json", counting_read_json)
-    page = await repository.list(
-        tenant_id="tenant",
-        memory_scope_digest="scope-digest",
-        prefix="memory/",
-        cursor=None,
-        limit=1,
-    )
-    assert [value.metadata["path"] for value in page.items] == ["memory/000.md"]
-    assert page.next_cursor is not None
-    assert record_reads == 2
-    await reopened.close()
 
 
-async def test_filesystem_rebuilds_missing_record_index_before_bounded_query(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from linktools.ai.persistence import _filesystem_layout as filesystem
-    from linktools.ai.persistence._filesystem import FilesystemStateStore
-    from linktools.ai.persistence._plan import PersistenceDomain
-
-    root = tmp_path / "memory-reindex"
-    state = FilesystemStateStore(
-        root,
-        namespace="memory-reindex",
-        tenant_id="tenant",
-        runtime_domain=PersistenceDomain.MEMORY.value,
-        _range_index=True,
-    )
-    await state.initialize()
-    repository = MemoryRepositoryImpl(
-        state,
-        namespace="memory-reindex",
-        tenant_id="tenant",
-    )
-    now = datetime.now(timezone.utc)
-    values = tuple(
-        MemoryRecord(
-            f"memory-{index}",
-            "scope-digest",
-            StoredPayload.inline_text("content"),
-            {"path": f"memory/{index:03d}.md"},
-            1,
-            now,
-            now,
-        )
-        for index in range(20)
-    )
-    await state.mutate(
-        lambda transaction: transaction.insert_records(
-            tuple(
-                repository._stored("memory", value.memory_id, value) for value in values
-            )
-        )
-    )
-    await state.close()
-    shutil.rmtree(root / "record-index")
-
-    reopened = FilesystemStateStore(
-        root,
-        namespace="memory-reindex",
-        tenant_id="tenant",
-        runtime_domain=PersistenceDomain.MEMORY.value,
-        _range_index=True,
-    )
-    await reopened.initialize()
-    assert (root / "record-index" / "complete").read_text(encoding="utf-8") == "1"
-    repository = MemoryRepositoryImpl(
-        reopened,
-        namespace="memory-reindex",
-        tenant_id="tenant",
-    )
-    original_read_json = filesystem._read_json
-    record_reads = 0
-
-    def counting_read_json(path: Path):
-        nonlocal record_reads
-        if "records" in path.parts:
-            record_reads += 1
-        return original_read_json(path)
-
-    monkeypatch.setattr(filesystem, "_read_json", counting_read_json)
-    page = await repository.list(
-        tenant_id="tenant",
-        memory_scope_digest="scope-digest",
-        prefix="memory/",
-        cursor=None,
-        limit=1,
-    )
-    assert [value.metadata["path"] for value in page.items] == ["memory/000.md"]
-    assert record_reads == 2
-    await reopened.close()
 
 
 async def test_list_paths_preserves_lexical_prefix() -> None:
@@ -393,89 +235,50 @@ async def test_list_paths_preserves_empty_prefix() -> None:
     assert records.calls[0]["prefix"] == ""
 
 
-async def test_filesystem_empty_prefix_query_does_not_enumerate_scope_index(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("prefix", ("", "memory/"))
+async def test_sql_memory_listing_reopens_and_reads_only_requested_page(
+    tmp_path: Path, prefix: str,
 ) -> None:
-    from linktools.ai.persistence._filesystem import FilesystemStateStore
-    from linktools.ai.persistence._plan import PersistenceDomain
+    from sqlalchemy import event
+    from linktools.ai.persistence import Persistence, PersistenceStorage
 
-    root = tmp_path / "memory-prefix-trie"
-    state = FilesystemStateStore(
-        root,
-        namespace="memory-prefix-trie",
-        tenant_id="tenant",
-        runtime_domain=PersistenceDomain.MEMORY.value,
-        _range_index=True,
-    )
-    await state.initialize()
-    repository = MemoryRepositoryImpl(
-        state,
-        namespace="memory-prefix-trie",
-        tenant_id="tenant",
-    )
+    storage = PersistenceStorage.sqlite(tmp_path / "memory.db")
     now = datetime.now(timezone.utc)
     values = tuple(
         MemoryRecord(
-            f"memory-{index}",
-            "scope-digest",
-            StoredPayload.inline_text("content"),
-            {"path": f"memory/{index:03d}.md"},
-            1,
-            now,
-            now,
-        )
-        for index in range(200)
+            f"memory-{index}", "scope-digest", StoredPayload.inline_text("content"),
+            {"path": f"memory/{index:03d}.md"}, 1, now, now,
+        ) for index in range(200)
     )
-    await state.mutate(
-        lambda transaction: transaction.insert_records(
-            tuple(
-                repository._stored("memory", value.memory_id, value) for value in values
+    async with Persistence.open("memory-bounded", storage=storage, tenant_id="tenant") as state:
+        repository = state.memory.records
+        await repository.state_store.mutate(lambda transaction: transaction.insert_records(
+            tuple(repository._stored("memory", value.memory_id, value) for value in values)
+        ))
+    async with Persistence.open("memory-bounded", storage=storage, tenant_id="tenant", read_only=True) as state:
+        repository = state.memory.records
+        engine = repository.state_store.context.engine
+        queries = []
+
+        def capture(connection, cursor, statement, parameters, context, many):
+            if statement.lstrip().upper().startswith("SELECT") and "ai_state_records" in statement:
+                queries.append((statement, parameters))
+
+        event.listen(engine.sync_engine, "before_cursor_execute", capture)
+        try:
+            page = await repository.list(
+                tenant_id="tenant", memory_scope_digest="scope-digest", prefix=prefix,
+                cursor=None, limit=1,
             )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", capture)
+        assert [value.metadata["path"] for value in page.items] == ["memory/000.md"]
+        assert page.next_cursor is not None
+        assert len(queries) == 1
+        assert "LIMIT" in queries[0][0]
+        assert queries[0][1][-2:] == (2, 0)
+        second = await repository.list(
+            tenant_id="tenant", memory_scope_digest="scope-digest", prefix="memory/0",
+            cursor=page.next_cursor, limit=1,
         )
-    )
-    await state.close()
-
-    reopened = FilesystemStateStore(
-        root,
-        namespace="memory-prefix-trie",
-        tenant_id="tenant",
-        runtime_domain=PersistenceDomain.MEMORY.value,
-        _range_index=True,
-    )
-    await reopened.initialize()
-    repository = MemoryRepositoryImpl(
-        reopened,
-        namespace="memory-prefix-trie",
-        tenant_id="tenant",
-    )
-
-    original_iterdir = Path.iterdir
-
-    def guarded_iterdir(path: Path):
-        if "record-index" in path.parts:
-            raise AssertionError(
-                "bounded record-index query must not enumerate directories"
-            )
-        return original_iterdir(path)
-
-    monkeypatch.setattr(Path, "iterdir", guarded_iterdir)
-    page = await repository.list(
-        tenant_id="tenant",
-        memory_scope_digest="scope-digest",
-        prefix="",
-        cursor=None,
-        limit=1,
-    )
-    assert [value.metadata["path"] for value in page.items] == ["memory/000.md"]
-    assert page.next_cursor is not None
-
-    second = await repository.list(
-        tenant_id="tenant",
-        memory_scope_digest="scope-digest",
-        prefix="memory/0",
-        cursor=page.next_cursor,
-        limit=1,
-    )
-    assert [value.metadata["path"] for value in second.items] == ["memory/001.md"]
-    await reopened.close()
+        assert [value.metadata["path"] for value in second.items] == ["memory/001.md"]

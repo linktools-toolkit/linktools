@@ -245,7 +245,7 @@ async def test_invalid_reference_metadata_still_fails_integrity(cache_enabled: b
 async def test_only_durable_routes_use_cache_backend(tmp_path: Path) -> None:
     store, cache = RecordingStore(), RecordingCache()
     plan = PersistencePlan(
-        conversation=StorageRoute.filesystem(tmp_path / "durable", cache=cache),
+        conversation=StorageRoute.sqlite(tmp_path / "durable.db", cache=cache, exclusive_writer=True),
         artifact=StorageRoute.transient(cache=cache),
         memory=StorageRoute.memory(cache=cache),
     )

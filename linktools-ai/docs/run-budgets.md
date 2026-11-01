@@ -108,7 +108,7 @@ identities are refused; repeated identical settlement is idempotent.
 - Expiration/exhaustion stops new admissions and retains completed results. It
   does not cancel in-flight calls or revoke an already-started external effect
 
-Memory, filesystem, and SQL-backed Runtime state use the existing transaction
+Memory and SQL-backed Runtime state use the existing transaction
 and optimistic-concurrency owner for scope and reservation updates. Durable
 backends retain admitted counts, settled tokens, and unresolved reservations
 across restart. A missing scope is an integrity failure, not a new empty budget.

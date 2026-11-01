@@ -306,7 +306,7 @@ async def test_single_scope_evaluation_uses_the_bound_task_engine(tmp_path: Path
     judge = Task("exact", exact, effect_policy="none")
     dimension = DimensionContract("exact", "boolean", "higher", 0, 1)
     principal = service_principal("default", "evaluator")
-    async with Runtime.open("evaluation", storage=PersistenceStorage.filesystem(tmp_path)) as runtime:
+    async with Runtime.open("evaluation", storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as runtime:
         engine = await runtime.tasks.bind(target, judge)
         evaluations = await runtime.evaluations.bind(engine)
         dataset = await evaluations.publish_dataset(
@@ -406,7 +406,7 @@ async def test_explicit_external_agent_keeps_its_owner_and_authorization() -> No
 async def test_handoff_supports_idle_task_and_evaluation_domains(tmp_path: Path) -> None:
     features = _features()
     features.capability(CheckpointCapability())
-    runtime = Runtime.open("handoff", storage=PersistenceStorage.filesystem(tmp_path), features=features)
+    runtime = Runtime.open("handoff", storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), features=features)
     async with runtime:
         engine = await runtime.tasks.bind()
         await runtime.evaluations.bind(engine)
@@ -421,7 +421,7 @@ async def test_handoff_rejects_inflight_evaluation_without_closing_other_domains
 ) -> None:
     features = _features()
     features.capability(CheckpointCapability())
-    runtime = Runtime.open("handoff-admission", storage=PersistenceStorage.filesystem(tmp_path), features=features)
+    runtime = Runtime.open("handoff-admission", storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), features=features)
     entered, release = asyncio.Event(), asyncio.Event()
     async with runtime:
         task = Task("echo", _echo, effect_policy="none")

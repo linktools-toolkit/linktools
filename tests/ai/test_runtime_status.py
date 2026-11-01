@@ -9,7 +9,6 @@ from ._runtime_test_helpers import model_features
 
 import asyncio
 from pathlib import Path
-from dataclasses import replace
 
 import pytest
 from sqlalchemy import event
@@ -21,12 +20,12 @@ from linktools.ai.migrate import provision_database
 from linktools.ai.observe import Metrics
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.storage import FilesystemObjectStore, StorageRoute
+from linktools.ai.storage import FilesystemObjectStore
 from ._runtime_test_helpers import RuntimeUsageModels
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["memory", "filesystem", "sqlite", "sql"])
+@pytest.mark.parametrize("backend", ["memory", "local_sqlite", "sqlite", "sql"])
 async def test_runtime_status_reports_bound_storage_without_io(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
@@ -35,11 +34,9 @@ async def test_runtime_status_reports_bound_storage_without_io(
     objects = FilesystemObjectStore(tmp_path / "custom-objects", store_id="chosen-objects")
     if backend == "memory":
         storage = PersistenceStorage.in_memory()
-    elif backend == "filesystem":
-        storage = PersistenceStorage.filesystem(tmp_path / "state", object_store=objects)
-        storage = PersistenceStorage(replace(storage.plan, trace=StorageRoute.filesystem(
-            tmp_path / "state" / "custom-trace", transaction_root=tmp_path / "state",
-        )), object_store=objects)
+    elif backend == "local_sqlite":
+        plan = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True).plan
+        storage = PersistenceStorage(plan, object_store=objects)
         features.capability(TraceCapability())
     elif backend == "sqlite":
         storage = PersistenceStorage.sqlite(tmp_path / "chosen.db", object_store=objects)
@@ -70,17 +67,17 @@ async def test_runtime_status_reports_bound_storage_without_io(
             assert status["metrics"].enabled is False
             assert status["metrics"].accepting is False
             routes = {item["domain"].value: item for item in status["storage"]}
-            assert routes["execution"]["backend"] == backend
+            assert routes["execution"]["backend"] == ("sqlite" if backend == "local_sqlite" else backend)
             assert routes["execution"]["retention"].value == ("volatile" if backend == "memory" else "durable")
             if backend in {"memory", "sql"}:
                 assert all(item["path"] is None and item["object_store_paths"] == () for item in routes.values())
             else:
-                expected_path = tmp_path / "state" / "execution" if backend == "filesystem" else tmp_path / "chosen.db"
+                expected_path = tmp_path / "state" / "runtime.db" if backend == "local_sqlite" else tmp_path / "chosen.db"
                 assert routes["execution"]["path"] == str(expected_path)
                 assert routes["execution"]["object_store_id"] == "chosen-objects"
                 assert routes["execution"]["object_store_paths"] == (str(tmp_path / "custom-objects"),)
-            if backend == "filesystem":
-                assert routes["trace"]["path"] == str(tmp_path / "state" / "custom-trace" / "trace")
+            if backend == "local_sqlite":
+                assert routes["trace"]["path"] == str(tmp_path / "state" / "runtime.db")
             assert "private-connection" not in repr(status)
     finally:
         if engine is not None:

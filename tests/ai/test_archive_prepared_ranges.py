@@ -16,7 +16,7 @@ from .test_shared_content_archive import _archive, _publish
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_prepared_ranges_resolve_without_a_state_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
@@ -43,7 +43,7 @@ async def test_prepared_ranges_resolve_without_a_state_scope(
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_partial_prepared_ranges_fall_back_to_one_scope_and_cold_skips_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
@@ -83,7 +83,7 @@ async def test_partial_prepared_ranges_fall_back_to_one_scope_and_cold_skips_pro
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("fault", ("root_scope", "prepared_owner", "unexpected_next", "missing_node"))
 async def test_prepared_range_probe_never_turns_invalid_or_missing_metadata_into_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, fault: str,

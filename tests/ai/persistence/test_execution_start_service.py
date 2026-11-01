@@ -309,8 +309,8 @@ async def test_sql_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None
 
 
 @pytest.mark.asyncio
-async def test_filesystem_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None:
-    state = Persistence(PersistenceStorage.filesystem(tmp_path / "runtime"))
+async def test_local_sqlite_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None:
+    state = Persistence(PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True))
     await state.initialize(namespace="filesystem-start", tenant_id="tenant")
     try:
         service = _service(state, backend=_Launcher(state.execution.executions))

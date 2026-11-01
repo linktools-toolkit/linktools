@@ -23,6 +23,7 @@ from linktools.ai.history import History
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.web import create_app
+import linktools.commands.ai._common as common_command
 from ._runtime_test_helpers import RuntimeUsageModels, _persistence_capabilities
 
 _HEADERS = {"X-LinkTools-Console": "1"}
@@ -503,11 +504,19 @@ def test_web_cli_owns_one_runtime_and_closes_it_after_server_failure(monkeypatch
     from contextlib import asynccontextmanager
     from linktools.ai.errors import AIError, ErrorCode
     from linktools.cli import CommandError
+    import linktools.commands.ai._common as common_command
     import linktools.commands.ai.web as web_command
     import uvicorn
 
     original_open = Runtime.open
+    original_assets = common_command._local_runtime_assets
     lifecycle = []
+    asset_stores = []
+
+    def create_assets(workspace):
+        store = original_assets(workspace)
+        asset_stores.append(store)
+        return store
 
     @asynccontextmanager
     async def tracked_open(*args: object, **kwargs: object):
@@ -525,6 +534,7 @@ def test_web_cli_owns_one_runtime_and_closes_it_after_server_failure(monkeypatch
         async def serve(self) -> None:
             assert self.config.host == "127.0.0.1"
             assert self.config.proxy_headers is False
+            assert asset_stores and all(store.ready for store in asset_stores)
             async with client(self.config.app) as http:
                 response = await http.get("/api/config")
                 assert response.status_code == 200
@@ -532,12 +542,74 @@ def test_web_cli_owns_one_runtime_and_closes_it_after_server_failure(monkeypatch
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
     monkeypatch.setattr(Runtime, "open", tracked_open)
-    monkeypatch.setattr(web_command, "_local_model", lambda *_, **__: RuntimeUsageModels())
+    monkeypatch.setattr(common_command, "_local_runtime_assets", create_assets)
+    monkeypatch.setattr(common_command._ModelOptions, "create_model", lambda _self: RuntimeUsageModels())
     monkeypatch.setattr(uvicorn, "Server", Server)
     args = web_command.command.create_parser().parse_args(["--project", str(tmp_path), "--model", "fake"])
     with pytest.raises(CommandError):
         web_command.command.run(args)
     assert lifecycle == ["open", "close"]
+    assert all(not store.ready for store in asset_stores)
+
+
+def test_web_cli_provides_default_memory_tools_to_messages(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from contextlib import asynccontextmanager
+    from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
+    from pydantic_ai.models.function import AgentInfo
+    import linktools.commands.ai.web as web_command
+    import uvicorn
+
+    from ._runtime_test_helpers import _Models, _UsageFunctionModel
+
+    memory_tools = {"read_memory", "write_memory", "search_memory", "delete_memory"}
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        assert memory_tools <= {tool.name for tool in info.function_tools}
+        returned = next((part for part in messages[-1].parts if isinstance(part, ToolReturnPart)), None)
+        if returned is not None:
+            return ModelResponse(parts=[TextPart(str(returned.content))])
+        prompt = next(part.content for part in messages[-1].parts if isinstance(part, UserPromptPart))
+        call = (ToolCallPart("write_memory", {"file": "web-notes.md", "content": "remembered from web"})
+                if prompt == "remember" else ToolCallPart("read_memory", {"file": "web-notes.md"}))
+        return ModelResponse(parts=[call])
+
+    original_open = Runtime.open
+    runtimes: list[Runtime] = []
+
+    @asynccontextmanager
+    async def tracked_open(*args: object, **kwargs: object):
+        async with original_open(*args, **kwargs) as runtime:
+            runtimes.append(runtime)
+            yield runtime
+
+    class Server:
+        def __init__(self, config: object) -> None:
+            self.config = config
+
+        async def serve(self) -> None:
+            async with client(self.config.app) as http:
+                settings = await http.get("/api/config")
+                declarations = settings.json()["capabilities"]
+                assert ("agent", "default") in {(item["kind"], item["id"]) for item in declarations}
+                assert memory_tools <= {item["id"] for item in declarations if item["kind"] == "tool"}
+                created = await http.post("/api/sessions", headers=_HEADERS,
+                    json={"session_id": "memory-session", "request_id": "create-memory-session"})
+                assert created.status_code == 201, created.text
+                for prompt in ("remember", "recall"):
+                    response = await http.post("/api/session/messages?session_id=memory-session", headers=_HEADERS,
+                        json={"prompt": prompt, "request_id": prompt})
+                    assert response.status_code == 202, response.text
+                    execution = await runtimes[0].executions.get(response.json()["execution_id"])
+                    result = (await execution.wait(timeout_seconds=10)).result
+                    assert result.status.value == "SUCCEEDED", result
+                    if prompt == "recall":
+                        assert result.output["text"].strip() == "remembered from web"
+
+    monkeypatch.setattr(Runtime, "open", tracked_open)
+    monkeypatch.setattr(common_command._ModelOptions, "create_model", lambda _self: _Models(_UsageFunctionModel(respond)))
+    monkeypatch.setattr(uvicorn, "Server", Server)
+    args = web_command.command.create_parser().parse_args(["--project", str(tmp_path), "--model", "fake"])
+    assert web_command.command.run(args) == 0
 
 
 def test_web_cli_requires_a_model_before_opening_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

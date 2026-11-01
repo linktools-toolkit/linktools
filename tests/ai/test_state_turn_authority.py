@@ -16,7 +16,7 @@ from .test_state_batch_delete_backends import _open_store
 from .test_state_lease_availability import _clock
 
 pytestmark = pytest.mark.asyncio
-_BACKENDS = ("memory", "filesystem", "sql")
+_BACKENDS = ("memory", "sql")
 
 
 def _backend(store):

@@ -18,10 +18,12 @@ from linktools.ai.task import Task, TaskGraph, TaskNode
 from linktools.ai.task.engine import TaskEngine
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
+from ._sqlite_failure_timeline import sqlite_failure_timeline
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("backend", "producer_count"), [("filesystem", 1), ("sqlite", 1), ("sqlite", 2)])
+@pytest.mark.parametrize(("backend", "producer_count"), [("local_sqlite", 1), ("sqlite", 1), ("sqlite", 2)])
+@sqlite_failure_timeline
 async def test_graph_observes_tools_before_models_finish_and_replays_after_reopen(tmp_path, backend, producer_count):
     release = asyncio.Event()
     entered = [asyncio.Event() for _ in range(producer_count)]
@@ -49,8 +51,8 @@ async def test_graph_observes_tools_before_models_finish_and_replays_after_reope
     storage_path = tmp_path / "state"
 
     def storage():
-        if backend == "filesystem":
-            return PersistenceStorage.filesystem(storage_path)
+        if backend == "local_sqlite":
+            return PersistenceStorage.from_root(storage_path, exclusive_writer=True)
         return PersistenceStorage.sqlite(storage_path / "runtime.db")
     async with AsyncExitStack() as stack:
         persistence = await stack.enter_async_context(Persistence.open(

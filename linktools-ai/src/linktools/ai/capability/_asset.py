@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """Asset-backed declarations captured before Agent compilation."""
 
-from typing import Generic, TypeVar
+from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 
@@ -15,12 +16,17 @@ from ._declaration import BuiltinDeclarationLoader
 from ._loading import CapabilityLoadContext, CapabilityLoader
 from ._skill import SkillDefinition
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from typing import Self
+
 AppT = TypeVar("AppT")
 
 
 class AssetCapability(AbstractCapability[AgentContext[AppT]], Generic[AppT]):
-    """Own declaration loading from one borrowed, versioned AssetStore.
+    """Load declarations from one versioned AssetStore.
 
+    The constructor borrows a ready store; open() owns its store's lifetime.
     RuntimeFeatures consumes this Runtime-scoped capability during capture;
     it does not participate in native Agent execution hooks.
     """
@@ -34,6 +40,23 @@ class AssetCapability(AbstractCapability[AgentContext[AppT]], Generic[AppT]):
         self._loaders: dict[str, CapabilityLoader[AppT]] = {
             kind: BuiltinDeclarationLoader(kind) for kind in ("agent", "skill", "mcp", "rule")
         }
+
+    @classmethod
+    @asynccontextmanager
+    async def open(cls, store: AssetStore) -> "AsyncIterator[Self]":
+        """Initialize and close the store around capture and all Runtime use."""
+        capability = cls(store)
+        try:
+            await store.initialize()
+            yield capability
+        except BaseException as primary_error:
+            try:
+                await store.close()
+            except BaseException as cleanup_error:
+                raise primary_error from cleanup_error
+            raise
+        else:
+            await store.close()
 
     def for_agent(self, agent: object) -> "AssetCapability[AppT]":
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,

@@ -28,7 +28,6 @@ from ..storage import (
     TransientObjectStore,
     read_object,
 )
-from ._filesystem import FilesystemStateStorageGroup
 from ._memory import InMemoryStateStorageGroup
 from ._sql import SqlStateStorageGroup
 from .state import StateStore
@@ -224,7 +223,8 @@ class _RuntimeObjectRouter:
     def local_paths(self) -> tuple[Path, ...]:
         paths: list[Path] = []
         for store in (*self._stores.values(), *self._archive_stores.values()):
-            paths.extend(store.local_paths())
+            if isinstance(store, FilesystemObjectStore):
+                paths.append(store.root)
         return tuple(dict.fromkeys(paths))
 
     def working_object_store(
@@ -285,7 +285,6 @@ def build_runtime_object_router(
 ) -> _RuntimeObjectRouter:
     values: dict[PersistenceDomain, ObjectStore] = {}
     close_guard_stores: list[ObjectStore] = []
-    filesystem_objects: dict[Path, FilesystemObjectStore] = {}
     sql_objects: dict[int, SqlObjectStore] = {}
     for domain in PersistenceDomain:
         if not runtime_domain_uses_object_store(domain):
@@ -301,14 +300,6 @@ def build_runtime_object_router(
             store = TransientObjectStore()
             values[domain] = store
             close_guard_stores.append(store)
-        elif route.kind == "filesystem" and route.path is not None:
-            object_root = (route.path / "objects").resolve()
-            store = filesystem_objects.get(object_root)
-            if store is None:
-                store = FilesystemObjectStore(object_root)
-                filesystem_objects[object_root] = store
-                close_guard_stores.append(store)
-            values[domain] = store
         elif route.kind in {"sqlite", "sql"} and domain in contexts:
             context = contexts[domain]
             context_key = id(context)
@@ -327,10 +318,8 @@ def build_runtime_object_router(
         if group not in group_objects:
             if isinstance(group, InMemoryStateStorageGroup):
                 archive_store = group.archive_objects
-            elif external is not None and isinstance(group, (FilesystemStateStorageGroup, SqlStateStorageGroup)):
+            elif external is not None and isinstance(group, SqlStateStorageGroup):
                 archive_store = external
-            elif isinstance(group, FilesystemStateStorageGroup):
-                archive_store = FilesystemObjectStore(group.transaction_root / ".state-archive-objects")
             elif isinstance(group, SqlStateStorageGroup) and domain in contexts:
                 archive_store = SqlObjectStore.from_context(contexts[domain])
             else:

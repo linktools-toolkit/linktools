@@ -42,7 +42,6 @@ from linktools.ai.persistence.state import (
     StoredFact,
     StoredRecord,
 )
-from linktools.ai.persistence._filesystem import FilesystemStateStorageGroup
 from linktools.ai.persistence._memory import InMemoryStateStorageGroup
 from linktools.ai.persistence._sql import SqlStateStorageGroup, _SqlTransaction
 from linktools.ai.storage import InMemoryCacheBackend, StorageRoute
@@ -83,7 +82,7 @@ class _Probe:
     release: asyncio.Event | None = None
 
     def observe(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for backend in (InMemoryStateStorageGroup, FilesystemStateStorageGroup, SqlStateStorageGroup):
+        for backend in (InMemoryStateStorageGroup, SqlStateStorageGroup):
             original = backend.mutate
 
             async def mutate(group, stores, callback, *, original=original):
@@ -260,8 +259,6 @@ async def _opened(
     engine = None
     if backend == "memory":
         storage = PersistenceStorage.in_memory()
-    elif backend == "filesystem":
-        storage = PersistenceStorage.filesystem(tmp_path / "state")
     elif backend == "sqlite":
         storage = PersistenceStorage.sqlite(tmp_path / "state.db")
     else:
@@ -326,7 +323,7 @@ def test_public_persistence_types_resolve_without_runtime_import_cycles() -> Non
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite", "sql"))
 async def test_equal_policy_values_join_one_real_transaction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
     buffer = _Buffer()
     policies = (_batch(buffer), _batch(buffer))
@@ -353,7 +350,7 @@ async def test_equal_policy_values_join_one_real_transaction(tmp_path: Path, mon
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite", "sql"))
 async def test_participant_conflict_rolls_back_all_and_retains_explicit_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
     buffer = _Buffer()
     async with _opened(tmp_path, monkeypatch, backend=backend, policies=(_batch(buffer), _batch(buffer))) as opened:
@@ -432,7 +429,7 @@ async def test_submission_keys_are_idempotent_and_payloads_are_frozen(tmp_path: 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "sql", "separate-conversation", "pending-turn"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite", "sql", "separate-conversation", "pending-turn"))
 async def test_terminal_custom_writes_join_the_existing_execution_transaction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
     async with _opened(
         tmp_path, monkeypatch, backend="sqlite" if backend in {"separate-conversation", "pending-turn"} else backend,

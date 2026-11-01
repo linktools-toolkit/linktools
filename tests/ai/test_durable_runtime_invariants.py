@@ -334,16 +334,25 @@ async def test_execution_retention_releases_objects_after_execution_lookup() -> 
 
     async def execution_get(execution_id: str, *, tenant_id: str) -> object:
         calls.append(f"execution:{execution_id}:{tenant_id}")
-        return SimpleNamespace(session_id=None, agent_run_seq=0, retention_closed=True)
+        return SimpleNamespace(session_id=None, agent_run_seq=0, retention_closed=True,
+                               status=ExecutionStatus.SUCCEEDED)
 
     async def release_object_scope(domain, *, owner_scope: str) -> None:
         calls.append(f"objects:{owner_scope}")
+
+    async def read_source(callback):
+        return await callback(None)
+
+    async def execution_get_in_transaction(transaction, execution_id, *, tenant_id):
+        return await execution_get(execution_id, tenant_id=tenant_id)
 
     controller = object.__new__(RuntimeRetentionController)
     controller._execution = SimpleNamespace(
         executions=SimpleNamespace(
             close_retention=close_retention,
             get=execution_get,
+            get_in_transaction=execution_get_in_transaction,
+            state_store=SimpleNamespace(read=read_source),
         ),
     )
     controller._conversation = SimpleNamespace()

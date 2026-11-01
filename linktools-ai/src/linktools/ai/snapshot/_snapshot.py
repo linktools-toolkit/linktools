@@ -9,7 +9,7 @@ import os
 import posixpath
 import shutil
 import secrets
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -30,6 +30,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..storage import (
     FilesystemMutationLock,
+    FilesystemObjectStore,
     InMemoryObjectStore,
     ObjectRef,
     ObjectStore,
@@ -41,11 +42,10 @@ from ..history import History
 from ..persistence.snapshots import (
     SnapshotExclusiveGuard,
     SnapshotLimits,
-    reject_filesystem_capability_partitions,
     snapshot_object_ref_payload as _object_ref_payload,
     snapshot_object_ref_from_payload as _object_ref_from_payload,
 )
-from ..persistence import PersistenceStorage, Persistence, PersistenceDomain
+from ..persistence import PersistenceStorage, Persistence
 
 if TYPE_CHECKING:
     from ..workspace import Workspace
@@ -100,23 +100,27 @@ class Snapshot:
         persistence: Persistence,
         object_store: ObjectStore,
         workspace: "Workspace | None" = None,
+        workspace_exclude_paths: Sequence[str | Path] = (),
         exclusive: SnapshotExclusiveGuard,
         limits: SnapshotLimits,
     ) -> ObjectRef:
-        """Capture read-only persistence and Workspace under caller-owned quiescence."""
+        """Capture read-only persistence and Workspace under caller-owned quiescence.
+
+        Known state and filesystem object paths are excluded automatically.
+        Use workspace_exclude_paths for additional local paths, including custom
+        object stores. These exclusions do not change persistence object export.
+        """
         if not persistence.ready:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         resolved_namespace = persistence.namespace
         resolved_tenant = persistence.tenant_id
         if not isinstance(limits, SnapshotLimits):
             raise TypeError("limits must be SnapshotLimits")
+        if isinstance(workspace_exclude_paths, (str, bytes)):
+            raise TypeError("workspace_exclude_paths must be a sequence of paths")
+        exclude_paths = tuple(workspace_exclude_paths)
 
         async def publish() -> ObjectRef:
-            await asyncio.to_thread(
-                reject_filesystem_capability_partitions,
-                tuple(persistence.plan.route(domain) for domain in PersistenceDomain),
-                resolved_namespace, resolved_tenant,
-            )
             storage_ref = await persistence.export_snapshot(
                 object_store=object_store,
                 limits=limits,
@@ -137,6 +141,7 @@ class Snapshot:
                 workspace,
                 storage=persistence,
                 object_store=object_store,
+                exclude_paths=exclude_paths,
                 limits=limits,
             )
             manifest: dict[str, JsonValue] = {
@@ -551,6 +556,7 @@ async def _capture_workspace(
     *,
     storage: "Persistence",
     object_store: ObjectStore,
+    exclude_paths: Sequence[str | Path],
     limits: SnapshotLimits,
 ) -> dict[str, JsonValue]:
     if workspace is None:
@@ -559,10 +565,10 @@ async def _capture_workspace(
             "entries": [],
         }
     root = workspace.root.resolve()
-    excluded = tuple(
-        path.resolve()
-        for path in (*storage.local_paths(), *object_store.local_paths())
-    )
+    paths = (*storage.local_paths(), *exclude_paths)
+    if isinstance(object_store, FilesystemObjectStore):
+        paths = (*paths, object_store.root)
+    excluded = tuple(Path(path).expanduser().resolve() for path in paths)
     if any(path == root for path in excluded):
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
 

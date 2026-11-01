@@ -37,7 +37,7 @@ from .test_pending_turn_sessionless import _commit, _standalone
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("local_sqlite", "sqlite"))
 @pytest.mark.parametrize("cached", (False, True), ids=("no-cache", "cache"))
 async def test_standalone_fork_preserves_actual_tools_and_imported_context_after_reopen(
     tmp_path: Path, backend: str, cached: bool,
@@ -72,7 +72,7 @@ async def test_standalone_fork_preserves_actual_tools_and_imported_context_after
     def storage():
         cache = InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None
         return (PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache) if backend == "sqlite"
-                else PersistenceStorage.filesystem(tmp_path, cache=cache))
+                else PersistenceStorage.from_root(tmp_path, cache=cache, exclusive_writer=True))
 
     state = storage()
     async with Persistence.open('standalone-fork', storage=state) as persistence_74, Runtime.attach(persistence=persistence_74, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:

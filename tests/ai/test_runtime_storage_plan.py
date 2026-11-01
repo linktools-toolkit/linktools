@@ -37,24 +37,11 @@ def test_default_state_plan_uses_memory_for_all_domains() -> None:
     assert all(plan.route(domain).kind == "memory" for domain in PersistenceDomain)
 
 
-@pytest.mark.asyncio
-async def test_filesystem_plan_rejects_effective_member_path_overlap(tmp_path) -> None:
-    execution_root = tmp_path / "state"
-    plan = PersistencePlan(
-        execution=StorageRoute.filesystem(execution_root),
-        memory=StorageRoute.filesystem(execution_root / "execution"),
-    )
-    state = Persistence(PersistenceStorage.from_plan(plan))
-
-    with pytest.raises(ValueError, match="member paths overlap"):
-        await state.initialize(namespace="runtime", tenant_id="tenant")
-
-    assert not execution_root.exists()
 
 
 @pytest.mark.asyncio
-async def test_filesystem_execution_and_recovery_share_object_store(tmp_path) -> None:
-    state = Persistence(PersistenceStorage.filesystem(tmp_path / "runtime"))
+async def test_local_sqlite_execution_and_recovery_share_object_store(tmp_path) -> None:
+    state = Persistence(PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True))
     await state.initialize(namespace="runtime", tenant_id="tenant")
     try:
         assert (
@@ -67,7 +54,7 @@ async def test_filesystem_execution_and_recovery_share_object_store(tmp_path) ->
 
 def test_durable_evaluation_requires_durable_execution(tmp_path) -> None:
     plan = PersistencePlan(
-        evaluation=StorageRoute.filesystem(tmp_path / "evaluation"),
+        evaluation=StorageRoute.sqlite(tmp_path / "evaluation.db"),
     )
 
     with pytest.raises(

@@ -5,7 +5,7 @@
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from ..errors import AIError, ErrorCode
 from ._lock import FilesystemWriterLock
@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 _LOCAL_PROFILE = 0x4C544C53
 _CONNECTION_PROFILE = 'linktools.local_sqlite.profile'
+_ValueT = TypeVar('_ValueT')
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,9 +29,14 @@ async def _connection_file(connection: 'AsyncConnection') -> _SqliteFile:
     cached = connection.info.get(_CONNECTION_PROFILE)
     if cached is not None:
         return cached
-    rows = (await connection.exec_driver_sql('PRAGMA database_list')).all()
+    # Finish buffering before cancellation can strand a live cursor in a traceback.
+    rows = (await _finish_owned_io(asyncio.create_task(
+        connection.exec_driver_sql('PRAGMA database_list'),
+    ))).all()
     main = next((str(row[2]) for row in rows if row[1] == 'main'), '')
-    profile = int((await connection.exec_driver_sql('PRAGMA main.application_id')).scalar_one())
+    profile = int((await _finish_owned_io(asyncio.create_task(
+        connection.exec_driver_sql('PRAGMA main.application_id'),
+    ))).scalar_one())
     path = Path(main).resolve() if main else None
     identity = None
     if profile == _LOCAL_PROFILE and path is not None:
@@ -43,7 +49,7 @@ async def _connection_file(connection: 'AsyncConnection') -> _SqliteFile:
     return result
 
 
-async def _finish_owned_io(task: 'asyncio.Task[None]') -> None:
+async def _finish_owned_io(task: 'asyncio.Task[_ValueT]') -> _ValueT:
     cancelled = None
     while not task.done():
         try:
@@ -51,13 +57,14 @@ async def _finish_owned_io(task: 'asyncio.Task[None]') -> None:
         except asyncio.CancelledError as error:
             cancelled = error
     try:
-        task.result()
+        result = task.result()
     except BaseException as error:
         if cancelled is not None:
             raise cancelled from error
         raise
     if cancelled is not None:
         raise cancelled
+    return result
 
 
 class _SqliteFileOwner:

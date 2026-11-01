@@ -14,7 +14,7 @@ from linktools.ai.task.engine import TaskEngine
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "sqlite", "filesystem"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite", "local_sqlite"))
 async def test_direct_task_engine_prevents_premature_persistence_close(tmp_path: Path, backend: str) -> None:
     async def work(context):
         return "still-open"
@@ -22,7 +22,7 @@ async def test_direct_task_engine_prevents_premature_persistence_close(tmp_path:
     task = Task("work", work, effect_policy="none")
     storage = (PersistenceStorage.in_memory() if backend == "memory" else
                PersistenceStorage.from_root(tmp_path) if backend == "sqlite" else
-               PersistenceStorage.filesystem(tmp_path))
+               PersistenceStorage.from_root(tmp_path, exclusive_writer=True))
     async with Persistence.open("task-owner", storage=storage) as persistence:
         engine = TaskEngine(task, persistence=persistence)
         try:
@@ -40,7 +40,7 @@ async def test_direct_task_engine_prevents_premature_persistence_close(tmp_path:
 
 @pytest.mark.asyncio
 async def test_task_open_views_and_peers_release_only_their_own_lifetime(tmp_path: Path) -> None:
-    async with Persistence.open("task-views", storage=PersistenceStorage.filesystem(tmp_path)) as persistence:
+    async with Persistence.open("task-views", storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence:
         async with TaskEngine.open(persistence=persistence) as first:
             peer = TaskEngine(persistence=persistence)
             view = first.with_definitions()

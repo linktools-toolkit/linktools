@@ -35,7 +35,7 @@ async def test_captured_task_dependencies_outlive_source_execution(tmp_path: Pat
 
     producer = Task("capture.source", source, effect_policy="none")
     consumer = Task("capture.target", target, effect_policy="none")
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open('input-capture', storage=storage) as persistence_34, Runtime.attach(persistence=persistence_34, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_34, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("capture", runtime.tenant_id)
         engine = runtime_engine.with_definitions(producer, consumer)
@@ -94,7 +94,7 @@ async def test_agent_capture_fixed_and_reproject_inputs(tmp_path: Path) -> None:
         calls.append(context.input["name"])
         return "Hello " + context.input["name"]
 
-    async with Persistence.open('agent-capture', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_92, Runtime.attach(persistence=persistence_92, features=model_features(_TaskTestModels(), group)) as runtime, TaskEngine.open(persistence=persistence_92, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('agent-capture', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_92, Runtime.attach(persistence=persistence_92, features=model_features(_TaskTestModels(), group)) as runtime, TaskEngine.open(persistence=persistence_92, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("capture", runtime.tenant_id)
         task = Task.from_agent("capture.agent", runtime.agents.get(), build_input=build)
         engine = runtime_engine.with_definitions(task)
@@ -135,7 +135,7 @@ async def test_graph_capture_keeps_frozen_results_across_restart(tmp_path: Path)
 
     producer = Task("frozen.source", source, effect_policy="none")
     consumer = Task("frozen.consumer", read, effect_policy="none")
-    async with Persistence.open('graph-capture', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_131, Runtime.attach(persistence=persistence_131, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_131, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('graph-capture', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_131, Runtime.attach(persistence=persistence_131, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_131, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("capture", runtime.tenant_id)
         engine = runtime_engine.with_definitions(producer, consumer)
         first = await engine.start(TaskGraph("external", (
@@ -152,7 +152,7 @@ async def test_graph_capture_keeps_frozen_results_across_restart(tmp_path: Path)
         graph_capture = await runtime_engine.inputs.capture_graph("consumer", CaptureGraphRequest(principal, "capture-graph-0001"))
         template = await capture_service.read_graph(graph_capture, principal=principal)
         assert template.task_contracts
-    async with Persistence.open('graph-capture', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_148, Runtime.attach(persistence=persistence_148, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_148, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('graph-capture', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_148, Runtime.attach(persistence=persistence_148, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_148, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         template = await runtime_engine.inputs.read_graph(graph_capture, principal=principal)
         replay = await runtime_engine.with_definitions(consumer).start(TaskGraph("consumer-replay", template.nodes), principal=principal, idempotency_key="capture-consumer-replay-0001")
         assert ((await replay.wait()).result).status is TaskStatus.SUCCEEDED
@@ -172,7 +172,7 @@ async def test_capture_preserves_failed_dependency_states(tmp_path: Path) -> Non
 
     failure = Task("capture.failure", fail, effect_policy="none")
     collector = Task("capture.collect", collect, effect_policy="none")
-    async with Persistence.open('failed-capture', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_168, Runtime.attach(persistence=persistence_168, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_168, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('failed-capture', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_168, Runtime.attach(persistence=persistence_168, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_168, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("capture", runtime.tenant_id)
         engine = runtime_engine.with_definitions(failure, collector)
         source = await engine.start(TaskGraph("failed-source", (
@@ -199,7 +199,7 @@ async def test_subagent_capture_runs_as_independent_execution(tmp_path: Path) ->
     group = RuntimeFeatures("capture-child")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     group.agent("child", model="default", system_prompt="Captured child instructions", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Persistence.open('subagent-capture', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_194, Runtime.attach(persistence=persistence_194, features=model_features(_TaskTestModels(), group)) as runtime, TaskEngine.open(persistence=persistence_194, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('subagent-capture', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_194, Runtime.attach(persistence=persistence_194, features=model_features(_TaskTestModels(), group)) as runtime, TaskEngine.open(persistence=persistence_194, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("capture", runtime.tenant_id)
         parent = await runtime.agents.get().start("parent input", principal=principal)
         await parent.wait()
@@ -250,7 +250,7 @@ async def test_snapshot_copies_capture_closure_and_rejects_missing_body(tmp_path
     use = Task("snapshot.use", consumer, effect_policy="none")
     root = tmp_path / "source"
     principal = Principal("capture", "default")
-    async with Persistence.open('snapshot-capture', storage=PersistenceStorage.filesystem(root)) as persistence_243, Runtime.attach(persistence=persistence_243, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_243, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('snapshot-capture', storage=PersistenceStorage.from_root(root, exclusive_writer=True)) as persistence_243, Runtime.attach(persistence=persistence_243, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_243, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         engine = runtime_engine.with_definitions(make, use)
         first = await engine.start(TaskGraph("source", (
             TaskNode("make", task=make),
@@ -263,7 +263,7 @@ async def test_snapshot_copies_capture_closure_and_rejects_missing_body(tmp_path
             principal=principal, idempotency_key="snapshot-captured-0001")
         assert ((await second.wait()).result).status is TaskStatus.SUCCEEDED
     archive = InMemoryObjectStore("capture-archive")
-    storage = Persistence(PersistenceStorage.filesystem(root))
+    storage = Persistence(PersistenceStorage.from_root(root, exclusive_writer=True))
     await storage.initialize(namespace="snapshot-capture", tenant_id="default", read_only=True)
     limits = SnapshotLimits(max_entries=4096, max_bytes=16 * 1024 * 1024)
     try:
@@ -310,7 +310,7 @@ async def test_task_capture_preserves_raw_input_and_projects_only_when_requested
 
     source = Task("raw.source", echo, normalize=original, effect_policy="none")
     target = Task("raw.candidate", echo, normalize=candidate, effect_policy="none")
-    async with Persistence.open('raw-capture', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_303, Runtime.attach(persistence=persistence_303, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_303, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('raw-capture', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_303, Runtime.attach(persistence=persistence_303, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_303, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("capture", runtime.tenant_id)
         engine = runtime_engine.with_definitions(source, target)
         run = await engine.start(TaskGraph("raw-source", (TaskNode("node", task=source, input={"value": 1}),)),

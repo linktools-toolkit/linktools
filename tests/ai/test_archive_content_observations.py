@@ -16,7 +16,7 @@ from .test_shared_content_archive import _archive, _publish
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_content_observation_consumes_missing_and_preserves_fresh_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
@@ -103,7 +103,7 @@ async def test_observation_unknown_key_failure_does_not_retain_consumed_missing(
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem"))
+@pytest.mark.parametrize("backend", ("memory",))
 async def test_unsupported_group_keeps_preparation_metadata_before_archive_open(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:

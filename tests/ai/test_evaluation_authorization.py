@@ -82,8 +82,8 @@ class SharedDatasetAuthorization:
 
 
 def storage_for(backend: str, path: Path) -> PersistenceStorage:
-    if backend == "filesystem":
-        return PersistenceStorage.filesystem(path)
+    if backend == "local_sqlite":
+        return PersistenceStorage.from_root(path, exclusive_writer=True)
     return PersistenceStorage.sqlite(path / "state.sqlite")
 
 
@@ -94,7 +94,7 @@ async def test_runtime_default_authorization_keeps_owner_and_local_trusted_denia
 ) -> None:
     options = {"authorization": None} if explicit_none else {}
     async with (
-        Persistence.open('default-policy', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_91,
+        Persistence.open('default-policy', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_91,
         TaskEngine.open(persistence=persistence_91, **options) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -120,7 +120,7 @@ async def test_runtime_default_authorization_keeps_owner_and_local_trusted_denia
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("local_sqlite", "sqlite"))
 @pytest.mark.parametrize("input_kind", ("task", "agent"))
 async def test_shared_dataset_reopens_with_scoped_policy_and_operator_owned_experiment(
     tmp_path: Path, backend: str, input_kind: str,
@@ -242,7 +242,7 @@ async def test_shared_graph_capture_requires_its_own_permission(tmp_path: Path) 
     target = Task("shared.graph-target", answer, effect_policy="none")
     scorer = Task("shared.graph-score", exact, effect_policy="none")
     async with (
-        Persistence.open('shared-graph', storage=PersistenceStorage.filesystem(tmp_path), tenant_id=TENANT) as persistence_232,
+        Persistence.open('shared-graph', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=TENANT) as persistence_232,
         TaskEngine.open(target, scorer, persistence=persistence_232, context=CONTEXT, authorization=authorization) as engine,
         Evaluations.open(engine) as evaluations,
     ):

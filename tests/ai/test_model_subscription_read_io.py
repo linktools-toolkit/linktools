@@ -67,7 +67,7 @@ async def test_model_subscription_eliminates_duplicate_sql_owner_lookup(tmp_path
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("denial", ("policy", "missing_after_authorization", "tenant"))
 async def test_model_subscription_fails_closed_before_registering(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, denial: str,

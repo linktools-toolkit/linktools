@@ -45,7 +45,7 @@ def _omitted_payload(messages):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_transcript_and_archived_projection_verify_original_omitted_field_bytes(tmp_path, monkeypatch, backend):
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="message-defaults", tenant_id="tenant")
@@ -81,7 +81,7 @@ async def test_transcript_and_archived_projection_verify_original_omitted_field_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_execution_context_preserves_omitted_source_bytes_and_semantic_digest(tmp_path, backend):
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="message-defaults", tenant_id="tenant")
@@ -103,7 +103,7 @@ async def test_execution_context_preserves_omitted_source_bytes_and_semantic_dig
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("sqlite",))
 @pytest.mark.parametrize("pending_kind", ("response", "request"))
 async def test_pending_omitted_defaults_reopen_without_accepting_changed_content(tmp_path, monkeypatch, backend, pending_kind):
     state = Persistence(_storage(backend, tmp_path))
@@ -156,7 +156,7 @@ async def test_pending_omitted_defaults_reopen_without_accepting_changed_content
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("sqlite",))
 async def test_pending_missing_clock_factory_does_not_claim_exact_historical_recovery(tmp_path, monkeypatch, backend):
     def omitted_clock(messages):
         values = json.loads(_omitted_payload(messages))
@@ -197,7 +197,7 @@ async def test_pending_missing_clock_factory_does_not_claim_exact_historical_rec
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("blocks", (1, 2))
 async def test_loaded_projection_reuse_digest_describes_original_root_bytes(tmp_path, monkeypatch, backend, blocks):
     state = Persistence(_storage(backend, tmp_path))

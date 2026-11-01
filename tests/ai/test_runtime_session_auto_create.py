@@ -2,12 +2,10 @@
 # -*- coding: utf-8 -*-
 """Regression coverage for Runtime session auto-create races."""
 
-from types import SimpleNamespace
-
 import pytest
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.agent_execution import AgentExecutionPort
+from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.execution import SessionView
 from linktools.ai.core import Principal, PrincipalKind
 
@@ -18,8 +16,8 @@ class _RaceSessionService:
         self.get_calls = 0
         self.create_calls = 0
 
-    async def get(self, session_id: str, *, principal: object) -> SessionView:
-        del principal
+    async def read_authorized(self, session_id: str, principal: object, action: object) -> SessionView:
+        del principal, action
         self.get_calls += 1
         if self.get_calls == 1 or not self._authorize_after_conflict:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
@@ -38,15 +36,10 @@ class _RaceSessionService:
 @pytest.mark.asyncio
 async def test_session_auto_create_race_reuses_authorized_session() -> None:
     service = _RaceSessionService(authorize_after_conflict=True)
-    port = SimpleNamespace(sessions=service)
-    definition = SimpleNamespace(
-        digest="a" * 64,
-        spec=SimpleNamespace(id="agent"),
-    )
 
-    await AgentExecutionPort._ensure_session(
-        port,
-        definition,
+    await RuntimeSessionService._prepare_resume_session(
+        service,
+        "agent",
         "session",
         Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
     )
@@ -58,16 +51,11 @@ async def test_session_auto_create_race_reuses_authorized_session() -> None:
 @pytest.mark.asyncio
 async def test_session_auto_create_conflict_does_not_reveal_foreign_session() -> None:
     service = _RaceSessionService(authorize_after_conflict=False)
-    port = SimpleNamespace(sessions=service)
-    definition = SimpleNamespace(
-        digest="a" * 64,
-        spec=SimpleNamespace(id="agent"),
-    )
 
     with pytest.raises(AIError) as error:
-        await AgentExecutionPort._ensure_session(
-            port,
-            definition,
+        await RuntimeSessionService._prepare_resume_session(
+            service,
+            "agent",
             "session",
             Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
         )

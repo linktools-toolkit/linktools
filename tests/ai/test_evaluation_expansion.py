@@ -57,7 +57,7 @@ async def test_dynamic_target_rejects_unsafe_bound_definition_before_callbacks(
     initial = Task("expansion.seed", seed, effect_policy="none")
     scorer = Task("expansion.score", exact, effect_policy="none")
     async with (
-        Persistence.open('unsafe-expansion', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_47,
+        Persistence.open('unsafe-expansion', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_47,
         Runtime.attach(persistence=persistence_47, context=CONTEXT, features=model_features(models, group)) as runtime,
     ):
         unsafe = (Task("expansion.effect", effect, effect_policy=unsafe_kind) if unsafe_kind != "model"
@@ -105,7 +105,7 @@ async def test_safe_nested_expansion_recovers_only_its_pinned_definition_scope(t
         TaskNode("child", ("seed",), task=child, input={"answer": "middle"}, expander=nested.ref),))
     definitions = (seed, child, unused, scorer, outer, nested)
     async with (
-        Persistence.open('safe-expansion', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_89,
+        Persistence.open('safe-expansion', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_89,
         TaskEngine.open(*definitions, persistence=persistence_89, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -126,7 +126,7 @@ async def test_safe_nested_expansion_recovers_only_its_pinned_definition_scope(t
         assert evidence.target.outputs["leaf"].value.value == "yes"
         experiment_id = run.experiment_id
     async with (
-        Persistence.open('safe-expansion', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_107,
+        Persistence.open('safe-expansion', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_107,
         TaskEngine.open(*definitions, persistence=persistence_107, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):

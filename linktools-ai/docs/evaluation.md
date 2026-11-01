@@ -10,7 +10,7 @@ report values live in `linktools.ai.evaluation`; orchestration lives in
 ## An offline evaluation, end to end
 
 This complete example needs no model credentials or network calls. It uses
-no model declarations, durable filesystem storage, two cases, and a rule scorer.
+no model declarations, durable local SQLite storage, two cases, and a rule scorer.
 Run it in an environment with `linktools-ai` installed. The state directory is
 retained so the same requests can be reopened or retried.
 
@@ -53,7 +53,7 @@ async def main() -> None:
 
     async with Runtime.open(
         "evaluation-guide",
-        storage=PersistenceStorage.filesystem(Path("evaluation-state")),
+        storage=PersistenceStorage.from_root(Path("evaluation-state")),
         tenant_id="example",
     ) as runtime:
         engine = await runtime.tasks.bind(target, judge)

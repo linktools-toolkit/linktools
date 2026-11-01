@@ -23,13 +23,13 @@ from .test_step_projection import _execution
 def _storage(backend: str, path: Path) -> PersistenceStorage:
     if backend == "memory":
         return PersistenceStorage.in_memory()
-    if backend == "filesystem":
-        return PersistenceStorage.filesystem(path / "state")
+    if backend == "local_sqlite":
+        return PersistenceStorage.from_root(path / "state", exclusive_writer=True)
     return PersistenceStorage.sqlite(path / "state.db")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite"))
 async def test_observed_transcript_does_not_extend_recoverable_checkpoint(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -62,7 +62,7 @@ async def test_observed_transcript_does_not_extend_recoverable_checkpoint(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite"))
 async def test_overlapping_request_updates_keep_their_admitted_identities(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -102,7 +102,7 @@ async def test_overlapping_request_updates_keep_their_admitted_identities(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite"))
 @pytest.mark.parametrize("fault", ("before_recovery", "after_recovery", "before_commit", "after_commit"))
 async def test_recovery_checkpoint_commits_guarded_truth_before_public_projection(
     tmp_path: Path, backend: str, fault: str, monkeypatch: pytest.MonkeyPatch,
@@ -217,7 +217,7 @@ async def test_recovery_checkpoint_commits_guarded_truth_before_public_projectio
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite"))
 async def test_caller_cancellation_waits_for_atomic_checkpoint_truth(
     tmp_path: Path, backend: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -276,7 +276,7 @@ async def test_caller_cancellation_waits_for_atomic_checkpoint_truth(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite"))
 @pytest.mark.parametrize("context_published", (False, True))
 async def test_recovery_restores_context_without_assuming_public_checkpoint_acknowledgment(
     tmp_path: Path, backend: str, context_published: bool,

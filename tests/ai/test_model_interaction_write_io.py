@@ -18,7 +18,7 @@ from .test_step_archive_read_boundaries import _archive
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_execution_interaction_lifecycle_bounds_record_reads(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -63,7 +63,7 @@ async def test_execution_interaction_lifecycle_bounds_record_reads(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("fence", ("producer", "owner"))
 async def test_execution_interaction_conflict_rolls_back_and_can_retry(
     tmp_path: Path, backend: str, fence: str, monkeypatch: pytest.MonkeyPatch,

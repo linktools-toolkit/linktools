@@ -26,7 +26,7 @@ pytestmark = pytest.mark.asyncio
 
 
 def _storage(root: Path, objects: ObjectStore, backend: str, *, volatile: bool = False) -> PersistenceStorage:
-    storage = (PersistenceStorage.filesystem(root / 'state', object_store=objects) if backend == 'filesystem'
+    storage = (PersistenceStorage(PersistenceStorage.from_root(root / 'state', exclusive_writer=True).plan, object_store=objects) if backend == 'local_sqlite'
                else PersistenceStorage.sqlite(root / 'state.db', object_store=objects))
     if volatile:
         storage = PersistenceStorage(replace(storage.plan, capability_routes={'opaque': StorageRoute.memory()}),
@@ -51,13 +51,13 @@ class _Owner:
         await transaction.insert_record(_record(payload))
 
 
-@pytest.mark.parametrize('backend', ['filesystem', 'sqlite'])
+@pytest.mark.parametrize('backend', ['local_sqlite', 'sqlite'])
 @pytest.mark.parametrize('volatile', [False, True])
 async def test_cleanup_blocks_live_custom_partition_without_changing_core_cleanup(
     tmp_path: Path, backend: str, volatile: bool,
 ) -> None:
-    objects = FilesystemObjectStore(tmp_path / 'objects') if backend == 'filesystem' else InMemoryObjectStore()
-    guard = objects if backend == 'filesystem' else Offline()
+    objects = FilesystemObjectStore(tmp_path / 'objects') if backend == 'local_sqlite' else InMemoryObjectStore()
+    guard = objects if backend == 'local_sqlite' else Offline()
     state = Persistence(_storage(tmp_path, objects, backend, volatile=volatile))
     await state.initialize(namespace='opaque-cleanup', tenant_id='tenant')
     try:
@@ -85,7 +85,7 @@ async def test_cleanup_blocks_live_custom_partition_without_changing_core_cleanu
         await state.close()
 
 
-@pytest.mark.parametrize('backend', ['filesystem', 'sqlite'])
+@pytest.mark.parametrize('backend', ['local_sqlite', 'sqlite'])
 @pytest.mark.parametrize('separate_resource', [False, True])
 async def test_cleanup_reopened_capability_marker_blocks_object_and_archive_deletion(
     tmp_path: Path, backend: str, separate_resource: bool,

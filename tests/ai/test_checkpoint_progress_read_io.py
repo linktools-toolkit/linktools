@@ -20,7 +20,7 @@ from .test_incremental_projection_boundaries import _storage
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_checkpoint_progress_keeps_repeated_checkpoint_position_and_fresh_high_water(
     tmp_path: Path, backend: str,
 ) -> None:

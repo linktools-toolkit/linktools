@@ -41,7 +41,7 @@ def _capabilities() -> RuntimeFeatures[None]:
 async def _admit_without_worker(
     path: Path, models: _Models, monkeypatch: pytest.MonkeyPatch,
 ) -> ExecutionRecord:
-    storage = PersistenceStorage.filesystem(path)
+    storage = PersistenceStorage.from_root(path, exclusive_writer=True)
     async with Persistence.open(_NAMESPACE, storage=storage) as persistence_41, Runtime.attach(persistence=persistence_41, features=model_features(models, _capabilities())) as runtime:
         async def interrupted_launch(
             request: ExecutionRequest, execution: ExecutionRecord, **kwargs: object,
@@ -72,7 +72,7 @@ async def test_startup_recovery_defaults_to_enabled(
     models = _Models(FunctionModel(stream_function=model))
     before = await _admit_without_worker(tmp_path / "state", models, monkeypatch)
     assert calls == []
-    storage = PersistenceStorage.filesystem(tmp_path / "state")
+    storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
     options = {"auto_recover": True} if explicit_default else {}
     async with Persistence.open(_NAMESPACE, storage=storage) as persistence_75, Runtime.attach(persistence=persistence_75, features=model_features(models, _capabilities()), **options) as runtime:
         result = (await runtime.executions.wait(
@@ -97,7 +97,7 @@ async def test_disabled_startup_preserves_admission_until_explicit_execution_rec
 
     models = _Models(FunctionModel(stream_function=model))
     before = await _admit_without_worker(tmp_path / "state", models, monkeypatch)
-    storage = PersistenceStorage.filesystem(tmp_path / "state")
+    storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
     async with Persistence.open(_NAMESPACE, storage=storage) as persistence_101, Runtime.attach(persistence=persistence_101, features=model_features(models, _capabilities()), auto_recover=False) as runtime:
         assert await runtime._state.execution.executions.get(
             before.execution_id, tenant_id=runtime.tenant_id,
@@ -216,7 +216,7 @@ async def test_explicit_graph_recovery_remains_available_when_startup_disabled(t
 
     task = Task("test.startup-recovery", execute, effect_policy="none")
     graph = TaskGraph("recover-graph", (TaskNode("node", task=task),))
-    storage = PersistenceStorage.filesystem(tmp_path / "state")
+    storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
     async with Persistence.open(_NAMESPACE, storage=storage) as persistence_228, Runtime.attach(features=RuntimeFeatures(), persistence=persistence_228) as runtime, TaskEngine.open(persistence=persistence_228, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         submission = await runtime_engine.with_definitions(task).prepare_submission(graph, idempotency_key="graph-admission")
         await runtime._state.task.admissions.admit_prepared(submission)
@@ -227,7 +227,7 @@ async def test_explicit_graph_recovery_remains_available_when_startup_disabled(t
             lease, tenant_id=runtime.tenant_id, error_code=ErrorCode.STORAGE_RECOVERY_REQUIRED.value,
             error_digest=canonical_sha256({"phase": "worker-interrupted"}),
         )
-    storage = PersistenceStorage.filesystem(tmp_path / "state")
+    storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
     async with Persistence.open(_NAMESPACE, storage=storage) as persistence_239, Runtime.attach(features=RuntimeFeatures(), persistence=persistence_239, auto_recover=False) as runtime, TaskEngine.open(persistence=persistence_239, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         run = await runtime_engine.with_definitions(task).get(graph.graph_id)
         assert (await run.state()).status is TaskStatus.RECOVERY_REQUIRED

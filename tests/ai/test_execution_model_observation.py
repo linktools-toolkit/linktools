@@ -299,7 +299,7 @@ async def test_facade_forwards_metadata_mode() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["memory", "filesystem", "sqlite", "transient"])
+@pytest.mark.parametrize("backend", ["memory", "local_sqlite", "sqlite", "transient"])
 @pytest.mark.parametrize("durable_trace", [False, True])
 async def test_real_execution_metadata_live_and_final_handoff(backend, durable_trace, tmp_path) -> None:
     from pydantic_ai.messages import ModelResponse, TextPart
@@ -318,7 +318,7 @@ async def test_real_execution_metadata_live_and_final_handoff(backend, durable_t
 
     storage = {
         "memory": lambda: PersistenceStorage.in_memory(),
-        "filesystem": lambda: PersistenceStorage.filesystem(tmp_path / "state"),
+        "local_sqlite": lambda: PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True),
         "sqlite": lambda: PersistenceStorage.sqlite(tmp_path / "state.db"),
         "transient": lambda: PersistenceStorage(PersistencePlan(execution=StorageRoute.transient())),
     }[backend]()

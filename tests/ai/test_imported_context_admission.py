@@ -20,13 +20,13 @@ from .test_history_projection_conformance import _record
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('backend', ['memory', 'filesystem', 'sqlite'])
+@pytest.mark.parametrize('backend', ['memory', 'local_sqlite', 'sqlite'])
 @pytest.mark.parametrize('abort', [False, True])
 async def test_imported_context_admission_commits_or_rolls_back_one_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, abort: bool,
 ) -> None:
     storage = (PersistenceStorage.in_memory() if backend == 'memory' else
-               PersistenceStorage.filesystem(tmp_path / 'state') if backend == 'filesystem' else
+               PersistenceStorage.from_root(tmp_path / 'state', exclusive_writer=True) if backend == 'local_sqlite' else
                PersistenceStorage.sqlite(tmp_path / 'state.db'))
     state = Persistence(storage)
     await state.initialize(namespace='imported-context', tenant_id='tenant')

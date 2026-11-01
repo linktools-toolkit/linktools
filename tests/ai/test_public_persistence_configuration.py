@@ -50,12 +50,12 @@ class _Cache(InMemoryCacheBackend):
         await super().put(key, content)
 
 
-async def test_module_filesystem_routes_reopen_history_without_models_or_hooks(
+async def test_module_sqlite_routes_reopen_history_without_models_or_hooks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "state"
     routes = {
-        domain: StorageRoute.filesystem(root / "modules" / domain.value, transaction_root=root)
+        domain: StorageRoute.sqlite(root / "runtime.db", exclusive_writer=True)
         for domain in (PersistenceDomain.CONVERSATION, PersistenceDomain.CHECKPOINT, PersistenceDomain.TRACE)
     }
     declarations = _features(
@@ -66,7 +66,7 @@ async def test_module_filesystem_routes_reopen_history_without_models_or_hooks(
     declarations.model("default", _FeatureModels())
     features = await declarations.capture()
     def root_storage() -> PersistenceStorage:
-        return PersistenceStorage(replace(PersistenceStorage.filesystem(root).plan, conversation=routes[PersistenceDomain.CONVERSATION], trace=routes[PersistenceDomain.TRACE], checkpoint=routes[PersistenceDomain.CHECKPOINT]))
+        return PersistenceStorage(replace(PersistenceStorage.from_root(root, exclusive_writer=True).plan, conversation=routes[PersistenceDomain.CONVERSATION], trace=routes[PersistenceDomain.TRACE], checkpoint=routes[PersistenceDomain.CHECKPOINT]))
 
     state = root_storage()
     async with Persistence.open('module-routes', storage=state) as persistence_67, Runtime.attach(persistence=persistence_67, metrics=Metrics.in_memory(), features=features) as runtime:
@@ -79,7 +79,7 @@ async def test_module_filesystem_routes_reopen_history_without_models_or_hooks(
         assert expected
         for domain, route in routes.items():
             assert runtime._state.plan.route(domain) == route
-            assert list(route.path.rglob("manifest.json"))
+            assert route.path.is_file()
 
     async def unexpected_hook(*args, **kwargs):
         pytest.fail("read-only history must not invoke execution hooks")
@@ -131,7 +131,7 @@ async def test_module_resource_cache_inherits_or_explicitly_overrides_root(
 ) -> None:
     root_cache, module_cache = _Cache(), _Cache()
     root = tmp_path / "state"
-    state = PersistenceStorage.filesystem(root, cache=root_cache)
+    state = PersistenceStorage.from_root(root, cache=root_cache, exclusive_writer=True)
     trace_cache = {"inherit": root_cache, "none": None,
                    "separate": module_cache, "shared": root_cache}[trace_cache_mode]
     if trace_cache_mode != "inherit":
@@ -177,8 +177,8 @@ async def test_atomic_module_route_rejects_a_different_transaction_group(
     root = tmp_path / "state"
     feature = feature_type()
     domain = "checkpoint" if feature_type is CheckpointCapability else "trace"
-    storage = PersistenceStorage(replace(PersistenceStorage.filesystem(root).plan,
-                                         **{domain: StorageRoute.filesystem(tmp_path / "separate")}))
+    storage = PersistenceStorage(replace(PersistenceStorage.from_root(root, exclusive_writer=True).plan,
+                                         **{domain: StorageRoute.sqlite(tmp_path / "separate.db", exclusive_writer=True)}))
     with pytest.raises(AIError) as invalid:
         async with Persistence.open('different-group', storage=storage) as persistence_174, Runtime.attach(persistence=persistence_174, features=model_features(_FeatureModels(), _features(feature))):
             pytest.fail("an atomic module cannot silently split its transactions")

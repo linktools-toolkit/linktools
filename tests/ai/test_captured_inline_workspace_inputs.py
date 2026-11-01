@@ -131,7 +131,7 @@ async def test_irreversible_projection_keeps_fixed_capture_and_rejects_reproject
     async def discard(context: AgentTaskInputContext) -> str:
         return "Projected without the original attachment"
 
-    async with Persistence.open('irreversible-capture', storage=PersistenceStorage.filesystem(tmp_path / 'state'), tenant_id='evaluation-consumers') as persistence_133, Runtime.attach(persistence=persistence_133, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_133, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('irreversible-capture', storage=PersistenceStorage.from_root(tmp_path / 'state', exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_133, Runtime.attach(persistence=persistence_133, context=CONTEXT, features=model_features(models, group)) as runtime, TaskEngine.open(persistence=persistence_133, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         target = Task.from_agent("irreversible.agent", runtime.agents.get(), build_input=discard)
         scorer = Task("irreversible.score", _score_graph, effect_policy="none")
         engine = runtime_engine.with_definitions(target, scorer)

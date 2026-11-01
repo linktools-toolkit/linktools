@@ -61,7 +61,7 @@ async def _publish(state, turn, projections):
     )
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("status", (ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED))
 @pytest.mark.parametrize("sessionless", (False, True))
 async def test_pending_trace_seals_the_atomic_terminal(tmp_path: Path, backend, status, sessionless) -> None:

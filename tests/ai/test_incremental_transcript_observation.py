@@ -7,12 +7,12 @@ from pathlib import Path
 import random
 
 import pytest
+import pytest_asyncio
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolReturnPart
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
 from linktools.ai.persistence import _history
-from linktools.ai.persistence._filesystem import FilesystemStateStore
 from linktools.ai.persistence._history import TranscriptRepository
 from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._memory_transaction import _MemoryTransaction
@@ -20,14 +20,20 @@ from linktools.ai.persistence.state import StateStore
 from linktools.ai.storage import InMemoryObjectStore
 
 
-@pytest.fixture(params=("memory", "filesystem"))
-def observation_store(request: pytest.FixtureRequest, tmp_path: Path) -> StateStore:
+@pytest_asyncio.fixture(params=("memory", "sqlite"))
+async def observation_store(request: pytest.FixtureRequest, tmp_path: Path):
     if request.param == "memory":
-        return InMemoryStateStore()
-    return FilesystemStateStore(
-        tmp_path / "transcript", namespace="observation", tenant_id="tenant",
-        runtime_domain="execution",
-    )
+        store = InMemoryStateStore()
+        try:
+            yield store
+        finally:
+            await store.close()
+    else:
+        async with Persistence.open(
+            "observation", tenant_id="tenant",
+            storage=PersistenceStorage.sqlite(tmp_path / "transcript.db"),
+        ) as persistence:
+            yield persistence.execution.executions.state_store
 
 
 def _repository(store: StateStore) -> TranscriptRepository:
@@ -233,12 +239,19 @@ async def test_rolled_back_pending_observation_can_be_retried(observation_store)
         "run", (), first_message_index=0, pending=message, pending_keys=("part:0",),
     )
 
+    failure = RuntimeError("abort transaction")
+
     async def rollback(transaction) -> None:
         await repository.commit_observation(transaction, first)
-        raise RuntimeError("abort transaction")
+        raise failure
 
-    with pytest.raises(RuntimeError, match="abort transaction"):
+    with pytest.raises((RuntimeError, AIError)) as raised:
         await store.mutate(rollback)
+    if isinstance(raised.value, AIError):
+        assert raised.value.code is ErrorCode.INTERNAL_ERROR
+        assert raised.value.__cause__ is failure
+    else:
+        assert raised.value is failure
     assert not await repository.verify_observation(first)
     retry = await repository.prepare_observation(
         "run", (), first_message_index=0, pending=message, pending_keys=("part:0",),
@@ -276,15 +289,22 @@ async def test_rolled_back_pending_cache_uses_other_writers_committed_parts(
     await prepare(first, [base])
     abandoned = await prepare(first, [base, TextPart("abandoned middle"), shared])
 
+    failure = RuntimeError("abort outer transaction")
+
     async def rollback(transaction) -> None:
         await first.commit_observation(transaction, abandoned)
         if nested:
             extra = await prepare(first, [base, TextPart("abandoned middle"), shared, TextPart("abandoned extra")])
             await first.commit_observation(transaction, extra)
-        raise RuntimeError("abort outer transaction")
+        raise failure
 
-    with pytest.raises(RuntimeError, match="abort outer transaction"):
+    with pytest.raises((RuntimeError, AIError)) as raised:
         await store.mutate(rollback)
+    if isinstance(raised.value, AIError):
+        assert raised.value.code is ErrorCode.INTERNAL_ERROR
+        assert raised.value.__cause__ is failure
+    else:
+        assert raised.value is failure
     winning = [base, TextPart("committed middle"), shared]
     committed = await prepare(second, winning)
     await store.mutate(lambda tx: second.commit_observation(tx, committed))

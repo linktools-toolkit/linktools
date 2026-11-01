@@ -28,7 +28,7 @@ from .test_evaluation_consumers import (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["memory", "filesystem"])
+@pytest.mark.parametrize("backend", ["memory", "local_sqlite"])
 async def test_pages_save_only_resumable_snapshots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
@@ -40,7 +40,7 @@ async def test_pages_save_only_resumable_snapshots(
 
     task = Task("paging.target", target, effect_policy="none")
     scorer = Task("paging.scorer", exact, effect_policy="none")
-    storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     published: list[EvaluationReport | ComparisonReport] = []
     async with (
         Persistence.open('paging', storage=storage, tenant_id='evaluation-consumers') as persistence_42,
@@ -133,7 +133,7 @@ async def test_pages_save_only_resumable_snapshots(
             return
 
     # Reopening the backend must recover the original cursors even after live state changes.
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with (
         Persistence.open('paging', storage=storage, tenant_id='evaluation-consumers') as persistence_130,
         TaskEngine.open(persistence=persistence_130, context=CONTEXT) as engine,

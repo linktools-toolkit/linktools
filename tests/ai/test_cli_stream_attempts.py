@@ -16,7 +16,7 @@ import pytest
 from rich.console import Console
 
 from linktools.cli import CommandError
-from linktools.commands.ai import run
+import linktools.commands.ai._output as output_module
 
 
 def event(kind: str, text: str | None = None, *, attempt: int | None = 1,
@@ -35,8 +35,8 @@ def output(monkeypatch: pytest.MonkeyPatch, terminal: bool = False) -> tuple[io.
     stdout, stderr = io.StringIO(), io.StringIO()
     console = Console(file=stdout, force_terminal=terminal, width=2000)
     diagnostics = Console(file=stderr, force_terminal=terminal, width=2000)
-    monkeypatch.setattr(run, "get_console", lambda: console)
-    monkeypatch.setattr(run, "Console", lambda **_: diagnostics)
+    monkeypatch.setattr(output_module, "get_console", lambda: console)
+    monkeypatch.setattr(output_module, "Console", lambda **_: diagnostics)
     return stdout, stderr
 
 
@@ -72,7 +72,7 @@ class Execution:
 @pytest.mark.parametrize("attempt", [None, 1])
 async def test_cli_normal_stream_output_is_unchanged(monkeypatch: pytest.MonkeyPatch, terminal: bool, attempt: int | None) -> None:
     stdout, stderr = output(monkeypatch, terminal)
-    assert await run._stream_result(Execution([
+    assert await output_module._stream_result(Execution([
         event("MODEL_ATTEMPT_STARTED", attempt=attempt),
         event("ASSISTANT_TEXT_DELTA", "hello ", attempt=attempt),
         event("ASSISTANT_THINKING_DELTA", "thought", attempt=attempt),
@@ -112,7 +112,7 @@ async def test_cli_retries_invalidate_partial_on_stdout_before_replacement(monke
             yield event("MODEL_REQUEST_FINISHED", attempt=3, status="SUCCEEDED")
             yield event("EXECUTION_SUCCEEDED")
 
-    task = asyncio.create_task(run._stream_result(GatedExecution()))
+    task = asyncio.create_task(output_module._stream_result(GatedExecution()))
     try:
         await asyncio.wait_for(first_visible.wait(), 2)
         assert stdout.getvalue() == "old-partial"
@@ -137,7 +137,7 @@ async def test_cli_retries_invalidate_partial_on_stdout_before_replacement(monke
 async def test_cli_terminal_attempt_is_not_a_completed_answer(monkeypatch: pytest.MonkeyPatch, status: str) -> None:
     stdout, _ = output(monkeypatch)
     with pytest.raises(CommandError):
-        await run._stream_result(Execution([
+        await output_module._stream_result(Execution([
             event("ASSISTANT_TEXT_DELTA", "uncommitted"),
             event("MODEL_ATTEMPT_FINISHED", status=status, retry_scheduled=False),
             event("MODEL_REQUEST_FINISHED", status=status),
@@ -151,7 +151,7 @@ async def test_cli_terminal_attempt_is_not_a_completed_answer(monkeypatch: pytes
 @pytest.mark.asyncio
 async def test_cli_ignores_old_attempts_and_does_not_clear_other_requests(monkeypatch: pytest.MonkeyPatch) -> None:
     stdout, _ = output(monkeypatch)
-    assert await run._stream_result(Execution([
+    assert await output_module._stream_result(Execution([
         event("ASSISTANT_TEXT_DELTA", "earlier"),
         event("MODEL_REQUEST_FINISHED", status="SUCCEEDED"),
         event("ASSISTANT_TEXT_DELTA", "discard", request=2),
@@ -180,7 +180,7 @@ async def test_cli_ignores_old_attempts_and_does_not_clear_other_requests(monkey
 @pytest.mark.asyncio
 async def test_cli_failed_attempt_without_text_adds_no_stdout_noise(monkeypatch: pytest.MonkeyPatch) -> None:
     stdout, stderr = output(monkeypatch)
-    assert await run._stream_result(Execution([
+    assert await output_module._stream_result(Execution([
         event("MODEL_ATTEMPT_STARTED"),
         event("ASSISTANT_THINKING_DELTA", "partial thought"),
         event("MODEL_ATTEMPT_FINISHED", status="FAILED", retry_scheduled=True),
@@ -196,7 +196,7 @@ async def test_cli_failed_attempt_without_text_adds_no_stdout_noise(monkeypatch:
 @pytest.mark.asyncio
 async def test_cli_preview_gap_is_not_an_attempt_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     stdout, _ = output(monkeypatch)
-    assert await run._stream_result(Execution([
+    assert await output_module._stream_result(Execution([
         event("ASSISTANT_TEXT_DELTA", "prefix"),
         event("STREAM_RESET", attempt=None),
         event("MODEL_ATTEMPT_STARTED"),
@@ -227,7 +227,7 @@ async def test_cli_gap_between_transports_separates_successful_prefix(monkeypatc
               event("MODEL_ATTEMPT_FINISHED", attempt=2, status="SUCCEEDED"),
               event("MODEL_REQUEST_FINISHED", attempt=2, status="SUCCEEDED"),
               event("EXECUTION_SUCCEEDED")]
-    assert await run._stream_result(Execution(items, [model_item("canonical after gap")])) == 0
+    assert await output_module._stream_result(Execution(items, [model_item("canonical after gap")])) == 0
     value = plain(stdout.getvalue())
     assert value.index("old snapshot") < value.index("request 1 preview GAP") < value.index("retained tail")
     assert value.count("preview GAP") == 1
@@ -254,7 +254,7 @@ async def test_cli_successful_continuation_preserves_previous_segments(monkeypat
               event("MODEL_ATTEMPT_FINISHED", attempt=seq + 1, status="SUCCEEDED"),
               event("MODEL_REQUEST_FINISHED", attempt=seq + 1, status="SUCCEEDED"),
               event("EXECUTION_SUCCEEDED")]
-    assert await run._stream_result(Execution(items, [model_item("prefix suffix")])) == 0
+    assert await output_module._stream_result(Execution(items, [model_item("prefix suffix")])) == 0
     value = plain(stdout.getvalue())
     assert "prefix suffix" in value
     assert f"attempt {seq + 1} begins" not in value
@@ -270,7 +270,7 @@ async def test_cli_successful_continuation_preserves_previous_segments(monkeypat
 async def test_cli_failed_continuation_does_not_invalidate_successful_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
     stdout, _ = output(monkeypatch)
     with pytest.raises(CommandError):
-        await run._stream_result(Execution([
+        await output_module._stream_result(Execution([
             event("ASSISTANT_TEXT_DELTA", "completed prefix "),
             event("MODEL_ATTEMPT_FINISHED", status="SUCCEEDED"),
             event("MODEL_ATTEMPT_STARTED", attempt=2, replaces_stream_attempt_seq=None),
@@ -301,7 +301,7 @@ async def test_cli_part_update_preserves_other_successful_parts(monkeypatch: pyt
              event("EXECUTION_SUCCEEDED")]
     for item in items:
         item.event.payload = MappingProxyType(item.event.payload)
-    assert await run._stream_result(Execution(items)) == 0
+    assert await output_module._stream_result(Execution(items)) == 0
     value = stdout.getvalue()
     assert value.startswith("old keep\n")
     assert "part 0 UPDATED" in value and "part 1 UPDATED" not in value
@@ -334,7 +334,7 @@ async def test_cli_final_readback_supersedes_all_earlier_preview_parts(monkeypat
                 raise RuntimeError("synthetic reader failure")
             return SimpleNamespace(items=[model_item(replacement, 2 if readback == "other-request" else 1)] if readback != "missing" else [])
 
-    assert await run._stream_result(ReadbackExecution(items)) == 0
+    assert await output_module._stream_result(ReadbackExecution(items)) == 0
     value = plain(stdout.getvalue())
     assert value.startswith((head or "") + "old-tail\n")
     if head:
@@ -364,7 +364,7 @@ async def test_real_runtime_continuation_events_reach_cli_and_web(monkeypatch: p
     items = [SimpleNamespace(depth=0, execution_id=item.execution_id, event=item) for item in observed]
     execution = Execution(items, models)
     execution.execution_id = items[0].execution_id
-    assert await run._stream_result(execution) == 0
+    assert await output_module._stream_result(execution) == 0
     value = stdout.getvalue()
     assert value.count("INVALIDATED") == 1
     assert "attempt 2 FAILED" not in value
@@ -402,7 +402,7 @@ async def test_real_runtime_empty_start_reaches_cli_and_web(monkeypatch: pytest.
     items = [SimpleNamespace(depth=0, execution_id=item.execution_id, event=item) for item in observed]
     execution = Execution(items, models)
     execution.execution_id = items[0].execution_id
-    assert await run._stream_result(execution) == 0
+    assert await output_module._stream_result(execution) == 0
     assert stdout.getvalue() == "winner\n"
     fixture = tmp_path / "empty-start-events.json"
     wire = [{"execution_id":item.execution_id,"event":{"event_type":item.event_type,"payload":item.payload}}
@@ -432,7 +432,7 @@ async def test_cli_interrupt_marks_visible_attempt_unconfirmed(monkeypatch: pyte
             waiting.set()
             await asyncio.Event().wait()
 
-    task = asyncio.create_task(run._stream_result(PendingExecution()))
+    task = asyncio.create_task(output_module._stream_result(PendingExecution()))
     await asyncio.wait_for(waiting.wait(), 2)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):

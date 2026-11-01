@@ -1038,7 +1038,7 @@ async def test_no_trace_terminal_readback_preserves_session_and_single_metric(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("exclusive_sqlite", "sqlite"))
 @pytest.mark.parametrize("reopen_with_restart", (False, True), ids=("default-reopen", "restart-reopen"))
 async def test_default_admission_without_worker_never_restarts_on_reopen(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, reopen_with_restart: bool,
@@ -1055,8 +1055,8 @@ async def test_default_admission_without_worker_never_restarts_on_reopen(
         return ModelResponse(parts=[TextPart("unexpected restart")])
 
     def storage() -> PersistenceStorage:
-        if backend == "filesystem":
-            return PersistenceStorage.filesystem(tmp_path / "runtime")
+        if backend == "exclusive_sqlite":
+            return PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True)
         return PersistenceStorage.sqlite(tmp_path / "runtime.db")
 
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
@@ -1065,6 +1065,7 @@ async def test_default_admission_without_worker_never_restarts_on_reopen(
     models = _Models(_UsageFunctionModel(model))
     initial = storage()
     async with Persistence.open(_NAMESPACE, storage=initial) as persistence_1103, Runtime.attach(persistence=persistence_1103, features=model_features(models, group)) as runtime:
+        assert persistence_1103.exclusive_execution_writer is (backend == "exclusive_sqlite")
         await runtime.agents.get().create_session("session")
 
         async def interrupted_launch(
@@ -1089,6 +1090,7 @@ async def test_default_admission_without_worker_never_restarts_on_reopen(
         group.capability(CheckpointCapability(), scope="runtime")
     reopened = storage()
     async with Persistence.open(_NAMESPACE, storage=reopened) as persistence_1129, Runtime.attach(persistence=persistence_1129, features=model_features(models, group)) as runtime:
+        assert persistence_1129.exclusive_execution_writer is (backend == "exclusive_sqlite")
         assert await runtime._state.execution.executions.get(
             execution.execution_id, tenant_id=runtime.tenant_id,
         ) == admitted

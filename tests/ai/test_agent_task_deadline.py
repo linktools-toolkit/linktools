@@ -228,14 +228,14 @@ def _start_interrupted_graph(
             return ModelResponse(parts=[TextPart("late")])
 
         group = _recovery_group(subagent)
-        async with Persistence.open('deadline-recovery', storage=PersistenceStorage.sqlite(Path(path)) if backend == 'sqlite' else PersistenceStorage.filesystem(Path(path))) as persistence_230, Runtime.attach(persistence=persistence_230, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_230) as engine:
+        async with Persistence.open('deadline-recovery', storage=PersistenceStorage.sqlite(Path(path)) if backend == 'sqlite' else PersistenceStorage.from_root(Path(path), exclusive_writer=True)) as persistence_230, Runtime.attach(persistence=persistence_230, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_230) as engine:
             task = Task.from_agent("deadline.agent", runtime.agents.get())
             run = await engine.with_definitions(task).start(
                 TaskGraph("deadline-recovery", (TaskNode("agent", task=task, input=AgentTaskInput("work"), timeout_seconds=timeout),)),
                 idempotency_key="start",
              principal=runtime.default_principal)
             # The parent bounds the complete startup handshake, including
-            # filesystem persistence and child execution admission.
+            # durable persistence and child execution admission.
             await entered.wait()
             await observer_entered.wait()
             execution = await run.execution("agent")
@@ -266,11 +266,11 @@ def _start_interrupted_graph(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend,subagent,change", (
-    ("sqlite", False, "none"), ("filesystem", False, "none"),
-    ("sqlite", True, "none"), ("filesystem", True, "none"),
+    ("sqlite", False, "none"), ("local_sqlite", False, "none"),
+    ("sqlite", True, "none"), ("local_sqlite", True, "none"),
     ("sqlite", True, "metadata"), ("sqlite", True, "prompt"),
     ("sqlite", True, "tool"), ("sqlite", True, "revision"),
-    ("sqlite", False, "missing_capture"), ("filesystem", False, "missing_capture"),
+    ("sqlite", False, "missing_capture"), ("local_sqlite", False, "missing_capture"),
 ))
 async def test_agent_node_recovery_keeps_first_start_deadline(
     tmp_path: Path, backend: str, subagent: bool, change: str,
@@ -293,7 +293,7 @@ async def test_agent_node_recovery_keeps_first_start_deadline(
         write.close()
     # Read without a Runtime: startup reconciliation must not run before the
     # crash premise (including the real in-flight child) has been verified.
-    snapshot = Persistence(PersistenceStorage.sqlite(path) if backend == "sqlite" else PersistenceStorage.filesystem(path))
+    snapshot = Persistence(PersistenceStorage.sqlite(path) if backend == "sqlite" else PersistenceStorage.from_root(path, exclusive_writer=True))
     await snapshot.initialize(namespace="deadline-recovery", tenant_id=tenant_id, read_only=True)
     try:
         original = await snapshot.execution.executions.get(execution_id, tenant_id=tenant_id)
@@ -320,7 +320,7 @@ async def test_agent_node_recovery_keeps_first_start_deadline(
     owners = AsyncExitStack()
     persistence = await owners.enter_async_context(Persistence.open(
         "deadline-recovery",
-        storage=PersistenceStorage.sqlite(path) if backend == "sqlite" else PersistenceStorage.filesystem(path),
+        storage=PersistenceStorage.sqlite(path) if backend == "sqlite" else PersistenceStorage.from_root(path, exclusive_writer=True),
     ))
     runtime = await owners.enter_async_context(Runtime.attach(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), group),
@@ -368,7 +368,7 @@ async def test_agent_recovery_relaunches_with_original_binding(tmp_path: Path, s
     path = tmp_path / "state"
     context = multiprocessing.get_context("spawn")
     read, write = context.Pipe(duplex=False)
-    process = context.Process(target=_start_interrupted_graph, args=(str(path), write, "sqlite" if subagent else "filesystem", 120 if subagent else None, subagent, False))
+    process = context.Process(target=_start_interrupted_graph, args=(str(path), write, "sqlite" if subagent else "local_sqlite", 120 if subagent else None, subagent, False))
     process.start()
     try:
         assert await asyncio.to_thread(read.poll, 30), "Interrupted execution did not reach its ready boundary"
@@ -391,7 +391,7 @@ async def test_agent_recovery_relaunches_with_original_binding(tmp_path: Path, s
         return ModelResponse(parts=[TextPart("recovered")])
 
     group = _recovery_group(subagent)
-    storage = PersistenceStorage.sqlite(path) if subagent else PersistenceStorage.filesystem(path)
+    storage = PersistenceStorage.sqlite(path) if subagent else PersistenceStorage.from_root(path, exclusive_writer=True)
     async with Persistence.open('deadline-recovery', storage=storage) as persistence_380, Runtime.attach(persistence=persistence_380, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_380) as engine:
         original_binding = (await runtime._state.execution.executions.get(
             execution_id, tenant_id=runtime.default_principal.tenant_id,

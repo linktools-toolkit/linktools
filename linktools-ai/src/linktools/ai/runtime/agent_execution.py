@@ -10,10 +10,10 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 from pydantic import BaseModel
 from linktools.core import environ
 from ..agent import AgentBinding, AgentBindingContract, AgentCompiler, CompiledAgent, OutputBinding, bind_output
-from ..core import (OperationLedgerInput, ExecutionMode, RunBudget, Principal, SessionStatus, ThinkingValue, normalize_execution_mode,
+from ..core import (OperationLedgerInput, ExecutionMode, RunBudget, Principal, ThinkingValue, normalize_execution_mode,
                     normalize_thinking, overlay_correlation, validate_idempotency_key)
 from ..errors import AIError, ErrorCode
-from ..execution import Execution, ExecutionInputContext, ExecutionRequest, ResumeSessionRequest, CreateSessionRequest
+from ..execution import Execution, ExecutionInputContext, ExecutionRequest, ResumeSessionRequest
 from ..execution.handle import ExecutionBinding, ExecutionTreeWatcher
 from ..model import CanonicalUserInput, normalize_input_files
 if TYPE_CHECKING:
@@ -178,7 +178,6 @@ class AgentExecutionPort(Generic[AppT]):
                 resolved_binding=binding,
             )
         else:
-            await self._ensure_session(compiled_agent, session_id, resolved_principal)
             resume_request = ResumeSessionRequest(
                 principal=resolved_principal,
                 user_prompt=request.user_prompt,
@@ -218,47 +217,6 @@ class AgentExecutionPort(Generic[AppT]):
             self.watch_tree,
         )
 
-
-    async def _ensure_session(
-        self,
-        compiled_agent: CompiledAgent,
-        session_id: str,
-        principal: Principal,
-    ) -> None:
-        try:
-            session = await self.sessions.get(
-                session_id,
-                principal=principal,
-            )
-        except AIError as error:
-            if error.code not in {
-                ErrorCode.SESSION_NOT_FOUND,
-                ErrorCode.AUTHORIZATION_DENIED,
-            }:
-                raise
-            try:
-                await self.sessions.create(
-                    compiled_agent.spec.id,
-                    CreateSessionRequest(
-                        principal,
-                        session_id,
-                        secrets.token_urlsafe(32),
-                        None,
-                        {},
-                    ),
-                )
-                return
-            except AIError as create_error:
-                if create_error.code is not ErrorCode.STORAGE_CONFLICT:
-                    raise
-            session = await self.sessions.get(
-                session_id,
-                principal=principal,
-            )
-        if session.status is not SessionStatus.OPEN:
-            raise AIError(ErrorCode.SESSION_CONFLICT)
-        if session.agent_id != compiled_agent.spec.id:
-            raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
 
 
 def _execution_policy(

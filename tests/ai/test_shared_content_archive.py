@@ -25,7 +25,7 @@ async def _publish(archive: ContentArchive, prepared: PreparedArchive) -> None:
     await archive.store.mutate(lambda tx: archive.publish(tx, prepared))
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_shared_content_preserves_occurrences_exact_slices_and_old_roots(tmp_path: Path, backend: str) -> None:
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
@@ -153,7 +153,7 @@ async def test_combined_preparation_rejects_foreign_scope_and_conflicting_record
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_range_metadata_uses_one_snapshot_and_body_reads_leave_it(tmp_path, monkeypatch, backend):
     from linktools.ai.persistence.state import active_state_scope
 

@@ -67,7 +67,7 @@ async def _add_run(state, run_id: str, execution_id: str) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("barrier", ("checkpoint", "close"))
 async def test_recovery_checkpoint_keeps_observations_queued_until_public_drain(
     tmp_path: Path, backend: str, barrier: str, monkeypatch: pytest.MonkeyPatch,
@@ -273,22 +273,29 @@ async def test_transient_observations_do_not_schedule_durability_tasks() -> None
 
 
 @pytest.mark.asyncio
-async def test_recovery_checkpoint_does_not_force_a_public_filesystem_commit(
+async def test_recovery_checkpoint_does_not_force_a_public_sql_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from linktools.ai.storage import FilesystemJournal
+    from sqlalchemy import event
 
     monkeypatch.setattr(_trace_persistence, "DEFAULT_TRACE_FLUSH_INTERVAL", 60.0)
-    state = await _setup(tmp_path, "filesystem")
+    state = await _setup(tmp_path, "local_sqlite")
     commits = 0
-    original = FilesystemJournal.stage
+    writes = set()
+    engine = state.execution.executions.state_store.context.engine
 
-    def staged(self, *args, **kwargs):
+    def changed(connection, cursor, statement, parameters, context, many):
+        if statement.lstrip().split()[0].upper() in {"INSERT", "UPDATE", "DELETE"}:
+            writes.add(connection)
+
+    def committed(connection):
         nonlocal commits
-        commits += 1
-        return original(self, *args, **kwargs)
+        if connection in writes:
+            writes.remove(connection)
+            commits += 1
 
-    monkeypatch.setattr(FilesystemJournal, "stage", staged)
+    event.listen(engine.sync_engine, "before_cursor_execute", changed)
+    event.listen(engine.sync_engine, "commit", committed)
     try:
         message = ModelRequest(parts=[UserPromptPart("one physical publication")])
         store = state.run_store
@@ -311,11 +318,13 @@ async def test_recovery_checkpoint_does_not_force_a_public_filesystem_commit(
         await store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
         assert commits == 2
     finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", changed)
+        event.remove(engine.sync_engine, "commit", committed)
         await state.close()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_run_buffers_publish_independently_and_remain_idle_after_drain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:

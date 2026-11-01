@@ -17,6 +17,7 @@ from ..core import validate_persistence_namespace, validate_tenant_id, canonical
 from ..errors import AIError, ErrorCode
 from ..storage import (
     CacheBackend,
+    FilesystemObjectStore,
     TurnCoordinationBackend,
     StreamBackend,
     ObjectRef,
@@ -72,7 +73,6 @@ class Persistence:
         if not isinstance(storage, PersistenceStorage):
             raise TypeError("storage must be PersistenceStorage")
         self._coordination_backend = storage.coordination
-        self._local_sqlite_path = storage.local_sqlite_path
         self._plan = storage.plan
         self._external_object_store = storage.object_store
         self._lifecycle = _RuntimeStateLifecycle.NEW
@@ -143,12 +143,12 @@ class Persistence:
         return self._plan
 
     def status(self) -> tuple[PersistenceStatus, ...]:
-        """Describe bound routes and object resources without probing their health."""
+        """Describe bound resources and known filesystem roots without probing them."""
         self._require_ready()
         result: list[PersistenceStatus] = []
         for domain in PersistenceDomain:
             route = self._plan.route(domain)
-            path = self._plan.filesystem_path(domain) if route.kind == "filesystem" else route.path
+            path = route.path
             objects = self.object_store(domain)
             result.append({
                 "domain": domain,
@@ -156,7 +156,7 @@ class Persistence:
                 "retention": route.retention,
                 "path": str(path) if path is not None else None,
                 "object_store_id": objects.store_id,
-                "object_store_paths": tuple(str(path) for path in objects.local_paths()),
+                "object_store_paths": (str(objects.root),) if isinstance(objects, FilesystemObjectStore) else (),
             })
         return tuple(result)
 
@@ -267,7 +267,7 @@ class Persistence:
         group = self.execution.executions.state_store.storage_group
         if isinstance(group, SqlStateStorageGroup):
             return group.context.exclusive_writer
-        return self._plan.route(PersistenceDomain.EXECUTION).kind == "filesystem"
+        return False
 
     async def bind_runtime(
         self, *, execution_producer: bool, owns_persistence: bool,
@@ -346,7 +346,6 @@ class Persistence:
                     tenant_id=tenant_id,
                     object_store=self._external_object_store,
                     read_only=read_only,
-                    local_sqlite_path=self._local_sqlite_path,
                     capability_routes=self._plan.capability_routes,
                     register_cleanup=self._register_initialization_cleanup,
                 )
@@ -511,15 +510,13 @@ class Persistence:
         )
 
     def local_paths(self) -> tuple[Path, ...]:
-        """Return local physical paths owned by this state instance."""
+        """Return known local state paths and built-in filesystem object roots."""
         self._require_ready()
         paths: list[Path] = []
         for domain in PersistenceDomain:
             route = self._plan.route(domain)
             if route.path is not None:
                 paths.append(route.path.resolve())
-            if route.transaction_root is not None:
-                paths.append(route.transaction_root.resolve())
         if self._objects is not None:
             paths.extend(self._objects.local_paths())
         return tuple(dict.fromkeys(paths))

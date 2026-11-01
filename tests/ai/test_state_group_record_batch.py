@@ -22,7 +22,6 @@ from linktools.ai.persistence._sql import SqlStateStore, _SqlGroupTransaction
 from linktools.ai.persistence.state import StateGroupTransaction, StateStore, StateTransaction, StoredRecord
 from linktools.ai.storage import CacheBackend, InMemoryCacheBackend
 
-from .test_state_group_archive import _filesystem
 
 
 def _key(value: str) -> bytes:
@@ -221,12 +220,8 @@ async def test_group_reads_demultiplex_aliases_of_one_physical_partition(tmp_pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem"))
-async def test_unsupported_and_custom_groups_keep_original_transaction_reads(tmp_path: Path, backend: str) -> None:
-    if backend == "memory":
-        store = InMemoryStateStore()
-    else:
-        store = _filesystem(tmp_path / "unsupported")
+async def test_unsupported_and_custom_groups_keep_original_transaction_reads() -> None:
+    store = InMemoryStateStore()
     await store.initialize()
     assert not isinstance(store.storage_group, GroupRecordReader)
     record = _record("ordinary")
