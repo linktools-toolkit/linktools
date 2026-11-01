@@ -189,7 +189,7 @@ class SqlObjectStore:
                 .one_or_none()
             )
         finally:
-            await session.close()
+            await _finish_owned_task(asyncio.create_task(session.close()))
         if row is None:
             return None
         if row["store_id"] != self.store_id or row["object_key"] != key:
@@ -216,7 +216,7 @@ class SqlObjectStore:
                 ))
             ).scalar_one_or_none()
         finally:
-            await session.close()
+            await _finish_owned_task(asyncio.create_task(session.close()))
         if orphan is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -245,7 +245,7 @@ class SqlObjectStore:
                     .all()
                 )
             finally:
-                await session.close()
+                await _finish_owned_task(asyncio.create_task(session.close()))
             if not headers:
                 return
 
@@ -282,7 +282,7 @@ class SqlObjectStore:
                 .all()
             )
         finally:
-            await session.close()
+            await _finish_owned_task(asyncio.create_task(session.close()))
         for row in rows:
             yield ObjectStat(
                 str(row["object_key"]),
@@ -387,7 +387,8 @@ class SqlObjectStore:
                     select(*header_columns, chunks.c.chunk_index, chunks.c.content)
                     .select_from(table.outerjoin(chunks, chunks.c.key_digest == table.c.key_digest))
                     .where(table.c.key_digest == _key_digest(self.store_id, key).hex())
-                    .order_by(chunks.c.chunk_index)
+                    .order_by(chunks.c.chunk_index),
+                    execution_options={"yield_per": 1},
                 )
 
             await self._context.run_statement(start_stream())
@@ -426,7 +427,7 @@ class SqlObjectStore:
                 if result is not None:
                     await self._context.run_statement(result.close())
             finally:
-                await session.close()
+                await _finish_owned_task(asyncio.create_task(session.close()))
 
     async def _stage_open(self, key: str, handle: BinaryIO) -> None:
         stream = self._stream_open(key)
