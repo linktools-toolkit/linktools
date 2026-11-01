@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Pydantic-specific automatic Model metric producer."""
+"""Logical model request lifecycle with an optional Metrics projection."""
 
 from __future__ import annotations
 
@@ -377,6 +377,131 @@ class PreparedRequestModel(WrapperModel):
                 raise
 
 
+class _ModelMetricProjection:
+    """Project already-owned request facts without owning their lifecycle."""
+
+    def __init__(
+        self,
+        recorder: MetricRecorder | None,
+        *,
+        source_namespace: str,
+        tenant_id: str,
+        execution_id: str,
+        session_id: str | None,
+        agent_run_id: str,
+        agent_id: str,
+    ) -> None:
+        self._recorder = recorder
+        self._source_namespace = source_namespace
+        self._tenant_id = tenant_id
+        self._execution_id = execution_id
+        self._session_id = session_id
+        self._agent_run_id = agent_run_id
+        self._agent_id = agent_id
+
+    @property
+    def enabled(self) -> bool:
+        return self._recorder is not None
+
+    def bind_execution_context(self, context: AgentContext[object]) -> None:
+        if self._recorder is not None:
+            bind_metric_execution_context(self._recorder, self._execution_id, context.correlation)
+
+    def capture(
+        self,
+        run_context: AgentContext[object] | None,
+        fact: ModelRequestFact,
+        *,
+        model: Model,
+        response: ModelResponse | None,
+        status: str,
+        error_code: str | None,
+        measurements: tuple[MetricMeasurement, ...],
+    ) -> Observation | None:
+        if self._recorder is None:
+            return
+        try:
+            selected_model_id = str(model.model_id)
+            selected_model_system = str(model.system)
+            selected_model_name = str(model.model_name)
+            response_provider = (
+                "" if response is None or response.provider_name is None
+                else str(response.provider_name)
+            )
+            response_model = "" if response is None else str(response.model_name)
+            dimensions = {
+                "agent_id": self._agent_id,
+                "provider": selected_model_system,
+                "model_identity": selected_model_name,
+                "route_id": selected_model_id,
+                "selected_model_id": selected_model_id,
+                "selected_model_system": selected_model_system,
+                "selected_model_name": selected_model_name,
+            }
+            if response_provider:
+                dimensions["response_provider_name"] = response_provider
+            if response_model:
+                dimensions["response_model_name"] = response_model
+            return Observation(
+                version=1,
+                observation_id=fact.observation_id,
+                kind="linktools.model.request",
+                occurred_at=datetime.now(timezone.utc),
+                source_namespace=self._source_namespace,
+                tenant_id=self._tenant_id,
+                status=status,
+                error_code=error_code,
+                correlation=metric_correlation(
+                    None if run_context is None else run_context.correlation,
+                    execution_id=self._execution_id,
+                    session_id=self._session_id,
+                    agent_run_id=self._agent_run_id,
+                    model_request_seq=fact.model_request_seq,
+                    request_purpose=fact.purpose,
+                    output_retry_index=fact.output_retry_index,
+                ),
+                dimensions=dimensions,
+                measurements=(
+                    MetricMeasurement("latency_ns", 1, fact.duration_ns or 0),
+                    *measurements,
+                ),
+            )
+        except Exception:
+            _logger.exception("model metric observation rejected")
+
+    async def record(self, observation: Observation | None) -> None:
+        if self._recorder is None or observation is None:
+            return
+        try:
+            await self._recorder.try_record(observation)
+        except Exception:
+            _logger.exception("model metric observation rejected")
+
+    @classmethod
+    def usage_measurements(cls, usage: RequestUsage | RunUsage) -> tuple[MetricMeasurement, ...]:
+        values = [
+            ("input_tokens", usage.input_tokens),
+            ("output_tokens", usage.output_tokens),
+            ("cache_read_tokens", usage.cache_read_tokens),
+            ("cache_write_tokens", usage.cache_write_tokens),
+        ]
+        measurements = [
+            MetricMeasurement(name, 1, value)
+            for name, value in values
+            if value > 0
+        ]
+        if usage.input_tokens > 0 and usage.output_tokens > 0:
+            measurements.insert(
+                2,
+                MetricMeasurement(
+                    "total_tokens",
+                    1,
+                    usage.input_tokens + usage.output_tokens,
+                ),
+            )
+        return tuple(measurements)
+
+
 class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
     """Observe actual logical model handler invocations without changing them."""
 
@@ -397,14 +522,17 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         budget: RunBudgetContext | None = None,
     ) -> None:
         self.id = "linktools.ai.model-observation"
-        self._recorder = recorder
-        self._source_namespace = source_namespace
-        self._tenant_id = tenant_id
+        self._metrics = _ModelMetricProjection(
+            recorder,
+            source_namespace=source_namespace,
+            tenant_id=tenant_id,
+            execution_id=execution_id,
+            session_id=session_id,
+            agent_run_id=agent_run_id,
+            agent_id=agent_id,
+        )
         self._execution_id = execution_id
         self._agent_run_seq = agent_run_seq
-        self._session_id = session_id
-        self._agent_run_id = agent_run_id
-        self._agent_id = agent_id
         self._journal = journal or ModelRequestJournal(
             source_namespace=source_namespace,
             tenant_id=tenant_id,
@@ -450,13 +578,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         self,
         ctx: PydanticRunContext[AgentContext[object]],
     ) -> None:
-        if self._recorder is None:
-            return
-        bind_metric_execution_context(
-            self._recorder,
-            self._execution_id,
-            ctx.deps.correlation,
-        )
+        self._metrics.bind_execution_context(ctx.deps)
 
     async def before_model_request(
         self,
@@ -923,13 +1045,13 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             status = "SUCCEEDED"
             error_code = None
             usage = model_response_usage(response)
-            measurements = _provider_usage_measurements(response)
+            measurements = self._metrics.usage_measurements(model_response_usage(response))
         else:
             exception = error if isinstance(error, Exception) else None
             error_code = None if exception is None else _model_error_code(exception)
             status = "CANCELLED" if phase == "cancelled" else "FAILED"
             usage = _failed_attempt_usage(error)
-            measurements = _usage_measurements(usage) if usage is not None else ()
+            measurements = self._metrics.usage_measurements(usage) if usage is not None else ()
         self._finish_request(
             fact,
             model,
@@ -939,7 +1061,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             usage,
             client_requests=client_requests,
         )
-        observation = self._capture_model(
+        observation = self._metrics.capture(
             ctx.deps,
             fact,
             model=model,
@@ -966,7 +1088,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             )
 
         interrupted = await await_request_handoff(handoff())
-        await self._record_model(observation)
+        await self._metrics.record(observation)
         if interrupted:
             raise asyncio.CancelledError
 
@@ -988,7 +1110,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             response=response,
             error_code=error_code,
             usage=usage,
-            include_observation=self._recorder is not None,
+            include_observation=self._metrics.enabled,
         )
 
     async def _publish_request_event(
@@ -1074,10 +1196,8 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             usage,
             client_requests=client_requests,
         )
-        measurements = (
-            _usage_measurements(usage) if usage is not None else ()
-        )
-        observation = self._capture_model(
+        measurements = self._metrics.usage_measurements(usage) if usage is not None else ()
+        observation = self._metrics.capture(
             run_context,
             finished,
             model=model,
@@ -1104,7 +1224,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             )
 
         interrupted = await await_request_handoff(handoff())
-        await self._record_model(observation)
+        await self._metrics.record(observation)
         return interrupted
 
     def _stage_request(
@@ -1179,75 +1299,6 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                              if fact.model_request_seq in self._client_recorders else None),
         )
 
-    def _capture_model(
-        self,
-        run_context: AgentContext[object] | None,
-        fact: ModelRequestFact,
-        *,
-        model: Model,
-        response: ModelResponse | None,
-        status: str,
-        error_code: str | None,
-        measurements: tuple[MetricMeasurement, ...],
-    ) -> Observation | None:
-        if self._recorder is None:
-            return
-        try:
-            selected_model_id = str(model.model_id)
-            selected_model_system = str(model.system)
-            selected_model_name = str(model.model_name)
-            response_provider = (
-                "" if response is None or response.provider_name is None
-                else str(response.provider_name)
-            )
-            response_model = "" if response is None else str(response.model_name)
-            dimensions = {
-                "agent_id": self._agent_id,
-                "provider": selected_model_system,
-                "model_identity": selected_model_name,
-                "route_id": selected_model_id,
-                "selected_model_id": selected_model_id,
-                "selected_model_system": selected_model_system,
-                "selected_model_name": selected_model_name,
-            }
-            if response_provider:
-                dimensions["response_provider_name"] = response_provider
-            if response_model:
-                dimensions["response_model_name"] = response_model
-            return Observation(
-                version=1,
-                observation_id=fact.observation_id,
-                kind="linktools.model.request",
-                occurred_at=datetime.now(timezone.utc),
-                source_namespace=self._source_namespace,
-                tenant_id=self._tenant_id,
-                status=status,
-                error_code=error_code,
-                correlation=metric_correlation(
-                    None if run_context is None else run_context.correlation,
-                    execution_id=self._execution_id,
-                    session_id=self._session_id,
-                    agent_run_id=self._agent_run_id,
-                    model_request_seq=fact.model_request_seq,
-                    request_purpose=fact.purpose,
-                    output_retry_index=fact.output_retry_index,
-                ),
-                dimensions=dimensions,
-                measurements=(
-                    MetricMeasurement("latency_ns", 1, fact.duration_ns or 0),
-                    *measurements,
-                ),
-            )
-        except Exception:
-            _logger.exception("model metric observation rejected")
-
-    async def _record_model(self, observation: Observation | None) -> None:
-        if self._recorder is None or observation is None:
-            return
-        try:
-            await self._recorder.try_record(observation)
-        except Exception:
-            _logger.exception("model metric observation rejected")
 
 
 def _event_usage(
@@ -1265,36 +1316,6 @@ def _event_usage(
         "cache_read_tokens": usage.cache_read_tokens,
         "cache_write_tokens": usage.cache_write_tokens,
     }
-
-
-def _provider_usage_measurements(
-    response: ModelResponse,
-) -> tuple[MetricMeasurement, ...]:
-    return _usage_measurements(model_response_usage(response))
-
-
-def _usage_measurements(usage: RequestUsage | RunUsage) -> tuple[MetricMeasurement, ...]:
-    values = [
-        ("input_tokens", usage.input_tokens),
-        ("output_tokens", usage.output_tokens),
-        ("cache_read_tokens", usage.cache_read_tokens),
-        ("cache_write_tokens", usage.cache_write_tokens),
-    ]
-    measurements = [
-        MetricMeasurement(name, 1, value)
-        for name, value in values
-        if value > 0
-    ]
-    if usage.input_tokens > 0 and usage.output_tokens > 0:
-        measurements.insert(
-            2,
-            MetricMeasurement(
-                "total_tokens",
-                1,
-                usage.input_tokens + usage.output_tokens,
-            ),
-        )
-    return tuple(measurements)
 
 
 def _fallback_error(error: BaseException) -> FallbackExceptionGroup | None:

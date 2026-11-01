@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """Normalized model usage measurement regressions."""
 
-from linktools.ai.runtime._metric_capability import _provider_usage_measurements
+from linktools.ai.model.messages import model_response_usage
+from linktools.ai.runtime._metric_capability import _ModelMetricProjection
 from pydantic_ai.messages import ModelResponse
 from pydantic_ai.usage import RequestUsage
 
@@ -13,7 +14,7 @@ def test_model_usage_omits_normalized_zero_cache_fields() -> None:
         usage=RequestUsage(input_tokens=12, output_tokens=4),
     )
 
-    measurements = _provider_usage_measurements(response)
+    measurements = _ModelMetricProjection.usage_measurements(model_response_usage(response))
 
     assert [(item.name, item.value) for item in measurements] == [
         ("input_tokens", 12),
@@ -25,7 +26,7 @@ def test_model_usage_omits_normalized_zero_cache_fields() -> None:
 def test_model_usage_omits_all_normalized_zero_fields() -> None:
     response = ModelResponse(parts=(), usage=RequestUsage())
 
-    measurements = _provider_usage_measurements(response)
+    measurements = _ModelMetricProjection.usage_measurements(model_response_usage(response))
 
     assert measurements == ()
 
@@ -41,7 +42,7 @@ def test_model_usage_records_nonzero_cache_fields() -> None:
         ),
     )
 
-    measurements = _provider_usage_measurements(response)
+    measurements = _ModelMetricProjection.usage_measurements(model_response_usage(response))
 
     assert [(item.name, item.value) for item in measurements] == [
         ("input_tokens", 12),
@@ -58,7 +59,7 @@ def test_model_usage_omits_total_when_normalized_output_is_zero() -> None:
         usage=RequestUsage(input_tokens=12, output_tokens=0),
     )
 
-    measurements = _provider_usage_measurements(response)
+    measurements = _ModelMetricProjection.usage_measurements(model_response_usage(response))
 
     assert [(item.name, item.value) for item in measurements] == [
         ("input_tokens", 12),
