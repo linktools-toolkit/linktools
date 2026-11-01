@@ -1,16 +1,18 @@
 # Storage 缓存与缓冲写入统一设计
 
 状态：本文分别记录当前存储合同与历史验证基线；第9至12节是原有发布证据，不构成后续写缓冲、指标 provider 或宿主部署的整体完成声明。
-更新日期：2026-10-31
+更新日期：2026-11-01
 范围：存储缓存、领域 payload 缓冲与独立指标 provider
 
 ## 1. 目标与边界
 
-以现有 storage 能力为基础减少重复读取、重复回源和可合并的写入。公共接口保持少量明确概念，业务调用不散落缓存 key、TTL、失效与刷新逻辑。允许对尚未发布的接口作必要破坏性调整，不保留旧别名。用户明确不要求兼容旧持久数据；不设计旧数据迁移或旧格式读取分支，也不因此授权删除实际环境数据。最新代码的功能、现有调用能力与扩展语义必须完整保留，必要接口调整同步所有调用方。
+以现有 storage 能力为基础减少重复读取、重复回源和可合并的写入。公共接口保持少量明确概念，业务调用不散落缓存 key、TTL、失效与刷新逻辑。允许对尚未发布的接口作必要破坏性调整，不保留无用途旧别名；当前 writer/reader 和明确承诺的持久格式仍须配对验证。现有窄离线 Runtime reader、历史 fixture、archive/snapshot 与 Asset 固定版本引用按各自合同保留，不为未知布局新增通用迁移器，也不授权删除实际环境数据。最新代码的功能、现有调用能力与扩展语义必须完整保留，必要接口调整同步所有调用方。
 
 Redis 连接、配置及适配器归宿主。框架不依赖 Redis，不添加 Redis 专属参数。内存、文件、宿主共享缓存按真实复用收益组合，不强制三层。缓存不替代授权、权威存在性、保留期、事务与恢复记录。
 
 缓冲写入与读缓存有不同职责：前者尚未获得 sink 的持久确认，不能像命中的副本一样任意逐出；后者可以丢弃并回源。本稿批写调度只用于业务明确接受延迟及异常丢失风险的数据；两种读取可见性均可使用它，不因只读已提交数据就改变交付保证。
+
+必要源事务、未确认的真实 payload 和已提交数据的可丢缓存不是三套 Runtime 模式。控制、已确认历史、effect receipt 与已承诺恢复的 checkpoint 仍由原 owner 确认；仅明确允许延迟的当前轮数据进入所选 buffer。丢失 payload 使该轮显式失败，不把源 miss 当成空状态恢复，不透明回退为逐项 SQL。
 
 ## 2. 语义与所有权
 
@@ -51,13 +53,13 @@ ObjectStore 和 CacheBackend 不能为了词形一致合并。get 返回可缺�
 
 ### 批量读取合同
 
-BatchStorageReader 与四个内置 Asset backend 的 get_many(keys) 返回 Mapping[key, value]，只包含存在且可见的条目；重复 key 合并，缺失 key 不进入结果。StorageOverlay、AssetStore、快照和能力捕获的 AssetStoreReader 返回 tuple[value | None, ...]，按输入顺序保留重复 key 与缺失位置。两层均通过 await 完成批读后返回，保留 backend 批量查询及 Overlay 的按 key 合并，不提供流式前缀或额外 iter_many 接口。ExecutionRepository 的领域 Mapping 合同保持独立。
+BatchStorageReader 与支持批读的 Asset backend 的 get_many(keys) 返回 Mapping[key, value]，只包含存在且可见的条目；重复 key 合并，缺失 key 不进入结果。StorageOverlay、AssetStore、快照和能力捕获的 AssetStoreReader 返回 tuple[value | None, ...]，按输入顺序保留重复 key 与缺失位置。两层均通过 await 完成批读后返回，保留 backend 批量查询及 Overlay 的按 key 合并，不提供流式前缀或额外 iter_many 接口。ExecutionRepository 的领域 Mapping 合同保持独立。
 
 ### 持久字段与当前代码一致性
 
 AssetInfo、AssetVersionRef 和 CapabilityLoadEntry 的 digest 字段表示内容字节的 SHA-256，采用 64 位小写十六进制。当前 SQL JSON payload、文件 metadata/history、batch receipt、快照及 Runtime 内嵌引用统一使用 digest；HTTP ETag 保持独立的传输语义。
 
-StoredRecord.storage_revision 与 Observed.storage_revision 是物理 CAS token；RecordReplacement 和 StateTransaction 使用 expected_storage_revision 作为比较条件。guard/lease 操作也会递增 storage_revision，但不改变领域数据及其 revision。业务 revision/expected_revision 保留各自语义，version 仍用于 wire/schema 格式。当前 ai_state_records 列和文件 record codec 均使用 storage_revision，不保留旧字段别名或旧数据读取、迁移路径。Asset digest 改名仍须同步当前 writers/readers/快照引用及摘要生成，不能用旧 ObjectRef 指向改过的字节。旧持久数据兼容不在范围，但不得自动清库。
+StoredRecord.storage_revision 与 Observed.storage_revision 是物理 CAS token；RecordReplacement 和 StateTransaction 使用 expected_storage_revision 作为比较条件。guard/lease 操作也会递增 storage_revision，但不改变领域数据及其 revision。业务 revision/expected_revision 保留各自语义，version 仍用于 wire/schema 格式。当前 ai_state_records 列和 record codec 使用 storage_revision，不增加开发期旧字段 alias；这不撤销独立离线 reader 已支持的源格式。Asset digest 改名仍须同步当前 writers/readers/快照引用及摘要生成，不能用旧 ObjectRef 指向改过的字节。受支持的旧 Runtime 数据与 Asset 历史转换边界分别见 [离线读取指南](storage-caching.md#read-only-legacy-filesystem-migration)和 [Asset 迁移说明](asset-storage.md#replacing-a-versioned-filesystem-backend)，不自动改写源或清库。
 
 ## 4. 场景矩阵
 
@@ -72,7 +74,7 @@ StoredRecord.storage_revision 与 Observed.storage_revision 是物理 CAS token�
 | 可观测性指标/诊断 | 评估有界批写 | 先明确哪些允许延迟/丢失；记账和审计不能默认可丢 |
 | 快照/恢复/冻结资产 | 各自固定读取源 | 不以最新在线缓存替代冻结内容 |
 
-资产缓存允许同一摘要的字节跨来源复用；现有 AssetContentCache 不提供租户或物理 backend 的 key 隔离。需要独立隔离的宿主使用适配器 namespace 或独立缓存实例，不增加框架参数。Runtime 对象缓存采用另一所有者合同：key 包含 namespace、tenant、domain 与完整 ObjectRef；store_id 不是全局物理源标识；共用 cache 时同一 Runtime namespace 必须绑定同一逻辑数据源，换源须换 namespace 或 cache 实例。普通观察的正文命中无需 stat，所属读缓存 envelope 强制原始 capture 起最多3秒期限，过期回源验证存在性和完整性，L1晋升及重开 Runtime 都不续期。RECOVERY域始终保留原有当前源校验；result/wait、History 结果、持久checkpoint、模型与恢复输入、展示重建（含 max_age=0）保留原有当前源 stat 验证，复用已校验字节，避免重复传输完整正文。新展示不会把旧正文期限延长；stat 能检出的变化仅遵循原 ObjectStore 合同。
+资产缓存允许同一摘要的字节跨来源复用；现有 AssetContentCache 不提供租户或物理 backend 的 key 隔离。需要独立隔离的宿主使用适配器 namespace 或真正隔离的缓存 keyspace，不增加框架参数。Runtime 对象缓存采用另一所有者合同：key 包含 namespace、tenant、domain 与完整 ObjectRef；store_id 不是全局物理源标识；共用 cache 时同一 Runtime namespace 必须绑定同一逻辑数据源，换源须换 namespace 或隔离实际 keyspace，仅新建指向同一前缀的 adapter 实例不构成隔离。合法同源跨 owner 仍可共享。普通观察的正文命中无需 stat，所属读缓存 envelope 强制原始 capture 起最多3秒期限，过期回源验证存在性和完整性，L1晋升及重开 Runtime 都不续期。RECOVERY域始终保留原有当前源校验；result/wait、History 结果、持久checkpoint、模型与恢复输入、展示重建（含 max_age=0）保留原有当前源 stat 验证，复用已校验字节，避免重复传输完整正文。新展示不会把旧正文期限延长；stat 能检出的变化仅遵循原 ObjectStore 合同。
 
 ## 5. 最小接入方式
 
@@ -185,7 +187,7 @@ Persistence.open 负责绑定 namespace/tenant 与物理资源，并在外层退
 
 宿主共享缓存适配器实现同一 CacheBackend；连接配置与关闭仍由宿主资源所有者负责，History 退出不关闭它。适配器须限制网络操作耗时；低层 TTL 不会自动使已提升到内存/文件层的副本过期，业务失效仍由拥有者合同决定。
 
-PersistenceStorage.read_object(domain, reference) 是 storage-bound SDK 读出口，供内部组装 history/transcript/result 复用；普通业务不主动调用它。它与通用 storage.read_object(store, key, ...) 的完整物化/校验工具具有不同所属对象和参数。独立冷 miss 创建新 flight，直接读取源而不先 stat；普通观察可在原 capture 的3秒内借用 flight 或热字节，晚于期限的新调用另读源，原慢调用可以正常结束。强消费者对借用 flight/热字节保留当前源 stat 验证。查询数按冷读、普通命中和强验证分别计量。禁用缓存和非 DURABLE 保留原有取消与源读取行为。
+Persistence.read_object(domain, reference) 是 Persistence 所属的 SDK 读出口，供内部组装 history/transcript/result 复用；普通业务不主动调用它。它与通用 storage.read_object(store, key, ...) 的完整物化/校验工具具有不同所属对象和参数。独立冷 miss 创建新 flight，直接读取源而不先 stat；普通观察可在原 capture 的3秒内借用 flight 或热字节，晚于期限的新调用另读源，原慢调用可以正常结束。强消费者对借用 flight/热字节保留当前源 stat 验证。查询数按冷读、普通命中和强验证分别计量。禁用缓存和非 DURABLE 保留原有取消与源读取行为。
 
 ## 6. 并发、一致性与生命周期
 
@@ -232,6 +234,8 @@ Execution、Trace、显式 Capability 各自拥有 payload scope。Execution 冻
 准入使用 `wait=False` 和有界 transport 等待，不能等终态 drain 造成互锁。明确拒绝或未解决的 append 错误使该次写入/执行失败，不普通 SQL fallback、不自动关闭 Trace、不重发 provider 请求。Trace、terminal-buffered Execution 与显式 buffered Capability 只有完整读回已准入前缀，才可隔离明确被拒尾部并继续必要的 FAILED/CANCELLED 控制结算；尚未 durable admission 的 pending turn 可失败并释放协调。未知 append/source 不能伪装成明确失败，保留原 ID、bytes、plan/flight 供同身份核验。已确认 canonical 后 ack 只是精确 ID 清理，失败不改业务终态；close 保留并报告未结算错误，不关闭借用 backend。
 
 Task、真正 Checkpoint、tool effect、授权/幂等/恢复控制仍在必要源边界确认。工作读取仍用原本的 staging/overlay，独立 History 读取已提交源；buffer 不是热缓存、可靠任务队列或进程重启后的接管凭据。纯 bytes capture 不等于 RAM 卸载、零拷贝或仅靠 Redis 可恢复。Metrics best-effort provider 独立，不吞 Trace 准入错误；`metrics=None` 也不禁用 Trace interaction recorder。
+
+未 source-admit 的失败轮须完成原 no-submission 证明后才可清理自己的 pending。已明确请求的 exact lease release 可因传输失败单独重试，包括原轮 source 已成功的情况；重试不翻转源结果。已 admit 执行若须撤销，先经现有授权取消/恢复取得源撤销证明，再清理该 producer 的精确条目。payload 丢失、一次源缺失或本地 hint 过期不撤销健康轮，也不清除或重放已确认 effect receipt；UNKNOWN 仍按原 ID 与固定 plan 读回。公开控制入口和范围见 [Admission, failures and cleanup](storage-caching.md#admission-failures-and-cleanup)。
 
 升级须停止并 drain 旧 marker producer，不能复用旧活动 scope。容量按真实序列化 bytes（含累计 snapshot/上下文重复量）配置，不能沿用 marker 条数估算或逐出未确认条目。无 buffer 的原有语义保持：batch 同步源写，terminal 本地 staging。同步 SQL 与有界热点读缓存仍可单独使用，缓存不放宽控制、授权或 unknown readback。
 
@@ -291,7 +295,7 @@ Task、真正 Checkpoint、tool effect、授权/幂等/恢复控制仍在必要�
 
 本轮首批仅接入已有允许损失的 Runtime 自动观测契约；注入支持完整 buffer 方法组的 cache 才延迟聚合，默认直接等待源 I/O，采用明确拒新与失败不自动重试。框架能力供其他领域显式 opt-in；阶段统计等新增业务接入需各自确认，不阻塞本轮框架设计。
 
-旧数据范围已明确：不保留旧格式兼容或迁移工具，不执行实际环境数据删除。当前代码各 backend、调用方、快照生成与读取必须同步，不能留下只改一端的状态。
+本节历史实验未增加旧格式兼容或迁移工具，也未执行实际环境数据删除。当前支持的离线 reader 与持久格式义务以第1、3节为准；各 backend、调用方、快照生成与读取仍须同步，不能留下只改一端的状态。
 
 其他常规命名与组装选择由设计审查负责。显式写缓存公共入口、实现及其接纳/结算/关闭回归已经独立复审并按矩阵验证；后续扩展仍需针对自己的改动重新核验。不得把静态审查或局部CI通过扩张成全部生产场景无问题保证。
 
