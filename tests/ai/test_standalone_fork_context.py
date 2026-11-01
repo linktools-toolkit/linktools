@@ -200,11 +200,36 @@ async def test_reopened_standalone_fork_rejects_mismatched_checkpoint_binding(
         assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
         source_id = source.execution_id
         await _damage_fork_context(runtime._run_store.read_store(PersistenceDomain.CHECKPOINT).state_store, damage)
-    with pytest.raises(AIError) as raised:
-        async with Persistence.open('corrupt-fork', storage=PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None)) as persistence_200, Runtime.attach(persistence=persistence_200, features=model_features(models, group)) as runtime:
-            source = await runtime.executions.get(source_id)
-            fork = await source.fork("fork")
-            await fork.wait(timeout_seconds=5)
+    reopened_group = None
+    try:
+        with pytest.raises(AIError) as raised:
+            async with Persistence.open('corrupt-fork', storage=PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None)) as persistence_200, Runtime.attach(persistence=persistence_200, features=model_features(models, group)) as runtime:
+                reopened_group = persistence_200.execution.executions.state_store.storage_group
+                source = await runtime.executions.get(source_id)
+                fork = await source.fork("fork")
+                await fork.wait(timeout_seconds=5)
+    finally:
+        if reopened_group is not None:
+            # Integrity rejection can prevent owner cleanup after work has settled.
+            backend = runtime._agent_lifecycle.backend
+            assert all(task.done() for task in backend._tasks.values())
+            assert all(task.done() for task in backend._checkpoint_tasks)
+            assert all(task.done() for tasks in backend._execution_task_map().values() for task in tasks)
+            assert not backend._pending_renewals
+            assert not backend._recovery_reconcile_tasks
+            assert not backend._subagent_dispatcher.pending_background_tasks
+            run_store = runtime._run_store
+            assert all(task.done() for task in run_store._background_tasks)
+            assert all(flight.completion.done() for flight in run_store._durability_flights.values())
+            trace = run_store.trace_persistence
+            assert trace._timer is None or trace._timer.cancelled()
+            writes = run_store.capability_writes
+            if writes is not None:
+                assert all(task.done() for task in writes._tasks)
+                assert all(scope.timer is None or scope.timer.cancelled() for scope in writes._scopes.values())
+            await reopened_group.close()
+            await reopened_group.context.close()
+            assert reopened_group.context.closed
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     assert len(calls) == 1
 

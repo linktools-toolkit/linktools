@@ -358,6 +358,28 @@ async def test_agent_node_recovery_keeps_first_start_deadline(
             with pytest.raises(AIError) as caught:
                 await owners.aclose()
             assert caught.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+            # The durable outcome stays unknown after its producers have stopped.
+            backend = runtime._agent_lifecycle.backend
+            assert engine._closed
+            assert all(task.done() for task in backend._tasks.values())
+            assert all(task.done() for task in backend._checkpoint_tasks)
+            assert all(task.done() for tasks in backend._execution_task_map().values() for task in tasks)
+            assert not backend._pending_renewals
+            assert not backend._recovery_reconcile_tasks
+            assert not backend._subagent_dispatcher.pending_background_tasks
+            run_store = runtime._run_store
+            assert all(task.done() for task in run_store._background_tasks)
+            assert all(flight.completion.done() for flight in run_store._durability_flights.values())
+            trace = run_store.trace_persistence
+            assert trace._timer is None or trace._timer.cancelled()
+            writes = run_store.capability_writes
+            if writes is not None:
+                assert all(task.done() for task in writes._tasks)
+                assert all(scope.timer is None or scope.timer.cancelled() for scope in writes._scopes.values())
+            storage_group = persistence.execution.executions.state_store.storage_group
+            await storage_group.close()
+            await storage_group.context.close()
+            assert storage_group.context.closed
         else:
             await owners.aclose()
 
