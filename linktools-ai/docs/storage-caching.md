@@ -3,6 +3,14 @@
 Caching accelerates reads; the source storage still owns durable facts. The
 storage package separates content, revision discovery, and metadata projection.
 
+Keep three responsibilities separate: source transactions confirm control facts
+and committed history; a selected payload buffer holds admitted bytes awaiting
+source publication; a hot cache holds disposable copies of committed data.
+Cache misses may read the source. Lost, unpublished payloads cannot be recovered
+by treating that same miss as an empty committed value. Cache contents never
+authorize admission, resolve an unknown commit, or prove that an effect did not
+occur.
+
 `PersistenceStorage` declares reusable resource routes and an optional object store.
 Each Persistence binding acquires and closes its operational scope. Runtime and
 TaskEngine borrow it and own only their producer-local lifetimes; borrowed
@@ -35,6 +43,40 @@ queries before closing the engine. History is not registered by this producer
 mechanism; hosts must await its ordinary queries and close its subscriptions
 before closing Persistence. Runtime state uses Memory or SQL; native file locks,
 file-backed ObjectStore bytes and caches remain separate supported resources.
+
+### Choosing the Runtime owner
+
+Use `open` when Runtime should create and own Persistence. `features` is the
+host's existing Agent declaration; `serve` represents the application's work:
+
+```python
+from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.runtime import Runtime
+
+storage = PersistenceStorage.from_root("./runtime")
+async with Runtime.open("app", storage=storage, features=features) as runtime:
+    await serve(runtime)
+```
+
+Use `attach` only when sharing an already-ready, writable Persistence. It takes
+the namespace and tenant from that instance and does not close it. A pure Task
+Runtime omits `features`; bind an engine once and reuse it or its definition
+views. Evaluation borrows that engine rather than creating another owner:
+
+```python
+async with Runtime.attach(persistence=ready_persistence) as runtime:
+    tasks = await runtime.tasks.bind(*definitions)
+    specialized = tasks.with_definitions(extra_task)
+    evaluations = await runtime.evaluations.bind(specialized)
+    await serve_tasks(specialized, evaluations)
+```
+
+The host supplies the ready Persistence, definitions and application functions.
+Independent binds still create independent engines. Close all borrowers before
+their shared Persistence and its host-owned clients; a request need not open a
+new Runtime or repeat the storage/metrics configuration. Read-only History does
+not require an Agent or a writable Runtime. Inject automatic Metrics only when
+needed through the existing `metrics=` parameter, as described below.
 
 `PersistenceStorage.from_root(root)` selects `root/runtime.db` and file-backed
 ObjectStore bytes; it does not migrate filesystem state. When that database is
@@ -125,6 +167,31 @@ An explicit positive `retry_limit` remains a hard total-attempt limit, including
 retryable errors other than native SQLite BUSY retain the eight-attempt default. Cancellation, non-retryable
 errors and unknown commit outcomes are never replayed by this policy. No
 additional public retry configuration, write lock or writer queue is introduced.
+
+### SQL object reads and writer progress
+
+`SqlObjectStore.open` retains one ordered SELECT and its original object view.
+For SQLite, the query requests one row per fetch. The reader stages and validates
+the complete object in a temporary file before yielding public bytes; a slow public consumer
+therefore does not keep that SQL reader open. The staging prefix holds at most
+four chunks and 4MiB. Objects within both bounds release the verified SQL reader
+before file writes; larger objects continue staging from the same cursor.
+
+For normal writer output, each stored chunk is at most 1MiB. Directed local
+8MiB/64MiB tests with a hash-and-count consumer observed roughly 5MiB of traced
+Python allocations and 1MiB driver batches. This is not a process RSS, SQLite
+native-cache or arbitrary BLOB/header byte limit. `read_object` returns complete
+`bytes` and necessarily materializes the result; it has a different memory
+contract from consuming `open` incrementally.
+
+A large object's file write can still overlap an unfinished SQLite SELECT.
+In rollback-journal mode, another connection's COMMIT may wait until that reader
+is released. Explicitly WAL-configured test databases allow concurrent writes
+and delete/re-put while preserving the reader's old bytes; production readers
+do not change the host's journal mode or timeout. WAL capacity and checkpointing
+remain host concerns. SQLite read cancellation settles current database/file I/O before
+closing its resources; it does not forcibly stop a blocked file operation to
+promise writer progress while that operation remains paused.
 
 ### Exclusively owned local SQLite
 
@@ -393,6 +460,7 @@ without creating a SQL dataset in the producer:
 
 ```python
 from linktools.ai.observe import MetricRecorderProvider, Metrics
+from linktools.ai.runtime import Runtime
 
 metrics = Metrics.sqlite("metrics.sqlite3")
 recorder = metrics.recorder()
@@ -573,6 +641,22 @@ Explicit results, waits, next-turn admission, terminal/unknown-commit readback,
 and effect ownership use their committed owner paths. These guarantees do not
 require a new per-call cache option or a different Runtime profile.
 
+Configuring `cache=` does not cache every repository endpoint:
+
+| Read path | Actual cache boundary |
+| --- | --- |
+| Ordinary Session/Execution record observations | `read_record` / `read_records` can use the bounded record view; transaction callbacks bypass it. |
+| Durable ObjectRef content used by History and Runtime | Verified bytes can be reused; strong consumers keep the current source-membership checks described under Runtime content. |
+| Session detail/display | Only an explicit positive `max_age` permits display capture reuse; default strong refresh, authorization and current binding checks remain. |
+| Task claim/scheduler state and Evaluation control/settlement | Their authoritative source paths remain; these operations are not made cache hits by configuring a byte backend. |
+| Asset content and fixed-version reads | Content caching does not replace the Asset owner's metadata/history and version validation. |
+| Metrics query/get/prune | These operate on the synchronous source dataset, not pending provider observations. |
+
+The original capture deadline travels with an observation. A hit, delayed fill,
+L2-to-L1 promotion or reopened Runtime cannot start a new freshness window.
+Local invalidation prevents an old local fill; it does not broadcast a global
+instantaneous invalidation or guarantee monotonic reads across owners.
+
 ## Runtime observation publication
 
 Write timing and storage are independent. `sync()` confirms source writes at the
@@ -625,6 +709,30 @@ may be retried after transport failure; other executions and borrowed buffers
 remain open. Existing observers retain the original turn error until Runtime
 close forgets the fully cleaned pending attempt. No durable terminal result or
 external-effect receipt is fabricated, deleted or replayed by this cleanup.
+
+That no-submission cleanup is separate from exact-lease release retries, which
+may also be needed after source-confirmed success. Such retries preserve the
+canonical result and do not cancel an already source-admitted execution.
+A failed execution that has not reached a canonical terminal state
+requires the existing authorized cancellation or recovery path before cleanup
+that depends on revocation. An explicit force request is a separate control
+action, not an automatic consequence of losing buffer bytes:
+
+```python
+from linktools.ai.execution import CancelExecutionRequest
+
+outcome = await runtime.executions.cancel(
+    execution_id, CancelExecutionRequest(principal, cancel_request_id, force=True),
+)
+```
+
+The request retains the execution API's ownership, effect and recovery checks.
+`outcome.cancelled=False` or an unknown outcome is not revocation proof. A retry
+keeps the cancellation request's original idempotency key. Cleanup
+requires the authoritative terminal/revoked state and quiescent owned work; it preserves
+confirmed tool receipts, healthy peers and other scopes. Retrying an explicitly
+requested exact lease release does not cancel a live or promoted execution, and
+neither release nor force cancellation authorizes replay of a confirmed effect.
 
 Admission is awaited with `wait=False` and bounded transport waits; terminal
 producers must not wait for a terminal drain that cannot run until they finish.
@@ -733,8 +841,10 @@ contract. Authorization and control checks remain with their domain owners.
 
 Sharing a cache requires each Runtime namespace to identify the same logical
 data source. When changing databases or object sources, use another Runtime
-namespace or a separate cache namespace/instance. Store IDs alone do not
-identify physical sources. Keys also isolate tenant, domain, and the complete
+namespace or a cache namespace that isolates its actual keys. Another adapter
+instance over the same underlying keys provides no isolation; owners of the
+same logical source may intentionally reuse those entries. Store IDs alone do
+not identify physical sources. Keys also isolate tenant, domain, and the complete
 immutable ObjectRef. A host-provided cache is a trusted byte transport, not an
 authorization service.
 `Persistence.read_object(domain, reference)` is the composition-level read

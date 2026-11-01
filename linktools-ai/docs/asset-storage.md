@@ -103,6 +103,11 @@ It is not an export of every historical version, tombstone, reset or batch
 receipt. Copying only current files or replaying ordinary `put()` calls into a
 new store does not preserve arbitrary existing version references.
 
+Runtime's [read-only legacy filesystem reader](storage-caching.md#read-only-legacy-filesystem-migration)
+exports supported Runtime state; it is not a converter for this complete Asset
+history. SDK writer/reader and retained-format checks establish their supported
+contracts, not a deployment's historical-data conversion or cutover.
+
 Existing SQL metadata, ObjectStore implementations and Directory readers are
 not reinterpreted by this backend removal. Runtime's
 `PersistenceStorage.from_root()` is a separate composition: it already uses

@@ -1667,6 +1667,8 @@ async def _open_runtime_history(
         tool_operations=selected_state.recovery.tools,
         durable_history_available=selected_state.run_store.model_interaction_history_available,
     )
+    if pending_coordination is not None:
+        reader.bind_pending_execution_reader(pending_coordination.read_execution)
     effective_authorization = (
         TenantAuthorizationPolicy(effective_tenant_id)
         if authorization is None

@@ -662,6 +662,7 @@ async def _build_local_components(
         )
         if released:
             await run_store.release_execution_staging(execution_id)
+            await backend.forget_runtime_execution_payloads(execution_id, tenant_id=tenant_id)
         return released
 
     try:
