@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Memory, artifact, and evaluation repository implementations."""
 
-import json
 from dataclasses import replace
 from ..core import (
     OperationKind,
@@ -13,7 +12,7 @@ from ..core import (
     ResourceKind,
 )
 from ..errors import AIError, ErrorCode
-from .contracts import ArtifactRecord, MemoryRecord
+from .contracts import ArtifactRecord, MemoryMutationReceipt, MemoryRecord
 from ._plan import PersistenceDomain
 from .state import RecordQuery, StateStore, StateTransaction, StoredRecord
 from ._repository_common import (
@@ -336,31 +335,10 @@ def _memory_delete_replay_result(operation: OperationLedgerRecord | None) -> boo
         or operation.result_ref is None
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    try:
-        value = json.loads(operation.result_ref)
-        if (
-            not isinstance(value, dict)
-            or not {"version", "result"}.issubset(value)
-            or isinstance(value.get("version"), bool)
-            or not isinstance(value.get("version"), int)
-            or value.get("version") < 1
-        ):
-            raise ValueError("memory delete receipt is invalid")
-        if value["version"] != 1:
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        if not isinstance(value.get("result"), dict):
-            raise ValueError("memory delete receipt is invalid")
-        result = value["result"]
-        if (
-            not {"file", "version", "status"}.issubset(result)
-            or not isinstance(result["file"], str)
-            or result["version"] is not None
-            or result["status"] not in {"deleted", "not_found"}
-        ):
-            raise ValueError("memory delete receipt is invalid")
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    return result["status"] == "deleted"
+    receipt = MemoryMutationReceipt.decode(operation.result_ref)
+    if receipt.kind != "delete":
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return receipt.existed
 
 
 __all__ = [

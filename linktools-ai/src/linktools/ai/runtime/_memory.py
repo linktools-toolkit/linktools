@@ -5,11 +5,9 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from linktools.core import environ
@@ -24,7 +22,6 @@ from pydantic_ai_harness.memory import (
 
 from ..core import (
     JsonValue,
-    OperationKind,
     OperationLedgerInput,
     OperationLedgerRecord,
     OperationStatus,
@@ -37,20 +34,15 @@ from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
 from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
 from ..persistence import PersistenceDomain
-from ..persistence.contracts import MemoryRecord, MemoryRepositories
+from ..persistence.contracts import MemoryMutationReceipt, MemoryRecord, MemoryRepositories
 
 _logger = environ.get_logger("ai.runtime.memory")
 _MAX_CONTENT_CHARS = 65_536
 _MEMORY_VERSION = re.compile(r"m1:[0-9a-f]{64}")
-_STORE_SEGMENT = re.compile(r"[A-Za-z0-9_.-]{1,200}")
 
 
-@dataclass(frozen=True, slots=True)
-class _MutationReceipt:
-    path: str
-    version: str | None
-    existed: bool
-    kind: str
+class _MutationReceipt(MemoryMutationReceipt):
+    __slots__ = ()
 
     @classmethod
     def from_record(
@@ -81,7 +73,7 @@ class _MutationReceipt:
             or record.sequence < 1
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        receipt = cls._decode(record.result_ref)
+        receipt = cls.decode(record.result_ref)
         if (
             record.resource_id != _memory_id(scope_digest, receipt.path)
             or record.operation_kind is not receipt.operation_kind
@@ -96,14 +88,6 @@ class _MutationReceipt:
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return receipt
-
-    @property
-    def operation_kind(self) -> OperationKind:
-        return (
-            OperationKind.MEMORY_WRITE
-            if self.kind == "write"
-            else OperationKind.MEMORY_DELETE
-        )
 
     def to_operation_input(
         self,
@@ -122,83 +106,13 @@ class _MutationReceipt:
             self.operation_kind,
             OperationStatus.SUCCEEDED,
             operation.fingerprint,
-            self._encode(),
+            self.encode(),
             None,
             None,
             True,
             now,
             now,
         )
-
-    def _encode(self) -> str:
-        status = (
-            "deleted"
-            if self.kind == "delete" and self.existed
-            else "not_found"
-            if self.kind == "delete"
-            else "updated"
-            if self.existed
-            else "created"
-        )
-        return json.dumps(
-            {
-                "version": 1,
-                "result": {
-                    "file": self.path,
-                    "version": self.version,
-                    "status": status,
-                },
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-
-    @classmethod
-    def _decode(cls, value: str) -> _MutationReceipt:
-        try:
-            raw = json.loads(value)
-            if (
-                not isinstance(raw, dict)
-                or isinstance(raw.get("version"), bool)
-                or not isinstance(raw.get("version"), int)
-                or raw.get("version") != 1
-                or not {"version", "result"}.issubset(raw)
-            ):
-                raise ValueError("memory receipt is malformed")
-            result = raw["result"]
-            if not isinstance(result, dict) or not {
-                "file",
-                "version",
-                "status",
-            }.issubset(result):
-                raise ValueError("memory receipt result is malformed")
-            path = _normalize_path(result["file"])
-            version = result["version"]
-            status = result["status"]
-            if status not in {"created", "updated", "deleted", "not_found"}:
-                raise ValueError("memory receipt status is invalid")
-            if status in {"created", "updated"}:
-                if (
-                    not isinstance(version, str)
-                    or _MEMORY_VERSION.fullmatch(version) is None
-                ):
-                    raise ValueError("memory receipt version is invalid")
-                kind = "write"
-            else:
-                if version is not None:
-                    raise ValueError("delete receipt cannot carry a version")
-                kind = "delete"
-            return cls(
-                path=path,
-                version=version,
-                existed=status not in {"created", "not_found"},
-                kind=kind,
-            )
-        except AIError:
-            raise
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
     def require_target(self, path: str, kind: str) -> None:
         if self.path != path or self.kind != kind:
@@ -553,18 +467,7 @@ def _record_paths(records: list[MemoryRecord]) -> list[str]:
 
 
 def _normalize_path(path: str) -> str:
-    if (
-        not isinstance(path, str)
-        or not path
-        or path.startswith("/")
-        or "\\" in path
-        or "\x00" in path
-    ):
-        raise ValueError("memory path is invalid")
-    parts = path.split("/")
-    if any(not _STORE_SEGMENT.fullmatch(part) or ".." in part for part in parts):
-        raise ValueError("memory path is invalid")
-    return "/".join(parts)
+    return MemoryMutationReceipt.normalize_path(path)
 
 
 def _normalize_prefix(prefix: str) -> str:

@@ -28,6 +28,7 @@ from ..execution import (
 
 import binascii
 import json
+import re
 from ..session import SessionRepository as SessionRepositoryContract
 from ..session import (ConversationCursor, SessionRecord, SessionTurnRef, SessionTurnCommit)
 
@@ -61,6 +62,7 @@ from ..core import (
     IdempotencyStatus,
     JsonValue,
     ImmutableJsonMapping,
+    OperationKind,
     OperationLedgerInput,
     OperationLedgerRecord,
     OperationStatus,
@@ -2188,6 +2190,121 @@ class EvaluationRepository(RuntimeRepository, Protocol):
     async def get_report(self, report_id: str) -> EvaluationReport | ComparisonReport | None: ...
 
 
+_MEMORY_VERSION = re.compile(r"m1:[0-9a-f]{64}")
+_STORE_SEGMENT = re.compile(r"[A-Za-z0-9_.-]{1,200}")
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryMutationReceipt:
+    """Vendor-neutral durable result of one memory mutation."""
+
+    path: str
+    version: str | None
+    existed: bool
+    kind: str
+
+    @property
+    def operation_kind(self) -> OperationKind:
+        if self.kind not in {"write", "delete"}:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return (
+            OperationKind.MEMORY_WRITE
+            if self.kind == "write"
+            else OperationKind.MEMORY_DELETE
+        )
+
+    def encode(self) -> str:
+        if self.kind not in {"write", "delete"} or not isinstance(self.existed, bool):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        status = (
+            "deleted"
+            if self.kind == "delete" and self.existed
+            else "not_found"
+            if self.kind == "delete"
+            else "updated"
+            if self.existed
+            else "created"
+        )
+        value = json.dumps(
+            {
+                "version": 1,
+                "result": {
+                    "file": self.path,
+                    "version": self.version,
+                    "status": status,
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        self.decode(value)
+        return value
+
+    @classmethod
+    def decode(cls, value: str) -> MemoryMutationReceipt:
+        try:
+            raw = json.loads(value)
+            if (
+                not isinstance(raw, dict)
+                or isinstance(raw.get("version"), bool)
+                or not isinstance(raw.get("version"), int)
+                or raw.get("version") < 1
+                or not {"version", "result"}.issubset(raw)
+            ):
+                raise ValueError("memory receipt is malformed")
+            if raw["version"] != 1:
+                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+            result = raw["result"]
+            if not isinstance(result, dict) or not {
+                "file",
+                "version",
+                "status",
+            }.issubset(result):
+                raise ValueError("memory receipt result is malformed")
+            path = cls.normalize_path(result["file"])
+            version = result["version"]
+            status = result["status"]
+            if status not in {"created", "updated", "deleted", "not_found"}:
+                raise ValueError("memory receipt status is invalid")
+            if status in {"created", "updated"}:
+                if (
+                    not isinstance(version, str)
+                    or _MEMORY_VERSION.fullmatch(version) is None
+                ):
+                    raise ValueError("memory receipt version is invalid")
+                kind = "write"
+            else:
+                if version is not None:
+                    raise ValueError("delete receipt cannot carry a version")
+                kind = "delete"
+            return cls(
+                path=path,
+                version=version,
+                existed=status not in {"created", "not_found"},
+                kind=kind,
+            )
+        except AIError:
+            raise
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+    @classmethod
+    def normalize_path(cls, path: str) -> str:
+        if (
+            not isinstance(path, str)
+            or not path
+            or path.startswith("/")
+            or "\\" in path
+            or "\x00" in path
+        ):
+            raise ValueError("memory path is invalid")
+        parts = path.split("/")
+        if any(not _STORE_SEGMENT.fullmatch(part) or ".." in part for part in parts):
+            raise ValueError("memory path is invalid")
+        return "/".join(parts)
+
+
 class MemoryRepository(RuntimeRepository, Protocol):
     async def capture_scope(self, *, tenant_id: str, memory_scope_digest: str) -> tuple[MemoryRecord, ...]: ...
     async def get_header(
@@ -2304,7 +2421,7 @@ class RecoveryRepositories:
 
 from ._evaluation_records import EvaluationHumanDecision
 
-__all__ = ['AgentAttemptClaim', 'ApprovalRecord', 'ApprovalRepository', 'ArchivedContextBlock', 'ArtifactRecord', 'ArtifactRepositories', 'ArtifactRepository', 'BudgetRepository', 'ContextProjection', 'ConversationCursor', 'ConversationHistoryRecord', 'ConversationHistoryRepository', 'ConversationRepositories', 'EvaluationHumanDecision', 'EvaluationLaunchIntent', 'EvaluationRecord', 'EvaluationRepositories', 'EvaluationRepository', 'EvaluationSlotDisposition', 'EvaluationTrialEvidence', 'EventRepository', 'ExecutionCancelRequestCommit', 'ExecutionEventAppend', 'ExecutionEventRecord', 'ExecutionHistorySealRecord', 'ExecutionHistoryState', 'ExecutionRecord', 'ExecutionRepositories', 'ExecutionRepository', 'ExecutionRunSealHead', 'ExecutionStartClaim', 'ExecutionStartReservation', 'ExecutionStartReservationResult', 'ExecutionStartUnknownCommit', 'ExecutionTerminalCommit', 'ExecutionTerminalCommitResult', 'ExternalCallRecord', 'ExternalCallRepository', 'HistoryQuality', 'IdempotencyRecord', 'IdempotencyRepository', 'IdempotencyTerminalUpdate', 'InlineContextBlock', 'LoadedContextMessage', 'LoadedModelContext', 'MemoryRecord', 'MemoryRepositories', 'MemoryRepository', 'ModelClientBodyRef', 'ModelClientRequestRef', 'ModelClientResponseRef', 'ModelInteractionRecord', 'OperationLedgerRepository', 'OperationTerminalUpdate', 'PendingDeferredCall', 'PendingToolContinuation', 'RecoveryCheckpoint', 'RecoveryCheckpointRepository', 'RecoveryCheckpointState', 'RecoveryConversationIntent', 'RecoveryHandoffPhase', 'RecoveryRepositories', 'RecoveryTerminalHandoff', 'RecoveryTerminalOutcome', 'RepositoryInstructionBarrier', 'ResultRecord', 'RuntimePayloadRef', 'RuntimeRepository', 'SessionRecord', 'SessionRepository', 'StoredAgentRunCheckpoint', 'StreamAttemptRecord', 'TaskAdmissionRepository', 'TaskPreparedInputRecord', 'TaskRepositories', 'TaskRepository', 'ToolOperationAdmission', 'ToolOperationRecord', 'ToolStateRepository', 'TranscriptChunk', 'TranscriptHeadRecord', 'TranscriptMessageRef', 'TranscriptOrigin', 'TranscriptOwnerDomain', 'TranscriptSeekDimension', 'TranscriptSeekRecord', 'TranscriptSpanRef', 'decode_tool_operation_failure', 'deferred_resource_id']
+__all__ = ['AgentAttemptClaim', 'ApprovalRecord', 'ApprovalRepository', 'ArchivedContextBlock', 'ArtifactRecord', 'ArtifactRepositories', 'ArtifactRepository', 'BudgetRepository', 'ContextProjection', 'ConversationCursor', 'ConversationHistoryRecord', 'ConversationHistoryRepository', 'ConversationRepositories', 'EvaluationHumanDecision', 'EvaluationLaunchIntent', 'EvaluationRecord', 'EvaluationRepositories', 'EvaluationRepository', 'EvaluationSlotDisposition', 'EvaluationTrialEvidence', 'EventRepository', 'ExecutionCancelRequestCommit', 'ExecutionEventAppend', 'ExecutionEventRecord', 'ExecutionHistorySealRecord', 'ExecutionHistoryState', 'ExecutionRecord', 'ExecutionRepositories', 'ExecutionRepository', 'ExecutionRunSealHead', 'ExecutionStartClaim', 'ExecutionStartReservation', 'ExecutionStartReservationResult', 'ExecutionStartUnknownCommit', 'ExecutionTerminalCommit', 'ExecutionTerminalCommitResult', 'ExternalCallRecord', 'ExternalCallRepository', 'HistoryQuality', 'IdempotencyRecord', 'IdempotencyRepository', 'IdempotencyTerminalUpdate', 'InlineContextBlock', 'LoadedContextMessage', 'LoadedModelContext', 'MemoryMutationReceipt', 'MemoryRecord', 'MemoryRepositories', 'MemoryRepository', 'ModelClientBodyRef', 'ModelClientRequestRef', 'ModelClientResponseRef', 'ModelInteractionRecord', 'OperationLedgerRepository', 'OperationTerminalUpdate', 'PendingDeferredCall', 'PendingToolContinuation', 'RecoveryCheckpoint', 'RecoveryCheckpointRepository', 'RecoveryCheckpointState', 'RecoveryConversationIntent', 'RecoveryHandoffPhase', 'RecoveryRepositories', 'RecoveryTerminalHandoff', 'RecoveryTerminalOutcome', 'RepositoryInstructionBarrier', 'ResultRecord', 'RuntimePayloadRef', 'RuntimeRepository', 'SessionRecord', 'SessionRepository', 'StoredAgentRunCheckpoint', 'StreamAttemptRecord', 'TaskAdmissionRepository', 'TaskPreparedInputRecord', 'TaskRepositories', 'TaskRepository', 'ToolOperationAdmission', 'ToolOperationRecord', 'ToolStateRepository', 'TranscriptChunk', 'TranscriptHeadRecord', 'TranscriptMessageRef', 'TranscriptOrigin', 'TranscriptOwnerDomain', 'TranscriptSeekDimension', 'TranscriptSeekRecord', 'TranscriptSpanRef', 'decode_tool_operation_failure', 'deferred_resource_id']
 
 
 class ToolStateRepository(Protocol):

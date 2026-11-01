@@ -65,7 +65,7 @@ async def test_memory_receipts_roundtrip_all_mutation_statuses(
 
 
 @pytest.mark.parametrize("damage", [
-    "json", "version", "appended", "shape", "token", "resource", "kind", "envelope", "extra", "conflict",
+    "json", "version", "malformed_version", "path", "appended", "shape", "token", "resource", "kind", "envelope", "extra", "conflict",
 ])
 async def test_memory_receipt_validates_durable_ledger_readback(damage: str) -> None:
     state = Persistence(PersistenceStorage.in_memory())
@@ -87,6 +87,10 @@ async def test_memory_receipt_validates_durable_ledger_readback(damage: str) -> 
         values.update(operation_id=_operation_id(store._memory_scope_digest, operation.id), operation_kind=OperationKind.MEMORY_DELETE)
         if damage == "version":
             payload["version"] = 2
+        elif damage == "malformed_version":
+            payload["version"] = True
+        elif damage == "path":
+            payload["result"]["file"] = "../invalid"
         elif damage == "appended":
             payload["result"]["status"] = "appended"
         elif damage == "shape":
@@ -115,7 +119,16 @@ async def test_memory_receipt_validates_durable_ledger_readback(damage: str) -> 
         else:
             with pytest.raises(AIError) as raised:
                 await store.get_operation(operation)
-            assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+            expected = (ErrorCode.STORAGE_VERSION_UNSUPPORTED if damage == "version"
+                        else ErrorCode.STORAGE_INTEGRITY_ERROR)
+            assert raised.value.code is expected
+            if damage in {"json", "version", "malformed_version", "path", "appended", "shape"}:
+                with pytest.raises(AIError) as repository_error:
+                    await state.memory.records.apply_delete(
+                        values["resource_id"], tenant_id="tenant", expected_revision=0,
+                        operation=OperationLedgerInput(**values),
+                    )
+                assert repository_error.value.code is expected
         assert (await store.read("memory/a.md", max_chars=100)).content == "content"
     finally:
         await state.close()
@@ -140,15 +153,24 @@ async def test_memory_replay_rejects_different_target(target: str) -> None:
         await state.close()
 
 
-@pytest.mark.parametrize("kind", ["write", "delete"])
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+@pytest.mark.parametrize("kind", ["write", "delete", "delete_existing"])
 async def test_memory_concurrent_mutation_replays_committed_receipt(
-    kind: str, monkeypatch: pytest.MonkeyPatch,
+    kind: str, backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = Persistence(PersistenceStorage.in_memory())
+    storage = (PersistenceStorage.in_memory() if backend == "memory"
+               else PersistenceStorage.sqlite(tmp_path / "concurrent.db"))
+    state = Persistence(storage)
+    other = Persistence(storage) if backend == "sqlite" else state
     await state.initialize(namespace="receipts", tenant_id="tenant")
     try:
-        loser, winner = _store(state), _store(state)
+        if other is not state:
+            await other.initialize(namespace="receipts", tenant_id="tenant")
+        loser, winner = _store(state), _store(other)
         operation = MemoryOperation(id="concurrent", fingerprint="a" * 64)
+        version = None
+        if kind == "delete_existing":
+            version = (await winner.write("memory/a.md", "initial", expected_version=None)).version
         observed = asyncio.Event()
         committed = asyncio.Event()
         read_record = loser._record
@@ -164,7 +186,7 @@ async def test_memory_concurrent_mutation_replays_committed_receipt(
         async def mutate(store: RuntimeMemoryStore):
             if kind == "write":
                 return await store.write("memory/a.md", "content", expected_version=None, operation=operation)
-            return await store.delete("memory/a.md", expected_version=None, operation=operation)
+            return await store.delete("memory/a.md", expected_version=version, operation=operation)
 
         pending = asyncio.create_task(mutate(loser))
         try:
@@ -182,5 +204,129 @@ async def test_memory_concurrent_mutation_replays_committed_receipt(
             if not pending.done():
                 pending.cancel()
             await asyncio.gather(pending, return_exceptions=True)
+    finally:
+        if other is not state:
+            await other.close()
+        await state.close()
+
+
+@pytest.mark.parametrize("committed", [False, True])
+@pytest.mark.parametrize("failure", ["unknown", "cancel"])
+async def test_memory_receipt_readback_resolves_storage_boundary_failure(
+    committed: bool, failure: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "outcome.db"))
+    await state.initialize(namespace="receipts", tenant_id="tenant")
+    try:
+        store = _store(state)
+        operation = MemoryOperation(id="interrupted", fingerprint="a" * 64)
+        version = (await store.write("memory/a.md", "initial", expected_version=None)).version
+        boundary = state.memory.records.state_store
+        mutate = boundary.mutate
+        reached = asyncio.Event()
+        release = asyncio.Event()
+
+        async def interrupt(callback):
+            if committed:
+                await mutate(callback)
+            reached.set()
+            if failure == "unknown":
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+            await release.wait()
+
+        with monkeypatch.context() as patch:
+            patch.setattr(boundary, "mutate", interrupt)
+            pending = asyncio.create_task(store.delete(
+                "memory/a.md", expected_version=version, operation=operation,
+            ))
+            try:
+                await asyncio.wait_for(reached.wait(), timeout=10)
+                if failure == "cancel":
+                    pending.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await pending
+                else:
+                    with pytest.raises(AIError) as raised:
+                        await pending
+                    assert raised.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+            finally:
+                release.set()
+                if not pending.done():
+                    pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+        receipt = await store.get_operation(operation)
+        assert (receipt is not None) is committed
+        current = await store.read("memory/a.md", max_chars=100)
+        assert (current is None) is committed
+        if current is not None:
+            assert current.content == "initial" and current.version == version
+        result = await store.delete("memory/a.md", expected_version=version, operation=operation)
+        assert result.replayed is committed
+        assert result.version is None and result.existed is True
+        assert await store.read("memory/a.md", max_chars=100) is None
+        assert await store.get_operation(operation) is not None
+    finally:
+        await state.close()
+
+
+async def test_memory_receipt_writer_preserves_wire_bytes() -> None:
+    from linktools.ai.persistence.contracts import MemoryMutationReceipt
+
+    for kind, existed, status in (
+        ("write", False, "created"), ("write", True, "updated"),
+        ("delete", True, "deleted"), ("delete", False, "not_found"),
+    ):
+        version = "m1:" + "a" * 64 if kind == "write" else None
+        receipt = MemoryMutationReceipt("memory/a.md", version, existed, kind)
+        expected = json.dumps(
+            {"version": 1, "result": {"file": "memory/a.md", "version": version, "status": status}},
+            ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+        )
+        assert receipt.encode() == expected
+        assert MemoryMutationReceipt.decode(expected) == receipt
+
+
+@pytest.mark.parametrize("change", [
+    {"kind": "append"}, {"existed": 1}, {"path": "../invalid"}, {"version": "invalid"},
+])
+async def test_memory_receipt_writer_rejects_invalid_fields(change: dict) -> None:
+    from linktools.ai.persistence.contracts import MemoryMutationReceipt
+
+    values = dict(path="memory/a.md", version="m1:" + "a" * 64, existed=False, kind="write")
+    values.update(change)
+    with pytest.raises(AIError) as raised:
+        MemoryMutationReceipt(**values).encode()
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("version", [0, True, "1"])
+async def test_memory_receipt_rejects_malformed_wire_version(version: object) -> None:
+    from linktools.ai.persistence.contracts import MemoryMutationReceipt
+
+    value = json.dumps({"version": version, "result": {
+        "file": "memory/a.md", "version": None, "status": "deleted",
+    }})
+    with pytest.raises(AIError) as raised:
+        MemoryMutationReceipt.decode(value)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+async def test_memory_replay_preserves_input_validation_precedence() -> None:
+    state = Persistence(PersistenceStorage.in_memory())
+    await state.initialize(namespace="receipts", tenant_id="tenant")
+    try:
+        store = _store(state)
+        operation = MemoryOperation(id="original", fingerprint="a" * 64)
+        await store.write("memory/a.md", "content", expected_version=None, operation=operation)
+        for path, content, version in (
+            ("../invalid", "content", None),
+            ("memory/a.md", "\x00", None),
+            ("memory/a.md", "content", "invalid"),
+        ):
+            with pytest.raises(ValueError):
+                await store.write(path, content, expected_version=version, operation=operation)
+        with pytest.raises(ValueError):
+            await store.delete("memory/a.md", expected_version="invalid", operation=operation)
+        assert (await store.read("memory/a.md", max_chars=100)).content == "content"
     finally:
         await state.close()
