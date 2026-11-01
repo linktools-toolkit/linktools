@@ -40,6 +40,7 @@ from ..execution import (
 )
 from ..execution import ExecutionRecord
 from ..persistence.contracts import ExecutionRepository
+from ..persistence.repositories import ExecutionRepositoryImpl
 
 _CURSOR_RESOURCE_KIND = "EXECUTION"
 
@@ -547,6 +548,8 @@ class DefaultExecutionHistoryService:
             execution_id,
             tenant_id=tenant_id,
         ))
+        if header is None and isinstance(self._executions, ExecutionRepositoryImpl):
+            header = await self._executions.get_header_fresh(execution_id, tenant_id=tenant_id)
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(
@@ -569,6 +572,8 @@ class DefaultExecutionHistoryService:
             execution_id,
             tenant_id=principal.tenant_id,
         )
+        if record is None and isinstance(self._executions, ExecutionRepositoryImpl):
+            record = await self._executions.get_fresh(execution_id, tenant_id=principal.tenant_id)
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return record
