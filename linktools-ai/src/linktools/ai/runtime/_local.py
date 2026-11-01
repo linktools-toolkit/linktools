@@ -3453,12 +3453,7 @@ class LocalExecutionBackend:
                 self._pending_audit_events.pop(execution_id, None)
             self._worker_failures.pop(execution_id, None)
 
-    async def release_runtime_execution(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-    ) -> None:
+    def _require_quiescent_execution(self, execution_id: str, *, tenant_id: str) -> None:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         task = self._tasks.get(execution_id)
@@ -3480,6 +3475,15 @@ class LocalExecutionBackend:
                 len(pending_execution_tasks),
             )
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+    async def release_runtime_execution(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> None:
+        self._require_quiescent_execution(execution_id, tenant_id=tenant_id)
+        task = self._tasks.get(execution_id)
         if execution_id in self._worker_failures and (
             self._execution_buffer is not None and self._execution_buffer.has_scope(execution_id)
             or isinstance(self._run_store, RuntimeAgentRunStore)
@@ -3505,6 +3509,13 @@ class LocalExecutionBackend:
             tenant_id,
             execution_id,
         )
+
+    async def forget_runtime_execution_payloads(self, execution_id: str, *, tenant_id: str) -> None:
+        """Finish buffer ownership after canonical handoff and staging release."""
+        self._require_quiescent_execution(execution_id, tenant_id=tenant_id)
+        if self._execution_buffer is not None:
+            await self._execution_buffer.forget(execution_id)
+        self._require_quiescent_execution(execution_id, tenant_id=tenant_id)
 
     async def _reconcile_unresolved_tool_operations(
         self,
