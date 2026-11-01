@@ -39,6 +39,7 @@ from .test_evaluation_consumers import (
 )
 from .test_evaluation_evidence_read_reuse import Policy, completed, report_count
 from .test_evaluation_retention import Offline
+from ._sqlite_failure_timeline import sqlite_failure_evidence
 
 
 @contextmanager
@@ -78,6 +79,7 @@ async def _add_attachment(storage: Persistence, experiment_id: str, index: int) 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("count", (2, 3))
+@sqlite_failure_evidence
 async def test_current_pages_hydrate_only_the_manifest_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, count: int,
 ) -> None:

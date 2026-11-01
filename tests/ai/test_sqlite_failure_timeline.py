@@ -15,7 +15,9 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from linktools.ai.storage import SqlStorageContext, create_sql_storage_context
 
 from . import _sqlite_failure_timeline as timeline_module
-from ._sqlite_failure_timeline import _SqliteTimeline, sqlite_failure_phase, sqlite_failure_timeline
+from ._sqlite_failure_timeline import (
+    _SqliteTimeline, sqlite_failure_evidence, sqlite_failure_phase, sqlite_failure_timeline,
+)
 
 
 @pytest.mark.asyncio
@@ -158,3 +160,47 @@ async def test_sqlite_timeline_loop_lag_is_bounded_and_cleanup_cancels_observati
     assert handle.cancelled()
     sqlite_failure_phase("outside.selected.case", producer=1)
     assert len(timeline.events) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", (False, True))
+async def test_sqlite_failure_evidence_keeps_mutation_error_identity_and_native_code(tmp_path, cancelled, capsys):
+    cancellation = asyncio.CancelledError("private cancellation detail")
+    observed = []
+
+    @sqlite_failure_evidence
+    async def exercise():
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'mutation.db'}")
+        context = create_sql_storage_context(engine, owns_engine=True)
+        try:
+            await context.initialize()
+
+            async def operation(session):
+                if cancelled:
+                    raise cancellation
+                return await context.run_statement(session.execute(text("SELECT :value FROM private_missing_table"),
+                                                                  {"value": "private parameter"}))
+
+            try:
+                await context.run_mutation(operation, domain="diagnostic.test")
+            except BaseException as error:
+                observed.append(error)
+                raise
+        finally:
+            await context.close()
+
+    original_mutation = SqlStorageContext.run_mutation
+    with pytest.raises(asyncio.CancelledError if cancelled else OperationalError) as caught:
+        await exercise()
+    assert caught.value is observed[0]
+    if cancelled:
+        assert caught.value is cancellation and cancellation.args == ("private cancellation detail",)
+    notes = "\n".join(caught.value.__notes__)
+    assert "mutation.begin" in notes and "mutation.error" in notes
+    assert "'domain': 'diagnostic.test'" in notes
+    assert "'code': None" in notes if cancelled else "'code': 1" in notes
+    assert f"'invalidated': {None if cancelled else False}" in notes
+    for secret in ("private cancellation detail", "private_missing_table", "private parameter", ":value"):
+        assert secret not in notes
+    assert SqlStorageContext.run_mutation is original_mutation
+    assert capsys.readouterr() == ("", "")

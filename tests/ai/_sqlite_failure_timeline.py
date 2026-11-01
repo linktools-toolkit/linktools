@@ -109,7 +109,8 @@ class _SqliteTimeline:
                 try:
                     result = original(dialect, connection)
                 except BaseException as error:
-                    self.emit(name + ".error", connection=identity, error=type(error).__name__)
+                    self.emit(name + ".error", connection=identity, error=type(error).__name__,
+                              code=getattr(error, "sqlite_errorcode", None))
                     raise
                 self.emit(name + ".end", connection=identity)
                 return result
@@ -129,6 +130,24 @@ class _SqliteTimeline:
                 self.origin.reset(token)
 
         patches.setattr(SqlStorageContext, "run_statement", statement)
+        original_mutation = SqlStorageContext.run_mutation
+
+        @wraps(original_mutation)
+        async def mutation(context, callback, **kwargs):
+            self.emit("mutation.begin", context=id(context), engine=id(context.engine), domain=kwargs.get("domain"))
+            try:
+                result = await original_mutation(context, callback, **kwargs)
+            except BaseException as error:
+                native = getattr(error, "orig", error)
+                self.emit("mutation.error", context=id(context), engine=id(context.engine),
+                          domain=kwargs.get("domain"), error=type(error).__name__,
+                          code=getattr(native, "sqlite_errorcode", None),
+                          invalidated=getattr(error, "connection_invalidated", None))
+                raise
+            self.emit("mutation.end", context=id(context), engine=id(context.engine), domain=kwargs.get("domain"))
+            return result
+
+        patches.setattr(SqlStorageContext, "run_mutation", mutation)
         original_close = AsyncSession.close
 
         @wraps(original_close)
@@ -174,12 +193,10 @@ def sqlite_failure_phase(name: str, *, producer: int | None = None) -> None:
         timeline.emit("phase." + name, producer=producer)
 
 
-def sqlite_failure_timeline(test: Callable[..., Awaitable[object]]) -> Callable[..., Awaitable[object]]:
-    """Attach lifecycle evidence only if the two-producer SQLite case fails."""
+def sqlite_failure_evidence(test: Callable[..., Awaitable[object]]) -> Callable[..., Awaitable[object]]:
+    """Attach bounded lifecycle evidence only when the decorated test fails."""
     @wraps(test)
     async def run(*args, **kwargs):
-        if kwargs.get("backend") != "sqlite" or kwargs.get("producer_count") != 2:
-            return await test(*args, **kwargs)
         timeline = _SqliteTimeline()
         token = _active_timeline.set(timeline)
         with pytest.MonkeyPatch.context() as patches:
@@ -193,5 +210,18 @@ def sqlite_failure_timeline(test: Callable[..., Awaitable[object]]) -> Callable[
             except BaseException as error:
                 error.add_note(timeline.format())
                 raise
+
+    return run
+
+
+def sqlite_failure_timeline(test: Callable[..., Awaitable[object]]) -> Callable[..., Awaitable[object]]:
+    """Select only the two-producer SQLite live-observation case."""
+    selected = sqlite_failure_evidence(test)
+
+    @wraps(test)
+    async def run(*args, **kwargs):
+        if kwargs.get("backend") != "sqlite" or kwargs.get("producer_count") != 2:
+            return await test(*args, **kwargs)
+        return await selected(*args, **kwargs)
 
     return run

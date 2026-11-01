@@ -3402,7 +3402,11 @@ class LocalExecutionBackend:
                 len(pending_execution_tasks),
             )
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if execution_id in self._worker_failures:
+        if execution_id in self._worker_failures and (
+            self._execution_buffer is not None and self._execution_buffer.has_scope(execution_id)
+            or isinstance(self._run_store, RuntimeAgentRunStore)
+            and self._run_store.has_active_execution_producer(execution_id)
+        ):
             await self._release_revoked_failed_producers((execution_id,))
             if execution_id in self._worker_failures:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
