@@ -423,6 +423,7 @@ async def test_runtime_close_coordinator_does_not_close_lower_resources_after_pr
 async def test_local_execution_close_rejects_pending_command_owned_work() -> None:
     backend = object.__new__(LocalExecutionBackend)
     backend._execution_buffer = None
+    backend._run_store = None
     backend._live_broker = LiveExecutionEventBroker()
     backend._pending_turns = _PendingExecutionTurns()
     backend._pending_renewals = {}

@@ -3222,6 +3222,14 @@ class LocalExecutionBackend:
 
         await self._live_broker.close_shared()
         if self._execution_buffer is not None:
+            try:
+                await self._execution_buffer.close()
+            except AIError as error:
+                if (error.code is not ErrorCode.STORAGE_RECOVERY_REQUIRED
+                        or error.safe_details.get("phase") != "execution_buffer_close"):
+                    raise
+        await self._release_revoked_failed_producers()
+        if self._execution_buffer is not None:
             await self._execution_buffer.close()
 
         pending_workers = tuple(
@@ -3306,6 +3314,61 @@ class LocalExecutionBackend:
         self._worker_cancel_requests.clear()
         self._worker_shutdown_requests.clear()
         self._execution_task_map().clear()
+
+    async def _release_revoked_failed_producers(self) -> None:
+        if not isinstance(self._run_store, RuntimeAgentRunStore):
+            return
+        archive = self._run_stores[PersistenceDomain.TRACE]
+        if not isinstance(archive, StateStepArchive):
+            return
+        for execution_id in tuple(self._worker_failures):
+            if self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is not None:
+                continue
+            current = await self.load_execution(execution_id, tenant_id=self._tenant_id)
+            if current is None or current.status not in {
+                ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+            }:
+                continue
+            while True:
+                pending = tuple(task for task in self._execution_task_map().get(execution_id, ())
+                                if task is not asyncio.current_task() and not task.done())
+                if not pending:
+                    break
+                await asyncio.gather(*(asyncio.shield(task) for task in pending), return_exceptions=True)
+            buffered = self._execution_buffer is not None and self._execution_buffer.has_scope(execution_id)
+            if not buffered and not self._run_store.has_active_execution_producer(execution_id):
+                continue
+            if buffered:
+                assert self._execution_buffer is not None
+                generation = self._execution_buffer.producer_generation(execution_id)
+                # A later owner may have revoked this failed worker after it
+                # stopped. Recheck authority before releasing its retained bytes.
+                await archive.require_revoked_execution_producer(
+                    execution_id=execution_id, producer_generation=generation,
+                    terminal_execution=current,
+                )
+                try:
+                    self._execution_buffer.retire(execution_id, generation, abandon=True)
+                except AIError as error:
+                    if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                        continue
+                    raise
+            for sequence in range(1, current.agent_run_seq + 1):
+                agent_run_id = make_agent_run_id(
+                    namespace=self._namespace, tenant_id=self._tenant_id,
+                    execution_id=execution_id, agent_run_seq=sequence,
+                )
+                generation = self._run_store.execution_producer_generation(
+                    agent_run_id, execution_id=execution_id,
+                )
+                if generation is not None:
+                    await self._agent_run_lifecycle.discard_revoked_producer_staging(
+                        agent_run_id, execution_id=execution_id, producer_generation=generation,
+                        terminal_execution=current,
+                    )
+            async with self._audit_lock(execution_id):
+                self._pending_audit_events.pop(execution_id, None)
+            self._worker_failures.pop(execution_id, None)
 
     async def release_runtime_execution(
         self,
