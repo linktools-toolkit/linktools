@@ -7,7 +7,7 @@ import hashlib
 import threading
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
-from typing import BinaryIO
+from typing import TYPE_CHECKING
 
 import pytest
 from aiosqlite import Cursor
@@ -32,6 +32,9 @@ from linktools.ai.storage import (
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy import event, insert
 
+if TYPE_CHECKING:
+    from typing import BinaryIO
+
 pytestmark = pytest.mark.asyncio
 
 
@@ -44,7 +47,7 @@ class _StagingFiles:
         self.operation = operation
         self.entered = asyncio.Event()
         self.release = threading.Event()
-        self.handles: list[BinaryIO] = []
+        self.handles: "list[BinaryIO]" = []
         self.loop = asyncio.get_running_loop()
         original = object_sql_module.tempfile.TemporaryFile
 
@@ -63,7 +66,7 @@ class _StagingFiles:
 
 
 class _StagingFile:
-    def __init__(self, files: _StagingFiles, handle: BinaryIO) -> None:
+    def __init__(self, files: _StagingFiles, handle: "BinaryIO") -> None:
         self.files = files
         self.handle = handle
 

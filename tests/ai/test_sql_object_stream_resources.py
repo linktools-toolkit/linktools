@@ -6,8 +6,7 @@ import asyncio
 import errno
 import hashlib
 import tracemalloc
-from collections.abc import AsyncIterator
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from aiosqlite import Cursor
@@ -19,11 +18,15 @@ from linktools.ai.storage import _object_sql
 
 from .test_storage_lifecycle_ownership import _StagingFiles
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from pathlib import Path
+
 pytestmark = pytest.mark.asyncio
 _MIB = 1024 * 1024
 
 
-async def _parts(chunk: bytes, count: int) -> AsyncIterator[bytes]:
+async def _parts(chunk: bytes, count: int) -> "AsyncIterator[bytes]":
     for _ in range(count):
         yield chunk
 
@@ -39,7 +42,7 @@ async def _seed(store: SqlObjectStore, key: str, count: int) -> str:
 
 
 async def test_sqlite_object_stream_python_allocations_stay_bounded_with_object_size(
-    tmp_path: Path,
+    tmp_path: "Path",
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'objects.db'}")
@@ -118,7 +121,7 @@ async def test_sqlite_object_stream_python_allocations_stay_bounded_with_object_
     ("stat", "session"), ("list", "session"), ("integrity", "session"),
 ))
 async def test_sqlite_object_cleanup_settles_after_repeated_cancellation(
-    tmp_path: Path,
+    tmp_path: "Path",
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
     phase: str,
@@ -224,7 +227,7 @@ async def test_sqlite_object_cleanup_settles_after_repeated_cancellation(
 
 
 async def test_wal_large_object_staging_allows_other_object_mutations_before_file_write_finishes(
-    tmp_path: Path,
+    tmp_path: "Path",
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'objects.db'}")
@@ -276,7 +279,7 @@ async def test_wal_large_object_staging_allows_other_object_mutations_before_fil
 
 
 async def test_rollback_large_object_commit_finishes_after_repeated_cancelled_stage_write_settles(
-    tmp_path: Path,
+    tmp_path: "Path",
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'objects.db'}")
@@ -340,7 +343,7 @@ async def test_rollback_large_object_commit_finishes_after_repeated_cancelled_st
 
 @pytest.mark.parametrize("operation", ("write", "seek", "read", "close"))
 async def test_sqlite_object_file_failure_preserves_error_and_releases_resources(
-    tmp_path: Path,
+    tmp_path: "Path",
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
 ) -> None:
