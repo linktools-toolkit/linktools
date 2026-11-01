@@ -109,6 +109,23 @@ reader preserves only offline access to supported clean legacy data. The unused
 independent atomic-file, file-lock, cache and ObjectStore APIs remain. Opaque
 custom-object closure and journal replay are not provided.
 
+### SQLite contention retries
+
+`SqlStorageContext.run_mutation(..., retry_limit=None)` uses the default
+policy. For native SQLite BUSY errors classified as definitely aborted, the
+complete callback may be retried within the existing five-second SQLite busy
+window. Each attempt fully rolls back and releases its session before backoff;
+a new attempt is not admitted after that elapsed window. This is not a hard
+callback timeout: active database work still settles before its outcome is
+reported. Consistent reads, optimistic guards and mutation receipts remain
+required. Continuous contention can still exhaust the window.
+
+An explicit positive `retry_limit` remains a hard total-attempt limit, including
+`retry_limit=8` for the previous default count. Other dialects and custom
+retryable errors other than native SQLite BUSY retain the eight-attempt default. Cancellation, non-retryable
+errors and unknown commit outcomes are never replayed by this policy. No
+additional public retry configuration, write lock or writer queue is introduced.
+
 ### Exclusively owned local SQLite
 
 `PersistenceStorage.from_root(root, exclusive_writer=True)` selects the same

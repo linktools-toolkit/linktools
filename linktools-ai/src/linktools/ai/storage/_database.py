@@ -6,6 +6,7 @@ import asyncio
 import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from operator import index
 from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, ClassVar, NoReturn, TypeVar
@@ -15,6 +16,8 @@ from linktools.core import environ
 from ..errors import AIError, ErrorCode
 from ._sqlite_owner import _LOCAL_PROFILE, _SqliteFileOwner, _connection_file, _finish_owned_io, require_sqlite_write
 from ._dialects import (
+    _SQLITE_BUSY_TIMEOUT_MS,
+    _is_sqlite_busy,
     SqlAlchemyDialect,
     SqlTransactionDisposition,
     SqlTransactionPhase,
@@ -154,18 +157,51 @@ class SqlStorageContext:
         self,
         callback: Callable[["AsyncSession"], Awaitable[ValueT]],
         *,
-        retry_limit: int = 8,
+        retry_limit: int | None = None,
         domain: str = "sql",
     ) -> ValueT:
-        if retry_limit < 1:
-            raise ValueError("retry_limit must be positive")
+        """Retry known aborts; explicit limits cap attempts on every dialect.
+
+        Default SQLite BUSY retries admit new attempts within its busy window.
+        In-flight I/O is still settled, not cancelled when that window expires.
+        """
+        from sqlalchemy.exc import DBAPIError
+
+        if retry_limit is not None:
+            retry_limit = index(retry_limit)
+            if retry_limit < 1:
+                raise ValueError("retry_limit must be positive")
         started = monotonic()
+        busy_deadline = started + _SQLITE_BUSY_TIMEOUT_MS / 1000
+        busy_error: BaseException | None = None
         retry_delay = 0.005
-        for attempt in range(retry_limit):
+        attempt = -1
+
+        def can_retry(error: BaseException) -> bool:
+            nonlocal busy_error
+            if (retry_limit is None and self.engine.dialect.name == "sqlite"
+                    and self.dialect.name == "sqlite" and self.dialect.single_writer and isinstance(error, DBAPIError)
+                    and _is_sqlite_busy(error.orig)):
+                busy_error = error
+                return monotonic() < busy_deadline
+            busy_error = None
+            return attempt + 1 < (8 if retry_limit is None else retry_limit)
+
+        while True:
+            attempt += 1
             if attempt and self.dialect.single_writer:
                 # Release the previous snapshot/session before giving another
                 # SQLite writer time to finish instead of reacquiring read locks.
-                await asyncio.sleep(retry_delay)
+                delay = retry_delay
+                if busy_error is not None:
+                    remaining = busy_deadline - monotonic()
+                    if remaining <= 0:
+                        raise busy_error
+                    delay = min(delay, remaining)
+                await asyncio.sleep(delay)
+                if busy_error is not None and monotonic() >= busy_deadline:
+                    raise busy_error
+                busy_error = None
                 retry_delay = min(retry_delay * 2, 0.05)
             if self._closed:
                 raise AIError(ErrorCode.STORAGE_CLOSED)
@@ -194,7 +230,7 @@ class SqlStorageContext:
                         connection_invalidated=_connection_invalidated(error),
                     )
                     await transaction.__aexit__(*sys.exc_info())
-                    if disposition is SqlTransactionDisposition.RETRYABLE_ABORTED and attempt + 1 < retry_limit:
+                    if disposition is SqlTransactionDisposition.RETRYABLE_ABORTED and can_retry(error):
                         _logger.warning(
                             "retrying SQL mutation after aborted body: domain=%s dialect=%s attempt=%s",
                             domain,
@@ -211,7 +247,7 @@ class SqlStorageContext:
                         phase=SqlTransactionPhase.COMMIT,
                         connection_invalidated=_connection_invalidated(error),
                     )
-                    if disposition is SqlTransactionDisposition.RETRYABLE_ABORTED and attempt + 1 < retry_limit:
+                    if disposition is SqlTransactionDisposition.RETRYABLE_ABORTED and can_retry(error):
                         _logger.warning(
                             "retrying SQL mutation after aborted commit: domain=%s dialect=%s attempt=%s",
                             domain,
@@ -253,7 +289,6 @@ class SqlStorageContext:
                             raise
                         else:
                             self._local_mutations.pop(session)
-        raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
     @property
     def closed(self) -> bool:

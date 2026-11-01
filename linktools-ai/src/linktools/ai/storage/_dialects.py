@@ -14,6 +14,7 @@ from ..errors import AIError, ErrorCode
 SqlValue: TypeAlias = str | int | bool | bytes | datetime | None
 _logger = environ.get_logger("ai.storage.dialects")
 _SQL_DELETE_RETURNING_BATCH_LIMIT = 64
+_SQLITE_BUSY_TIMEOUT_MS = 5000
 
 
 class _SqliteCursor(Protocol):
@@ -934,7 +935,7 @@ def configure_sqlite_connection(
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
     finally:
         cursor.close()
 
