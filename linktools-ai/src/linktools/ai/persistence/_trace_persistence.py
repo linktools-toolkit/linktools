@@ -164,6 +164,19 @@ class TracePersistence:
                 await asyncio.shield(buffer.ack_task)
             await self._ack(buffer)
 
+    async def settle_execution_cleanup(self, execution_id: str) -> None:
+        """Retry only retired, source-settled buffers owned by this execution."""
+        for buffer in tuple(self._cleanup.values()):
+            if buffer.key[1] != execution_id:
+                continue
+            try:
+                while buffer.ack_task is not None:
+                    await asyncio.shield(buffer.ack_task)
+                await self._ack(buffer)
+            except Exception as error:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                              safe_details={"phase": "trace_buffer_cleanup"}) from error
+
     def release(self, agent_run_id: str) -> None:
         failed = self._failed_runs.get(agent_run_id)
         if failed is not None:

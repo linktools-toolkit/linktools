@@ -396,3 +396,125 @@ async def test_dispatched_prefix_cannot_be_discarded_without_canonical_proof() -
     assert not backend.acks
     owner.confirm(capture.execution.execution_id, ids)
     await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_cleanup_keeps_unconfirmed_bytes_and_accepts_later_admission() -> None:
+    backend = _Buffer(max_bytes=1024 * 1024)
+    owner = _ExecutionPayloadBuffer(backend)
+    capture = _capture()
+    execution_id = capture.execution.execution_id
+    await owner.append(capture)
+    with pytest.raises(AIError) as retained:
+        await owner.flush_cleanup(execution_id)
+    assert retained.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+    assert not backend.acks
+    assert (await owner.read(execution_id))[0] == capture
+    await owner.append(replace(capture, execution=replace(capture.execution, revision=2)))
+    owner.discard(execution_id)
+    await owner.flush_cleanup(execution_id)
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_cleanup_drains_retired_generation_without_waiting_for_peer_ack() -> None:
+    peer_started, peer_release = asyncio.Event(), asyncio.Event()
+
+    class SelectiveBuffer(_Buffer):
+        blocked_scope = None
+
+        async def ack(self, scope, ids):
+            if scope == self.blocked_scope:
+                peer_started.set()
+                await peer_release.wait()
+            await super().ack(scope, ids)
+
+    backend = SelectiveBuffer(max_bytes=1024 * 1024)
+    owner = _ExecutionPayloadBuffer(backend)
+    capture = _capture()
+    execution_id = capture.execution.execution_id
+    backend.fail_ack = True
+    owner.bind_producer(execution_id, 0)
+    await owner.append(capture)
+    owner.retire(execution_id, 0, abandon=True)
+    with pytest.raises(AIError):
+        await owner.flush_cleanup(execution_id)
+    owner.bind_producer(execution_id, 1)
+    await owner.append(capture)
+    owner.discard(execution_id)
+
+    peer = replace(capture, execution=replace(capture.execution, execution_id="healthy-peer"))
+    await owner.append(peer)
+    backend.blocked_scope = backend.admissions[-1][0]
+    owner.discard("healthy-peer")
+    await asyncio.wait_for(peer_started.wait(), 1)
+    backend.fail_ack = False
+    try:
+        await asyncio.wait_for(owner.flush_cleanup(execution_id), 1)
+        assert not peer_release.is_set()
+        assert not owner._retired_scopes
+        for scope, _, _, _ in backend.admissions[:-1]:
+            assert await backend.read_batch(scope, limit=10) == ()
+        assert await backend.read_batch(backend.blocked_scope, limit=10)
+        following = replace(capture, execution=replace(capture.execution, execution_id="next-turn"))
+        await owner.append(following)
+        owner.discard("next-turn")
+    finally:
+        peer_release.set()
+        await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_cleanup_retry_preserves_caller_cancellation_and_owned_ack() -> None:
+    ack_started, ack_release = asyncio.Event(), asyncio.Event()
+
+    class RetryingBuffer(_Buffer):
+        calls = 0
+        cancelled = False
+
+        async def ack(self, scope, ids):
+            self.calls += 1
+            if self.calls == 1:
+                raise OSError("first ACK failed")
+            ack_started.set()
+            try:
+                await ack_release.wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+            await super().ack(scope, ids)
+
+    backend = RetryingBuffer(max_bytes=1024 * 1024)
+    owner = _ExecutionPayloadBuffer(backend)
+    capture = _capture()
+    execution_id = capture.execution.execution_id
+    await owner.append(capture)
+    owner.discard(execution_id)
+    first_cleanup = owner._scopes[execution_id].cleanup
+    assert first_cleanup is not None
+    await first_cleanup
+    assert backend.calls == 1
+    flushing = asyncio.create_task(owner.flush_cleanup(execution_id))
+    try:
+        await asyncio.wait_for(ack_started.wait(), 1)
+        flushing.cancel("caller stopped waiting")
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await flushing
+        assert cancelled.value.args == ("caller stopped waiting",)
+        assert not backend.cancelled
+        assert await backend.read_batch(backend.admissions[0][0], limit=10)
+        assert any(not task.done() for task in owner._tasks)
+        retrying = asyncio.create_task(owner.flush_cleanup(execution_id))
+        await asyncio.sleep(0)
+        assert not retrying.done()
+        ack_release.set()
+        await retrying
+        assert backend.calls == 2
+        assert await backend.read_batch(backend.admissions[0][0], limit=10) == ()
+        following = replace(capture, execution=replace(capture.execution, execution_id="next-turn"))
+        await owner.append(following)
+        owner.discard("next-turn")
+    finally:
+        ack_release.set()
+        await asyncio.gather(flushing, return_exceptions=True)
+        await owner.close()

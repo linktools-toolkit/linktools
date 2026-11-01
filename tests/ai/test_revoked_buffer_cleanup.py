@@ -8,7 +8,7 @@ from collections.abc import Hashable, Sequence
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 
 from linktools.ai.capability import AgentContext, ExecutionCapability, TraceCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus, PersistenceDomain, ToolOperationStatus, WriteBufferEntry
@@ -182,4 +182,95 @@ async def test_revoked_failed_owner_retries_exact_cleanup_without_replaying_effe
                 assert terminal.output == {"text": "next turn"}
                 assert calls == {"model": 2, "tool": 1, "next": 1}
         assert buffer.pending == {("other-owner", "entry"): b"{}"}
+        assert buffer.close_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload_format", ("execution-payload-v1", "trace-projection-v1"))
+async def test_terminal_handoff_cleans_only_revoked_failed_execution_while_peer_keeps_running(
+    tmp_path: Path, payload_format: str,
+) -> None:
+    buffer = _MissingPayloadBuffer()
+    assert await buffer.append("foreign", "entry", "key", b"{}", wait=False)
+    policy = CommitPolicy.terminal(buffer=buffer)
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db", coordination=buffer)
+    peer_entered, peer_release = asyncio.Event(), asyncio.Event()
+    calls = {"effect": 0, "failed_model": 0}
+    peer_keys = set()
+    receipt = None
+
+    async with Persistence.open("isolated-cleanup", storage=storage) as state:
+        async def effect(ctx: AgentContext[None]) -> str:
+            calls["effect"] += 1
+            return "confirmed external result"
+
+        async def model(messages, info):
+            nonlocal receipt
+            prompts = [part.content for message in messages for part in message.parts
+                       if isinstance(part, UserPromptPart)]
+            if "healthy peer" in prompts:
+                peer_entered.set()
+                await peer_release.wait()
+                return ModelResponse(parts=[TextPart("peer completed")])
+            if "next turn" in prompts:
+                return ModelResponse(parts=[TextPart("next completed")])
+            calls["failed_model"] += 1
+            if not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
+                return ModelResponse(parts=[ToolCallPart("effect", {}, tool_call_id="effect-call")])
+            tools = await state.recovery.tools.list_by_execution(failed.execution_id, tenant_id=state.tenant_id)
+            assert len(tools) == 1 and tools[0].status is ToolOperationStatus.COMPLETED
+            receipt = tools[0]
+            lost = next(key for key, content in buffer.pending.items()
+                        if key not in peer_keys and content is not None
+                        and json.loads(content).get("format") == payload_format)
+            buffer.missing.add(lost)
+            return ModelResponse(parts=[TextPart("lost turn")])
+
+        def features() -> RuntimeFeatures:
+            values = RuntimeFeatures("isolated-cleanup")
+            values.capability(ExecutionCapability(retain_history=True, commit=policy))
+            values.capability(TraceCapability(commit=policy))
+            values.tool(effect, effect_policy="non_replay_safe")
+            values.agent("default", model="default", allow_tools=("effect",))
+            return model_features(_Models(_UsageFunctionModel(model)), values)
+
+        async with Runtime.attach(persistence=state, features=features(), metrics=None,
+                                  auto_recover=False) as original:
+            peer_session = await original.agents.get().create_session("peer")
+            peer = await peer_session.start("healthy peer", idempotency_key="peer")
+            await asyncio.wait_for(peer_entered.wait(), 5)
+            peer_keys = set(buffer.pending)
+            try:
+                failed_session = await original.agents.get().create_session("failed")
+                failed = await failed_session.start("failed turn", idempotency_key="failed")
+                with pytest.raises(AIError) as caught:
+                    await failed.wait(timeout_seconds=10)
+                assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+                assert receipt is not None
+                async with Runtime.attach(persistence=state, features=features(), metrics=None,
+                                          auto_recover=False) as control:
+                    cancelled = await control.executions.cancel(failed.execution_id,
+                        CancelExecutionRequest(control.default_principal, "revoke", force=True))
+                    assert cancelled.cancelled
+                request = CancelExecutionRequest(original.default_principal, "observe-revoked", force=True)
+                buffer.fail_ack = True
+                assert (await original.executions.cancel(failed.execution_id, request)).cancelled
+                assert peer_keys < buffer.pending.keys()
+                buffer.fail_ack = False
+                assert (await original.executions.cancel(failed.execution_id, request)).cancelled
+                assert set(buffer.pending) == peer_keys
+                assert not peer_release.is_set()
+                assert buffer.close_calls == 0
+                kept = await state.recovery.tools.list_by_execution(failed.execution_id, tenant_id=state.tenant_id)
+                assert len(kept) == 1 and kept[0].tool_operation_id == receipt.tool_operation_id
+                assert kept[0].status is ToolOperationStatus.COMPLETED
+                assert kept[0].result_payload == receipt.result_payload
+                following = await failed_session.start("next turn", idempotency_key="next")
+                assert (await following.wait(timeout_seconds=10)).result.output == {"text": "next completed"}
+                assert calls == {"effect": 1, "failed_model": 2}
+            finally:
+                buffer.fail_ack = False
+                peer_release.set()
+                assert (await peer.wait(timeout_seconds=10)).result.output == {"text": "peer completed"}
+        assert buffer.pending == {("foreign", "entry"): b"{}"}
         assert buffer.close_calls == 0

@@ -3315,13 +3315,15 @@ class LocalExecutionBackend:
         self._worker_shutdown_requests.clear()
         self._execution_task_map().clear()
 
-    async def _release_revoked_failed_producers(self) -> None:
+    async def _release_revoked_failed_producers(self, execution_ids: Sequence[str] | None = None) -> None:
         if not isinstance(self._run_store, RuntimeAgentRunStore):
             return
         archive = self._run_stores[PersistenceDomain.TRACE]
         if not isinstance(archive, StateStepArchive):
             return
-        for execution_id in tuple(self._worker_failures):
+        for execution_id in tuple(self._worker_failures) if execution_ids is None else execution_ids:
+            if execution_id not in self._worker_failures:
+                continue
             if self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is not None:
                 continue
             current = await self.load_execution(execution_id, tenant_id=self._tenant_id)
@@ -3365,7 +3367,10 @@ class LocalExecutionBackend:
                     await self._agent_run_lifecycle.discard_revoked_producer_staging(
                         agent_run_id, execution_id=execution_id, producer_generation=generation,
                         terminal_execution=current,
+                        settle_cleanup=True,
                     )
+            if buffered:
+                await self._execution_buffer.flush_cleanup(execution_id)
             async with self._audit_lock(execution_id):
                 self._pending_audit_events.pop(execution_id, None)
             self._worker_failures.pop(execution_id, None)
@@ -3397,6 +3402,10 @@ class LocalExecutionBackend:
                 len(pending_execution_tasks),
             )
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if execution_id in self._worker_failures:
+            await self._release_revoked_failed_producers((execution_id,))
+            if execution_id in self._worker_failures:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
         if task is not None:
             self._tasks.pop(execution_id, None)
         self._worker_cancel_requests.discard(execution_id)

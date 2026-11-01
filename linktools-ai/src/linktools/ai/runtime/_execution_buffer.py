@@ -97,7 +97,7 @@ class _ExecutionPayloadBuffer:
     def __init__(self, backend: WriteBufferBackend) -> None:
         self._backend = backend
         self._scopes: dict[str, _Scope] = {}
-        self._retired_scopes: list[_Scope] = []
+        self._retired_scopes: list[tuple[str, _Scope]] = []
         self._accepting = True
         self._tasks: set[asyncio.Task[object]] = set()
 
@@ -115,7 +115,7 @@ class _ExecutionPayloadBuffer:
                 or producer_generation <= scope.producer_generation):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         if scope.entries or scope.cleanup_failure is not None:
-            self._retired_scopes.append(scope)
+            self._retired_scopes.append((execution_id, scope))
         self._scopes[execution_id] = _Scope(producer_generation=producer_generation)
 
     def producer_generation(self, execution_id: str) -> int:
@@ -356,7 +356,7 @@ class _ExecutionPayloadBuffer:
         scope.rejection_prefix = None
         scope.failure = None
         scope.uncertain = None
-        self._retired_scopes[:] = [value for value in self._retired_scopes if value is not scope]
+        self._retired_scopes[:] = [(owner, value) for owner, value in self._retired_scopes if value is not scope]
 
     def _schedule_cleanup(self, execution_id: str, scope: _Scope) -> None:
         if scope.cleanup is not None and not scope.cleanup.done():
@@ -392,6 +392,22 @@ class _ExecutionPayloadBuffer:
             scope.retired = False
             self._drop_settled_payload(scope)
 
+    async def flush_cleanup(self, execution_id: str) -> None:
+        """Settle only this execution's exact ACKs without closing admission."""
+        scope = self._scopes.get(execution_id)
+        scopes = (() if scope is None else (scope,)) + tuple(
+            value for owner, value in self._retired_scopes if owner == execution_id
+        )
+        for scope in scopes:
+            if scope.cleanup is not None and not scope.cleanup.done():
+                await asyncio.shield(scope.cleanup)
+            self._schedule_cleanup(execution_id, scope)
+            assert scope.cleanup is not None
+            await asyncio.shield(scope.cleanup)
+            if scope.entries or scope.rejection_prefix is not None and not scope.released:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                              safe_details={"phase": "execution_buffer_cleanup"}) from scope.cleanup_failure
+
     async def close(self) -> None:
         self._accepting = False
         while self._tasks:
@@ -400,9 +416,9 @@ class _ExecutionPayloadBuffer:
             )
         for execution_id, scope in tuple(self._scopes.items()):
             await self._cleanup(execution_id, scope)
-        for scope in tuple(self._retired_scopes):
-            await self._cleanup("retired", scope)
-        unsettled = tuple(scope for scope in (*self._scopes.values(), *self._retired_scopes)
+        for execution_id, scope in tuple(self._retired_scopes):
+            await self._cleanup(execution_id, scope)
+        unsettled = tuple(scope for scope in (*self._scopes.values(), *(value for _, value in self._retired_scopes))
                           if scope.entries or scope.rejection_prefix is not None and not scope.released)
         if unsettled:
             failures = [scope.cleanup_failure or scope.failure for scope in unsettled]

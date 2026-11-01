@@ -2235,16 +2235,19 @@ class RuntimeAgentRunStore(AgentRunStore):
     async def discard_revoked_producer_staging(
         self, agent_run_id: str, *, execution_id: str, producer_generation: int,
         terminal_execution: ExecutionRecord | None = None,
+        settle_cleanup: bool = False,
     ) -> None:
         """Release a quiescent producer's uncommitted tail after revocation proof."""
         await self._settle_observation_boundary(self._discard_revoked_producer_staging(
             agent_run_id, execution_id=execution_id, producer_generation=producer_generation,
             terminal_execution=terminal_execution,
+            settle_cleanup=settle_cleanup,
         ))
 
     async def _discard_revoked_producer_staging(
         self, agent_run_id: str, *, execution_id: str, producer_generation: int,
         terminal_execution: ExecutionRecord | None = None,
+        settle_cleanup: bool = False,
     ) -> None:
         await self._ensure_business()
         async with self._history_lock.hold(agent_run_id):
@@ -2265,6 +2268,8 @@ class RuntimeAgentRunStore(AgentRunStore):
             terminal_execution=terminal_execution,
         )
         await self.trace_persistence.discard(agent_run_id)
+        if settle_cleanup:
+            await self.trace_persistence.settle_execution_cleanup(execution_id)
         async with self._history_lock.hold(agent_run_id):
             if (self._execution_producers.get(agent_run_id) != (execution_id, producer_generation)
                     or agent_run_id in self._durability_flights):

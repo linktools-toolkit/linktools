@@ -70,6 +70,7 @@ class _AgentRunLifecycle(Protocol):
     async def discard_revoked_producer_staging(
         self, agent_run_id: str, *, execution_id: str, producer_generation: int,
         terminal_execution: ExecutionRecord | None = None,
+        settle_cleanup: bool = False,
     ) -> None: ...
     async def wait_projection_flight(self, agent_run_id: str) -> None: ...
     async def prepare_execution_terminal_seal(
