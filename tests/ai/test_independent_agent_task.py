@@ -3,13 +3,16 @@
 """Agent tasks borrow an Agent producer without recreating its execution."""
 
 import pytest
-from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.models.function import AgentInfo
+from linktools.ai.agent import AgentBindingContract
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.task.engine import TaskEngine
 from linktools.ai.task import Task, TaskGraph, TaskNode
-from linktools.ai.inputs import AgentTaskInput
+from linktools.ai.inputs import AgentTaskInput, AgentTaskInputContext
 from linktools.ai.persistence import Persistence, PersistenceStorage
-from linktools.ai.core import TaskStatus
+from linktools.ai.core import JsonValue, TaskStatus
 from ._runtime_test_helpers import model_features, _UsageFunctionModel
 from .test_live_history_readback_integration import _Models
 
@@ -225,3 +228,121 @@ async def test_two_agent_producers_share_task_persistence_without_sharing_lifecy
                     assert (await second_graph.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED
                     assert await second_graph.result("answer") == {"text": "second"}
                     assert persistence.ready
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("projected", (False, True), ids=("literal", "projected"))
+async def test_agent_task_binding_reuses_its_declaration_without_execution(projected: bool) -> None:
+    calls: list[str] = []
+
+    async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        calls.append("model")
+        return ModelResponse(parts=[TextPart("answer")])
+
+    async def build_input(context: AgentTaskInputContext) -> str:
+        calls.append("projection")
+        return "question"
+
+    features = RuntimeFeatures("agent-task-binding")
+    features.agent("default", model="default", allow_tools=())
+    async with Persistence.open("binding", storage=PersistenceStorage.in_memory()) as persistence:
+        async with Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+            task = Task.from_agent(
+                "answer", runtime.agents.get(), revision=3,
+                build_input=build_input if projected else None,
+            )
+            async with TaskEngine.open(persistence=persistence) as engine:
+                bound = engine.with_definitions(task).definition(task.ref)
+                assert bound.ref == task.ref
+                assert bound.contract == task.contract
+                config = bound.contract["config"]
+                assert isinstance(config, dict)
+                assert config["input_mode"] == ("projected" if projected else "literal")
+                assert engine.with_definitions(bound).definition(task.ref) is bound
+                assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("already_bound", "changed"), (
+    (False, "binding_contract"),
+    (False, "reconcile"),
+    (True, "input_mode"),
+), ids=("first-binding-contract", "first-binding-normalization", "rebound-input-mode"))
+async def test_agent_task_binding_rejects_changed_declaration(
+    already_bound: bool, changed: str,
+) -> None:
+    async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        raise AssertionError("Binding must not execute the Agent")
+
+    features = RuntimeFeatures("agent-task-declaration")
+    features.agent("default", model="default", allow_tools=())
+    async with Persistence.open("declaration", storage=PersistenceStorage.in_memory()) as persistence:
+        async with Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+            task = Task.from_agent("answer", runtime.agents.get())
+            async with TaskEngine.open(persistence=persistence) as engine:
+                if already_bound:
+                    task = engine.with_definitions(task).definition(task.ref)
+                contract = dict(task.contract)
+                if changed in {"binding_contract", "input_mode"}:
+                    config = dict(contract["config"])
+                    config[changed] = {} if changed == "binding_contract" else "projected"
+                    contract["config"] = config
+                else:
+                    contract["reconcile"] = "invalid"
+                object.__setattr__(task, "_contract", contract)
+                with pytest.raises(AIError) as rejected:
+                    engine.with_definitions(task)
+                assert rejected.value.code is ErrorCode.REQUEST_FIELD_INVALID
+
+
+@pytest.mark.asyncio
+async def test_agent_task_closed_producer_preserves_first_binding_and_rebinding_checks() -> None:
+    async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        raise AssertionError("Binding must not execute the Agent")
+
+    features = RuntimeFeatures("agent-task-closed-producer")
+    features.agent("default", model="default", allow_tools=())
+    async with Persistence.open("closed-producer", storage=PersistenceStorage.in_memory()) as persistence:
+        async with TaskEngine.open(persistence=persistence) as engine:
+            async with Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+                task = Task.from_agent("answer", runtime.agents.get())
+                bound = engine.with_definitions(task).definition(task.ref)
+            object.__setattr__(task, "_contract", {**task.contract, "reconcile": "invalid"})
+            with pytest.raises(AIError) as first_binding:
+                engine.with_definitions(task)
+            assert first_binding.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+            assert engine.with_definitions(bound).definition(bound.ref) is bound
+            object.__setattr__(bound, "_contract", {**bound.contract, "reconcile": "invalid"})
+            with pytest.raises(AIError) as rebinding:
+                engine.with_definitions(bound)
+            assert rebinding.value.code is ErrorCode.REQUEST_FIELD_INVALID
+
+
+@pytest.mark.asyncio
+async def test_agent_task_invalid_binding_payload_precedes_invalid_declaration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        raise AssertionError("Binding must not execute the Agent")
+
+    features = RuntimeFeatures("agent-task-payload-precedence")
+    features.agent("default", model="default", allow_tools=())
+    async with Persistence.open("payload-precedence", storage=PersistenceStorage.in_memory()) as persistence:
+        async with Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+            task = Task.from_agent("answer", runtime.agents.get())
+            binding = task.agent_execution.binding_contract
+            to_payload = AgentBindingContract.to_payload
+
+            def invalid_payload(value: AgentBindingContract) -> dict[str, JsonValue]:
+                payload = to_payload(value)
+                if value is binding:
+                    payload["version"] = 0
+                return payload
+
+            object.__setattr__(task, "_contract", {**task.contract, "reconcile": "invalid"})
+            async with TaskEngine.open(persistence=persistence) as engine:
+                with monkeypatch.context() as patch:
+                    patch.setattr(AgentBindingContract, "to_payload", invalid_payload)
+                    with pytest.raises(AIError) as rejected:
+                        engine.with_definitions(task)
+                assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

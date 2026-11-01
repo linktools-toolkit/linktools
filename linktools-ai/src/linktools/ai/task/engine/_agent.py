@@ -127,10 +127,8 @@ class AgentTaskRunner(Generic[AppT]):
     async def bind_existing_execution(self, execution_id: str, principal: Principal) -> None:
         await self._get_execution(execution_id, principal)
 
-    def validate_binding(self, persistence_owner: object, task: Task[AppT]) -> None:
-        if persistence_owner is not self._persistence_owner:
-            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
-        expected_contract: dict[str, JsonValue] = {
+    def _expected_contract(self) -> dict[str, JsonValue]:
+        return {
             "version": 1,
             "type": "agent",
             "effect_policy": "none",
@@ -143,6 +141,22 @@ class AgentTaskRunner(Generic[AppT]):
                 "input_mode": self.input_mode,
             },
         }
+
+    def bind_task(self, task: Task[AppT]) -> Task[AppT]:
+        expected_contract = self._expected_contract()
+        if dict(task.contract) != expected_contract:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        return Task.from_runner(
+            self.id,
+            self,
+            revision=self.revision,
+            contract=expected_contract,
+        )
+
+    def validate_binding(self, persistence_owner: object, task: Task[AppT]) -> None:
+        if persistence_owner is not self._persistence_owner:
+            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+        expected_contract = self._expected_contract()
         if (
             task.runner is not self
             or task.id != self.id

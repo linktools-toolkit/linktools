@@ -335,27 +335,7 @@ class TaskEngine(Generic[AppT]):
             store_prepared_prompt=store_prepared_prompt,
             restore_prepared_prompt=lambda *args, **kwargs: self._task_node_runtime.restore_prepared_agent_prompt(*args, **kwargs),
         )
-        contract: dict[str, JsonValue] = {
-            "version": 1,
-            "type": "agent",
-            "effect_policy": "none",
-            "output_contract": {"kind": "json"},
-            "reconcile": False,
-            "config": {
-                "agent_id": compiled.spec.id,
-                "agent_revision": compiled.spec.revision,
-                "binding_contract": binding_contract.to_payload(),
-                "input_mode": input_mode,
-            },
-        }
-        if dict(task.contract) != contract:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        return Task.from_runner(
-            task_id,
-            runner,
-            revision=revision,
-            contract=contract,
-        )
+        return runner.bind_task(task)
 
 
     @classmethod

@@ -1890,6 +1890,10 @@ async def test_runtime_agent_task_binding_is_owned_by_its_runtime() -> None:
                 first_runtime_engine.with_definitions(edited_task)
             assert edited_declaration.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
+            with pytest.raises(AIError) as foreign_edited_declaration:
+                second_runtime_engine.with_definitions(edited_task)
+            assert foreign_edited_declaration.value.code is ErrorCode.RUNTIME_SERVICE_MISMATCH
+
             class FakeAgentRunner:
                 pass
 
