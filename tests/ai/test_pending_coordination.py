@@ -674,3 +674,198 @@ async def test_concurrent_release_retries_preserve_single_successor(
     assert observed is not None and observed.owner_id == winner.owner_id
     assert await claim("third") is None
     await helper.release(winner.lease)
+
+
+@pytest.mark.asyncio
+async def test_expired_release_metadata_does_not_accumulate_across_unrelated_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.persistence import coordination as coordination_module
+
+    now = [100.0]
+    monkeypatch.setattr(cache_module, "monotonic", lambda: now[0])
+    monkeypatch.setattr(coordination_module, "monotonic", lambda: now[0], raising=False)
+    cache = _ObservedCache()
+    helper = _helper(cache)
+    kept = []
+    for identity in ("healthy", "unknown"):
+        claim = await helper.claim(
+            session_key=identity, request_key=identity, request_digest=identity,
+            execution_id=identity, owner_id=identity, lease_seconds=600,
+        )
+        assert claim is not None and claim.lease is not None
+        kept.append(claim)
+
+    async def unavailable(lease):
+        raise OSError("release unavailable")
+
+    sizes = []
+    with monkeypatch.context() as patch:
+        patch.setattr(cache, "release_turn", unavailable)
+        for batch in range(4):
+            for index in range(8):
+                identity = f"batch-{batch}-{index}"
+                claim = await helper.claim(
+                    session_key=identity, request_key=identity, request_digest=identity,
+                    execution_id=identity, owner_id=identity, lease_seconds=30,
+                )
+                assert claim is not None and claim.lease is not None
+                with pytest.raises(OSError):
+                    await helper.release(claim.lease)
+            now[0] += 31
+            assert await helper.read_owner(identity, tenant_id="tenant") is None
+            # This is a resource-retention invariant, which backend behavior
+            # alone cannot reveal: live, never-released claims must remain.
+            sizes.append(len(helper._claimed_sessions))
+    assert sizes == [len(kept)] * 4
+    assert not helper._pending_releases
+    for claim in kept:
+        assert await helper.read_owner(claim.execution_id, tenant_id="tenant") is not None
+        await helper.release(claim.lease)
+
+
+@pytest.mark.asyncio
+async def test_release_hint_expiry_neither_extends_on_retry_nor_proves_remote_absence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.persistence import coordination as coordination_module
+
+    now = [100.0]
+    monkeypatch.setattr(cache_module, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(coordination_module, "monotonic", lambda: now[0])
+    cache = _ObservedCache()
+    helper = _helper(cache)
+    owned = await _claim(helper)
+    assert owned.lease is not None
+    release = cache.release_turn
+
+    async def unavailable(lease):
+        raise OSError("release unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cache, "release_turn", unavailable)
+        for instant in (100.0, 110.0, 120.0, 129.0):
+            now[0] = instant
+            with pytest.raises(OSError):
+                await helper.release(owned.lease)
+            assert len(helper._release_expiry) == 1
+        now[0] = 131.0
+        assert await helper.claim(
+            session_key="session", request_key="successor", request_digest="successor",
+            execution_id="successor", owner_id="successor", lease_seconds=30,
+        ) is None
+        assert not helper._claimed_sessions and not helper._pending_releases and not helper._release_expiry
+        # The remote clock deliberately has not advanced. Forgetting the local
+        # hint neither releases this live owner nor permits a successor.
+        assert await helper.read_owner("execution", tenant_id="tenant") is not None
+    await release(owned.lease)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ("renewed", "unavailable", "cancelled"))
+async def test_release_hint_retains_inflight_and_ambiguous_renewal_horizon(
+    monkeypatch: pytest.MonkeyPatch, outcome: str,
+) -> None:
+    from linktools.ai.persistence import coordination as coordination_module
+
+    now = [100.0]
+    monkeypatch.setattr(cache_module, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(coordination_module, "monotonic", lambda: now[0])
+    cache = _ObservedCache()
+    helper = _helper(cache)
+    owned = await _claim(helper)
+    assert owned.lease is not None
+    renew = cache.renew_turn
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    async def delayed(lease, *, lease_seconds):
+        result = await renew(lease, lease_seconds=lease_seconds)
+        entered.set()
+        await finish.wait()
+        if outcome == "unavailable":
+            raise OSError("renewal acknowledgement lost")
+        return result
+
+    async def unavailable(lease):
+        raise OSError("release unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cache, "renew_turn", delayed)
+        patch.setattr(cache, "release_turn", unavailable)
+        operation = asyncio.create_task(helper.renew(owned.lease, lease_seconds=120))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            with pytest.raises(OSError):
+                await helper.release(owned.lease)
+            now[0] = 300.0
+            await helper.read_owner("unrelated", tenant_id="tenant")
+            assert owned.lease in helper._claimed_sessions
+            assert owned.lease in helper._pending_releases["session"]
+            assert not helper._release_expiry
+            if outcome == "cancelled":
+                operation.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await operation
+            else:
+                finish.set()
+                if outcome == "unavailable":
+                    with pytest.raises(OSError):
+                        await operation
+                else:
+                    assert await operation is not None
+        finally:
+            finish.set()
+            await asyncio.gather(operation, return_exceptions=True)
+        assert len(helper._release_expiry) == 1
+        patch.setattr(cache, "renew_turn", renew)
+        for _ in range(8):
+            now[0] += 1
+            assert await helper.renew(owned.lease, lease_seconds=120) is not None
+            assert len(helper._release_expiry) == 1
+        deadline = now[0] + 120
+        now[0] = deadline - 1
+        await helper.read_owner("unrelated", tenant_id="tenant")
+        assert owned.lease in helper._claimed_sessions
+        now[0] = deadline + 1
+        await helper.read_owner("unrelated", tenant_id="tenant")
+        assert not helper._claimed_sessions and not helper._pending_releases and not helper._release_expiry
+        assert await helper.read_owner("execution", tenant_id="tenant") is not None
+
+
+@pytest.mark.asyncio
+async def test_successful_release_and_late_failed_duplicate_leave_no_retry_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = _ObservedCache()
+    helper = _helper(cache)
+    # Healthy throughput does not allocate expiry tombstones.
+    for index in range(32):
+        owned = await _claim(helper, execution_id=str(index), owner_id=str(index))
+        assert owned.lease is not None
+        await helper.renew(owned.lease, lease_seconds=30)
+        assert await helper.release(owned.lease)
+    assert not helper._release_expiry
+    owned = await _claim(helper, execution_id="last", owner_id="last")
+    assert owned.lease is not None
+    release = cache.release_turn
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    async def late_failure(lease):
+        entered.set()
+        await finish.wait()
+        raise OSError("old release failed late")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cache, "release_turn", late_failure)
+        operation = asyncio.create_task(helper.release(owned.lease))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            patch.setattr(cache, "release_turn", release)
+            assert await helper.release(owned.lease)
+            finish.set()
+            with pytest.raises(OSError):
+                await operation
+        finally:
+            finish.set()
+            await asyncio.gather(operation, return_exceptions=True)
+    assert not helper._claimed_sessions and not helper._pending_releases and not helper._release_expiry
