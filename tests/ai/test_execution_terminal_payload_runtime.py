@@ -41,6 +41,134 @@ class _PayloadBuffer(InMemoryCacheBackend):
 
 
 @pytest.mark.asyncio
+async def test_completed_turns_release_execution_buffer_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    buffer = _PayloadBuffer()
+    released = asyncio.Event()
+
+    async def model(messages, info):
+        return ModelResponse(parts=[TextPart("answer")])
+
+    features = RuntimeFeatures("execution-buffer-owner-release")
+    features.capability(ExecutionCapability(retain_history=True,
+        commit=CommitPolicy.terminal(buffer=buffer)), scope="runtime")
+    features.agent("default", model="default", allow_tools=())
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db",
+        coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
+    async with Persistence.open("execution-buffer-owner-release", storage=storage) as persistence:
+        async with Runtime.attach(persistence=persistence,
+            features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as runtime:
+            backend = runtime._execution_service.runtime_backend()
+            original_release = backend.release_runtime_execution
+
+            async def observe_release(*args, **kwargs):
+                await original_release(*args, **kwargs)
+                released.set()
+
+            monkeypatch.setattr(backend, "release_runtime_execution", observe_release)
+            session = await runtime.agents.get().create_session("session")
+            for index in range(8):
+                released.clear()
+                execution = await session.start("question", idempotency_key=f"request-{index}")
+                result = (await execution.wait(timeout_seconds=10)).result
+                assert result.status is ExecutionStatus.SUCCEEDED
+                assert result.output == {"text": "answer"}
+                await asyncio.wait_for(released.wait(), 5)
+                await backend._execution_buffer.flush_cleanup(execution.execution_id)
+                # Transport emptiness alone does not release per-turn IDs, locks or tasks.
+                assert not backend._execution_buffer._scopes
+                assert not backend._execution_buffer._retired_scopes
+            assert set(buffer.accepted) == set(buffer.acknowledged)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("admission", ("rejected", "unknown"))
+async def test_rejected_start_releases_buffer_owner_after_exact_cleanup(
+    tmp_path: Path, admission: str,
+) -> None:
+    from linktools.ai.errors import AIError, ErrorCode
+
+    class RejectingBuffer(_PayloadBuffer):
+        fail = True
+
+        def __init__(self):
+            super().__init__()
+            self.ack_started, self.ack_release = asyncio.Event(), asyncio.Event()
+
+        async def append(self, scope, id, key, content, *, wait):
+            if self.fail and admission == "rejected":
+                return False
+            result = await super().append(scope, id, key, content, wait=wait)
+            if self.fail:
+                raise OSError("append acknowledgement lost")
+            return result
+
+        async def read_batch(self, scope, *, limit):
+            if self.fail and admission == "unknown":
+                raise OSError("admission readback unavailable")
+            return await super().read_batch(scope, limit=limit)
+
+        async def ack(self, scope, ids):
+            if admission == "unknown":
+                self.ack_started.set()
+                await self.ack_release.wait()
+            await super().ack(scope, ids)
+
+    buffer = RejectingBuffer()
+    calls = 0
+
+    async def model(messages, info):
+        nonlocal calls
+        calls += 1
+        return ModelResponse(parts=[TextPart("answer")])
+
+    features = RuntimeFeatures("execution-buffer-rejected-start")
+    features.capability(ExecutionCapability(retain_history=True,
+        commit=CommitPolicy.terminal(buffer=buffer)), scope="runtime")
+    features.agent("default", model="default", allow_tools=())
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db",
+        coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
+    async with Persistence.open("execution-buffer-rejected-start", storage=storage) as persistence:
+        async with Runtime.attach(persistence=persistence,
+            features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as runtime:
+            session = await runtime.agents.get().create_session("session")
+            backend = runtime._execution_service.runtime_backend()
+            for index in range(4):
+                with pytest.raises(AIError) as rejected:
+                    await session.start("question", idempotency_key=f"rejected-{index}")
+                assert rejected.value.code is ErrorCode.STORAGE_UNAVAILABLE
+                if admission == "unknown":
+                    await asyncio.wait_for(buffer.ack_started.wait(), 1)
+                    owner = backend._execution_buffer
+                    scopes = (*owner._scopes.values(), *(scope for _, scope in owner._retired_scopes))
+                    assert len(scopes) == 1
+                    scope = scopes[0]
+                    assert scope.uncertain is not None
+                    assert scope.cleanup is not None and not scope.cleanup.done()
+                    assert scope.entries and all(entry.settled for entry in scope.entries)
+                    assert await InMemoryCacheBackend.read_batch(buffer, scope.id, limit=10)
+                    assert not backend._tasks and calls == 0
+                    execution_id = scope.uncertain[1]
+                    buffer.ack_release.set()
+                    await owner.flush_cleanup(execution_id)
+                    assert scope.uncertain is None
+                assert not backend._execution_buffer._scopes
+                assert not backend._execution_buffer._retired_scopes
+                assert calls == 0
+                buffer.ack_started.clear()
+                buffer.ack_release.clear()
+            buffer.fail = False
+            buffer.ack_release.set()
+            execution = await session.start("question", idempotency_key="accepted")
+            result = (await execution.wait(timeout_seconds=10)).result
+            assert result.status is ExecutionStatus.SUCCEEDED
+            assert result.output == {"text": "answer"}
+            assert calls == 1
+        assert set(buffer.accepted) == set(buffer.acknowledged)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("outcome", "sessionless"), (("success", False), ("failure", False),
                                                         ("cancelled", False), ("success", True)))
 async def test_pending_payloads_and_checkpoint_are_read_from_buffer_before_source(

@@ -518,3 +518,112 @@ async def test_execution_cleanup_retry_preserves_caller_cancellation_and_owned_a
         ack_release.set()
         await asyncio.gather(flushing, return_exceptions=True)
         await owner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ack_outcome", ("blocked", "failed"))
+async def test_finished_owner_retains_only_unacknowledged_transport(ack_outcome: str) -> None:
+    backend = _Buffer(max_bytes=1024 * 1024)
+    backend.ack_release.clear()
+    backend.fail_ack = ack_outcome == "failed"
+    owner = _ExecutionPayloadBuffer(backend)
+    capture = _capture()
+    execution_id = capture.execution.execution_id
+    await owner.append(capture)
+    _, ids = await owner.read(execution_id, seal=True)
+    scope = owner._scopes[execution_id]
+    owner.confirm(execution_id, ids)
+    await asyncio.wait_for(backend.ack_started.wait(), 1)
+    await owner.release(execution_id)
+    owner.confirm(execution_id, ids)
+    owner.release_owner(execution_id)
+    assert not owner.has_scope(execution_id)
+    assert scope.confirmed == set(ids)
+    assert await backend.read_batch(scope.id, limit=10)
+    if ack_outcome == "failed":
+        backend.ack_release.set()
+        with pytest.raises(AIError) as failure:
+            await owner.flush_cleanup(execution_id)
+        assert failure.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+        assert scope.confirmed == set(ids)
+        assert await backend.read_batch(scope.id, limit=10)
+        backend.fail_ack = False
+    backend.ack_release.set()
+    await owner.flush_cleanup(execution_id)
+    assert not scope.confirmed
+    assert not owner._retired_scopes
+    assert await backend.read_batch(scope.id, limit=10) == ()
+    assert len(backend.admissions) == 1
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_owner_release_preserves_unconfirmed_source_and_waiting_generation() -> None:
+    backend = _Buffer(max_bytes=1024 * 1024)
+    owner = _ExecutionPayloadBuffer(backend)
+    capture = _capture()
+    execution_id = capture.execution.execution_id
+    owner.bind_producer(execution_id, 2)
+    await owner.append(capture)
+    _, ids = await owner.read(execution_id, seal=True)
+    await owner.release(execution_id)
+    owner.release_owner(execution_id)
+    assert owner.has_scope(execution_id)
+    assert not backend.acks
+    assert await backend.read_batch(backend.admissions[0][0], limit=10)
+    with pytest.raises(AIError) as unknown:
+        await owner.flush_cleanup(execution_id)
+    assert unknown.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+    owner.confirm(execution_id, ids)
+    owner.retire(execution_id, 2)
+    await owner.flush_cleanup(execution_id)
+    owner.release_owner(execution_id)
+    assert owner.has_scope(execution_id)
+    assert owner.producer_generation(execution_id) == 2
+    owner.confirm(execution_id, ids)
+    with pytest.raises(AIError) as stale:
+        owner.bind_producer(execution_id, 2)
+    assert stale.value.code is ErrorCode.STORAGE_CONFLICT
+    owner.bind_producer(execution_id, 3)
+    owner.require_producer(execution_id, 3)
+    await owner.append(capture)
+    owner.discard(execution_id)
+    owner.release_owner(execution_id)
+    await owner.flush_cleanup(execution_id)
+    assert not owner._scopes
+    assert not owner._retired_scopes
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_old_ack_does_not_release_successor_buffer_owner() -> None:
+    backend = _Buffer(max_bytes=1024 * 1024)
+    backend.ack_release.clear()
+    owner = _ExecutionPayloadBuffer(backend)
+    capture = _capture()
+    execution_id = capture.execution.execution_id
+    owner.bind_producer(execution_id, 2)
+    await owner.append(capture)
+    _, old_ids = await owner.read(execution_id, seal=True)
+    old_scope = owner._scopes[execution_id]
+    owner.confirm(execution_id, old_ids)
+    await asyncio.wait_for(backend.ack_started.wait(), 1)
+    owner.retire(execution_id, 2)
+    owner.bind_producer(execution_id, 3)
+    await owner.append(capture)
+    successor = owner._scopes[execution_id]
+    backend.ack_release.set()
+    assert old_scope.cleanup is not None
+    await old_scope.cleanup
+    assert not old_scope.confirmed
+    assert owner._scopes[execution_id] is successor
+    assert (await owner.read(execution_id))[0] == capture
+    with pytest.raises(AIError) as wrong_prefix:
+        owner.confirm(execution_id, old_ids)
+    assert wrong_prefix.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    owner.discard(execution_id)
+    owner.release_owner(execution_id)
+    await owner.flush_cleanup(execution_id)
+    assert not owner._scopes
+    assert not owner._retired_scopes
+    await owner.close()

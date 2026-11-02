@@ -1074,6 +1074,7 @@ class LocalExecutionBackend:
                 if self._execution_buffer is not None:
                     self._execution_buffer.discard(execution.execution_id)
                     await self._execution_buffer.release(execution.execution_id)
+                    self._execution_buffer.release_owner(execution.execution_id)
             # Until this method returns an ID, the admission owner retains the
             # lease and releases it on failure.
             raise
@@ -3449,6 +3450,8 @@ class LocalExecutionBackend:
                     )
             if buffered:
                 await self._execution_buffer.flush_cleanup(execution_id)
+                await self._execution_buffer.release(execution_id)
+                self._execution_buffer.release_owner(execution_id)
             async with self._audit_lock(execution_id):
                 self._pending_audit_events.pop(execution_id, None)
             self._worker_failures.pop(execution_id, None)
@@ -3488,6 +3491,8 @@ class LocalExecutionBackend:
             await self._release_revoked_failed_producers((execution_id,))
             if execution_id in self._worker_failures:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if self._execution_buffer is not None:
+            self._execution_buffer.release_owner(execution_id)
         if task is not None:
             self._tasks.pop(execution_id, None)
         self._worker_cancel_requests.discard(execution_id)

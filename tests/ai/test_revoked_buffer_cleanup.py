@@ -165,6 +165,8 @@ async def test_revoked_failed_owner_retries_exact_cleanup_without_replaying_effe
                 assert set(buffer.pending) == pending
                 buffer.fail_ack = False
                 await original.close()
+                assert not backend._execution_buffer.has_scope(execution.execution_id)
+                assert not backend._execution_buffer._retired_scopes
                 assert buffer.pending == {("other-owner", "entry"): b"{}"}
                 assert await buffer.read_batch("other-owner", limit=1) == (("entry", "key", b"{}"),)
                 assert buffer.close_calls == 0
@@ -258,6 +260,9 @@ async def test_terminal_handoff_cleans_only_revoked_failed_execution_while_peer_
                 assert peer_keys < buffer.pending.keys()
                 buffer.fail_ack = False
                 assert (await original.executions.cancel(failed.execution_id, request)).cancelled
+                backend = original._execution_service.runtime_backend()
+                assert not backend._execution_buffer.has_scope(failed.execution_id)
+                assert backend._execution_buffer.has_scope(peer.execution_id)
                 assert set(buffer.pending) == peer_keys
                 assert not peer_release.is_set()
                 assert buffer.close_calls == 0

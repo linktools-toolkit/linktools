@@ -141,7 +141,7 @@ class _ExecutionPayloadBuffer:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         scope.released = True
         scope.retired = True
-        self._drop_settled_payload(scope)
+        self._drop_settled_payload(execution_id, scope)
 
     async def append(self, capture: _ExecutionPayloadCapture) -> None:
         if not self._accepting:
@@ -356,13 +356,26 @@ class _ExecutionPayloadBuffer:
         scope = self._scopes.get(execution_id)
         return scope is not None and scope.failure is not None
 
-    def _drop_settled_payload(self, scope: _Scope) -> None:
+    def _drop_settled_payload(self, execution_id: str, scope: _Scope) -> None:
         if not scope.released or scope.entries:
             return
         scope.rejection_prefix = None
         scope.failure = None
         scope.uncertain = None
+        if self._scopes.get(execution_id) is not scope:
+            scope.confirmed.clear()
         self._retired_scopes[:] = [(owner, value) for owner, value in self._retired_scopes if value is not scope]
+
+    def release_owner(self, execution_id: str) -> None:
+        """Forget a quiescent terminal owner, retaining any unacknowledged transport bytes."""
+        scope = self._scopes.get(execution_id)
+        if (scope is None or not scope.released or scope.retired
+                or any(not entry.settled for entry in scope.entries)):
+            return
+        del self._scopes[execution_id]
+        if scope.entries:
+            self._retired_scopes.append((execution_id, scope))
+        self._drop_settled_payload(execution_id, scope)
 
     def _schedule_cleanup(self, execution_id: str, scope: _Scope) -> None:
         if scope.cleanup is not None and not scope.cleanup.done():
@@ -377,7 +390,7 @@ class _ExecutionPayloadBuffer:
             async with scope.lock:
                 ids = tuple(entry.id for entry in scope.entries if entry.settled)
             if not ids:
-                self._drop_settled_payload(scope)
+                self._drop_settled_payload(execution_id, scope)
                 return
             try:
                 async with asyncio.timeout(_BUFFER_TIMEOUT_SECONDS):
@@ -396,7 +409,7 @@ class _ExecutionPayloadBuffer:
         async with scope.lock:
             scope.released = True
             scope.retired = False
-            self._drop_settled_payload(scope)
+            self._drop_settled_payload(execution_id, scope)
 
     async def flush_cleanup(self, execution_id: str) -> None:
         """Settle only this execution's exact ACKs without closing admission."""
