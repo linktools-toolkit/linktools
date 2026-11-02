@@ -78,7 +78,6 @@ from ...inputs import (
     task_prompt_draft,
     validate_user_input,
 )
-from ...persistence.codec import encode_domain
 from ...execution import ExecutionRecord, StoredUserInput
 from ...persistence.contracts import ExecutionRepository, TaskAdmissionRepository, TaskPreparedInputRecord
 from ...persistence.objects import ObjectKeyFactory
@@ -668,76 +667,13 @@ class TaskNodeExecutor(Generic[AppT]):
         if task is None or task.contract.get("type") != "agent":
             return node
         runner = task.runner
-        if not isinstance(runner, AgentTaskRunner) or runner.execution_port is None:
+        if not isinstance(runner, AgentTaskRunner):
             raise AIError(ErrorCode.BINDING_NOT_REGISTERED)
-        port = runner.execution_port
-        task_input = AgentTaskInput.from_mapping(node.input)
-        config = task.contract.get("config")
-        input_mode = config.get("input_mode") if isinstance(config, Mapping) else None
-        if task_input.stored_prompt is not None:
-            return node
-        if input_mode == "projected":
-            if not task_input.files:
-                return node
-            materializer = self._input_materializer
-            if materializer is None:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            body = dict(task_input)
-            body["files"] = list(
-                await port.canonicalize_files(task_input.files)
-            )
-            return AgentTaskNode.from_resolved(
-                node.node_id,
-                node.dependencies,
-                task=node.task,
-                input=body,
-                budget_cost=node.budget_cost,
-                expander=node.expander,
-                input_refs=node.input_refs,
-                input_capture=node.input_capture,
-                original_input=node.original_input,
-                timeout_seconds=node.timeout_seconds,
-                max_attempts=node.max_attempts,
-                retry_delay_seconds=node.retry_delay_seconds,
-                output_contract=node.output_contract,
-                effect_policy=node.effect_policy,
-                reconcile=node.reconcile,
-                dependency_policy=node.dependency_policy,
-                failure_policy=node.failure_policy,
-            )
-        if not task_input.files and isinstance(task_input.prompt, str):
-            return node
-        materializer = self._input_materializer
-        if materializer is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        content = await port.materialize_input(task_input.prompt, task_input.files)
-        stored = await materializer.store(content, tenant_id=tenant_id)
-        body = dict(task_input)
-        body["prompt"] = {
-            "kind": "stored-user-content-v1",
-            "intent": "task-admission",
-            "source_intent_digest": canonical_sha256(task_input["prompt"]),
-            "value": encode_domain(stored),
-        }
-        _logger.info("task input resolved: node=%s", node.node_id)
-        return AgentTaskNode.from_resolved(
-            node.node_id,
-            node.dependencies,
-            task=node.task,
-            input=body,
-            budget_cost=node.budget_cost,
-            expander=node.expander,
-            input_refs=node.input_refs,
-            input_capture=node.input_capture,
-            original_input=node.original_input,
-            timeout_seconds=node.timeout_seconds,
-            max_attempts=node.max_attempts,
-            retry_delay_seconds=node.retry_delay_seconds,
-            output_contract=node.output_contract,
-            effect_policy=node.effect_policy,
-            reconcile=node.reconcile,
-            dependency_policy=node.dependency_policy,
-            failure_policy=node.failure_policy,
+        return await runner.materialize_admission_input(
+            node,
+            tenant_id=tenant_id,
+            contract=task.contract,
+            materializer=self._input_materializer,
         )
 
     async def restore_prepared_agent_prompt(
