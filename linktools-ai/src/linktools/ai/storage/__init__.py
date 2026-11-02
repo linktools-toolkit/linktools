@@ -50,6 +50,7 @@ from ._contracts import (
 from ._database import (
     SqlStorageContext,
     create_sql_storage_context,
+    create_sqlite_storage_context,
     provision_sql,
     validate_sql,
 )
@@ -218,6 +219,7 @@ __all__ = [
     "classify_integrity_error_by_message",
     "classify_sql_error",
     "create_sql_storage_context",
+    "create_sqlite_storage_context",
     "dialect_for_name",
     "is_retryable_sql_transaction",
     "namespace_digest",
