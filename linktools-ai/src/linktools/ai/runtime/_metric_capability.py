@@ -116,6 +116,12 @@ class ModelInteractionRecorder(Protocol):
     ) -> None: ...
 
 
+class _StreamDeadline(Protocol):
+    def iterate(
+        self, iterator: AsyncIterator[ModelResponseStreamEvent],
+    ) -> AsyncIterator[ModelResponseStreamEvent]: ...
+
+
 class _ProviderStreamedResponse(StreamedResponse):
     """Observe errors at provider pulls without intercepting consumer failures."""
 
@@ -127,13 +133,17 @@ class _ProviderStreamedResponse(StreamedResponse):
         self._project_response = project_response or (lambda response: response)
         self._failed = failed
         self._observed = observed
-        self._iterator: AsyncIterator[ModelResponseStreamEvent] | None = None
         super().__init__(model_request_parameters=response.model_request_parameters)
 
     def __aiter__(self) -> AsyncIterator[ModelResponseStreamEvent]:
-        if self._iterator is None:
-            self._iterator = self._get_event_iterator()
-        return self._iterator
+        # Native fallback replays its first event through this SDK-owned cache.
+        if self._event_iterator is None:
+            self._event_iterator = self._get_event_iterator()
+        return self._event_iterator
+
+    def _enforce_request_deadline(self, deadline: _StreamDeadline) -> None:
+        # The inner stream already synthesizes SDK events; wrap pulls, not event processing.
+        self._event_iterator = deadline.iterate(self.__aiter__())
 
     async def _get_event_iterator(self) -> AsyncIterator[ModelResponseStreamEvent]:
         try:
