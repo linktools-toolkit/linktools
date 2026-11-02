@@ -80,7 +80,7 @@ async def test_graph_cancel_closes_remote_client_and_preserves_unknown_effect_on
                 execution = await runtime.executions.get(execution_id)
                 effects = await execution.recovery_effects()
                 assert len(effects) == 1
-                assert effects[0].replay_safe is False
+                assert effects[0].replay_safe is True
                 assert effects[0].error_code == ErrorCode.TOOL_EFFECT_UNKNOWN.value
                 operations = await runtime._state.recovery.tools.list_by_execution(
                     execution_id, tenant_id=runtime.default_principal.tenant_id

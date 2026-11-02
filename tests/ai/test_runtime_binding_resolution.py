@@ -464,6 +464,7 @@ async def test_binding_resolution_restores_mcp_execution_contract(tmp_path: Path
     assert pin.contract["execution_policy"] == {
         "version": 1,
         "boundary": "host-stdio",
+        "tool_effect_policy": "replay_safe",
     }
     resource_versions = MCPServerSpecCodec().decode_binding_payload(
         pin.contract,
@@ -521,9 +522,16 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
     )
 
     pin = next(item for item in resolved.binding_contract.selected if item.kind == "mcp")
-    assert pin.contract["execution_policy"] == sandbox(tmp_path).stdio_execution_policy()
+    assert pin.contract["execution_policy"] == {
+        **sandbox(tmp_path).stdio_execution_policy(),
+        "tool_effect_policy": "replay_safe",
+    }
     if backend != "bubblewrap":
-        assert pin.contract["execution_policy"] == {"version": 1, "boundary": "host-stdio"}
+        assert pin.contract["execution_policy"] == {
+            "version": 1,
+            "boundary": "host-stdio",
+            "tool_effect_policy": "replay_safe",
+        }
 
 
 @pytest.mark.asyncio

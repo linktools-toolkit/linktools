@@ -1148,6 +1148,22 @@ class LocalExecutionBackend:
                 # Cleanup cannot change a known source result or replay receipt.
                 _logger.warning("pending lease release failed: execution=%s", coordination.execution_id)
 
+    async def require_tool_authority(self, execution_id: str, agent_run_id: str) -> None:
+        """Check the current producer without promoting a replay-safe pending turn."""
+        try:
+            turn = self._pending_turns.get(execution_id, tenant_id=self._tenant_id)
+            if turn is not None:
+                async with turn.boundary:
+                    if self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is turn:
+                        await self._check_pending_lease(turn, allow_cancelled=False)
+                        await self._run_store.require_active_producer(agent_run_id)
+                        return
+            await self._run_store.require_active_producer(agent_run_id)
+        except AIError as error:
+            if error.code is ErrorCode.EXECUTION_CANCELLED:
+                raise asyncio.CancelledError from error
+            raise
+
     async def promote_pending_execution(self, execution_id: str, *, allow_cancelled: bool = False) -> None:
         """Establish source authority before effects or dependent work can begin."""
         turn = self._pending_turns.get(execution_id, tenant_id=self._tenant_id)
@@ -4037,6 +4053,7 @@ class LocalExecutionBackend:
                     terminal_commands=self._runtime_commands,
                     before_effect=lambda: self.promote_pending_execution(execution_id),
                     retain_replay_results=current.restart_checkpoints,
+                    require_active=lambda: self.require_tool_authority(execution_id, agent_run_id),
                 )
                 if tool_repository is not None
                 else None

@@ -70,6 +70,8 @@ class ToolOperationBridge(Protocol):
         replay_safe: bool,
     ) -> ToolOperationDecision | None: ...
 
+    async def require_active(self) -> None: ...
+
     async def renew(self, decision: ToolOperationDecision) -> ToolOperationDecision: ...
 
     async def complete(self, decision: ToolOperationDecision, result: Any) -> bool: ...
@@ -236,6 +238,7 @@ class RuntimeToolOperationBridge:
         producer_generation: int | None = None,
         before_effect: Callable[[], Awaitable[None]] | None = None,
         retain_replay_results: bool = True,
+        require_active: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._repository = repository
         self._recovery_objects = recovery_objects
@@ -252,6 +255,7 @@ class RuntimeToolOperationBridge:
         self._producer_generation = producer_generation
         self._before_effect = before_effect
         self._retain_replay_results = retain_replay_results
+        self._require_active = require_active
         self._cancellation_requested = False
         if producer_generation is not None and terminal_commands is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -261,6 +265,10 @@ class RuntimeToolOperationBridge:
     @property
     def cancellation_requested(self) -> bool:
         return self._cancellation_requested
+
+    async def require_active(self) -> None:
+        if self._require_active is not None:
+            await self._require_active()
 
     async def begin(
         self,

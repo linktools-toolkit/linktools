@@ -37,7 +37,7 @@ async def test_pending_unknown_absent_readback_keeps_admission_until_late_commit
     buffer = _PayloadBuffer()
     features = RuntimeFeatures('pending-unknown')
     features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(buffer=buffer)), scope='runtime')
-    features.tool(effect, effect_policy='replay_safe')
+    features.tool(effect, effect_policy='non_replay_safe' if boundary == 'promotion' else 'replay_safe')
     features.agent('default', model='default', allow_tools=('effect',))
     storage = PersistenceStorage.sqlite(
         tmp_path / 'state.db',

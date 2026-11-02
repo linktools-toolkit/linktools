@@ -355,12 +355,16 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         if decision is None:
             if self._budget is not None:
                 await self._budget.admit_tool(call_id)
+            if bridge is not None and descriptor.effect_owner != "none":
+                await bridge.require_active()
             result = await self._invoke(
                 call,
                 tool.tool_def,
                 final_args,
                 invoke,
             )
+            if bridge is not None and descriptor.effect_owner != "none":
+                await bridge.require_active()
             return bind_tool_return_attachments(name, call_id, result)
         assert bridge is not None
         if decision.cached_error is not None:

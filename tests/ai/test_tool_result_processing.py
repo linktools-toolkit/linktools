@@ -349,7 +349,7 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
         assert len(operations) == (0 if kind in {"none", "read_file"} else 1)
         if operations:
             assert operations[0].status is ToolOperationStatus.COMPLETED
-            assert operations[0].replay_safe is (kind == "replay_safe")
+            assert operations[0].replay_safe is (kind in {"replay_safe", "mcp"})
     assert provider_counts == [0, 1, 0] and len(loads) == 1
     assert pipeline == ["project", "observe"]
     assert len(after_hooks) == 2 and after_hooks[1] == "finish"
@@ -416,7 +416,7 @@ async def test_projection_failure_preserves_effect_classification(
             assert len(operations) == 1
             assert operations[0].status is ToolOperationStatus.EFFECT_UNKNOWN
             assert operations[0].result_payload is None
-            assert operations[0].replay_safe is (kind == "replay_safe")
+            assert operations[0].replay_safe is (kind in {"replay_safe", "mcp"})
             with pytest.raises(AIError) as raised:
                 await execution.recover()
             assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN

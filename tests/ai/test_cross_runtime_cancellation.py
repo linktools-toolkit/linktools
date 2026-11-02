@@ -13,7 +13,7 @@ from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.storage import InMemoryCacheBackend
@@ -191,8 +191,9 @@ async def test_remote_cancel_releases_revoked_producer_staging(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sibling_settles", (True, False))
+@pytest.mark.parametrize("checkpoint", (False, True))
 async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
-    tmp_path: Path, sibling_settles: bool,
+    tmp_path: Path, sibling_settles: bool, checkpoint: bool,
 ) -> None:
     from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 
@@ -237,6 +238,8 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
         ])
 
     group = RuntimeFeatures("individual-tool-cancel")
+    if checkpoint:
+        group.capability(CheckpointCapability(), scope="runtime")
     group.capability(TraceCapability(), scope="runtime")
     group.tool(fast, effect_policy="replay_safe")
     group.tool(slow, effect_policy="replay_safe")
@@ -256,7 +259,7 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
             assert not outcome.cancelled
             assert not slow_stopped.is_set()
             finish_fast.set()
-            if sibling_settles:
+            if sibling_settles or not checkpoint:
                 result = (await execution.wait(timeout_seconds=15)).result
                 assert result.status is ExecutionStatus.CANCELLED
                 assert result.output is None
@@ -271,12 +274,19 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
             operations = await owner._state.recovery.tools.list_by_execution(
                 execution.execution_id, tenant_id=owner.default_principal.tenant_id,
             )
-            assert next(item for item in operations if item.tool_call_id == "fast-call").status is ToolOperationStatus.COMPLETED
-            if not sibling_settles:
-                assert next(item for item in operations if item.tool_call_id == "slow-call").status is ToolOperationStatus.EFFECT_UNKNOWN
+            if checkpoint:
+                assert next(item for item in operations if item.tool_call_id == "fast-call").status is ToolOperationStatus.COMPLETED
+                if not sibling_settles:
+                    assert next(item for item in operations if item.tool_call_id == "slow-call").status is ToolOperationStatus.EFFECT_UNKNOWN
+            else:
+                assert operations == ()
             history = (await execution.history(tool_call_id="fast-call", include_content=True)).items
-            assert [item.item_kind for item in history] == ["tool_call", "tool_result"]
-            assert history[-1].content == "completed effect"
+            if checkpoint:
+                assert [item.item_kind for item in history] == ["tool_call", "tool_result"]
+                assert history[-1].content == "completed effect"
+            else:
+                # Cancellation prevents the native caller from observing the returned value.
+                assert [item.item_kind for item in history] == ["tool_call"]
         finally:
             finish_fast.set()
 
@@ -407,3 +417,64 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
             if projection is not None:
                 projection.cancel()
                 await asyncio.gather(projection, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_remote_cancel_during_tool_budget_admission_never_dispatches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+
+    from linktools.ai.capability import AgentContext
+    from linktools.ai.core import RunBudget
+    from linktools.ai.persistence._budget import BudgetRepositoryImpl
+
+    from ._runtime_test_helpers import _UsageFunctionModel
+
+    admitted, release = asyncio.Event(), asyncio.Event()
+    effects = []
+    requests = []
+    original_admit = BudgetRepositoryImpl.admit_tool
+
+    async def hold_after_admission(repository, scope_id, call_id):
+        result = await original_admit(repository, scope_id, call_id)
+        admitted.set()
+        await release.wait()
+        return result
+
+    monkeypatch.setattr(BudgetRepositoryImpl, "admit_tool", hold_after_admission)
+
+    async def work(_context: AgentContext[None]) -> str:
+        effects.append("effect")
+        return "done"
+
+    async def model(messages, info):
+        del messages, info
+        requests.append(1)
+        return ModelResponse(parts=[ToolCallPart("work", {}, tool_call_id="call")])
+
+    features = RuntimeFeatures("budget-cancel")
+    features.tool(work, effect_policy="replay_safe")
+    features.agent("default", model="default", allow_tools=("work",))
+    database = tmp_path / "budget-cancel.db"
+    async with Persistence.open("budget-cancel", storage=PersistenceStorage.sqlite(database)) as storage, Runtime.attach(
+        persistence=storage, features=model_features(_Models(_UsageFunctionModel(model)), features),
+    ) as owner, Persistence.open("budget-cancel", storage=PersistenceStorage.sqlite(database)) as other_storage, Runtime.attach(
+        persistence=other_storage, features=model_features(_Models(_UsageFunctionModel(model)), features),
+    ) as remote:
+        execution = await owner.agents.get().start("work", budget=RunBudget(tool_calls=1))
+        try:
+            await asyncio.wait_for(admitted.wait(), 5)
+            await remote.executions.cancel(
+                execution.execution_id, CancelExecutionRequest(owner.default_principal, "budget-remote-cancel"),
+            )
+            release.set()
+            result = (await execution.wait(timeout_seconds=5)).result
+            assert result.status is ExecutionStatus.CANCELLED
+            assert effects == []
+            assert requests == [1]
+            assert await owner._state.recovery.tools.list_by_execution(
+                execution.execution_id, tenant_id=owner.tenant_id,
+            ) == ()
+        finally:
+            release.set()

@@ -20,7 +20,7 @@ from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('effect_policy', ('none', 'replay_safe'))
+@pytest.mark.parametrize('effect_policy', ('none', 'replay_safe', 'non_replay_safe'))
 async def test_promotion_archives_accepted_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, effect_policy: str,
 ) -> None:
@@ -56,7 +56,7 @@ async def test_promotion_archives_accepted_context(
         owner.update(execution=execution.execution_id, tenant=runtime.tenant_id)
         assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
         assert len(calls) == 1
-        if effect_policy == 'none':
+        if effect_policy != 'non_replay_safe':
             assert calls == [None]
             assert len(commits) == 1
         else:
