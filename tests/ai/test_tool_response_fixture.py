@@ -349,8 +349,9 @@ async def test_fixture_rejects_ambiguous_or_nonfinite_json(raw: bytes) -> None:
 
 
 @pytest.mark.asyncio
-async def test_native_runtime_consumes_fixture_through_durable_mcp_operation(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("strict", (False, True))
+async def test_native_runtime_consumes_fixture_with_captured_effect_policy(
+    monkeypatch: pytest.MonkeyPatch, strict: bool,
 ) -> None:
     from collections.abc import Sequence
 
@@ -399,7 +400,10 @@ async def test_native_runtime_consumes_fixture_through_durable_mcp_operation(
         """Look up a query using the requested options."""
         raise AssertionError("the captured upstream leaf must never execute")
 
-    mapped = _MCPModelToolset(FunctionToolset([lookup]), "server", None)
+    from pydantic_ai import Tool
+    from linktools.ai.capability import tool_metadata
+    tool = Tool(lookup, metadata=tool_metadata(effect_policy="non_replay_safe")) if strict else Tool(lookup)
+    mapped = _MCPModelToolset(FunctionToolset([tool]), "server", None)
     captured = await mapped.get_tools(tool_run_context())
     captured_definition = next(iter(captured.values())).tool_def
     payload = _manifest()
@@ -467,12 +471,15 @@ async def test_native_runtime_consumes_fixture_through_durable_mcp_operation(
             operations = await runtime._state.recovery.tools.list_by_execution(
                 execution.execution_id, tenant_id=runtime.default_principal.tenant_id,
             )
-            assert len(operations) == 1
-            operation = operations[0]
-            assert operation.tool_name == name and operation.tool_call_id == "fixture-call"
-            assert operation.status is ToolOperationStatus.COMPLETED
-            assert operation.replay_safe is False
-            assert operation.result_payload is not None
+            if strict:
+                assert len(operations) == 1
+                operation = operations[0]
+                assert operation.tool_name == name and operation.tool_call_id == "fixture-call"
+                assert operation.status is ToolOperationStatus.COMPLETED
+                assert operation.replay_safe is False
+                assert operation.result_payload is not None
+            else:
+                assert operations == ()
         assert await assets.read_versions((fixture.ref,)) == (canonical_json_bytes(payload),)
     finally:
         await assets.close()

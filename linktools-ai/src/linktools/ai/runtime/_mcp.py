@@ -37,6 +37,7 @@ from ..capability import (
     AgentContext,
     TOOL_MCP_SELECTOR_METADATA_KEY,
     ToolCallRetry,
+    ToolEffectPolicy,
     tool_metadata,
     validate_resource_path,
     validate_resource_tree,
@@ -72,15 +73,16 @@ if TYPE_CHECKING:
 
 _logger = environ.get_logger("ai.runtime.mcp")
 _MCP_TOOL_METADATA = tool_metadata(
-    effect_policy="non_replay_safe",
+    effect_policy="replay_safe",
     tool_class="mcp",
 )
 
 
-def _mcp_tool_metadata(base: Mapping[str, object] | None) -> dict[str, object]:
-    metadata = tool_metadata(base=base)
-    metadata.update(_MCP_TOOL_METADATA)
-    return metadata
+def _mcp_tool_metadata(
+    base: Mapping[str, object] | None, *, effect_policy: ToolEffectPolicy | None = None,
+) -> dict[str, object]:
+    return tool_metadata(base={**_MCP_TOOL_METADATA, **(base or {})},
+                         tool_class="mcp", effect_policy=effect_policy)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,11 +109,13 @@ class _MCPModelToolset(WrapperToolset[object]):
         server_id: str,
         allowed_tools: frozenset[str] | None,
         required_tools: frozenset[str] = frozenset(),
+        *, effect_policy: ToolEffectPolicy | None = None,
     ) -> None:
         super().__init__(wrapped)
         self._server_id = server_id
         self._allowed_tools = allowed_tools
         self._required_tools = required_tools
+        self._effect_policy = effect_policy
         self._published: dict[str, str] = {}
 
     async def get_tools(
@@ -156,7 +160,7 @@ class _MCPModelToolset(WrapperToolset[object]):
                     name=model_name,
                     description=description,
                     metadata={
-                        **_mcp_tool_metadata(tool.tool_def.metadata),
+                        **_mcp_tool_metadata(tool.tool_def.metadata, effect_policy=self._effect_policy),
                         TOOL_MCP_SELECTOR_METADATA_KEY: mcp_tool_selector(self._server_id, upstream_name),
                     },
                 ),
@@ -509,7 +513,6 @@ async def materialize_mcp_capabilities(
     policy, required = _selector_policy(selectors)
     if response_fixture is not None:
         response_fixture.validate_servers(servers, selectors)
-    descriptor = managed_tool_descriptor_from_metadata(_MCP_TOOL_METADATA)
     values: list[AbstractCapability[AgentContext[object]]] = []
     try:
         for server in servers:
@@ -523,9 +526,12 @@ async def materialize_mcp_capabilities(
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if response_fixture is None:
                 current_policy = _mcp_execution_policy(server, workspace_backend)
-                if dict(binding.execution_policy) != dict(current_policy):
+                if {key: value for key, value in binding.execution_policy.items()
+                    if key != "tool_effect_policy"} != dict(current_policy):
                     raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
             allowed = policy[server.id]
+            retained_policy = binding.execution_policy.get("tool_effect_policy", "non_replay_safe")
+            fixed_policy = "non_replay_safe" if retained_policy == "non_replay_safe" else None
 
             toolset: _MCPDiscoveryToolset | None = None
             mapped: AbstractToolset[object]
@@ -557,12 +563,18 @@ async def materialize_mcp_capabilities(
                     server.id,
                     allowed,
                     required.get(server.id, frozenset()),
+                    effect_policy=fixed_policy,
                 )
             boundary = BoundaryToolset(
                 (mapped,),
                 {},
                 id=f"linktools.mcp.{server.id}",
-                descriptor=descriptor,
+                descriptor=(
+                    managed_tool_descriptor_from_metadata(tool_metadata(
+                        effect_policy=fixed_policy, tool_class="mcp",
+                    )) if fixed_policy is not None else
+                    lambda metadata: managed_tool_descriptor_from_metadata(_mcp_tool_metadata(metadata))
+                ),
                 result_callbacks=result_callbacks if response_fixture is None else None,
                 tool_operations=tool_operations,
                 tool_metrics=tool_metrics,

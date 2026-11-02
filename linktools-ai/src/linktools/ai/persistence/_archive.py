@@ -849,11 +849,13 @@ class ContentArchive:
         else:
             if self._objects is None or not payload.ref.key.startswith(self._object_prefix):
                 raise _integrity()
-            raw = (await self._object_reader(payload.ref) if self._object_reader is not None
-                   else await read_object(self._objects, payload.ref.key, expected_digest=payload.digest,
-                                          expected_size=payload.size))
-            if len(raw) != payload.size or hashlib.sha256(raw).hexdigest() != payload.digest:
-                raise _integrity()
+            if self._object_reader is None:
+                raw = await read_object(self._objects, payload.ref.key, expected_digest=payload.digest,
+                                        expected_size=payload.size)
+            else:
+                raw = await self._object_reader(payload.ref)
+                if len(raw) != payload.size or hashlib.sha256(raw).hexdigest() != payload.digest:
+                    raise _integrity()
         return decode_payload_bytes(raw, codec=content.compression,
                                     raw_digest=content.raw_digest, raw_size=content.raw_size)
 

@@ -141,7 +141,7 @@ class _RuntimeObjectRouter:
 
         content = await self._hot[domain].get(key, load)
         if (isinstance(content, bytes) and len(content) == reference.size
-                and hashlib.sha256(content).hexdigest() == reference.digest):
+                and (loaded or hashlib.sha256(content).hexdigest() == reference.digest)):
             if not loaded and (domain in {PersistenceDomain.RECOVERY, PersistenceDomain.CHECKPOINT} or _source_reads.get()):
                 await self._validate_source(store, reference)
             return content

@@ -99,8 +99,8 @@ async def test_pending_session_commits_once_and_retains_canonical_replay(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('effect_policy', ('none', 'replay_safe'))
-async def test_actual_effect_promotes_before_invocation_but_read_only_tool_stays_pending(
+@pytest.mark.parametrize('effect_policy', ('none', 'replay_safe', 'non_replay_safe'))
+async def test_strict_effect_promotes_but_idempotent_tool_stays_pending(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, effect_policy: str,
 ) -> None:
     from pydantic_ai.messages import ToolCallPart, ToolReturnPart
@@ -133,7 +133,7 @@ async def test_actual_effect_promotes_before_invocation_but_read_only_tool_stays
         owner.update(execution=execution.execution_id, tenant=runtime.tenant_id)
         assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
         assert len(calls) == 1
-        if effect_policy == 'none':
+        if effect_policy != 'non_replay_safe':
             assert calls == [None]
             assert len(commits) == 1
         else:

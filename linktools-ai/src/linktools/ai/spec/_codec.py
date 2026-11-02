@@ -525,6 +525,13 @@ def _execution_policy_payload(value: object) -> dict[str, JsonValue]:
         or version != 1
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    tool_effect_policy = policy.pop("tool_effect_policy", None)
+    if "tool_effect_policy" in value and (
+        not isinstance(tool_effect_policy, str)
+        or tool_effect_policy not in {"replay_safe", "non_replay_safe"}
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    tool_policy = {} if tool_effect_policy is None else {"tool_effect_policy": tool_effect_policy}
     cwd = policy.pop("cwd", None)
     if cwd is not None and (cwd != "resource" or boundary == "host-network"):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -535,7 +542,7 @@ def _execution_policy_payload(value: object) -> dict[str, JsonValue]:
         expected = {"version": 1, "boundary": boundary}
         if policy != expected:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return {**expected, **cwd_policy}
+        return {**expected, **cwd_policy, **tool_policy}
     expected = {
         "version",
         "boundary",
@@ -563,6 +570,7 @@ def _execution_policy_payload(value: object) -> dict[str, JsonValue]:
         "hidden_paths": list(hidden_paths),
         "network": "isolated",
         **cwd_policy,
+        **tool_policy,
     }
 
 

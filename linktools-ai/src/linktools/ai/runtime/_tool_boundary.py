@@ -122,7 +122,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         descriptors: Mapping[str, ManagedToolDescriptor],
         *,
         id: str,
-        descriptor: ManagedToolDescriptor | None = None,
+        descriptor: ManagedToolDescriptor | Callable[[Mapping[str, object] | None], ManagedToolDescriptor] | None = None,
         permission_policy: ToolPermissionPolicy | None = None,
         workspace_backend: SupportsFileTools | None = None,
         tool_operations: ToolOperationBridge | None = None,
@@ -209,7 +209,9 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             for name, raw_tool in raw_tools.items():
                 if name in result:
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-                if name not in self._descriptors:
+                if callable(self._descriptor):
+                    self._descriptors[name] = self._descriptor(raw_tool.tool_def.metadata)
+                elif name not in self._descriptors:
                     if self._descriptor is None:
                         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                     self._descriptors[name] = self._descriptor
@@ -330,10 +332,18 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                 error,
             )
             raise
+        bridge = self._tool_operations
+        replay_safe = descriptor.effect_policy == "replay_safe"
+        decision = None
+        if descriptor.effect_owner != "none":
+            if bridge is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            decision = await bridge.begin(ctx, call, tool.tool_def, final_args, replay_safe)
+
         async def invoke(args: dict[str, Any]) -> Any:
             result = await raw_toolset.call_tool(name, args, ctx, raw_tool)
             if processors:
-                if descriptor.effect_owner == "none":
+                if decision is None:
                     # Give projections the existing file occurrence to preserve;
                     # equal bytes alone do not identify a particular occurrence.
                     result = bind_tool_return_attachments(name, call_id, result)
@@ -342,7 +352,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                 )
             return result
 
-        if descriptor.effect_owner == "none":
+        if decision is None:
             if self._budget is not None:
                 await self._budget.admit_tool(call_id)
             result = await self._invoke(
@@ -352,17 +362,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                 invoke,
             )
             return bind_tool_return_attachments(name, call_id, result)
-        bridge = self._tool_operations
-        if bridge is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        replay_safe = descriptor.effect_policy == "replay_safe"
-        decision = await bridge.begin(
-            ctx,
-            call,
-            tool.tool_def,
-            final_args,
-            replay_safe,
-        )
+        assert bridge is not None
         if decision.cached_error is not None:
             raise decision.cached_error
         if decision.has_cached_result:

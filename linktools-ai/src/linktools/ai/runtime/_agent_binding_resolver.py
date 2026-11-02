@@ -115,8 +115,13 @@ class _AgentBindingResolver:
 
             current_policy = dict(_mcp_execution_policy(server, self._workspace_backend))
             bound_policy = pin.contract.get("execution_policy")
-            if bound_policy is not None and dict(bound_policy) != current_policy:
-                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+            if bound_policy is not None:
+                execution_policy = dict(bound_policy)
+                if {key: value for key, value in execution_policy.items()
+                    if key != "tool_effect_policy"} != current_policy:
+                    raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+            else:
+                execution_policy = {**current_policy, "tool_effect_policy": "replay_safe"}
             asset_source_id = pin.contract.get("asset_source_id")
             if server.resource is None:
                 if resource_versions is not None or asset_source_id is not None:
@@ -131,7 +136,7 @@ class _AgentBindingResolver:
                 CapabilityPin(
                     "mcp",
                     pin.id,
-                    {**pin.contract, "execution_policy": current_policy},
+                    {**pin.contract, "execution_policy": execution_policy},
                 )
             )
         return replace(binding_contract, selected=tuple(selected))

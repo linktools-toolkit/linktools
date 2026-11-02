@@ -68,7 +68,7 @@ class ToolOperationBridge(Protocol):
         tool_def: ToolDefinition,
         args: dict[str, Any],
         replay_safe: bool,
-    ) -> ToolOperationDecision: ...
+    ) -> ToolOperationDecision | None: ...
 
     async def renew(self, decision: ToolOperationDecision) -> ToolOperationDecision: ...
 
@@ -235,6 +235,7 @@ class RuntimeToolOperationBridge:
         terminal_commands: "_ToolTerminalCommands | None" = None,
         producer_generation: int | None = None,
         before_effect: Callable[[], Awaitable[None]] | None = None,
+        retain_replay_results: bool = True,
     ) -> None:
         self._repository = repository
         self._recovery_objects = recovery_objects
@@ -250,6 +251,7 @@ class RuntimeToolOperationBridge:
         self._terminal_commands = terminal_commands
         self._producer_generation = producer_generation
         self._before_effect = before_effect
+        self._retain_replay_results = retain_replay_results
         self._cancellation_requested = False
         if producer_generation is not None and terminal_commands is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -267,9 +269,17 @@ class RuntimeToolOperationBridge:
         tool_def: ToolDefinition,
         args: dict[str, Any],
         replay_safe: bool,
-    ) -> "ToolOperationDecision":
+    ) -> "ToolOperationDecision | None":
         if not isinstance(replay_safe, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if replay_safe and not self._retain_replay_results:
+            if self._recovery_agent_run_id is None:
+                return None
+            existing_calls = await self._repository.existing_call_ids(
+                self._recovery_agent_run_id, (call.tool_call_id,), tenant_id=self._tenant_id,
+            )
+            if call.tool_call_id not in existing_calls:
+                return None
         if self._before_effect is not None:
             await self._before_effect()
         key = (self._run_id(ctx), call.tool_call_id)

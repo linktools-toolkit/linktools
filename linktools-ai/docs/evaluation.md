@@ -369,9 +369,12 @@ execution can start; it must not lose the reference and become live. Ordinary
 captures retain their existing behavior. This restriction is separate from
 recovery of the original execution.
 
-MCP names, declarations, and `non_replay_safe` effect semantics remain intact.
-The offline toolset enters the existing ToolOperation, budget, and history
-boundaries without constructing a transport. Cancellation or uncertain result
+MCP names and declarations remain intact. New bindings use their captured tool
+effect policy: replay-safe fixture calls without ongoing Checkpoint recovery
+do not create tool receipts, while
+explicit strict policies and existing bindings with the original implicit
+strict policy keep their ToolOperation semantics. The offline toolset still
+uses the budget and history boundaries without constructing a transport. Cancellation or uncertain result
 settlement can still require native effect resolution; fixture availability
 does not prove terminal success. `external_effects="deny"` and `"read_only"`
 retain their existing admission rules, including the MCP restriction. Explicit

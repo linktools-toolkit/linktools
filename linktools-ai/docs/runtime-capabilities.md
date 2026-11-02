@@ -34,6 +34,43 @@ applied to direct Agent runs, Sessions, delegated Agents, Agent-backed Tasks and
 resumed/recovered runs. Plain Python Task bodies and external SDK calls do not
 pass through these hooks.
 
+## Tool retries and persistence
+
+`RuntimeFeatures.tool(function)` declares a replay-safe tool by default. The
+application must make repeated calls with the same arguments safe; this does not
+promise identical return values. Declare `effect_policy="non_replay_safe"` for
+operations whose effects must not be repeated, or `effect_policy="none"` for
+read-only operations. Newly admitted MCP bindings also default to replay-safe;
+existing top-level local tool metadata can explicitly retain strict behavior.
+Server `idempotentHint` annotations and nested metadata are not authorization.
+Previously saved MCP bindings without a tool policy keep their original strict
+behavior. No new MCP authoring configuration is required. Readers predating this
+internal policy field reject new MCP bindings; upgrade readers and writers
+together before admitting them. After such bindings exist, do not roll back only
+the SDK reader or run mixed old/new readers against those bindings.
+
+Explicit policies from tool-owning capabilities remain in
+force; the ordinary-tool default does not change a shell command's declared
+policy.
+
+When ongoing Checkpoint recovery is disabled, new replay-safe calls use native
+tool execution without a per-tool durable claim, heartbeat, or result receipt.
+Authorization, tool budgets, cancellation and result processing still apply.
+With Checkpoint recovery enabled, the existing tool receipts remain necessary:
+a tool may have published a result before the whole parallel group reaches its
+next checkpoint. Recovery preserves that observed result instead of replacing it
+with a different value from another safe invocation. It uses the original
+model-produced tool call, not a new request to regenerate its arguments. Previously persisted tool receipts remain authoritative: confirmed
+results and failures are reused, and unresolved effects are not silently treated
+as completed. A recovered ordinary tool keeps its admitted effect policy even if
+the host's default has since changed; unrelated same-revision configuration
+continues to use the current declaration.
+
+Keep `CommitPolicy.sync()` with `CheckpointCapability` when a replacement worker
+must recover the existing execution. `CommitPolicy.terminal()` without ongoing
+checkpoints is a different durability choice, not an equivalent recovery mode.
+Idempotent tools alone do not make an uncommitted execution recoverable.
+
 ## Capability and service ownership
 
 All public capability declarations are imported from `linktools.ai.capability`,

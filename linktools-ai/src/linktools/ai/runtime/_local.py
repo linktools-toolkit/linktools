@@ -4036,6 +4036,7 @@ class LocalExecutionBackend:
                     producer_generation=producer_generation,
                     terminal_commands=self._runtime_commands,
                     before_effect=lambda: self.promote_pending_execution(execution_id),
+                    retain_replay_results=current.restart_checkpoints,
                 )
                 if tool_repository is not None
                 else None
