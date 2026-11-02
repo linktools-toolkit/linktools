@@ -185,6 +185,7 @@ async def test_current_cursor_survives_mutable_revision_and_reads_new_native_sta
 
 
 @pytest.mark.asyncio
+@sqlite_failure_evidence
 async def test_current_cursor_rejects_wrong_scope_manifest_and_position(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
