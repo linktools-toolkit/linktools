@@ -275,7 +275,11 @@ def test_sdk_setting_owners_have_explicit_protocol_classification() -> None:
     from linktools.ai.model._anthropic import _REQUEST_SETTING_FIELDS
     from linktools.ai.model._openai import _CHAT_REQUEST_SETTING_FIELDS, _RESPONSES_REQUEST_SETTING_FIELDS
 
+    from pydantic_ai.settings import ModelSettings
+
     operational = {"timeout", "request_timeout", "max_retries", "extra_headers", "extra_body"}
+    if "first_event_timeout" in ModelSettings.__annotations__:
+        operational.add("first_event_timeout")
     fallback = {"thinking", "cache"}
     request_owned = {"tool_choice", "citations"}
     cases = (
@@ -637,3 +641,23 @@ async def test_raw_parallel_calls_may_override_output_only_default(
     async with binding.materialize() as model:
         await _request(model, None, streaming, parameters)
     assert sent[-1]["parallel_tool_calls"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_first_event_timeout_keeps_committed_binding_without_becoming_wire_data(
+    monkeypatch: pytest.MonkeyPatch, streaming: bool,
+) -> None:
+    sent = []
+    _capture(monkeypatch, "openai", sent)
+    binding = create_model(
+        api="openai", model="unregistered-model-alias", api_key="mock-only",
+        max_retries=0, model_settings={"first_event_timeout": 5.0},
+    )
+    # Existing prepared tasks bind this exact settings payload; transport
+    # classification must not silently change their committed input identity.
+    assert binding.contract["settings"] == {"first_event_timeout": 5.0}
+    async with binding.materialize() as model:
+        await _request(model, None, streaming)
+    assert sent
+    assert "first_event_timeout" not in sent[-1]
