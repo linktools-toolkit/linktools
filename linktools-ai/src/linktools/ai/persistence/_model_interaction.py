@@ -157,13 +157,10 @@ class StagedModelInteraction:
     attachments: tuple[Mapping[str, JsonValue], ...] = ()
     client_requests: tuple[ModelClientRequest, ...] | None = None
     stream_attempts: tuple[StagedStreamAttemptRecord, ...] | None = None
-    is_direct_result: bool = False
 
     def __post_init__(self) -> None:
         if (
-            not isinstance(self.is_direct_result, bool)
-            or self.is_direct_result and (self.request_context is not None or self.response_context is None)
-            or not self.agent_run_id
+            not self.agent_run_id
             or self.step_index < 0
             or self.model_request_seq < 1
             or self.purpose not in {"agent", "compaction"}
@@ -198,8 +195,7 @@ class StagedModelInteraction:
             or self.status not in {"RUNNING", "INTERRUPTED"}
             and self.duration_ns is None
             or self.status == "SUCCEEDED"
-            and (self.response_context is None or (self.request_context is None and not self.is_direct_result))
-            or self.response_context is not None and self.request_context is None and not self.is_direct_result
+            and self.response_context is None
             or self.status == "FAILED"
             and not self.error_code
             or self.status not in {"RUNNING", "INTERRUPTED"}
@@ -251,7 +247,7 @@ class StagedModelInteraction:
             if not isinstance(normalized, dict):
                 raise ValueError("staged model attachment fact is invalid")
             normalized_attachments.append(normalized)
-        if self.is_direct_result and any(value.get("fact") == "included_in_request" for value in normalized_attachments):
+        if self.request_context is None and any(value.get("fact") == "included_in_request" for value in normalized_attachments):
             raise ValueError("direct result cannot claim prepared request attachments")
         object.__setattr__(self, "attachments", tuple(normalized_attachments))
 

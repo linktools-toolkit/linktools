@@ -798,7 +798,6 @@ class RuntimeAgentRunStore(AgentRunStore):
                         not isinstance(record, ModelInteractionRecord)
                         or record.agent_run_id != agent_run_id
                         or record.model_request_seq != staged_value.model_request_seq
-                        or record.is_direct_result != staged_value.is_direct_result
                         for record, staged_value in zip(archived, staged, strict=True)
                     )
                 ):

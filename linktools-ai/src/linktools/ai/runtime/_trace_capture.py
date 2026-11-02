@@ -213,7 +213,7 @@ class ModelInteractionCapture:
         client_requests: tuple[ModelClientRequest, ...] | None = None,
         response_message_index: int | None = None,
         stream_attempts: tuple[ModelStreamAttempt, ...] | None = None,
-    ) -> bool:
+    ) -> None:
         del model
         model_request_seq = fact.model_request_seq
         try:
@@ -258,14 +258,12 @@ class ModelInteractionCapture:
                 started_at=fact.started_at,
                 finished_at=fact.finished_at,
                 client_requests=client_requests,
-                is_direct_result=response is not None and projection is None,
                 stream_attempts=None if stream_attempts is None else tuple(
                     self._stream_attempt(value) for value in stream_attempts
                 ),
             )
         )
 
-        return response is not None and projection is None
 
     def _stream_attempt(self, attempt: ModelStreamAttempt) -> StagedStreamAttemptRecord:
         error = attempt.error

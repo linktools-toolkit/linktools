@@ -1625,7 +1625,6 @@ class StateStepArchive(AgentRunStore):
                             else None
                         ) for attempt in staged.stream_attempts
                     ]),
-                    is_direct_result=staged.is_direct_result,
                 )
             )
         return tuple(result)

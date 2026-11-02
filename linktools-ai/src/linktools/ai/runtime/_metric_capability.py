@@ -102,7 +102,7 @@ class ModelInteractionRecorder(Protocol):
         usage: object | None,
         client_requests: tuple[ModelClientRequest, ...] | None = None,
         stream_attempts: tuple[ModelStreamAttempt, ...] | None = None,
-    ) -> bool: ...
+    ) -> None: ...
 
     async def record_model_event(
         self,
@@ -1285,15 +1285,15 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         usage: RequestUsage | RunUsage | None,
         *,
         client_requests: tuple[ModelClientRequest, ...] | None = None,
-    ) -> bool:
+    ) -> None:
         recorder = self._interaction_recorder
         if recorder is None:
-            return False
+            return
         if client_requests is None:
             client_recorder = self._client_recorders.get(fact.model_request_seq)
             if client_recorder is not None:
                 client_requests = client_recorder.requests
-        return recorder.finish_model_interaction(
+        recorder.finish_model_interaction(
             fact,
             model=model,
             response=response,

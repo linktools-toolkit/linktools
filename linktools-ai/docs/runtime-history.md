@@ -115,10 +115,13 @@ request envelope or an `included_in_request` attachment fact. The interaction’
 binding served the response. A missing response `model_id` is not filled from
 that entry selection. With `include_content=False`, both bodies remain omitted.
 
-The durable owner explicitly records this observation internally. Ordinary
-prepared interactions record that internal marker as false and retain strict request/response
-integrity checks; a damaged successful record is not inferred to be an unprepared
-response. Message bodies use the current unpublished native codec described below,
+The durable owner uses the same request-context/envelope pair; it does not store
+an additional classification. One absent half is invalid, success requires a
+response, and attachments cannot claim inclusion without request preparation.
+Prepared running records cannot lose that preparation in a successor. Integrity
+checks still verify stored bytes; two deliberately rewritten absent request
+fields have the same shape as a legitimately unprepared response and cannot be
+distinguished by shape alone. Message bodies use the current unpublished native codec described below,
 not the superseded development encoding. Upgrade all participating readers and
 writers together; do not mix development encodings or roll back only the SDK
 after writing the current format. Existing stores are not automatically rewritten

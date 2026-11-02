@@ -37,39 +37,26 @@ def _record(sequence: int, *, direct: bool) -> ModelInteractionRecord:
         request_envelope=None if direct else RuntimePayloadRef(StoredPayload.inline_bytes(b"{}"), PersistenceDomain.TRACE),
         response_context=projection(ModelResponse(parts=[TextPart(f"response-{sequence}")], timestamp=timestamp)),
         status="SUCCEEDED", error_code=None, duration_ns=17, usage=None,
-        started_at=timestamp, finished_at=timestamp, is_direct_result=direct,
+        started_at=timestamp, finished_at=timestamp,
     )
 
 
-def test_direct_result_wire_is_explicit_and_ordinary_record_matches_current_format() -> None:
+def test_request_shape_round_trips_without_classification_fields() -> None:
     ordinary = _record(1, direct=False)
     direct = _record(2, direct=True)
+    for record in (ordinary, direct):
+        wire = _encode_step_envelope(record)
+        assert "is_direct_result" not in wire["value"]["payload"]["fields"]
+        assert not hasattr(record, "is_direct_result")
+        assert _decode_step_envelope(wire) == record
     ordinary_wire = _encode_step_envelope(ordinary)
-    assert ordinary_wire["value"]["payload"]["fields"]["is_direct_result"] is False
-    assert hashlib.sha256(canonical_json_bytes(ordinary_wire)).hexdigest() == (
-        "c6d770aaa573712fbfa8ee9cde1ed91156472608d0f45a249a606f0c0d9140dc"
-    )
-    assert _decode_step_envelope(ordinary_wire) == ordinary
-    missing_default = _encode_step_envelope(ordinary)
-    del missing_default["value"]["payload"]["fields"]["is_direct_result"]
-    assert _decode_step_envelope(missing_default) == ordinary
-    direct_wire = _encode_step_envelope(direct)
-    assert direct_wire["value"]["payload"]["fields"]["is_direct_result"] is True
-    assert _decode_step_envelope(direct_wire) == direct
-    # A direct marker is not inferred from a malformed historical success.
-    raw = dict(direct_wire["value"])
-    payload = dict(raw["payload"])
-    fields = dict(payload["fields"])
-    del fields["is_direct_result"]
-    payload["fields"] = fields
-    raw["payload"] = payload
-    with pytest.raises(AIError) as raised:
-        _decode_step_envelope({"v": 1, "value": raw})
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    for invalid in (1, "true", None):
-        fields["is_direct_result"] = invalid
+    assert hashlib.sha256(canonical_json_bytes(ordinary_wire)).hexdigest() == "2142ca8c5c2e8acdb55ee082b46da796ac8b22344f52afeeaa6647e70000e60e"
+    # Both omitted request fields mean no observed preparation; a partial pair is invalid.
+    for field in ("request_context", "request_envelope", "response_context"):
+        wire = _encode_step_envelope(ordinary)
+        wire["value"]["payload"]["fields"][field] = None
         with pytest.raises(AIError) as raised:
-            _decode_step_envelope({"v": 1, "value": raw})
+            _decode_step_envelope(wire)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
@@ -85,17 +72,18 @@ def test_direct_result_contract_rejects_fabricated_preparation(staged: bool) -> 
     else:
         ordinary = _record(1, direct=False)
         preparation = {"request_context": ordinary.request_context, "request_envelope": ordinary.request_envelope}
+    assert replace(direct, **preparation).request_context is not None
     for change in (
-        preparation,
+        {"request_context": preparation["request_context"]},
+        {key: value for key, value in preparation.items() if key != "request_context"},
         {"response_context": None},
         {"status": "RUNNING", "duration_ns": None, "finished_at": None},
         {"status": "INTERRUPTED", "duration_ns": None, "finished_at": None},
-        {"is_direct_result": False},
     ):
         with pytest.raises(ValueError):
             replace(direct, **change)
     with pytest.raises(FrozenInstanceError):
-        direct.is_direct_result = False
+        direct.status = "FAILED"
 
     accepted = {
         "fact": "accepted", "attachment_id": "a" * 64, "source": "input",
@@ -107,6 +95,19 @@ def test_direct_result_contract_rejects_fabricated_preparation(staged: bool) -> 
         replace(direct, attachments=({**accepted, "fact": "included_in_request"},))
 
 
+def test_published_preparation_cannot_disappear_from_successor() -> None:
+    terminal = _record(1, direct=False)
+    prepared = replace(terminal, status="RUNNING", response_context=None,
+                       duration_ns=None, finished_at=None)
+    prepared.validate_successor(terminal)
+    without_request = replace(terminal, request_context=None, request_envelope=None)
+    # The terminal shape is legitimate on its own, not after this published request.
+    assert _decode_step_envelope(_encode_step_envelope(without_request)) == without_request
+    with pytest.raises(AIError) as raised:
+        prepared.validate_successor(without_request)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
 async def test_mixed_direct_and_prepared_archive_reads_keep_response_positions(tmp_path: Path, backend: str) -> None:
@@ -115,7 +116,7 @@ async def test_mixed_direct_and_prepared_archive_reads_keep_response_positions(t
         await archive.sync_prepared_projection(run, events=(), checkpoints=(), interactions=records, execution_id="execution", producer_generation=1)
         page = await archive.list_model_interactions(agent_run_id="run", after_model_request_seq=1, limit=2)
         assert [value.model_request_seq for value in page] == [2, 3]
-        assert [value.is_direct_result for value in page] == [False, True]
+        assert [value.request_context is None for value in page] == [False, True]
         batch = await archive.resolve_model_interactions(records)
         singles = [await archive.resolve_model_interaction(value) for value in records]
         assert batch == singles
@@ -153,14 +154,14 @@ async def test_staged_and_prepared_direct_response_round_trip() -> None:
                 request_envelope_digest=None if direct else intern(b"{}")[0],
                 response_context=build_inline_context_projection((response,), intern),
                 status="SUCCEEDED", error_code=None, duration_ns=0, usage=None,
-                started_at=now, finished_at=now, is_direct_result=direct,
+                started_at=now, finished_at=now,
             )
             store.stage_model_interaction(staged)
             values.append(staged)
         staged_batch = await store.resolve_model_interactions(values)
         assert staged_batch == [await store.resolve_model_interaction(value) for value in values]
         durable = await archive.prepare_interactions(run, values, lambda digest: staging.staged_payload("run", digest))
-        assert [value.is_direct_result for value in durable] == [True, False, True, False]
+        assert [value.request_context is None for value in durable] == [True, False, True, False]
         assert await archive.resolve_model_interaction(durable[0]) == staged_batch[0]
         with pytest.raises(AIError) as raised:
             await archive.resolve_model_interaction(durable[1])
@@ -179,3 +180,38 @@ async def test_staged_and_prepared_direct_response_round_trip() -> None:
         await store.preflight_close()
         await store.close()
         await archive.close()
+
+
+@pytest.mark.asyncio
+async def test_running_page_resolves_after_terminal_archive_releases_staging() -> None:
+    staging = StagingAgentRunStore()
+    archive = ModelInteractionInMemoryStepArchive(PersistenceDomain.TRACE)
+    store = RuntimeAgentRunStore(staging, conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
+                                 execution_archive=archive, recovery_archive=None)
+    await store.initialize()
+    try:
+        run = AgentRunRecord("run")
+        await store.register_agent_run(run)
+        terminal = _record(1, direct=False)
+        values = {field.name: getattr(terminal, field.name) for field in fields(terminal)
+                  if field.name != "request_envelope"}
+        request = ModelRequest(parts=[UserPromptPart("request-1", timestamp=terminal.started_at)],
+                               timestamp=terminal.started_at)
+        values.update(request_context=build_inline_context_projection((request,),
+                          lambda payload: staging.intern_payload("run", payload)),
+                      request_envelope_digest=staging.intern_payload("run", b"{}")[0],
+                      response_context=None, status="RUNNING", duration_ns=None, finished_at=None)
+        store.stage_model_interaction(StagedModelInteraction(**values))
+        page = await staging.list_model_interactions(agent_run_id="run", after_model_request_seq=0, limit=10)
+        before = await store.resolve_model_interactions(page)
+        response = ModelResponse(parts=[TextPart("response-1")], timestamp=terminal.started_at)
+        await archive.sync_projection(run, events=(),
+                                      checkpoints=(AgentRunCheckpoint("run", 1, [request, response]),),
+                                      interactions=(terminal,))
+        await staging.release_agent_run("run")
+        assert await store.resolve_model_interactions(page) == before
+        assert before[0][1] is None
+        assert (await archive.resolve_model_interaction(terminal))[1] is not None
+    finally:
+        await store.preflight_close()
+        await store.close()

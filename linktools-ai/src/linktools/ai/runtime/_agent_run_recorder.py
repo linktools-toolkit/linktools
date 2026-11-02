@@ -358,12 +358,10 @@ class AgentRunRecorder:
             next(iter(self._pending_parts.values())), ModelResponse,
         ):
             self.finish_transcript(interrupted=True)
-        if self._stream_position.get("is_direct_result") is True and complete:
+        sequence = self.response_message_seq(self._stream_position.get("model_request_seq"))
+        if sequence is not None and complete:
             # Native synthesizes part events after a direct response is already
             # captured. They describe that occurrence, not another transcript.
-            sequence = self._stream_position.get("message_seq")
-            if not isinstance(sequence, int) or isinstance(sequence, bool):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             captured = self._transcript_messages[sequence - 1]
             if (not isinstance(captured, ModelResponse) or part_index < 0 or part_index >= len(captured.parts)
                     or captured.parts[part_index] != part):
@@ -528,7 +526,7 @@ class AgentRunRecorder:
 
     def finish_transcript(self, *, interrupted: bool = False) -> None:
         """Retain confirmed parts when no next request can capture their message."""
-        if (self._stream_position.get("is_direct_result") is True and self._pending_parts
+        if (self.response_message_seq(self._stream_position.get("model_request_seq")) is not None and self._pending_parts
                 and all(isinstance(value, ModelResponse) for value in self._pending_parts.values())):
             # Cancellation may interrupt synthetic events for an already captured
             # result. The canonical response remains the sole stored occurrence.
@@ -587,7 +585,7 @@ class AgentRunRecorder:
         model_id: str | None = None,
         source_messages: Sequence[ModelMessage] | None = None,
     ) -> None:
-        self._stream_position = {}
+        self._stream_position = {"model_request_seq": fact.model_request_seq}
         self.model_interactions.begin_model_interaction(
             fact, model, messages, model_settings, parameters, streaming, model_id, source_messages,
         )
@@ -619,7 +617,7 @@ class AgentRunRecorder:
         usage: object | None,
         client_requests: tuple[ModelClientRequest, ...] | None = None,
         stream_attempts: tuple[ModelStreamAttempt, ...] | None = None,
-    ) -> bool:
+    ) -> None:
         response_message_index = None
         response_error = None
         if status == "SUCCEEDED" and fact.purpose == "agent" and response is not None:
@@ -645,20 +643,15 @@ class AgentRunRecorder:
                 response = replace(response, state="interrupted")
                 response = cast(ModelResponse, self.append_transcript_message(response))
                 response_message_index = len(self._transcript_messages) - 1
-        is_direct_result = self.model_interactions.finish_model_interaction(
+        self.model_interactions.finish_model_interaction(
             fact, model=model, response=response, status=status, error_code=error_code,
             duration_ns=duration_ns, usage=usage, client_requests=client_requests,
             response_message_index=response_message_index, stream_attempts=stream_attempts,
         )
         if response_error is not None:
             raise response_error
-        if is_direct_result and response_message_index is not None:
-            self._stream_position = {
-                "model_request_seq": fact.model_request_seq,
-                "message_seq": response_message_index + 1,
-                "is_direct_result": True,
-            }
-        return is_direct_result
+        if response_message_index is not None:
+            self._stream_position["message_seq"] = response_message_index + 1
 
     def _capture_model_response(
         self, fact: ModelRequestFact, response: ModelResponse,

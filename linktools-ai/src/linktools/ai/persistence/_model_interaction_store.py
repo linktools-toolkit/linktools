@@ -124,7 +124,6 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
                         else None
                     ) for attempt in staged.stream_attempts
                 ),
-                is_direct_result=staged.is_direct_result,
             )
             for staged in values
         ])
