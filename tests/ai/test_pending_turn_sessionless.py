@@ -92,7 +92,7 @@ async def test_sessionless_pending_commit_replay_and_unique_result(tmp_path: Pat
         assert result.execution.retention_closed and result.result == turn.commit.result
         if engine is not None:
             assert len(transactions) == 1 and None not in transactions
-        recovery = await state.storage.recovery.checkpoints.get("execution", tenant_id="tenant")
+        recovery = await state.storage.checkpoint.checkpoints.get("execution", tenant_id="tenant")
         assert recovery is not None and recovery.state is RecoveryCheckpointState.COMPLETED
         assert await _conversation(state) == before
         committed = await _snapshot(state)
@@ -132,7 +132,7 @@ async def test_sessionless_pending_failure_rolls_back_every_domain(tmp_path: Pat
     async with _turn_state(backend, tmp_path) as state:
         turn = _standalone(state)
         before = await _snapshot(state)
-        repository = state.storage.recovery.checkpoints
+        repository = state.storage.checkpoint.checkpoints
         original = type(repository).admit_in_transaction
 
         async def fail(self, transaction, record):

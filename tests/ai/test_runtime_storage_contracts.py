@@ -343,9 +343,9 @@ def _runtime_commands(
         events=state.execution.events,
         operations=state.execution.operations,
         conversation=state.conversation.sessions,
-        recovery=state.recovery.checkpoints,
+        recovery=state.checkpoint.checkpoints,
         conversation_history=state.conversation.histories,
-        tools=state.recovery.tools,
+        tools=state.checkpoint.tools,
         conversation_run_store=state.run_store.read_store(PersistenceDomain.CONVERSATION),
         execution_run_store=state.run_store.read_store(PersistenceDomain.TRACE),
         recovery_run_store=state.run_store.read_store(PersistenceDomain.CHECKPOINT),
@@ -373,8 +373,8 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
         await state.run_store.register_agent_run(_tool_run(agent_run_id))
         background_tasks: set[asyncio.Task[object]] = set()
         bridge = RuntimeToolOperationBridge(
-            state.recovery.tools,
-            state.object_store(PersistenceDomain.RECOVERY),
+            state.checkpoint.tools,
+            state.object_store(PersistenceDomain.CHECKPOINT_CONTROL),
             namespace="parallel-tools",
             tenant_id="tenant",
             execution_id="execution",
@@ -426,7 +426,7 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
         ]
 
         for call_id in call_ids:
-            operation = await state.recovery.tools.get_by_call(
+            operation = await state.checkpoint.tools.get_by_call(
                 agent_run_id,
                 call_id,
                 tenant_id="tenant",

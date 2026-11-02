@@ -22,7 +22,7 @@ from linktools.ai.persistence.contracts import (
     LoadedModelContext,
 )
 from linktools.ai.persistence._history import TranscriptRepository
-from linktools.ai.persistence._recovery_repositories import (
+from linktools.ai.persistence._checkpoint_repositories import (
     RecoveryApprovalRepositoryImpl,
 )
 from linktools.ai.persistence._sql import SqlStateStore

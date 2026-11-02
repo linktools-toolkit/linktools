@@ -292,10 +292,10 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
 
     try:
         await state.execution.executions.create_with_history_head(current)
-        await state.recovery.checkpoints.create(source)
+        await state.checkpoint.checkpoints.create(source)
         commands = StateCommands(
             state.execution.executions, namespace="terminal-scopes", events=state.execution.events,
-            recovery=state.recovery.checkpoints, execution_run_store=trace,
+            recovery=state.checkpoint.checkpoints, execution_run_store=trace,
             recovery_run_store=recovery, background_tasks=set(),
         )
         monkeypatch.setattr(ContentArchive, "publish", capture)
@@ -319,7 +319,7 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
                 assert not await content.store.read(lambda tx: tx.scan_records())
                 assert await owner.get_agent_run(agent_run_id="run") is None
             assert await state.execution.executions.get("execution", tenant_id="tenant") == current
-            assert await state.recovery.checkpoints.get("execution", tenant_id="tenant") == source
+            assert await state.checkpoint.checkpoints.get("execution", tenant_id="tenant") == source
             return
         committed = await commit_terminal()
         assert committed.execution.status is ExecutionStatus.FAILED
@@ -329,7 +329,7 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
             latest = await owner.latest_checkpoint(agent_run_id="run")
             assert latest is not None and latest.messages == checkpoint.messages
             assert await owner.checkpoint_count(agent_run_id="run") == 1
-        assert await state.recovery.checkpoints.get("execution", tenant_id="tenant") == target
+        assert await state.checkpoint.checkpoints.get("execution", tenant_id="tenant") == target
     finally:
         await state.close()
 

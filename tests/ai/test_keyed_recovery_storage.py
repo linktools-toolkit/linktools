@@ -81,11 +81,11 @@ async def _admission(
         state=RecoveryCheckpointState.ADMITTED, revision=0,
         created_at=_NOW, updated_at=_NOW,
     )
-    await storage.recovery.checkpoints.create(checkpoint)
+    await storage.checkpoint.checkpoints.create(checkpoint)
     commands = StateCommands(
         storage.execution.executions, namespace=_NAMESPACE,
         events=storage.execution.events, operations=storage.execution.operations,
-        recovery=storage.recovery.checkpoints, background_tasks=set(),
+        recovery=storage.checkpoint.checkpoints, background_tasks=set(),
     )
     claim = AgentAttemptClaim(
         execution.execution_id, execution.revision, execution.agent_run_seq,
@@ -123,7 +123,7 @@ async def test_competing_claims_share_one_recovery_admission(
     events = await storage.execution.events.list("execution", tenant_id="tenant", after_event_seq=0, limit=10)
     assert len(events.items) == int(mode == "resume")
     if mode == "attempt":
-        checkpoint = await storage.recovery.checkpoints.get("execution", tenant_id="tenant")
+        checkpoint = await storage.checkpoint.checkpoints.get("execution", tenant_id="tenant")
         assert checkpoint is not None
         assert checkpoint.revision == 1
         assert checkpoint.state is RecoveryCheckpointState.ACTIVE
@@ -170,7 +170,7 @@ async def test_recovery_receipt_rolls_back_with_producer_checkpoint(
     assert await operations.get("recovery-key", tenant_id="tenant") is None
     assert not (await storage.execution.events.list("execution", tenant_id="tenant", after_event_seq=0, limit=10)).items
     if mode == "attempt":
-        checkpoint = await storage.recovery.checkpoints.get("execution", tenant_id="tenant")
+        checkpoint = await storage.checkpoint.checkpoints.get("execution", tenant_id="tenant")
         assert checkpoint is not None
         assert checkpoint.state is RecoveryCheckpointState.ADMITTED
         assert checkpoint.revision == 0

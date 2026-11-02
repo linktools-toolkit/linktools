@@ -559,7 +559,7 @@ def _execution_history_reader(
         store=history_store,
         transient_store=transient_store,
         cursor_signer=HmacCursorSigner("execution-history", runtime_token_seed),
-        tool_operations=state.recovery.tools,
+        tool_operations=state.checkpoint.tools,
         notifications=run_store,
         durable_history_available=run_store.model_interaction_history_available,
     )
@@ -802,9 +802,9 @@ async def _build_local_components(
         backend = LocalExecutionBackend(
             state.conversation,
             state.execution,
-            state.recovery,
+            state.checkpoint,
             state.object_store(PersistenceDomain.EXECUTION),
-            state.object_store(PersistenceDomain.RECOVERY),
+            state.object_store(PersistenceDomain.CHECKPOINT_CONTROL),
             namespace,
             run_store,
             executor,
@@ -840,7 +840,7 @@ async def _build_local_components(
                 state.plan.route(PersistenceDomain.EXECUTION).retention
                 is StorageRetentionMode.DURABLE
             ),
-            tool_operations=state.recovery.tools,
+            tool_operations=state.checkpoint.tools,
             metric_recorder=metric_buffer,
             worker_completed=worker_completed,
             exclusive_execution_writer=exclusive_execution_writer,
@@ -906,19 +906,19 @@ async def _build_local_components(
         )
         backend.bind_recovery_relaunch_guard(TaskRecoveryGuard(state, input_captures))
         approval = DefaultApprovalService(
-            state.recovery.approvals,
+            state.checkpoint.approvals,
             state.execution.executions,
-            state.recovery.checkpoints,
+            state.checkpoint.checkpoints,
             authorization,
-            objects=state.object_store(PersistenceDomain.RECOVERY),
+            objects=state.object_store(PersistenceDomain.CHECKPOINT_CONTROL),
             continuation=backend,
         )
         external = DefaultExternalService(
-            state.recovery.external_calls,
+            state.checkpoint.external_calls,
             state.execution.executions,
-            state.recovery.checkpoints,
+            state.checkpoint.checkpoints,
             authorization,
-            objects=state.object_store(PersistenceDomain.RECOVERY),
+            objects=state.object_store(PersistenceDomain.CHECKPOINT_CONTROL),
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
             continuation=backend,
@@ -966,7 +966,7 @@ async def _build_local_components(
         )
         lifecycle.configure(close_actions, handoff_actions)
         await run_store.prepare_archives()
-        if auto_recover and PersistenceDomain.RECOVERY in state.plan.durable_domains:
+        if auto_recover and PersistenceDomain.EXECUTION in state.plan.durable_domains:
             await backend.reconcile(
                 allow_active_recovery=exclusive_execution_writer,
             )
@@ -987,8 +987,7 @@ async def _build_local_components(
         close_callback=lifecycle.close,
         handoff_callback=(lifecycle.handoff if restart_checkpoints and commit.mode == "sync"
             and all(state.plan.route(domain).retention is StorageRetentionMode.DURABLE
-                    for domain in (PersistenceDomain.EXECUTION, PersistenceDomain.RECOVERY,
-                                   PersistenceDomain.CHECKPOINT)) else None),
+                    for domain in (PersistenceDomain.EXECUTION, PersistenceDomain.CHECKPOINT)) else None),
         tree_streamer=tree_streamer,
         metric_control=metric_buffer,
         binding_resolver=binding_resolver,

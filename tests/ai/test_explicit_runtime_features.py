@@ -154,10 +154,10 @@ async def test_no_optional_features_preserves_required_deferred_frontier(tmp_pat
 
         record = await asyncio.wait_for(wait_for_deferred(), timeout=5)
         assert not record.conversation and not record.restart_checkpoints and not record.durable_trace
-        checkpoint = await runtime._state.recovery.checkpoints.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        checkpoint = await runtime._state.checkpoint.checkpoints.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert checkpoint is not None and checkpoint.state is RecoveryCheckpointState.WAITING
         assert checkpoint.pending_tools is not None
-        approvals = await runtime._state.recovery.approvals.list_pending(execution.execution_id, tenant_id=runtime.tenant_id)
+        approvals = await runtime._state.checkpoint.approvals.list_pending(execution.execution_id, tenant_id=runtime.tenant_id)
         assert len(approvals) == 1 and approvals[0].status is ApprovalStatus.PENDING
 
 

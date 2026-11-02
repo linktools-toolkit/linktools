@@ -24,7 +24,7 @@ def test_runtime_storage_plan_allows_sqlite_without_an_explicit_object_store(
         **{
             domain.value: route
             for domain in PersistenceDomain
-            if domain not in {PersistenceDomain.RECOVERY, PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}
+            if domain not in {PersistenceDomain.CHECKPOINT_CONTROL, PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}
         }
     )
 
@@ -46,7 +46,7 @@ async def test_local_sqlite_execution_and_recovery_share_object_store(tmp_path) 
     try:
         assert (
             state.object_store(PersistenceDomain.EXECUTION)
-            is state.object_store(PersistenceDomain.RECOVERY)
+            is state.object_store(PersistenceDomain.CHECKPOINT_CONTROL)
         )
     finally:
         await state.close()

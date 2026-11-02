@@ -74,7 +74,7 @@ async def _runtime(
     state = Persistence(state)
     await state.initialize(namespace="tool-lease", tenant_id="tenant")
     bridge = RuntimeToolOperationBridge(
-        state.recovery.tools,
+        state.checkpoint.tools,
         InMemoryObjectStore(),
         namespace="tool-lease",
         tenant_id="tenant",
@@ -135,7 +135,7 @@ async def test_long_leaf_renews_live_claim_before_terminal_commit(
         assert operation.fence == 1
         assert operation.updated_at - operation.created_at == timedelta(seconds=61)
         assert operation.lease_expires_at is None
-        assert await state.recovery.tools.reconcile_expired_claim(
+        assert await state.checkpoint.tools.reconcile_expired_claim(
             operation.tool_operation_id, tenant_id="tenant"
         ) == operation
 
@@ -259,7 +259,7 @@ async def test_terminal_commit_renews_and_wins_racing_heartbeat(
                 raise signal
             return "known result"
 
-        settle = getattr(state.recovery.tools, method)
+        settle = getattr(state.checkpoint.tools, method)
 
         async def delayed_response(*args: Any, **kwargs: Any) -> Any:
             if not after_commit:
@@ -271,7 +271,7 @@ async def test_terminal_commit_renews_and_wins_racing_heartbeat(
                 raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
             return result
 
-        monkeypatch.setattr(state.recovery.tools, method, delayed_response)
+        monkeypatch.setattr(state.checkpoint.tools, method, delayed_response)
         if signal is None:
             assert await _call(bridge, effect, replay_safe=True) == "known result"
         else:
@@ -363,7 +363,7 @@ async def test_expired_non_replay_safe_claim_is_not_revived(
         assert raised.value.code is ErrorCode.TOOL_OPERATION_CONFLICT
         assert stopped.is_set()
         operation, = await bridge.list_operations()
-        reconciled = await state.recovery.tools.reconcile_expired_claim(
+        reconciled = await state.checkpoint.tools.reconcile_expired_claim(
             operation.tool_operation_id, tenant_id="tenant"
         )
         assert reconciled.status is ToolOperationStatus.EFFECT_UNKNOWN
@@ -389,7 +389,7 @@ async def test_renewal_cannot_overwrite_successor_claim(
         await asyncio.wait_for(started.wait(), 1)
         operation, = await bridge.list_operations()
         clock.current += timedelta(seconds=61)
-        successor = await state.recovery.tools.claim(
+        successor = await state.checkpoint.tools.claim(
             operation.tool_operation_id, tenant_id="tenant", owner="successor", lease_seconds=60
         )
         await clock.advance(0)
@@ -448,7 +448,7 @@ async def test_budget_admission_keeps_effect_claim_live(
             for seconds in (20, 20, 21):
                 await clock.advance(seconds)
                 operation, = await bridge.list_operations()
-                reconciled = await state.recovery.tools.reconcile_expired_claim(
+                reconciled = await state.checkpoint.tools.reconcile_expired_claim(
                     operation.tool_operation_id, tenant_id="tenant"
                 )
                 assert reconciled.status is ToolOperationStatus.CLAIMED
@@ -484,12 +484,12 @@ async def test_budget_admission_cannot_dispatch_after_claim_loss(
             clock.current += timedelta(seconds=61)
             operation, = await bridge.list_operations()
             if replay_safe:
-                expected = await state.recovery.tools.claim(
+                expected = await state.checkpoint.tools.claim(
                     operation.tool_operation_id, tenant_id="tenant",
                     owner="successor", lease_seconds=60,
                 )
             else:
-                expected = await state.recovery.tools.reconcile_expired_claim(
+                expected = await state.checkpoint.tools.reconcile_expired_claim(
                     operation.tool_operation_id, tenant_id="tenant"
                 )
             return result

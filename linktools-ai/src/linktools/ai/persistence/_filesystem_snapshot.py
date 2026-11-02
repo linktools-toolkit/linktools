@@ -88,7 +88,7 @@ class FilesystemSnapshotReader:
             source_stores = {}
             for domain in PersistenceDomain:
                 route_root = (self._root if domain in {
-                    PersistenceDomain.EXECUTION, PersistenceDomain.RECOVERY,
+                    PersistenceDomain.EXECUTION, PersistenceDomain.CHECKPOINT_CONTROL,
                     PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT,
                 } else self._root / domain.value)
                 source_stores[domain] = (self._source_object_store if self._source_object_store is not None

@@ -79,14 +79,14 @@ async def test_composed_runtime_ask_enters_approval_wait(
 
         assert record is not None
         assert record.status is ExecutionStatus.WAITING_DEFERRED
-        checkpoint = await runtime._state.recovery.checkpoints.get(
+        checkpoint = await runtime._state.checkpoint.checkpoints.get(
             execution.execution_id,
             tenant_id=runtime.tenant_id,
         )
         assert checkpoint is not None
         assert checkpoint.state is RecoveryCheckpointState.WAITING
         assert checkpoint.pending_tools is not None
-        approvals = await runtime._state.recovery.approvals.list_pending(
+        approvals = await runtime._state.checkpoint.approvals.list_pending(
             execution.execution_id,
             tenant_id=runtime.tenant_id,
         )

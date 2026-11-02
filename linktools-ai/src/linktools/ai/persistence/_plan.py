@@ -20,7 +20,7 @@ _OBJECT_STORE_DOMAINS = frozenset(
         PersistenceDomain.ARTIFACT,
         PersistenceDomain.TASK,
         PersistenceDomain.EVALUATION,
-        PersistenceDomain.RECOVERY,
+        PersistenceDomain.CHECKPOINT_CONTROL,
         PersistenceDomain.TRACE,
         PersistenceDomain.CHECKPOINT,
     }
@@ -50,7 +50,7 @@ class PersistencePlan:
     def from_default(cls, route: StorageRoute) -> "PersistencePlan":
         """Apply one default resource to the independently routed domains."""
         return cls(**{domain.value: route for domain in PersistenceDomain
-                      if domain not in {PersistenceDomain.RECOVERY, PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}})
+                      if domain not in {PersistenceDomain.CHECKPOINT_CONTROL, PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}})
 
 
     def __post_init__(self) -> None:
@@ -64,7 +64,8 @@ class PersistencePlan:
 
     @property
     def resolved_routes(self) -> Mapping[PersistenceDomain, StorageRoute]:
-        return MappingProxyType({domain: self.route(domain) for domain in PersistenceDomain})
+        return MappingProxyType({domain: self.route(domain) for domain in PersistenceDomain
+                                 if domain is not PersistenceDomain.CHECKPOINT_CONTROL})
 
     def validate_object_store(self, object_store: ObjectStore | None) -> None:
         if object_store is not None and not any(
@@ -84,11 +85,6 @@ class PersistencePlan:
                 is not StorageRetentionMode.DURABLE
             ):
                 raise ValueError("durable conversation requires durable execution")
-            if (
-                self.route(PersistenceDomain.RECOVERY).retention
-                is not StorageRetentionMode.DURABLE
-            ):
-                raise ValueError("durable conversation requires durable recovery")
         if (
             self.route(PersistenceDomain.EVALUATION).retention
             is StorageRetentionMode.DURABLE
@@ -107,7 +103,7 @@ class PersistencePlan:
             PersistenceDomain.ARTIFACT: self.artifact,
             PersistenceDomain.TASK: self.task,
             PersistenceDomain.EVALUATION: self.evaluation,
-            PersistenceDomain.RECOVERY: self.execution,
+            PersistenceDomain.CHECKPOINT_CONTROL: self.execution,
             PersistenceDomain.TRACE: self.trace or self.execution,
             PersistenceDomain.CHECKPOINT: self.checkpoint or self.execution,
         }[domain]

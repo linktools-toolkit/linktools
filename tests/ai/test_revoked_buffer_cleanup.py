@@ -74,7 +74,7 @@ async def test_revoked_failed_owner_retries_exact_cleanup_without_replaying_effe
         async def effect(ctx: AgentContext[None]) -> str:
             calls["tool"] += 1
             execution = await state.execution.executions.get(ctx.execution_id, tenant_id=ctx.principal.tenant_id)
-            tools = await state.recovery.tools.list_by_execution(ctx.execution_id, tenant_id=ctx.principal.tenant_id)
+            tools = await state.checkpoint.tools.list_by_execution(ctx.execution_id, tenant_id=ctx.principal.tenant_id)
             assert execution.status is ExecutionStatus.STARTED
             assert len(tools) == 1 and tools[0].status is ToolOperationStatus.CLAIMED
             return result
@@ -87,7 +87,7 @@ async def test_revoked_failed_owner_retries_exact_cleanup_without_replaying_effe
             calls["model"] += 1
             if not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
                 return ModelResponse(parts=[ToolCallPart("effect", {}, tool_call_id="effect-call")])
-            tools = await state.recovery.tools.list_by_execution(execution.execution_id, tenant_id=state.tenant_id)
+            tools = await state.checkpoint.tools.list_by_execution(execution.execution_id, tenant_id=state.tenant_id)
             assert len(tools) == 1 and tools[0].status is ToolOperationStatus.COMPLETED
             receipt = tools[0]
             decoded = decode_model_messages(receipt.result_payload.decode())
@@ -171,7 +171,7 @@ async def test_revoked_failed_owner_retries_exact_cleanup_without_replaying_effe
                 assert await buffer.read_batch("other-owner", limit=1) == (("entry", "key", b"{}"),)
                 assert buffer.close_calls == 0
 
-                kept = await state.recovery.tools.list_by_execution(execution.execution_id, tenant_id=state.tenant_id)
+                kept = await state.checkpoint.tools.list_by_execution(execution.execution_id, tenant_id=state.tenant_id)
                 assert len(kept) == 1 and kept[0].status is ToolOperationStatus.COMPLETED
                 assert kept[0].tool_operation_id == receipt.tool_operation_id
                 assert kept[0].result_payload == receipt.result_payload
@@ -219,7 +219,7 @@ async def test_terminal_handoff_cleans_only_revoked_failed_execution_while_peer_
             calls["failed_model"] += 1
             if not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
                 return ModelResponse(parts=[ToolCallPart("effect", {}, tool_call_id="effect-call")])
-            tools = await state.recovery.tools.list_by_execution(failed.execution_id, tenant_id=state.tenant_id)
+            tools = await state.checkpoint.tools.list_by_execution(failed.execution_id, tenant_id=state.tenant_id)
             assert len(tools) == 1 and tools[0].status is ToolOperationStatus.COMPLETED
             receipt = tools[0]
             lost = next(key for key, content in buffer.pending.items()
@@ -266,7 +266,7 @@ async def test_terminal_handoff_cleans_only_revoked_failed_execution_while_peer_
                 assert set(buffer.pending) == peer_keys
                 assert not peer_release.is_set()
                 assert buffer.close_calls == 0
-                kept = await state.recovery.tools.list_by_execution(failed.execution_id, tenant_id=state.tenant_id)
+                kept = await state.checkpoint.tools.list_by_execution(failed.execution_id, tenant_id=state.tenant_id)
                 assert len(kept) == 1 and kept[0].tool_operation_id == receipt.tool_operation_id
                 assert kept[0].status is ToolOperationStatus.COMPLETED
                 assert kept[0].result_payload == receipt.result_payload

@@ -99,7 +99,7 @@ async def test_sqlite_materializes_convergent_tool_repository(tmp_path) -> None:
     ))
     await state.initialize(namespace="tool-cas", tenant_id="tenant")
     try:
-        repository = state.recovery.tools
+        repository = state.checkpoint.tools
         assert type(repository) is ToolRepositoryImpl
 
         request = _admission()
@@ -148,7 +148,7 @@ async def test_expired_tool_claim_becomes_effect_unknown_without_replay(
     state = Persistence(PersistenceStorage.sqlite(tmp_path / "expired-tool-claim.db"))
     await state.initialize(namespace="tool-expired-claim", tenant_id="tenant")
     try:
-        repository = state.recovery.tools
+        repository = state.checkpoint.tools
         expired = replace(
             _record(replay_safe=False),
             lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
@@ -174,7 +174,7 @@ async def test_expired_replay_safe_claim_returns_to_pending() -> None:
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="tool-expired-replay-safe", tenant_id="tenant")
     try:
-        repository = state.recovery.tools
+        repository = state.checkpoint.tools
         expired = replace(
             _record(replay_safe=True),
             lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
@@ -200,7 +200,7 @@ async def test_live_tool_claim_is_not_reconciled_early() -> None:
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="tool-live-claim", tenant_id="tenant")
     try:
-        repository = state.recovery.tools
+        repository = state.checkpoint.tools
         claimed = _record()
         await repository.reserve(claimed)
 
@@ -540,7 +540,7 @@ async def test_expired_non_replay_safe_admission_commits_unknown_before_raising(
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="tool-cas", tenant_id="tenant")
     try:
-        repository = state.recovery.tools
+        repository = state.checkpoint.tools
         expired = replace(
             _record(),
             replay_safe=False,

@@ -130,7 +130,7 @@ def _stores(state: _TurnState) -> tuple[StateStore, ...]:
     return tuple(dict.fromkeys((
         storage.execution.executions.state_store,
         storage.conversation.sessions.state_store,
-        storage.recovery.checkpoints.state_store,
+        storage.checkpoint.checkpoints.state_store,
     )))
 
 
@@ -188,7 +188,7 @@ async def _assert_committed(state: _TurnState, turn: _PendingTurn, result: Execu
     assert head is not None and head.state is ExecutionHistoryState.CLOSED
     assert head.producer_generation == turn.commit.producer_generation
     assert await storage.execution.executions.get_history_seal(execution_id, tenant_id="tenant") is None
-    recovery = await storage.recovery.checkpoints.get(execution_id, tenant_id="tenant")
+    recovery = await storage.checkpoint.checkpoints.get(execution_id, tenant_id="tenant")
     assert recovery is not None and recovery.state is RecoveryCheckpointState.COMPLETED
     events = (await storage.execution.events.list(execution_id, tenant_id="tenant", after_event_seq=0, limit=20)).items
     assert [item.event_type for item in events] == [

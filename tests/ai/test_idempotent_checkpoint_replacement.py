@@ -74,7 +74,7 @@ def test_idempotent_tool_retries_original_call_after_worker_process_exit(tmp_pat
                     await asyncio.wait_for(entered.wait(), 5)
                     record = await state.execution.executions.get(handle.execution_id, tenant_id=runtime.tenant_id)
                     assert record is not None and record.restart_checkpoints
-                    operations = await state.recovery.tools.list_by_execution(handle.execution_id, tenant_id=runtime.tenant_id)
+                    operations = await state.checkpoint.tools.list_by_execution(handle.execution_id, tenant_id=runtime.tenant_id)
                     if legacy_stage == "completed":
                         assert len(operations) == 1 and operations[0].replay_safe is False
                         assert operations[0].status is ToolOperationStatus.COMPLETED
@@ -93,7 +93,7 @@ def test_idempotent_tool_retries_original_call_after_worker_process_exit(tmp_pat
                 assert result.result.status is ExecutionStatus.SUCCEEDED, result
                 if legacy_stage == "budget":
                     assert (await handle.budget_usage()).tool_calls == 2
-                operations = await state.recovery.tools.list_by_execution(execution_id, tenant_id=runtime.tenant_id)
+                operations = await state.checkpoint.tools.list_by_execution(execution_id, tenant_id=runtime.tenant_id)
                 if legacy_strict:
                     assert len(operations) == 1 and operations[0].replay_safe is False
                 else:
@@ -143,7 +143,7 @@ async def test_recovered_idempotent_call_preserves_existing_receipt(tmp_path: Pa
                     tool_call_id="call", tool_name="effect", arguments_digest=arguments_digest)
     operation_id = canonical_sha256(dict(identity, tenant_id="tenant", binding_digest="b" * 64))
     try:
-        record = await state.recovery.tools.admit(ToolOperationAdmission(
+        record = await state.checkpoint.tools.admit(ToolOperationAdmission(
             execution_id="execution", tool_operation_id=operation_id,
             agent_run_id="old-run", recovery_agent_run_id=None, tool_call_id="call",
             idempotency_key_digest=canonical_sha256(identity), tool_name="effect",
@@ -153,7 +153,7 @@ async def test_recovered_idempotent_call_preserves_existing_receipt(tmp_path: Pa
         ))
         def bridge(run, owner, recovery=None):
             return RuntimeToolOperationBridge(
-                state.recovery.tools, objects, namespace="receipt-compat", tenant_id="tenant",
+                state.checkpoint.tools, objects, namespace="receipt-compat", tenant_id="tenant",
                 execution_id="execution", agent_run_id=run, binding_digest="b" * 64,
                 owner=owner, background_tasks=set(), payload_policy=PayloadPolicy(),
                 recovery_agent_run_id=recovery,
@@ -183,7 +183,7 @@ async def test_recovered_idempotent_call_preserves_existing_receipt(tmp_path: Pa
             with pytest.raises(AIError) as raised:
                 await _call(effect, descriptor, bridge=recovered)
             assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
-        records = await state.recovery.tools.list_by_execution("execution", tenant_id="tenant")
+        records = await state.checkpoint.tools.list_by_execution("execution", tenant_id="tenant")
         assert len(records) == 1
         assert records[0].tool_operation_id == operation_id
         assert records[0].fence == record.fence
@@ -204,7 +204,7 @@ async def test_default_idempotent_dispatch_obeys_budget_without_tool_receipt() -
     try:
         await state.execution.budgets.ensure("scope", RunBudget(tool_calls=0))
         bridge = RuntimeToolOperationBridge(
-            state.recovery.tools, InMemoryObjectStore(), namespace="idempotent-budget",
+            state.checkpoint.tools, InMemoryObjectStore(), namespace="idempotent-budget",
             tenant_id="tenant", execution_id="execution", agent_run_id="run",
             binding_digest="b" * 64, owner="worker", background_tasks=set(),
             payload_policy=PayloadPolicy(), retain_replay_results=False,
@@ -226,7 +226,7 @@ async def test_default_idempotent_dispatch_obeys_budget_without_tool_receipt() -
         assert raised.value.code is ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED
         assert effects == []
         assert (await state.execution.budgets.read("scope")).tool_calls == 0
-        assert not await state.recovery.tools.list_by_execution("execution", tenant_id="tenant")
+        assert not await state.checkpoint.tools.list_by_execution("execution", tenant_id="tenant")
     finally:
         await state.close()
 
@@ -287,7 +287,7 @@ async def test_parallel_idempotent_rich_results_commit_and_reopen(tmp_path: Path
         handle = await session.start("save", idempotency_key="one")
         try:
             await asyncio.wait_for(asyncio.gather(entered_a.wait(), entered_b.wait()), 5)
-            assert len(await state.recovery.tools.list_by_execution(handle.execution_id, tenant_id=runtime.tenant_id)) == (0 if terminal else 2)
+            assert len(await state.checkpoint.tools.list_by_execution(handle.execution_id, tenant_id=runtime.tenant_id)) == (0 if terminal else 2)
             if terminal:
                 assert await state.execution.executions.get(handle.execution_id, tenant_id=runtime.tenant_id) is None
         finally:
@@ -296,7 +296,7 @@ async def test_parallel_idempotent_rich_results_commit_and_reopen(tmp_path: Path
         assert result.status is ExecutionStatus.SUCCEEDED
         assert sorted(effects) == ["first", "second"]
         assert len(requests) == 2
-        assert len(await state.recovery.tools.list_by_execution(handle.execution_id, tenant_id=runtime.tenant_id)) == (0 if terminal else 2)
+        assert len(await state.checkpoint.tools.list_by_execution(handle.execution_id, tenant_id=runtime.tenant_id)) == (0 if terminal else 2)
         original_id = handle.execution_id
     async with Persistence.open("idempotent-parallel", storage=PersistenceStorage.sqlite(
         database, cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024),
@@ -327,11 +327,11 @@ async def test_mcp_defaults_safe_and_preserves_local_strict_policy() -> None:
     try:
         async def default_tool() -> str:
             calls.append("default")
-            assert not await state.recovery.tools.list_by_execution("execution", tenant_id="tenant")
+            assert not await state.checkpoint.tools.list_by_execution("execution", tenant_id="tenant")
             return "default result"
         async def strict_tool() -> str:
             calls.append("strict")
-            rows = await state.recovery.tools.list_by_execution("execution", tenant_id="tenant")
+            rows = await state.checkpoint.tools.list_by_execution("execution", tenant_id="tenant")
             assert len(rows) == 1 and rows[0].replay_safe is False
             return "strict result"
         source = FunctionToolset([
@@ -340,7 +340,7 @@ async def test_mcp_defaults_safe_and_preserves_local_strict_policy() -> None:
             Tool(strict_tool, metadata=tool_metadata(effect_policy="non_replay_safe")),
         ])
         bridge = RuntimeToolOperationBridge(
-            state.recovery.tools, InMemoryObjectStore(), namespace="mcp-policy", tenant_id="tenant",
+            state.checkpoint.tools, InMemoryObjectStore(), namespace="mcp-policy", tenant_id="tenant",
             execution_id="execution", agent_run_id="run", binding_digest="b" * 64,
             owner="worker", background_tasks=set(), payload_policy=PayloadPolicy(),
             retain_replay_results=False,
@@ -356,7 +356,7 @@ async def test_mcp_defaults_safe_and_preserves_local_strict_policy() -> None:
             result = await boundary.call_tool(model_name, {}, context, tools[model_name])
             assert result == ("default result" if name == "default_tool" else "strict result")
         assert calls == ["default", "strict"]
-        rows = await state.recovery.tools.list_by_execution("execution", tenant_id="tenant")
+        rows = await state.checkpoint.tools.list_by_execution("execution", tenant_id="tenant")
         assert len(rows) == 1 and rows[0].status is ToolOperationStatus.COMPLETED
     finally:
         await state.close()

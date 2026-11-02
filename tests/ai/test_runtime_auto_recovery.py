@@ -162,7 +162,7 @@ async def test_disabled_startup_and_close_preserve_other_runtime_owned_execution
             head = await owner._state.execution.executions.get_history_head(
                 owner_run.execution_id, tenant_id=owner.tenant_id,
             )
-            checkpoint = await owner._state.recovery.checkpoints.get(
+            checkpoint = await owner._state.checkpoint.checkpoints.get(
                 owner_run.execution_id, tenant_id=owner.tenant_id,
             )
             async with Persistence.open(_NAMESPACE, storage=other_storage) as persistence_173, Runtime.attach(persistence=persistence_173, features=model_features(_Models(FunctionModel(stream_function=owned_model)), _capabilities()), auto_recover=False) as other:
@@ -177,7 +177,7 @@ async def test_disabled_startup_and_close_preserve_other_runtime_owned_execution
                 assert head is not None and observed_head is not None
                 assert observed_head.producer_generation == head.producer_generation
                 assert observed_head.producer_claim_id == head.producer_claim_id
-                assert await other._state.recovery.checkpoints.get(
+                assert await other._state.checkpoint.checkpoints.get(
                     owner_run.execution_id, tenant_id=other.tenant_id,
                 ) == checkpoint
                 owned_run = await other.agents.get().start("close only this worker", idempotency_key="owned")

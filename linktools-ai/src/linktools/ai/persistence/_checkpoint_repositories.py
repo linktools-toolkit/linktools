@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Recovery-domain repository implementations."""
+"""Checkpoint control repositories: attempts, approvals and tool results."""
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -62,7 +62,7 @@ class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
             store,
             namespace=namespace,
             tenant_id=tenant_id,
-            domain=PersistenceDomain.RECOVERY,
+            domain=PersistenceDomain.CHECKPOINT_CONTROL,
             kind="approval",
             resource_kind=ResourceKind.APPROVAL,
             value_type=ApprovalRecord,
@@ -166,7 +166,7 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
             store,
             namespace=namespace,
             tenant_id=tenant_id,
-            domain=PersistenceDomain.RECOVERY,
+            domain=PersistenceDomain.CHECKPOINT_CONTROL,
             kind="external_call",
             resource_kind=ResourceKind.EXTERNAL_CALL,
             value_type=ExternalCallRecord,
@@ -273,7 +273,7 @@ class _RecoveryCheckpointRepository(_ResourceRepository[RecoveryCheckpoint]):
             store,
             namespace=namespace,
             tenant_id=tenant_id,
-            domain=PersistenceDomain.RECOVERY,
+            domain=PersistenceDomain.CHECKPOINT_CONTROL,
             kind=self._KIND,
             resource_kind=ResourceKind.EXECUTION,
             value_type=RecoveryCheckpoint,
@@ -427,7 +427,7 @@ class ToolRepositoryImpl(_RepositoryBase):
             store,
             namespace=namespace,
             tenant_id=tenant_id,
-            domain=PersistenceDomain.RECOVERY,
+            domain=PersistenceDomain.CHECKPOINT_CONTROL,
         )
 
     def _tool_key(self, identity: str) -> bytes:
@@ -1523,14 +1523,14 @@ class RecoveryExternalCallRepositoryImpl(_ExternalCallRepositoryImpl):
         return tuple(values)
 
 
-def build_recovery_repository_bundle(
+def build_checkpoint_repository_bundle(
     store: StateStore,
     *,
     namespace: str,
     tenant_id: str,
 ) -> dict[str, _RepositoryBase]:
     return {
-        "operations": OperationLedgerRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id, domain=PersistenceDomain.RECOVERY),
+        "operations": OperationLedgerRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id, domain=PersistenceDomain.CHECKPOINT_CONTROL),
         "approvals": RecoveryApprovalRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
         "external_calls": RecoveryExternalCallRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
         "checkpoints": _RecoveryCheckpointRepository(store, namespace=namespace, tenant_id=tenant_id),
@@ -1565,6 +1565,6 @@ __all__ = [
     "RecoveryExternalCallRepositoryImpl",
     "RecoveryCheckpointRepositoryImpl",
     "ToolRepositoryImpl",
-    "build_recovery_repository_bundle",
+    "build_checkpoint_repository_bundle",
     "tool_admission_matches",
 ]

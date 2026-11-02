@@ -510,7 +510,7 @@ async def test_deferred_source_boundary_releases_buffer_and_resumes_new_producer
             await _wait_for_committed(
                 lambda: persistence.execution.executions.get(execution.execution_id, tenant_id=tenant),
                 lambda record: record is not None and record.status is ExecutionStatus.WAITING_DEFERRED)
-            approvals = await persistence.recovery.approvals.list_pending(execution.execution_id, tenant_id=tenant)
+            approvals = await persistence.checkpoint.approvals.list_pending(execution.execution_id, tenant_id=tenant)
             assert len(approvals) == 1 and calls == 1
             if reopen:
                 await stack.aclose()

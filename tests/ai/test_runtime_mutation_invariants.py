@@ -77,8 +77,8 @@ async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path:
     state = Persistence(PersistenceStorage.from_root(root, exclusive_writer=True))
     await state.initialize(namespace="effect-unknown", tenant_id="tenant")
     try:
-        await state.recovery.tools.reserve(_tool_record())
-        await state.recovery.tools.claim(
+        await state.checkpoint.tools.reserve(_tool_record())
+        await state.checkpoint.tools.claim(
             "operation",
             tenant_id="tenant",
             owner="worker",
@@ -86,7 +86,7 @@ async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path:
         )
         await asyncio.sleep(1.05)
         with pytest.raises(AIError) as error:
-            await state.recovery.tools.claim(
+            await state.checkpoint.tools.claim(
                 "operation",
                 tenant_id="tenant",
                 owner="worker-2",
@@ -99,7 +99,7 @@ async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path:
     reopened = Persistence(PersistenceStorage.from_root(root, exclusive_writer=True))
     await reopened.initialize(namespace="effect-unknown", tenant_id="tenant")
     try:
-        record = await reopened.recovery.tools.get_operation(
+        record = await reopened.checkpoint.tools.get_operation(
             "operation",
             tenant_id="tenant",
         )

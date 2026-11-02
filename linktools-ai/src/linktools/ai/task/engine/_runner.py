@@ -361,7 +361,6 @@ class TaskNodeExecutor(Generic[AppT]):
         expanders: Sequence[TaskExpander] = (),
         task_durable: bool = False,
         execution_durable: bool = True,
-        recovery_durable: bool = True,
         input_materializer: ExecutionInputMaterializer | None = None,
         input_captures: InputCaptures | None = None,
     ) -> None:
@@ -398,7 +397,6 @@ class TaskNodeExecutor(Generic[AppT]):
         self._default_definitions = self._definition_maps(tasks, expanders)
         self._task_durable = task_durable
         self._execution_durable = execution_durable
-        self._recovery_durable = recovery_durable
 
     def _definition_maps(
         self,
@@ -3084,7 +3082,7 @@ class TaskNodeExecutor(Generic[AppT]):
         )
         if not self._task_durable or not is_agent_task:
             return
-        if self._execution_durable and self._recovery_durable:
+        if self._execution_durable:
             return
         raise AIError(
             ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,

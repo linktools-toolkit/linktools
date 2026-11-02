@@ -76,7 +76,7 @@ from ._conversation_repositories import (
     ConversationHistoryRepositoryImpl,
     SessionRepositoryImpl,
 )
-from ._recovery_repositories import (
+from ._checkpoint_repositories import (
     RecoveryCheckpointRepositoryImpl,
     tool_admission_matches as _tool_admission_matches,
 )

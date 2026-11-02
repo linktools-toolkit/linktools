@@ -54,12 +54,12 @@ def test_terminal_worker_exit_retries_idempotent_effect_as_new_turn(tmp_path: Pa
                 if mode == 'create':
                     await asyncio.wait_for(entered.wait(), 5)
                     assert await state.execution.executions.get(handle.execution_id, tenant_id=runtime.tenant_id) is None
-                    assert not await state.recovery.tools.list_by_execution(handle.execution_id, tenant_id=runtime.tenant_id)
+                    assert not await state.checkpoint.tools.list_by_execution(handle.execution_id, tenant_id=runtime.tenant_id)
                     (root / 'old-id').write_text(handle.execution_id)
                     os._exit(73)
                 assert handle.execution_id != (root / 'old-id').read_text()
                 assert (await handle.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
-                assert not await state.recovery.tools.list_by_execution(handle.execution_id, tenant_id=runtime.tenant_id)
+                assert not await state.checkpoint.tools.list_by_execution(handle.execution_id, tenant_id=runtime.tenant_id)
                 assert (root / 'effect').read_text() == '7'
                 assert (root / 'calls').read_text().splitlines() == ['create', 'retry']
         asyncio.run(main())

@@ -50,7 +50,7 @@ async def test_admission_readback_requires_own_receipt(
         )
         repository = state.execution.executions
         await repository.create_with_history_head(execution)
-        await state.recovery.checkpoints.create(checkpoint)
+        await state.checkpoint.checkpoints.create(checkpoint)
         commands = _commands(state, namespace)
 
         async def claim():

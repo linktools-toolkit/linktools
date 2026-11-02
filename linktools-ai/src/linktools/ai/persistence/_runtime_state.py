@@ -27,7 +27,7 @@ from ..storage import (
 from ._root import PersistenceStorage, _validate_storage_configuration
 from ._plan import PersistenceDomain, PersistencePlan, runtime_domain_uses_object_store
 from .contracts import (ArtifactRepositories, ConversationRepositories, EvaluationRepositories,
-                         ExecutionRepositories, MemoryRepositories, RecoveryRepositories, TaskRepositories)
+                         ExecutionRepositories, MemoryRepositories, CheckpointRepositories, TaskRepositories)
 from .state import StateStore
 from ._snapshot import SnapshotLimits, SnapshotExclusiveGuard
 from .snapshots import SnapshotResources, RuntimeSnapshotOperations, restore_snapshot
@@ -90,7 +90,7 @@ class Persistence:
         self._artifact: ArtifactRepositories | None = None
         self._task: TaskRepositories | None = None
         self._evaluation: EvaluationRepositories | None = None
-        self._recovery: RecoveryRepositories | None = None
+        self._checkpoint: CheckpointRepositories | None = None
         self._objects: _RuntimeObjectRouter | None = None
         self._run_store: RuntimeAgentRunStore | None = None
         self._retention: RuntimeRetentionController | None = None
@@ -147,6 +147,8 @@ class Persistence:
         self._require_ready()
         result: list[PersistenceStatus] = []
         for domain in PersistenceDomain:
+            if domain is PersistenceDomain.CHECKPOINT_CONTROL:
+                continue
             route = self._plan.route(domain)
             path = route.path
             objects = self.object_store(domain)
@@ -207,8 +209,9 @@ class Persistence:
         return self._require_materialized(self._evaluation)
 
     @property
-    def recovery(self) -> RecoveryRepositories:
-        return self._require_materialized(self._recovery)
+    def checkpoint(self) -> CheckpointRepositories:
+        """Borrow Checkpoint's execution control, approvals and tool-result stores."""
+        return self._require_materialized(self._checkpoint)
 
     @property
     def run_store(self) -> "RuntimeAgentRunStore":
@@ -430,7 +433,7 @@ class Persistence:
         self._artifact = value.artifact
         self._task = value.task
         self._evaluation = value.evaluation
-        self._recovery = value.recovery
+        self._checkpoint = value.checkpoint
         self._objects = value.objects
         self._run_store = value.run_store
         self._retention = value.retention

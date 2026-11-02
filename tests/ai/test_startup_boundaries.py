@@ -341,11 +341,11 @@ async def test_prepared_attempt_member_conflict_rolls_back_authority_and_context
         await state.execution.executions.create_with_history_head(execution)
         checkpoint = RecoveryCheckpoint(execution.execution_id, None, RecoveryCheckpointState.ADMITTED,
                                         0, execution.created_at, execution.updated_at)
-        await state.recovery.checkpoints.create(checkpoint)
+        await state.checkpoint.checkpoints.create(checkpoint)
         commands = StateCommands(state.execution.executions, namespace='startup-member-cas',
-                                        events=state.execution.events, recovery=state.recovery.checkpoints,
+                                        events=state.execution.events, recovery=state.checkpoint.checkpoints,
                                         background_tasks=set())
-        stores = (state.execution.executions.state_store, state.recovery.checkpoints.state_store)
+        stores = (state.execution.executions.state_store, state.checkpoint.checkpoints.state_store)
         before = [await _snapshot(store) for store in stores]
         original = _SqlTransaction.replace_records
         conflicts = []

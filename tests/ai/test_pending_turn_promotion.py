@@ -67,7 +67,7 @@ async def _assert_promoted(
     )
     storage = state.storage
     assert await storage.execution.executions.get(initial.execution_id, tenant_id="tenant") == execution
-    assert await storage.recovery.checkpoints.get(initial.execution_id, tenant_id="tenant") == recovery
+    assert await storage.checkpoint.checkpoints.get(initial.execution_id, tenant_id="tenant") == recovery
     identity = turn.reservation.idempotency
     assert await storage.execution.idempotency.get(identity.scope, identity.idempotency_key_digest, tenant_id="tenant") == replace(
         identity, status=IdempotencyStatus.STARTED,
@@ -285,7 +285,7 @@ async def test_pending_turn_promotion_independent_connections_grant_only_one_can
             losing_id = next(turn.reservation.execution.execution_id for turn in turns if turn is not winning_turn)
             assert await first.storage.execution.executions.get(losing_id, tenant_id="tenant") is None
             assert await first.storage.execution.executions.get_history_head(losing_id, tenant_id="tenant") is None
-            assert await first.storage.recovery.checkpoints.get(losing_id, tenant_id="tenant") is None
+            assert await first.storage.checkpoint.checkpoints.get(losing_id, tenant_id="tenant") is None
             assert not (await first.storage.execution.events.list(losing_id, tenant_id="tenant", after_event_seq=0, limit=20)).items
         finally:
             await second_storage.close()

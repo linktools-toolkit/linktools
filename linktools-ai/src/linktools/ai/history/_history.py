@@ -1664,7 +1664,7 @@ async def _open_runtime_history(
             "execution-history",
             token_seed(resolved_namespace),
         ),
-        tool_operations=selected_state.recovery.tools,
+        tool_operations=selected_state.checkpoint.tools,
         durable_history_available=selected_state.run_store.model_interaction_history_available,
     )
     effective_authorization = (
