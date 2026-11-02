@@ -85,7 +85,8 @@ checks:
         - test_evaluation*
         - test_captured*
         - test_graph_capture*
-        - test_runtime_recovery_ownership.py
-        - test_runtime_process_recovery.py
-        - test_keyed_execution_recovery.py
+        - test_*recovery*.py
+        - test_runtime_shutdown_handoff.py
+        - test_idempotent_checkpoint_replacement.py
+        - test_idempotent_partial_frontier.py
       runtime: []

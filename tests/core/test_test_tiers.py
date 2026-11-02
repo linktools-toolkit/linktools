@@ -121,6 +121,10 @@ def test_ai_groups_partition_file_families_without_changing_tiers(
         "tests/ai/test_runtime_recovery_ownership.py": "evaluation-recovery",
         "tests/ai/test_runtime_process_recovery.py": "evaluation-recovery",
         "tests/ai/test_keyed_execution_recovery.py": "evaluation-recovery",
+        "tests/ai/test_session_tool_process_recovery_sql.py": "evaluation-recovery",
+        "tests/ai/test_runtime_shutdown_handoff.py": "evaluation-recovery",
+        "tests/ai/test_idempotent_checkpoint_replacement.py": "evaluation-recovery",
+        "tests/ai/test_idempotent_partial_frontier.py": "evaluation-recovery",
         "tests/ai/test_runtime_other.py": "runtime",
         "tests/ai/test_new_feature.py": "runtime",
         "linktools-ai/tests/test_evaluation_local.py": "evaluation-recovery",
@@ -185,7 +189,7 @@ def test_generated_ci_plan_supplies_execution_versions_and_options() -> None:
         assert "--test-group=" + check["group"] in options
         assert "-vv" not in options
         assert ("--durations=50" in options) == (check["group"] != "all")
-        if check["group"] == "runtime":
+        if check["group"] != "all":
             assert "-ra" in options
             assert options[-5:] == ["--tb=long", "-o", "verbosity_assertions=2", "-o", "faulthandler_timeout=90"]
         else:
