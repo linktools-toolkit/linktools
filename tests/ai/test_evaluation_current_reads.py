@@ -132,7 +132,7 @@ async def test_current_pages_hydrate_only_the_manifest_window(
 async def test_current_reads_reload_native_recovery_state_without_updating_evaluation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with completed(tmp_path) as (evaluations, storage, run, _scorer, _policy):
+    async with completed(tmp_path, count=1) as (evaluations, storage, run, _scorer, _policy):
         await evaluations.close()
         owner = evaluations
         record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
@@ -345,7 +345,7 @@ async def test_current_reads_preserve_frozen_trial_and_score_pages(
 async def test_current_reads_enforce_selected_evidence_authorization(
     tmp_path: Path, boundary: str,
 ) -> None:
-    async with completed(tmp_path) as (evaluations, storage, run, _scorer, policy):
+    async with completed(tmp_path, count=1) as (evaluations, storage, run, _scorer, policy):
         await evaluations.close()
         record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         first = next(item for item in record.evidence
@@ -364,7 +364,7 @@ async def test_current_reads_enforce_selected_evidence_authorization(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("field", ("metadata_expires_at", "content_expires_at"))
 async def test_current_reads_reject_expired_evidence_sources(tmp_path: Path, field: str) -> None:
-    async with completed(tmp_path) as (evaluations, storage, run, _scorer, _policy):
+    async with completed(tmp_path, count=1) as (evaluations, storage, run, _scorer, _policy):
         await evaluations.close()
         record = await storage.evaluation.records.update(run.experiment_id, lambda value: replace(
             value, **{field: datetime.now(timezone.utc) - timedelta(seconds=1)}))
@@ -381,7 +381,7 @@ async def test_current_reads_reject_expired_evidence_sources(tmp_path: Path, fie
 async def test_current_reads_validate_selected_evidence_and_attachment_integrity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
 ) -> None:
-    async with completed(tmp_path) as (evaluations, storage, run, _scorer, _policy):
+    async with completed(tmp_path, count=1) as (evaluations, storage, run, _scorer, _policy):
         await evaluations.close()
         repository = storage.evaluation.records
         if fault == "digest":
@@ -523,7 +523,7 @@ async def test_get_case_preserves_owner_expiry_and_missing_boundaries(tmp_path: 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("boundary", ("dataset", "owner"))
 async def test_current_reads_preserve_dataset_authorization(tmp_path: Path, boundary: str) -> None:
-    async with completed(tmp_path) as (evaluations, storage, run, _scorer, policy):
+    async with completed(tmp_path, count=1) as (evaluations, storage, run, _scorer, policy):
         await evaluations.close()
         record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         policy.reject = lambda action, resource: action is AuthorizationAction.EVALUATION_DATASET_READ and (
