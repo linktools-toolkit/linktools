@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._memory import RuntimeMemoryStore, _decode_receipt
+from linktools.ai.runtime._memory import RuntimeMemoryStore, _MutationReceipt
 from linktools.ai.persistence.contracts import MemoryRecord
 from linktools.ai.persistence._memory import InMemoryStateStorageGroup, InMemoryStateStore
 from linktools.ai.persistence.repositories import MemoryRepositoryImpl
@@ -90,7 +90,7 @@ async def test_memory_receipt_rejects_unwritten_appended_status() -> None:
     )
 
     with pytest.raises(AIError) as raised:
-        _decode_receipt(payload)
+        _MutationReceipt.decode(payload)
 
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
