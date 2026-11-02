@@ -8,6 +8,7 @@ import sqlite3
 from types import SimpleNamespace
 
 import pytest
+from aiosqlite import Cursor
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, PendingRollbackError
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -46,6 +47,7 @@ async def test_sqlite_timeline_preserves_error_and_omits_statement_parameters(tm
             await engine.dispose()
 
     original = SqlStorageContext.run_statement
+    original_cursor_init, original_cursor_close = Cursor.__init__, Cursor.close
     original_gc_callbacks = tuple(gc.callbacks)
     original_format = _SqliteTimeline.format
 
@@ -65,10 +67,11 @@ async def test_sqlite_timeline_preserves_error_and_omits_statement_parameters(tm
     notes = "\n".join(failure.__notes__)
     assert secret not in notes and str(failure) not in notes and ":payload" not in notes
     for kind in ("sql.begin", "sql.end", "sql.error", "session.begin", "session.close.begin", "session.close.end",
-                 "do_commit.begin", "do_commit.end", "do_rollback.begin", "do_rollback.end", "pool.out", "pool.in"):
+                 "cursor.open", "cursor.close.begin", "cursor.close.end", "do_commit.begin", "do_commit.end", "do_rollback.begin", "do_rollback.end", "pool.out", "pool.in"):
         assert kind in notes
     assert "'verb': 'SELECT'" in notes
     assert SqlStorageContext.run_statement is original
+    assert (Cursor.__init__, Cursor.close) == (original_cursor_init, original_cursor_close)
     assert tuple(gc.callbacks) == original_gc_callbacks
     assert timeline_module._active_timeline.get() is None
     assert "phase.model.entered" in notes and "'producer': 1" in notes
@@ -204,3 +207,51 @@ async def test_sqlite_failure_evidence_keeps_mutation_error_identity_and_native_
         assert secret not in notes
     assert SqlStorageContext.run_mutation is original_mutation
     assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.asyncio
+async def test_sqlite_failure_snapshot_reports_open_cursor_without_payload(tmp_path):
+    import aiosqlite
+
+    timeline = _SqliteTimeline()
+    with pytest.MonkeyPatch.context() as patches:
+        timeline.install(patches)
+        try:
+            async with aiosqlite.connect(tmp_path / 'cursor.db') as connection:
+                cursor = await connection.execute("SELECT ?", ("private cursor content",))
+                try:
+                    timeline.failure_snapshot()
+                    snapshot = timeline.events[-1][-1]
+                    assert snapshot['cursor_count'] == 1
+                    assert snapshot['cursors'][0]['connection'] == id(connection)
+                    assert snapshot['cursors'][0]['age'] >= 0
+                    assert 'private cursor content' not in timeline.format()
+                finally:
+                    await cursor.close()
+                timeline.failure_snapshot()
+                assert timeline.events[-1][-1]['cursor_count'] == 0
+        finally:
+            timeline.remove()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_failure_snapshot_tolerates_gc_during_summary():
+    timeline = _SqliteTimeline()
+
+    class CollectOnRead(dict):
+        def get(self, key, default=None):
+            gc.collect(0)
+            return super().get(key, default)
+
+    with pytest.MonkeyPatch.context() as patches:
+        timeline.install(patches)
+        try:
+            timeline.emit("cursor.open", connection=1, cursor=2)
+            timestamp, kind, task, origin, fields = timeline.events[-1]
+            timeline.events[-1] = (timestamp, kind, task, origin, CollectOnRead(fields))
+            timeline.failure_snapshot()
+            assert timeline.events[-1][1] == "failure.observed_unclosed"
+            assert timeline.events[-1][-1]["cursor_count"] == 1
+            assert any(row[1] == "gc.start" for row in timeline.events)
+        finally:
+            timeline.remove()
