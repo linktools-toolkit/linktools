@@ -117,6 +117,11 @@ class BubblewrapWorkspaceBackend(_NativeWorkspaceOperations):
             WorkspaceReadPolicy,
         ):
             raise TypeError("read_policy must be WorkspaceReadPolicy")
+        if read_policy is not None and read_policy.read_validator is not None:
+            raise WorkspaceOperationRejected(
+                ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                safe_details={"reason": "sandbox_read_validator_unsupported"},
+            )
         self._read_policy = read_policy
 
     def stdio_execution_policy(self) -> Mapping[str, JsonValue]:

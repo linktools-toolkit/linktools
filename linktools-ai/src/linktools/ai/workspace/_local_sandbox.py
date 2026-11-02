@@ -23,6 +23,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path, PurePosixPath
 from subprocess import DEVNULL, PIPE
 from typing import BinaryIO, TypeVar
@@ -45,7 +46,7 @@ from ._sandbox import (
 )
 from ._root import Workspace
 from ._file_io import (
-    _check_state, _facts, _glob_matches, _inspect_file, _read_text_range, _state,
+    _check_state, _facts, _glob_matches, _inspect_file, _read_text_range, _state, _validate_read,
 )
 from ._sandbox_protocol import validate_request_size
 from ._local_process import (
@@ -490,6 +491,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
                         raise AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"reason": "file_changed"})
                     if max_bytes is not None and info.st_size > max_bytes:
                         raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "file_byte_limit"})
+                    _validate_read(stream, self._read_validator(display, _resource_key))
                     value = stream.read() if max_bytes is None else stream.read(max_bytes + 1)
                     _check_state(target, display, stream, state)
                 if max_bytes is not None and len(value) > max_bytes:
@@ -512,7 +514,10 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
         def operation() -> Mapping[str, JsonValue]:
             target, display, _resource_key = self._read_target(path)
             try:
-                return _inspect_file(target, display, max_bytes)
+                return _inspect_file(
+                    target, display, max_bytes,
+                    validator=self._read_validator(display, _resource_key),
+                )
             except FileNotFoundError as error:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
             except OSError as error:
@@ -537,6 +542,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
                     target, display, offset=offset, limit=limit,
                     cursor=cursor, full_metadata=full_metadata, max_bytes=max_bytes,
                     max_read_bytes=max_read_bytes,
+                    validator=self._read_validator(display, _resource_key),
                 )
             except FileNotFoundError as error:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
@@ -728,7 +734,10 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
                     matches, incomplete, scanned = _search_bounded_lines(
                         candidate, logical, expression, remaining_scan, deadline,
                         _MAX_ITEMS - len(rows),
+                        validator=self._read_validator(logical, resource_key),
                     )
+                except WorkspaceOperationRejected:
+                    raise
                 except (AIError, OSError):
                     walk_state.failed = True
                     continue
@@ -1010,6 +1019,14 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
             )
         except ValueError as error:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+
+    def _read_validator(
+        self, logical: str, resource_key: str | None,
+    ) -> Callable[[BinaryIO], None] | None:
+        policy = self._read_policy
+        if policy is None or policy.read_validator is None:
+            return None
+        return partial(policy.read_validator, logical, resource_key)
 
     def _read_target(
         self,
@@ -1603,7 +1620,8 @@ class _WalkState:
 
 def _search_bounded_lines(
     path: Path, logical: str, expression: re.Pattern[str], max_bytes: int,
-    deadline: float, limit: int,
+    deadline: float, limit: int, *,
+    validator: Callable[[BinaryIO], None] | None = None,
 ) -> tuple[list[str], bool, int]:
     rows: list[str] = []
     scanned = 0
@@ -1615,6 +1633,7 @@ def _search_bounded_lines(
     pending_cr = ""
     with path.open("rb") as stream:
         state = _state(logical, os.fstat(stream.fileno()))
+        _validate_read(stream, validator)
         while True:
             if time.monotonic() > deadline or scanned >= max_bytes:
                 incomplete = True
