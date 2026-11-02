@@ -189,21 +189,20 @@ async def test_resource_scope_does_not_dispose_borrowed_engine(tmp_path: Path) -
 @pytest.mark.asyncio
 async def test_resource_scope_closes_owned_context_after_later_open_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from sqlalchemy import MetaData
-    from sqlalchemy.ext.asyncio import AsyncEngine
     from linktools.ai.persistence import _resource_scope as resources
 
     contexts: list[SqlStorageContext] = []
-    create_context = resources.create_sql_storage_context
+    create_context = resources.create_sqlite_storage_context
 
-    def track_context(engine: AsyncEngine, *, owns_engine: bool = False) -> SqlStorageContext:
-        context = create_context(engine, owns_engine=owns_engine)
+    def track_context(path: str | Path) -> SqlStorageContext:
+        context = create_context(path)
         contexts.append(context)
         return context
 
     def fail_schema(metadata: MetaData) -> None:
         raise RuntimeError("schema unavailable")
 
-    monkeypatch.setattr(resources, "create_sql_storage_context", track_context)
+    monkeypatch.setattr(resources, "create_sqlite_storage_context", track_context)
     with pytest.raises(RuntimeError, match="schema unavailable"):
         await resources.StorageResourceScope.open(
             (

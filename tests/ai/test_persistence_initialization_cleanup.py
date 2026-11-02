@@ -166,10 +166,10 @@ async def test_sqlite_provisioning_failure_retains_temporary_engine_cleanup(
     blocked = True
     contexts: list[SqlStorageContext] = []
     original_dispose = AsyncEngine.dispose
-    original_create = _resource_scope.create_sql_storage_context
+    original_create = _resource_scope.create_sqlite_storage_context
 
-    def create_context(engine: AsyncEngine, *, owns_engine: bool = False) -> SqlStorageContext:
-        context = original_create(engine, owns_engine=owns_engine)
+    def create_context(path: str | Path) -> SqlStorageContext:
+        context = original_create(path)
         contexts.append(context)
         return context
 
@@ -181,7 +181,7 @@ async def test_sqlite_provisioning_failure_retains_temporary_engine_cleanup(
             raise OSError("engine cleanup failed")
         await original_dispose(engine, close=close)
 
-    monkeypatch.setattr(_resource_scope, "create_sql_storage_context", create_context)
+    monkeypatch.setattr(_resource_scope, "create_sqlite_storage_context", create_context)
     monkeypatch.setattr(SqlStorageContext, "initialize", initialize)
     monkeypatch.setattr(AsyncEngine, "dispose", dispose)
     try:
