@@ -146,10 +146,7 @@ class Persistence:
         """Describe bound resources and known filesystem roots without probing them."""
         self._require_ready()
         result: list[PersistenceStatus] = []
-        for domain in PersistenceDomain:
-            if domain is PersistenceDomain.CHECKPOINT_CONTROL:
-                continue
-            route = self._plan.route(domain)
+        for domain, route in self._plan.resolved_routes.items():
             path = route.path
             objects = self.object_store(domain)
             result.append({

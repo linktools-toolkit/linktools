@@ -12,26 +12,11 @@ from ..storage import ObjectStore, StorageRoute, StorageRetentionMode
 from ..core import PersistenceDomain
 
 
-_OBJECT_STORE_DOMAINS = frozenset(
-    {
-        PersistenceDomain.CONVERSATION,
-        PersistenceDomain.EXECUTION,
-        PersistenceDomain.MEMORY,
-        PersistenceDomain.ARTIFACT,
-        PersistenceDomain.TASK,
-        PersistenceDomain.EVALUATION,
-        PersistenceDomain.CHECKPOINT_CONTROL,
-        PersistenceDomain.TRACE,
-        PersistenceDomain.CHECKPOINT,
-    }
-)
-
-
 def runtime_domain_uses_object_store(domain: PersistenceDomain) -> bool:
-    """Return whether a Runtime domain owns object-store data."""
+    """All Runtime persistence addresses support object-store data."""
     if not isinstance(domain, PersistenceDomain):
         raise TypeError("domain must be PersistenceDomain")
-    return domain in _OBJECT_STORE_DOMAINS
+    return True
 
 
 @dataclass(frozen=True, slots=True)

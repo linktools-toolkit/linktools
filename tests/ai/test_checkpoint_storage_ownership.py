@@ -13,7 +13,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceStorage
 from linktools.ai.persistence.codec import decode_domain, encode_domain
 from linktools.ai.persistence.contracts import RuntimePayloadRef
-from linktools.ai.storage import InMemoryCacheBackend, ObjectRef, ObjectStore, StorageRoute
+from linktools.ai.storage import InMemoryCacheBackend, ObjectRef, ObjectStore, StorageRetentionMode, StorageRoute
 
 
 async def _put(store: ObjectStore, content: bytes) -> ObjectRef:
@@ -48,6 +48,9 @@ async def test_checkpoint_control_and_archive_keep_distinct_object_sources() -> 
 async def test_transient_checkpoint_cleanup_does_not_delete_control_objects() -> None:
     storage = PersistenceStorage(replace(PersistencePlan(), checkpoint=StorageRoute.transient()))
     async with Persistence.open("checkpoint-retention", storage=storage) as state:
+        status = {item["domain"]: item for item in state.status()}
+        assert status[PersistenceDomain.CHECKPOINT]["retention"] is StorageRetentionMode.TRANSIENT
+        assert status[PersistenceDomain.EXECUTION]["retention"] is StorageRetentionMode.VOLATILE
         control_ref = await _put(state.object_store(PersistenceDomain.CHECKPOINT_CONTROL), b"control")
         archive_ref = await _put(state.working_object_store(
             PersistenceDomain.CHECKPOINT, owner_scope="execution:completed",
