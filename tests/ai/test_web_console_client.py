@@ -92,6 +92,7 @@ assert.equal(Object.fromEntries(promptLayers({messages:[{parts:[{kind:'system-pr
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.usefixtures("thinking_request_json")
 def test_web_dom_interactions_ignore_stale_work_and_preserve_mutation_identity() -> None:
     node = shutil.which("node")
     if node is None:
@@ -99,7 +100,7 @@ def test_web_dom_interactions_ignore_stale_work_and_preserve_mutation_identity()
     root = Path(__file__).parents[2]
     script = Path(__file__).with_name("web_console_dom.mjs")
     assets = root / "linktools-ai/src/linktools/ai/web/assets"
-    for mode in ("writable", "readonly", "workspace", "races", "navigation", "native", "sdk", "protocols", "diagnostics", "tools", "thinking", "guided", "details", "minimal", "resume", "streaming", "attempts"):
+    for mode in ("writable", "readonly", "workspace", "races", "navigation", "native", "sdk", "protocols", "diagnostics", "tools", "guided", "details", "minimal", "resume", "streaming", "attempts"):
         result = subprocess.run([node, str(script), str(assets), mode], capture_output=True, text=True, timeout=20, check=False)
         assert result.returncode == 0, result.stderr
 
@@ -166,9 +167,24 @@ assert.equal(nodes['settings-content'].children[1].children.find(item=>item.tag=
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.fixture(scope="module")
+def thinking_request_json() -> str:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the optional Web client tests")
+    assets = Path(__file__).parents[2] / "linktools-ai/src/linktools/ai/web/assets"
+    result = subprocess.run([node, str(Path(__file__).with_name("web_console_dom.mjs")),
+                             str(assets), "thinking"], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    return next(line.removeprefix("THINKING_REQUEST=") for line in result.stdout.splitlines()
+                if line.startswith("THINKING_REQUEST="))
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("thinking", (None, False, "max"))
-async def test_thinking_request_reaches_custom_binding(tmp_path: Path, thinking) -> None:
+async def test_thinking_request_reaches_custom_binding(
+    tmp_path: Path, thinking, thinking_request_json: str,
+) -> None:
     import json
     from pydantic_ai.models.test import TestModel
 
@@ -178,15 +194,7 @@ async def test_thinking_request_reaches_custom_binding(tmp_path: Path, thinking)
     from .test_model_client_request_capture import _ModelBinding
     from .test_web_console_viewers import _client
 
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("Node.js is required for the optional Web client tests")
-    assets = Path(__file__).parents[2] / "linktools-ai/src/linktools/ai/web/assets"
-    result = subprocess.run([node, str(Path(__file__).with_name("web_console_dom.mjs")),
-                             str(assets), "thinking"], capture_output=True, text=True, timeout=20)
-    assert result.returncode == 0, result.stderr
-    payload = json.loads(next(line.removeprefix("THINKING_REQUEST=") for line in result.stdout.splitlines()
-                              if line.startswith("THINKING_REQUEST=")))
+    payload = json.loads(thinking_request_json)
     payload["thinking"] = thinking
     models = _ModelBinding(TestModel(custom_output_text="ok", profile={
         "supports_thinking": True, "thinking_always_enabled": True,

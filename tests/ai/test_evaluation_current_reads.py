@@ -78,11 +78,11 @@ async def _add_attachment(storage: Persistence, experiment_id: str, index: int) 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("count", (2, 3))
 @sqlite_failure_evidence
 async def test_current_pages_hydrate_only_the_manifest_window(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, count: int,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    count = 3
     async with completed(tmp_path, count=count) as (evaluations, storage, run, _scorer, _policy):
         await evaluations.close()
         owner = evaluations

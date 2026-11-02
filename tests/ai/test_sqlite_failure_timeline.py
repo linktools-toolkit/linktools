@@ -255,3 +255,26 @@ async def test_sqlite_failure_snapshot_tolerates_gc_during_summary():
             assert any(row[1] == "gc.start" for row in timeline.events)
         finally:
             timeline.remove()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_timeline_format_tolerates_gc_during_rendering():
+    timeline = _SqliteTimeline()
+
+    class CollectOnRepr(dict):
+        def __repr__(self):
+            gc.collect(0)
+            return super().__repr__()
+
+    with pytest.MonkeyPatch.context() as patches:
+        timeline.install(patches)
+        try:
+            timeline.emit("cursor.open", connection=1, cursor=2)
+            timestamp, kind, task, origin, fields = timeline.events[-1]
+            timeline.events[-1] = (timestamp, kind, task, origin, CollectOnRepr(fields))
+            rendered = timeline.format()
+            assert "cursor.open" in rendered
+            assert "'connection': 1" in rendered
+            assert any(row[1] == "gc.start" for row in timeline.events)
+        finally:
+            timeline.remove()
