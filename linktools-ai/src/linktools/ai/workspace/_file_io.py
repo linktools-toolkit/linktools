@@ -20,6 +20,7 @@ from typing import BinaryIO, Protocol
 
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
+from ._sandbox import WorkspaceOperationRejected
 
 _BLOCK_BYTES = 64 * 1024
 _MAX_PREVIEW_BYTES = 50_000
@@ -138,7 +139,22 @@ def _facts(sample: bytes, name: str, size: int) -> dict[str, JsonValue]:
     return result
 
 
-def _inspect_file(path: Path, logical: str, max_bytes: int | None = None) -> dict[str, JsonValue]:
+def _validate_read(stream: BinaryIO, validator: Callable[[BinaryIO], None] | None) -> None:
+    if validator is None:
+        return
+    position = stream.tell()
+    try:
+        validator(stream)
+    except AIError as error:
+        raise WorkspaceOperationRejected.from_error(error) from error
+    finally:
+        stream.seek(position)
+
+
+def _inspect_file(
+    path: Path, logical: str, max_bytes: int | None = None, *,
+    validator: Callable[[BinaryIO], None] | None = None,
+) -> dict[str, JsonValue]:
     if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 1):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     if not stat.S_ISREG(path.stat().st_mode):
@@ -148,6 +164,7 @@ def _inspect_file(path: Path, logical: str, max_bytes: int | None = None) -> dic
         if not stat.S_ISREG(info.st_mode):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         state = _state(logical, info)
+        _validate_read(stream, validator)
         sample = stream.read(min(max_bytes or _MAGIC_BYTES, _MAGIC_BYTES))
         result = _facts(sample, logical, info.st_size)
         _check_state(path, logical, stream, state)
@@ -294,6 +311,7 @@ def _read_text_range(
     path: Path, logical: str, *, offset: int | None,
     limit: int | None, cursor: str | None, full_metadata: bool,
     max_bytes: int | None, max_read_bytes: int | None,
+    validator: Callable[[BinaryIO], None] | None = None,
 ) -> dict[str, JsonValue]:
     if offset is not None and (type(offset) is not int or offset < 0):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -318,6 +336,7 @@ def _read_text_range(
         if not stat.S_ISREG(info.st_mode):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         state = _state(logical, info)
+        _validate_read(stream, validator)
         scan_ceiling = _MAX_SCAN_BYTES + (_MAX_METADATA_BYTES if full_metadata else 0)
         reader = _ReadBudget(stream, min(max_read_bytes or scan_ceiling, scan_ceiling))
         if cursor is not None:
