@@ -104,7 +104,10 @@ source root must remain byte-for-byte unchanged: reader internals write only
 coordination locks, but an explicitly colocated destination still receives the
 requested snapshot objects. Verify the restored records/receipts/content before
 switching consumers. Filesystem State writers and routes are removed; this
-reader preserves only offline access to supported clean legacy data. The unused
+reader preserves only offline access to supported clean legacy data. Restored
+message payloads use the model codec's frozen read-only filesystem-format adapter;
+source/archive bytes and their recorded hashes are not rewritten. This does not
+provide a general converter for obsolete development protocols. The unused
 `storage.FilesystemJournal` transaction API is removed with those State writers;
 independent atomic-file, file-lock, cache and ObjectStore APIs remain. Opaque
 custom-object closure and journal replay are not provided.

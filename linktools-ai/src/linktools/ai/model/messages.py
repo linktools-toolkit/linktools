@@ -20,7 +20,7 @@ from pydantic_ai.messages import (
     BinaryContent, FilePart, InstructionBaselinePart, InstructionDeltaPart, InstructionDigest,
     InstructionId, InstructionPart, SerializedInstructionId, ModelMessage, ModelMessagesTypeAdapter, ModelRequest,
     ModelRequestAttempt, ModelResponse, NativeToolReturnPart, RetryPromptPart,
-    SpeechPart, SystemPromptPart, TextContent, ToolReturnPart, UserPromptPart,
+    SpeechPart, SystemPromptPart, TextContent, ToolReturnPart, UserContent, UserPromptPart,
 )
 
 try:
@@ -46,6 +46,8 @@ _HOST_CONTENT = "linktools-content"
 _SUMMARY_KIND = "runtime-summary-prompt"
 _RETRY_ADAPTER = TypeAdapter(RetryPromptPart)
 _USAGE_ADAPTER = TypeAdapter(RequestUsage)
+_USER_CONTENT_ADAPTER = TypeAdapter(UserContent)
+_DURATION_ADAPTER = TypeAdapter(timedelta)
 _INSTRUCTION_ID_ADAPTER = TypeAdapter(SerializedInstructionId)
 _USAGE_TOKEN_FIELDS = tuple(field.name for field in fields(RequestUsage) if field.name.endswith("_tokens"))
 _CORRELATED_PARTS = frozenset({
@@ -533,6 +535,79 @@ def _encode_messages(messages: Sequence[ModelMessage]) -> list[JsonValue]:
     return wire
 
 
+def _legacy_message_wire(value: dict[str, object]) -> dict[str, object]:
+    """Lower the frozen filesystem message format without altering its stored bytes."""
+    if "conversation_id" in value:
+        raise ValueError("message contains conflicting conversation identities")
+    wire = dict(value)
+    wire["conversation_id"] = wire.pop("agent_conversation_id")
+
+    def content(raw: object) -> object:
+        item = decode_user_content_item(raw)
+        _require_preserved_fields(raw, encode_user_content_item(item))
+        if isinstance(item, (ReferencedContent, RetiredReferencedContent)):
+            return {"kind": _HOST_CONTENT, "value": raw}
+        return _dump_native(_USER_CONTENT_ADAPTER, item)
+
+    def usage(raw: object) -> object:
+        if not isinstance(raw, dict):
+            raise ValueError("legacy usage must be an object")
+        result = dict(raw)
+        extensions = result.pop("extensions")
+        if not isinstance(extensions, dict) or extensions.keys() & (result.keys() | {"extensions"}):
+            raise ValueError("legacy usage extensions conflict with recorded fields")
+        result.update(extensions)
+        return result
+
+    parts = []
+    for original in wire["parts"]:
+        if not isinstance(original, dict):
+            raise ValueError("legacy message part must be an object")
+        part = dict(original)
+        kind = part.get("part_kind")
+        if kind == "user-prompt":
+            raw = part["content"]
+            if not isinstance(raw, dict):
+                raise ValueError("legacy prompt envelope is invalid")
+            if raw.get("type") == "text" and set(raw) == {"type", "value"}:
+                if not isinstance(raw["value"], str):
+                    raise ValueError("legacy prompt text is invalid")
+                part["content"] = raw["value"]
+            elif raw.get("type") == "items" and set(raw) == {"type", "items"} and isinstance(raw["items"], list):
+                part["content"] = [content(item) for item in raw["items"]]
+            else:
+                raise ValueError("legacy prompt envelope is invalid")
+        elif kind == "file":
+            part["content"] = content(part["content"])
+        elif kind == "speech" and part.get("audio") is not None:
+            part["audio"] = content(part["audio"])
+        parts.append(part)
+    wire["parts"] = parts
+    if wire.get("kind") == "response":
+        wire["usage"] = usage(wire["usage"])
+        if wire.get("failed_attempts") is not None:
+            if not isinstance(wire["failed_attempts"], list):
+                raise ValueError("legacy attempts must be a list")
+            attempts = []
+            for original in wire["failed_attempts"]:
+                if not isinstance(original, dict):
+                    raise ValueError("legacy attempt must be an object")
+                attempt = dict(original)
+                duration = attempt.pop("duration_us")
+                if type(duration) is not int or duration < 0 or "duration" in attempt:
+                    raise ValueError("legacy attempt duration is invalid")
+                try:
+                    elapsed = timedelta(microseconds=duration)
+                except OverflowError as error:
+                    raise ValueError("legacy attempt duration is invalid") from error
+                attempt["duration"] = _dump_native(_DURATION_ADAPTER, elapsed)
+                if attempt.get("usage") is not None:
+                    attempt["usage"] = usage(attempt["usage"])
+                attempts.append(attempt)
+            wire["failed_attempts"] = attempts
+    return wire
+
+
 def _decode_message(value: object) -> ModelMessage:
     if not isinstance(value, dict):
         raise ValueError("message must be an object")
@@ -543,6 +618,8 @@ def _decode_message(value: object) -> ModelMessage:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     if "kind" not in value or "parts" not in value or not isinstance(value["parts"], list):
         raise ValueError("durable message discriminators are required")
+    if "agent_conversation_id" in value:
+        value = _legacy_message_wire(value)
     wire = {key: item for key, item in value.items() if key != "version"}
     wire["parts"] = [dict(part) if isinstance(part, dict) else part for part in wire["parts"]]
     patches = []

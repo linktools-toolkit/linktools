@@ -135,11 +135,10 @@ preparation never occurred.
 Prepared running records cannot lose that preparation in a successor. Integrity
 checks still verify stored bytes; two deliberately rewritten absent request
 fields have the same shape as a legitimately unprepared response and cannot be
-distinguished by shape alone. Message bodies use the current unpublished native codec described below,
-not the superseded development encoding. Upgrade all participating readers and
-writers together; do not mix development encodings or roll back only the SDK
-after writing the current format. Existing stores are not automatically rewritten
-or migrated; retain a compatible reader or restore a coordinated backup.
+distinguished by shape alone. New message bodies use the native codec described
+below. The retained filesystem message format has a read-only adapter; existing
+bytes and their integrity references are unchanged. Upgrade participating readers
+before writing the current shape; an SDK-only rollback is not safe.
 
 `include_client_requests=True` loads original client attempt bodies independently
 of `include_content=True`, which loads the SDK request/response projection.
@@ -836,13 +835,22 @@ An omitted clock factory runs at read time; it is not proof of a historical
 timestamp. Exact pending continuation still fails closed when a missing clock
 value prevents proving that the recorded part is unchanged.
 
-This is an in-place change to the unpublished format, not an old-format reader or
-migration. The current writer uses native conversation and attempt duration
-fields, and no longer writes the former manual projections. Older development
-records are not promised readable; readers and writers sharing a namespace must
-be upgraded together. Do not clear actual stores, rewrite stored hashes, or claim
-an SDK-only rollback is safe after writing the current shape. Retain old data for
-an explicit operational decision rather than silently converting it.
+The current writer uses native conversation and attempt duration fields only.
+The retained filesystem format is recognized by its explicit
+`agent_conversation_id` field, rather than a failed native decode. Its frozen
+prompt envelope, usage-extension envelope and microsecond duration are lowered
+in memory to the same native validation path. Both conversation identity fields
+in one message are rejected. No legacy writer, fallback decoding, second durable
+state or automatic data rewrite is introduced. Archive decoding returns the
+original canonical bytes, so existing payload, projection and checkpoint hashes
+remain meaningful after offline filesystem snapshot restoration.
+
+This support does not restore unrelated removed fields or promise every obsolete
+development format. It remains necessary while retained filesystem archives are
+supported; removing it requires retiring that retained-data contract explicitly.
+Readers must be upgraded before current writers. Do not clear actual stores,
+rewrite stored hashes, or claim an SDK-only rollback is safe after writing the
+current shape.
 
 Native response identities are internal recorded facts, not untrusted import
 credentials. `model_id` records the actual successful configured model;

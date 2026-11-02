@@ -1,0 +1,7 @@
+{
+  "writer_commit": "527a681404a02d8cc057540eee6cf85dd26017ac",
+  "writer_path": "linktools-ai/src/linktools/ai/model/messages.py",
+  "writer_sha256": "591548f3fc91ebdf7a6588797aa7c8e85998f2f65458a02ff6559fbfe189a688",
+  "sha256": "4b5dc3caa6749d2b13cdc74a5fa17b65e058a262d80562fdc9ef87fea360feaf",
+  "note": "Captured with frozen old message writer and PydanticAI 2.64.0; no legacy State writer or deployed data changed."
+}
