@@ -102,7 +102,7 @@ class ModelInteractionRecorder(Protocol):
         usage: object | None,
         client_requests: tuple[ModelClientRequest, ...] | None = None,
         stream_attempts: tuple[ModelStreamAttempt, ...] | None = None,
-    ) -> None: ...
+    ) -> bool: ...
 
     async def record_model_event(
         self,
@@ -900,7 +900,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 # Freeze the resolved SDK identity before publishing the completed request.
                 response.run_id = response.run_id or ctx.run_id
                 response.conversation_id = response.conversation_id or ctx.conversation_id
-                if hasattr(response, "model_id"):
+                if model_request_seq in self._prepared_models and hasattr(response, "model_id"):
                     response.model_id = (response.model_id or self._serving_model_ids.get(model_request_seq)
                                          or request_context.model_id or selected_model.model_id)
                 interrupted = await self._complete_request(
@@ -1285,15 +1285,15 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         usage: RequestUsage | RunUsage | None,
         *,
         client_requests: tuple[ModelClientRequest, ...] | None = None,
-    ) -> None:
+    ) -> bool:
         recorder = self._interaction_recorder
         if recorder is None:
-            return
+            return False
         if client_requests is None:
             client_recorder = self._client_recorders.get(fact.model_request_seq)
             if client_recorder is not None:
                 client_requests = client_recorder.requests
-        recorder.finish_model_interaction(
+        return recorder.finish_model_interaction(
             fact,
             model=model,
             response=response,

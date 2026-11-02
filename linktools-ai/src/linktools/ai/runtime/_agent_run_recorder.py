@@ -102,12 +102,16 @@ class AgentRunRecorder:
         )
         self._transcript_messages: list[ModelMessage] = []
         self._pending_parts: dict[str, ModelMessage] = {}
-        self._stream_position: dict[str, int] = {}
+        self._stream_position: dict[str, JsonValue] = {}
         self._last_response_position: tuple[int, int] | None = None
 
     @property
-    def stream_position(self) -> Mapping[str, int]:
-        return dict(self._stream_position)
+    def stream_position(self) -> Mapping[str, JsonValue]:
+        return {
+            key: self._stream_position[key]
+            for key in ("model_request_seq", "stream_attempt_seq", "message_seq")
+            if key in self._stream_position
+        }
 
     def observe_stream_attempt(self, fact: ModelRequestFact, attempt: ModelStreamAttempt) -> None:
         if attempt.status == "RUNNING":
@@ -354,6 +358,18 @@ class AgentRunRecorder:
             next(iter(self._pending_parts.values())), ModelResponse,
         ):
             self.finish_transcript(interrupted=True)
+        if self._stream_position.get("is_direct_result") is True and complete:
+            # Native synthesizes part events after a direct response is already
+            # captured. They describe that occurrence, not another transcript.
+            sequence = self._stream_position.get("message_seq")
+            if not isinstance(sequence, int) or isinstance(sequence, bool):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            captured = self._transcript_messages[sequence - 1]
+            if (not isinstance(captured, ModelResponse) or part_index < 0 or part_index >= len(captured.parts)
+                    or captured.parts[part_index] != part):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self._pending_parts.pop(f"part:{part_index}", None)
+            return sequence
         if complete and isinstance(part, ToolCallPart) and part.tool_call_id in self._model_request_seq_by_tool_call:
             previous = self._restored_tool_calls.get(part.tool_call_id)
             if previous is None or not self._same_tool_call(previous, part):
@@ -512,6 +528,13 @@ class AgentRunRecorder:
 
     def finish_transcript(self, *, interrupted: bool = False) -> None:
         """Retain confirmed parts when no next request can capture their message."""
+        if (self._stream_position.get("is_direct_result") is True and self._pending_parts
+                and all(isinstance(value, ModelResponse) for value in self._pending_parts.values())):
+            # Cancellation may interrupt synthetic events for an already captured
+            # result. The canonical response remains the sole stored occurrence.
+            self._pending_parts.clear()
+            self._stage_transcript()
+            return
         if self._pending_parts:
             first = next(iter(self._pending_parts.values()))
             parts = [
@@ -596,7 +619,7 @@ class AgentRunRecorder:
         usage: object | None,
         client_requests: tuple[ModelClientRequest, ...] | None = None,
         stream_attempts: tuple[ModelStreamAttempt, ...] | None = None,
-    ) -> None:
+    ) -> bool:
         response_message_index = None
         response_error = None
         if status == "SUCCEEDED" and fact.purpose == "agent" and response is not None:
@@ -622,13 +645,20 @@ class AgentRunRecorder:
                 response = replace(response, state="interrupted")
                 response = cast(ModelResponse, self.append_transcript_message(response))
                 response_message_index = len(self._transcript_messages) - 1
-        self.model_interactions.finish_model_interaction(
+        is_direct_result = self.model_interactions.finish_model_interaction(
             fact, model=model, response=response, status=status, error_code=error_code,
             duration_ns=duration_ns, usage=usage, client_requests=client_requests,
             response_message_index=response_message_index, stream_attempts=stream_attempts,
         )
         if response_error is not None:
             raise response_error
+        if is_direct_result and response_message_index is not None:
+            self._stream_position = {
+                "model_request_seq": fact.model_request_seq,
+                "message_seq": response_message_index + 1,
+                "is_direct_result": True,
+            }
+        return is_direct_result
 
     def _capture_model_response(
         self, fact: ModelRequestFact, response: ModelResponse,

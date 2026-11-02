@@ -632,6 +632,11 @@ class StreamAttemptRecord:
 class ModelInteractionRecord:
     """Canonical lifecycle of one admitted logical model request.
 
+    is_direct_result marks a received response without observed managed request
+    preparation. It does not identify a cache or exclude external network calls.
+    Missing durable fields default to False and retain strict prepared-request
+    integrity; only new explicitly marked results may omit that preparation.
+
     client_requests is absent for uncaptured history; an empty tuple means the
     completed observation scope saw no client dispatch. Array positions belong
     only to actual client dispatches within this logical request. Stream attempt
@@ -657,10 +662,13 @@ class ModelInteractionRecord:
     attachments: tuple[Mapping[str, JsonValue], ...] = ()
     client_requests: tuple[ModelClientRequestRef, ...] | None = None
     stream_attempts: tuple[StreamAttemptRecord, ...] | None = None
+    is_direct_result: bool = False
 
     def __post_init__(self) -> None:
         if (
-            not self.agent_run_id
+            not isinstance(self.is_direct_result, bool)
+            or self.is_direct_result and (self.request_context is not None or self.response_context is None)
+            or not self.agent_run_id
             or self.step_index < 0
             or self.model_request_seq < 1
             or self.purpose not in {"agent", "compaction"}
@@ -700,10 +708,10 @@ class ModelInteractionRecord:
         ):
             raise ValueError("terminal model interaction needs completion data")
         if self.status == "SUCCEEDED" and (
-            self.request_context is None or self.response_context is None
+            (self.request_context is None and not self.is_direct_result) or self.response_context is None
         ):
             raise ValueError("successful model interaction needs request and response context")
-        if self.response_context is not None and self.request_context is None:
+        if self.response_context is not None and self.request_context is None and not self.is_direct_result:
             raise ValueError("model response context needs prepared request context")
         if self.status == "FAILED" and not self.error_code:
             raise ValueError("failed model interaction needs an error code")
@@ -730,6 +738,9 @@ class ModelInteractionRecord:
             "attachments",
             tuple(_normalize_model_attachment_fact(value) for value in self.attachments),
         )
+
+        if self.is_direct_result and any(value["fact"] == "included_in_request" for value in self.attachments):
+            raise ValueError("direct result cannot claim prepared request attachments")
 
     def validate_storage_domain(self, domain: PersistenceDomain) -> None:
         """Failed response bodies belong only to the trace retention domain."""

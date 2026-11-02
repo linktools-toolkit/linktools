@@ -39,15 +39,9 @@ def test_model_settings_delta_rejects_corrupt_window_flag(top_level):
         decode_model_messages(canonical_json_bytes(wire))
 
 
-def test_old_sdk_rejects_recorded_settings_instead_of_dropping_them(monkeypatch):
-    import linktools.ai.model.messages as codec
-
+def test_unknown_recorded_part_is_rejected_instead_of_dropped():
     wire = json.loads(encode_model_messages((ModelRequest(parts=[]),)))
-    wire[0]["parts"] = [{
-        "part_kind": "model-settings-delta", "settings": {"thinking": None},
-        "top_level": True,
-    }]
-    monkeypatch.setattr(codec, "ModelSettingsDeltaPart", None)
+    wire[0]["parts"] = [{"part_kind": "future-recorded-settings", "settings": {}}]
     with pytest.raises(AIError) as caught:
         decode_model_messages(canonical_json_bytes(wire))
     assert caught.value.code == ErrorCode.STORAGE_VERSION_UNSUPPORTED

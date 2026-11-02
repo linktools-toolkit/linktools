@@ -1217,9 +1217,9 @@ class StepExecutionHistoryReader:
             ]
             if instructions:
                 request["instructions"] = instructions
-            if response_messages is not None:
-                projected = project_public_messages(response_messages)
-                response = projected[0] if len(projected) == 1 else projected
+        if include_content and response_messages is not None:
+            projected = project_public_messages(response_messages)
+            response = projected[0] if len(projected) == 1 else projected
         stream_attempts = None
         if interaction.stream_attempts is not None:
             if include_content and (stream_responses is None or len(stream_responses) != len(interaction.stream_attempts)):

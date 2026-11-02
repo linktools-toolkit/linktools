@@ -5,42 +5,22 @@
 import binascii
 import json
 import math
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
 from datetime import datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import cast
 
-from pydantic import TypeAdapter
-from pydantic_core import ErrorDetails
+from pydantic import TypeAdapter, ValidationError
+from pydantic_core import PydanticSerializationError
 from pydantic_ai import RequestUsage
 from pydantic_ai.settings import ThinkingEffort
+from typing import get_args
 from pydantic_ai.messages import (
-    BinaryContent,
-    CompactionPart,
-    FilePart,
-    InstructionBaselinePart,
-    InstructionDeltaPart,
-    InstructionDigest,
-    InstructionId,
-    InstructionPart,
-    ModelMessage,
-    ModelRequest,
-    ModelRequestAttempt,
-    ModelResponse,
-    NativeToolCallPart,
-    NativeToolReturnPart,
-    RetryPromptPart,
-    SerializedInstructionId,
-    SpeechPart,
-    SystemPromptPart,
-    TextContent,
-    TextPart,
-    ThinkingPart,
-    ToolAvailabilityDeltaPart,
-    ToolCallPart,
-    ToolReturnPart,
-    UserPromptPart,
+    BinaryContent, InstructionBaselinePart, InstructionDeltaPart, InstructionDigest,
+    InstructionId, InstructionPart, SerializedInstructionId, ModelMessage, ModelMessagesTypeAdapter, ModelRequest,
+    ModelRequestAttempt, ModelResponse, NativeToolReturnPart, RetryPromptPart,
+    SpeechPart, SystemPromptPart, TextContent, ToolReturnPart, UserPromptPart,
 )
 
 try:
@@ -58,21 +38,19 @@ from ..errors import AIError, ErrorCode
 from . import model_input_content, ReferencedContent, project_model_attempts, project_model_response_attempts
 from ._attachment import binary_attachment_text, has_binary_attachment_metadata
 from ._user_content_codec import RetiredReferencedContent, decode_user_content_item, encode_user_content_item
-from ._wire_fields import decode_fields
 from ._json_snapshot import stable_json_snapshot
 from ._tool_return_codec import decode_tool_return_content, encode_tool_return_content
 
 _MESSAGE_VERSION = 1
-_RESPONSE_IDENTITY_FIELDS = frozenset(field.name for field in fields(ModelResponse)) & {"model_id", "canonical_system"}
-_TOOL_KINDS = frozenset({"tool-search", "capability-load"})
-_REQUEST_STATES = frozenset({"complete", "interrupted"})
-_RESPONSE_STATES = frozenset({"complete", "incomplete", "suspended", "interrupted"})
-_FINISH_REASONS = frozenset({"stop", "length", "content_filter", "tool_call", "error"})
-_TOOL_OUTCOMES = frozenset({"success", "failed", "denied", "interrupted", "retried"})
-_TOOL_RETRY_CAUSES = frozenset({"validation_error", "model_retry", "unknown_tool", "unavailable_tool"})
-_FEEDBACK_RETRY_CAUSES = frozenset({"validation_error", "model_retry", "no_output"})
-_ERROR_DETAILS_ADAPTER = TypeAdapter(list[ErrorDetails])
+_HOST_CONTENT = "linktools-content"
+_SUMMARY_KIND = "runtime-summary-prompt"
+_RETRY_ADAPTER = TypeAdapter(RetryPromptPart)
+_USAGE_ADAPTER = TypeAdapter(RequestUsage)
 _INSTRUCTION_ID_ADAPTER = TypeAdapter(SerializedInstructionId)
+_USAGE_TOKEN_FIELDS = tuple(field.name for field in fields(RequestUsage) if field.name.endswith("_tokens"))
+_CORRELATED_PARTS = frozenset({
+    "tool-call", "builtin-tool-call", "tool-return", "builtin-tool-return", "retry-prompt",
+})
 
 
 @dataclass
@@ -105,7 +83,7 @@ def project_provider_messages(
     """Lower Runtime summaries only in the outbound provider view."""
     return [
         replace(message, parts=[
-            SystemPromptPart(part.content, timestamp=part.timestamp, dynamic_ref=part.dynamic_ref)
+            _system_prompt(part)
             if isinstance(part, SummaryPromptPart) else part
             for part in message.parts
         ]) if isinstance(message, ModelRequest) else message
@@ -218,8 +196,12 @@ def binary_content_usage(messages: Sequence[ModelMessage]) -> tuple[int, int]:
 
 
 def encode_model_messages(messages: Sequence[ModelMessage]) -> bytes:
-    """Encode model history using the LinkTools-owned v1 durable contract."""
-    return canonical_json_bytes([_encode_message(message) for message in messages])
+    """Encode native message fields with the Runtime-owned durable extensions."""
+    try:
+        return canonical_json_bytes(_encode_messages(messages))
+    except PydanticSerializationError:
+        # Native diagnostics can embed message bodies; do not expose them as codec errors.
+        raise ValueError("durable native message value is invalid") from None
 
 
 def model_attempts_details(
@@ -302,6 +284,8 @@ def _read_model_message_payloads(
                 messages.append(_decode_message(leaf[0]))
     except AIError:
         raise
+    except ValidationError:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from None
     except (TypeError, ValueError, KeyError, binascii.Error) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     fragments.append(b"]")
@@ -330,612 +314,314 @@ def decode_model_messages(raw: bytes) -> tuple[ModelMessage, ...]:
         return tuple(_decode_message(item) for item in value)
     except AIError:
         raise
+    except ValidationError:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from None
     except (TypeError, ValueError, KeyError, binascii.Error) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-def _encode_message(message: ModelMessage) -> dict[str, JsonValue]:
-    if isinstance(message, ModelRequest):
-        return {
-            "version": _MESSAGE_VERSION,
-            "kind": "request",
-            "parts": [_encode_request_part(part) for part in message.parts],
-            "timestamp": _encode_datetime(message.timestamp),
-            "instructions": message.instructions,
-            "run_id": message.run_id,
-            "agent_conversation_id": message.conversation_id,
-            "metadata": _encode_optional_mapping(message.metadata),
-            "state": message.state,
-        }
+def _system_prompt(part: SystemPromptPart) -> SystemPromptPart:
+    return SystemPromptPart(**{
+        field.name: getattr(part, field.name) for field in fields(SystemPromptPart) if field.init
+    })
+
+
+def _normalize_native_wire(source: object, wire: object) -> object:
+    """Check pre-JSON values and order open metadata sets in one linear pass."""
+    if isinstance(source, float) and not math.isfinite(source):
+        raise ValueError("durable message JSON requires finite floats")
+    if isinstance(source, Mapping):
+        for key, item in source.items():
+            if not isinstance(key, str):
+                raise TypeError("durable message mappings require string keys")
+            if isinstance(wire, dict) and key in wire:
+                wire[key] = _normalize_native_wire(item, wire[key])
+            else:
+                _normalize_native_wire(item, None)
+    elif isinstance(source, (list, tuple)):
+        for index, item in enumerate(source):
+            if isinstance(wire, list) and index < len(wire):
+                wire[index] = _normalize_native_wire(item, wire[index])
+            else:
+                _normalize_native_wire(item, None)
+    elif isinstance(source, (set, frozenset)):
+        return stable_json_snapshot(source)
+    return wire
+
+
+def _dump_native(adapter: TypeAdapter, value: object) -> object:
+    # Keep the pre-JSON snapshot: native JSON serialization can erase NaN or key types.
+    source = adapter.dump_python(value, mode="python", warnings="error")
+    wire = adapter.dump_python(value, mode="json", warnings="error")
+    return _normalize_native_wire(source, wire)
+
+
+def _recorded_settings(value: object) -> dict[str, JsonValue]:
+    # Recorded windows are open JSON, unlike the SDK's model settings TypedDict.
+    result = _portable_json(value)
+    if not isinstance(result, dict):
+        raise ValueError("recorded model settings must be an object")
+    thinking = result.get("thinking")
+    if thinking is not None and thinking not in get_args(ThinkingEffort):
+        raise ValueError("recorded thinking setting is invalid")
+    return result
+
+
+def _tool_return_with_content(
+    part: ToolReturnPart | NativeToolReturnPart, content: object, tool_kind: str | None,
+) -> ToolReturnPart | NativeToolReturnPart:
+    if tool_kind is not None and not isinstance(tool_kind, str):
+        raise TypeError("tool kind must be a string")
+    owner = NativeToolReturnPart if isinstance(part, NativeToolReturnPart) else ToolReturnPart
+    restored = owner(**{
+        field.name: (content if field.name == "content" else tool_kind if field.name == "tool_kind"
+                     else getattr(part, field.name))
+        for field in fields(owner) if field.init
+    })
+    restored = owner.narrow_type(restored)
+    if restored.tool_kind != tool_kind:
+        raise ValueError("tool content does not substantiate its native kind")
+    return restored
+
+
+def _validate_message_facts(message: ModelMessage) -> None:
+    """Enforce durable invariants absent from the SDK's authoring dataclasses."""
+    usages = []
     if isinstance(message, ModelResponse):
-        message = project_model_response_attempts(message)
-        result: dict[str, JsonValue] = {
-            "version": _MESSAGE_VERSION,
-            "kind": "response",
-            "parts": [_encode_response_part(part) for part in message.parts],
-            "usage": _encode_usage(message.usage),
-            "model_name": message.model_name,
-            "timestamp": _encode_datetime(message.timestamp),
-            "provider_name": message.provider_name,
-            "provider_url": message.provider_url,
-            "provider_details": _encode_optional_mapping(message.provider_details),
-            "provider_response_id": message.provider_response_id,
-            "finish_reason": message.finish_reason,
-            "run_id": message.run_id,
-            "agent_conversation_id": message.conversation_id,
-            "metadata": _encode_optional_mapping(message.metadata),
-            "state": message.state,
-        }
-        for name in _RESPONSE_IDENTITY_FIELDS:
-            identity = getattr(message, name)
-            if identity is not None:
-                result[name] = identity
-        attempts = message.failed_attempts
-        if attempts is not None:
-            result["failed_attempts"] = _encode_model_attempts(attempts)
-        return result
-    raise TypeError(f"unsupported model message type: {type(message).__name__}")
+        usages.append(message.usage)
+        for attempt in message.failed_attempts or ():
+            if not isinstance(attempt.duration, timedelta) or attempt.duration < timedelta():
+                raise ValueError("model request attempt duration is invalid")
+            if not isinstance(attempt.timestamp, datetime) or attempt.timestamp.tzinfo is None:
+                raise ValueError("model request attempt timestamp must include a timezone")
+            if attempt.usage is not None:
+                usages.append(attempt.usage)
+    for usage in usages:
+        if usage.cost is not None and (not isinstance(usage.cost, Decimal) or not usage.cost.is_finite()):
+            raise ValueError("usage cost is invalid")
+        for name in _USAGE_TOKEN_FIELDS:
+            count = getattr(usage, name)
+            if type(count) is not int or count < 0:
+                raise ValueError("usage token count must be a nonnegative integer")
+    for part in message.parts:
+        if isinstance(part, SpeechPart) and part.interrupted_at_ms is not None:
+            if type(part.interrupted_at_ms) is not int or part.interrupted_at_ms < 0:
+                raise ValueError("speech interruption position is invalid")
+        retry = getattr(part, "retry", None)
+        if retry is not None:
+            if RetryInfo is None or not isinstance(retry, RetryInfo):
+                raise TypeError("retry information is invalid")
+            causes = ({"validation_error", "model_retry", "no_output"}
+                      if RetryFeedbackPart is not None and isinstance(part, RetryFeedbackPart)
+                      else {"validation_error", "model_retry", "unknown_tool", "unavailable_tool"})
+            if retry.cause not in causes:
+                raise ValueError("retry cause is invalid")
+            for budget in (retry.attempt, retry.max_retries):
+                if budget is not None and type(budget) is not int:
+                    raise ValueError("retry budget must be an integer or null")
+        instructions = (part.instructions if isinstance(part, InstructionBaselinePart)
+                        else [part] if isinstance(part, InstructionDeltaPart) else ())
+        for instruction in instructions:
+            if not isinstance(instruction, (InstructionPart, InstructionDigest, InstructionDeltaPart)):
+                raise TypeError("instruction value is invalid")
+            if instruction.id is not None and not isinstance(instruction.id, InstructionId):
+                raise TypeError("instruction identity is invalid")
+            if instruction.id is not None:
+                identity = _INSTRUCTION_ID_ADAPTER.validate_python(str(instruction.id))
+                if identity is None:
+                    raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+                if identity != instruction.id:
+                    raise ValueError("instruction identity is not durably representable")
+            digest = (instruction.content_hash if isinstance(instruction, InstructionDigest)
+                      else instruction.base_hash if isinstance(instruction, InstructionDeltaPart) else None)
+            if digest is not None and (not isinstance(digest, str) or len(digest) != 64
+                                       or any(char not in "0123456789abcdef" for char in digest)):
+                raise ValueError("instruction digest is invalid")
+
+
+def _require_preserved_fields(supplied: object, restored: object) -> None:
+    """Allow declared missing defaults, not ignored or coerced explicit facts."""
+    if supplied is restored:
+        return
+    if isinstance(supplied, dict):
+        if not isinstance(restored, dict) or supplied.keys() - restored.keys():
+            raise ValueError("native message decoder discarded fields")
+        for key, value in supplied.items():
+            _require_preserved_fields(value, restored[key])
+    elif isinstance(supplied, list):
+        if not isinstance(restored, list) or len(supplied) != len(restored):
+            raise ValueError("native message decoder changed a sequence")
+        for left, right in zip(supplied, restored):
+            _require_preserved_fields(left, right)
+    elif isinstance(supplied, str) and isinstance(restored, str) and supplied.endswith("+00:00") and restored == supplied[:-6] + "Z":
+        # Native datetime JSON uses Z for UTC; source archive bytes remain untouched.
+        return
+    elif type(supplied) is not type(restored) or supplied != restored:
+        raise ValueError("native message decoder changed an explicit value")
+
+
+def _encode_messages(messages: Sequence[ModelMessage]) -> list[JsonValue]:
+    lowered = []
+    patches = []
+    for mi, message in enumerate(messages):
+        _validate_message_facts(message)
+        if isinstance(message, ModelResponse):
+            message = project_model_response_attempts(message)
+        parts = []
+        for pi, part in enumerate(message.parts):
+            if isinstance(part, RetryPromptPart):
+                # The native union upgrades this supported authoring type to retry feedback,
+                # losing its tool correlation. Its own adapter retains the recorded fact.
+                parts.append(UserPromptPart("", timestamp=part.timestamp))
+                patches.append((mi, pi, "retry", _dump_native(_RETRY_ADAPTER, part)))
+            elif ModelSettingsDeltaPart is not None and isinstance(part, ModelSettingsDeltaPart):
+                settings = _recorded_settings(part.settings)
+                parts.append(replace(part, settings={}))
+                patches.append((mi, pi, "settings", settings))
+            elif isinstance(part, SummaryPromptPart):
+                parts.append(_system_prompt(part))
+                patches.append((mi, pi, "summary", None))
+            elif isinstance(part, UserPromptPart) and not isinstance(part.content, str):
+                content = []
+                for ci, item in enumerate(part.content):
+                    if isinstance(item, (ReferencedContent, RetiredReferencedContent)):
+                        content.append(TextContent(""))
+                        patches.append((mi, pi, ci, {
+                            "kind": _HOST_CONTENT, "value": encode_user_content_item(item),
+                        }))
+                    else:
+                        content.append(item)
+                parts.append(replace(part, content=content))
+            elif isinstance(part, (ToolReturnPart, NativeToolReturnPart)):
+                patches.append((mi, pi, "tool", (encode_tool_return_content(part.content), part.tool_kind)))
+                # The content owner preserves host references and snapshots. Native kind
+                # promotion happens against restored content, never its JSON placeholder.
+                parts.append(_tool_return_with_content(part, "", None))
+            else:
+                parts.append(part)
+        lowered.append(replace(message, parts=parts))
+    wire = _dump_native(ModelMessagesTypeAdapter, lowered)
+    for mi, pi, target, value in patches:
+        part = wire[mi]["parts"][pi]
+        if target == "summary":
+            part["part_kind"] = _SUMMARY_KIND
+        elif target == "retry":
+            wire[mi]["parts"][pi] = value
+        elif target == "settings":
+            part["settings"] = value
+        elif target == "tool":
+            original = messages[mi].parts[pi]
+            _tool_return_with_content(original, original.content, original.tool_kind)
+            part["content"], part["tool_kind"] = value
+        else:
+            part["content"][target] = value
+    for message, original in zip(wire, lowered):
+        message["version"] = _MESSAGE_VERSION
+        if isinstance(original, ModelResponse):
+            # The nested native attempt schema omits provider usage extensions.
+            # Delegate this value to its own native adapter, not another field map.
+            for index, attempt in enumerate(original.failed_attempts or ()):
+                if attempt.usage is not None:
+                    message["failed_attempts"][index]["usage"] = _dump_native(_USAGE_ADAPTER, attempt.usage)
+    return wire
 
 
 def _decode_message(value: object) -> ModelMessage:
-    if not isinstance(value, Mapping):
-        raise ValueError("model message must be an object")
+    if not isinstance(value, dict):
+        raise ValueError("message must be an object")
     version = value.get("version")
-    if isinstance(version, bool) or not isinstance(version, int):
-        raise ValueError("model message version is invalid")
+    if type(version) is not int:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if version != _MESSAGE_VERSION:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    kind = value.get("kind")
-    if kind == "request":
-        return ModelRequest(**decode_fields(value, ModelRequest, {
-            "state": lambda raw: _choice(raw, _REQUEST_STATES),
-            "parts": lambda raw: _decode_list(raw, _decode_request_part),
-            "timestamp": _decode_optional_datetime,
-            "instructions": _optional_string,
-            "run_id": _optional_string,
-            "agent_conversation_id": _optional_string,
-            "metadata": _decode_optional_mapping,
-        }, required={"version", "kind"}, aliases={"agent_conversation_id": "conversation_id"}))
-    if kind == "response":
-        return ModelResponse(**decode_fields(value, ModelResponse, {
-            "state": lambda raw: _choice(raw, _RESPONSE_STATES),
-            "finish_reason": lambda raw: None if raw is None else _choice(raw, _FINISH_REASONS),
-            "timestamp": _required_datetime,
-            "failed_attempts": _decode_model_attempts,
-            "parts": lambda raw: _decode_list(raw, _decode_response_part),
-            "usage": _decode_usage,
-            "model_name": _optional_string,
-            **{name: _optional_string for name in _RESPONSE_IDENTITY_FIELDS},
-            "provider_name": _optional_string,
-            "provider_url": _optional_string,
-            "provider_details": _decode_optional_mapping,
-            "provider_response_id": _optional_string,
-            "run_id": _optional_string,
-            "agent_conversation_id": _optional_string,
-            "metadata": _decode_optional_mapping,
-        }, required={"version", "kind"}, aliases={"agent_conversation_id": "conversation_id"}))
-    raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-
-def _encode_request_part(part: object) -> dict[str, JsonValue]:
-    if isinstance(part, SystemPromptPart):
-        return {
-            "part_kind": ("runtime-summary-prompt" if isinstance(part, SummaryPromptPart)
-                          else "system-prompt"),
-            "content": part.content,
-            "timestamp": _encode_datetime(part.timestamp),
-            "dynamic_ref": part.dynamic_ref,
-        }
-    if isinstance(part, UserPromptPart):
-        content: dict[str, JsonValue]
-        if isinstance(part.content, str):
-            content = {"type": "text", "value": part.content}
+    if "kind" not in value or "parts" not in value or not isinstance(value["parts"], list):
+        raise ValueError("durable message discriminators are required")
+    wire = {key: item for key, item in value.items() if key != "version"}
+    wire["parts"] = [dict(part) if isinstance(part, dict) else part for part in wire["parts"]]
+    patches = []
+    attempt_usages = []
+    if isinstance(wire.get("failed_attempts"), list):
+        wire["failed_attempts"] = [dict(attempt) if isinstance(attempt, dict) else attempt
+                                   for attempt in wire["failed_attempts"]]
+        for index, attempt in enumerate(wire["failed_attempts"]):
+            if isinstance(attempt, dict) and attempt.get("usage") is not None:
+                usage = _USAGE_ADAPTER.validate_python(attempt["usage"])
+                usage_wire = _USAGE_ADAPTER.dump_python(usage, mode="json", warnings="error")
+                _require_preserved_fields(attempt["usage"], usage_wire)
+                attempt_usages.append((index, usage))
+                attempt["usage"] = None
+    for pi, part in enumerate(wire["parts"]):
+        if not isinstance(part, dict) or "part_kind" not in part:
+            raise ValueError("durable part discriminator is required")
+        kind = part["part_kind"]
+        instructions = (part.get("instructions", ()) if kind == "instruction-baseline"
+                        else [part] if kind == "instruction-delta" else ())
+        if isinstance(instructions, list):
+            for instruction in instructions:
+                if not isinstance(instruction, dict):
+                    continue
+                if instruction.get("part_kind") not in {"instruction", "instruction-digest", "instruction-delta"}:
+                    raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+                identity = instruction.get("id")
+                if isinstance(identity, str) and _INSTRUCTION_ID_ADAPTER.validate_python(identity) is None:
+                    raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        if kind in _CORRELATED_PARTS and "tool_call_id" not in part:
+            raise ValueError("durable tool correlation is required")
+        if kind == "retry-prompt":
+            restored = _RETRY_ADAPTER.validate_python(part)
+            _require_preserved_fields(part, _RETRY_ADAPTER.dump_python(restored, mode="json", warnings="error"))
+            patches.append((pi, "retry", restored))
+            wire["parts"][pi] = {"part_kind": "user-prompt", "content": ""}
+        elif kind == "model-settings-delta":
+            patches.append((pi, "settings", _recorded_settings(part["settings"])))
+            part["settings"] = {}
+        elif kind == _SUMMARY_KIND:
+            part["part_kind"] = "system-prompt"
+            patches.append((pi, "summary", None))
+        elif kind == "user-prompt" and isinstance(part.get("content"), list):
+            part["content"] = list(part["content"])
+            for ci, item in enumerate(part["content"]):
+                if isinstance(item, dict) and item.get("kind") == _HOST_CONTENT:
+                    if set(item) != {"kind", "value"}:
+                        raise ValueError("host content envelope is invalid")
+                    restored = decode_user_content_item(item["value"])
+                    if not isinstance(restored, (ReferencedContent, RetiredReferencedContent)):
+                        raise ValueError("host content must be a reference descriptor")
+                    patches.append((pi, ci, restored))
+                    part["content"][ci] = {"kind": "text-content", "content": ""}
+        elif kind in {"tool-return", "builtin-tool-return"}:
+            content = decode_tool_return_content(part["content"])
+            patches.append((pi, "tool", (content, part.get("tool_kind"))))
+            part["content"] = ""
+            part["tool_kind"] = None
+    try:
+        message, = ModelMessagesTypeAdapter.validate_python([wire])
+    except ValidationError as error:
+        code = (ErrorCode.STORAGE_VERSION_UNSUPPORTED
+                if all(item["type"] == "union_tag_invalid" for item in error.errors(include_input=False, include_context=False))
+                else ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(code) from None
+    # Global extra=forbid would reject supported provider usage extensions.
+    _require_preserved_fields(wire, ModelMessagesTypeAdapter.dump_python([message], mode="json", warnings="error")[0])
+    for pi, target, restored in patches:
+        part = message.parts[pi]
+        if target == "summary":
+            message.parts[pi] = SummaryPromptPart(**{
+                field.name: getattr(part, field.name) for field in fields(SystemPromptPart) if field.init
+            })
+        elif target == "retry":
+            message.parts[pi] = restored
+        elif target == "settings":
+            part.settings = restored
+        elif target == "tool":
+            message.parts[pi] = _tool_return_with_content(part, *restored)
         else:
-            content = {
-                "type": "items",
-                "items": [encode_user_content_item(item) for item in part.content],
-            }
-        return {
-            "part_kind": "user-prompt",
-            "content": content,
-            "timestamp": _encode_datetime(part.timestamp),
-        }
-    if isinstance(part, ToolReturnPart):
-        return _encode_tool_return_part(part, native=False)
-    if isinstance(part, RetryPromptPart):
-        return {
-            "part_kind": "retry-prompt",
-            "content": _portable_json(part.content),
-            "tool_name": part.tool_name,
-            "tool_call_id": part.tool_call_id,
-            "timestamp": _encode_datetime(part.timestamp),
-        }
-    if RetryFeedbackPart is not None and isinstance(part, RetryFeedbackPart):
-        return {
-            "part_kind": "retry-feedback",
-            "content": _portable_json(_retry_content(part.content)),
-            "retry": _encode_retry_info(part.retry, feedback=True),
-            "timestamp": _encode_datetime(part.timestamp),
-        }
-    if isinstance(part, ToolAvailabilityDeltaPart):
-        return {
-            "part_kind": "tool-availability-delta",
-            "tools_added": list(part.tools_added),
-            "tool_call_id": part.tool_call_id,
-        }
-    if ModelSettingsDeltaPart is not None and isinstance(part, ModelSettingsDeltaPart):
-        return {
-            "part_kind": "model-settings-delta",
-            "settings": _recorded_model_settings(part.settings),
-            "top_level": _settings_top_level(part.top_level),
-        }
-    if isinstance(part, InstructionBaselinePart):
-        if not isinstance(part.instructions, list):
-            raise TypeError("instruction baseline must contain a list")
-        return {
-            "part_kind": "instruction-baseline",
-            "instructions": [_encode_instruction_block(block) for block in part.instructions],
-        }
-    if isinstance(part, InstructionDeltaPart):
-        return {
-            "part_kind": "instruction-delta",
-            "id": _encode_instruction_id(part.id),
-            "content": _optional_string(part.content),
-            "base_hash": None if part.base_hash is None else _instruction_hash(part.base_hash),
-        }
-    if isinstance(part, CompactionPart):
-        if not hasattr(CompactionPart, "metadata"):
-            raise TypeError("SDK does not support request-side compaction")
-        return _encode_response_part(part)
-    if isinstance(part, SpeechPart):
-        return _encode_speech_part(part)
-    raise TypeError(f"unsupported model request part: {type(part).__name__}")
+            part.content[target] = restored
+    for index, usage in attempt_usages:
+        message.failed_attempts[index] = replace(message.failed_attempts[index], usage=usage)
+    _validate_message_facts(message)
+    return message
 
-
-def _decode_request_part(value: object) -> object:
-    part = _part_mapping(value)
-    kind = part.get("part_kind")
-    if kind in {"system-prompt", "runtime-summary-prompt"}:
-        part_type = SummaryPromptPart if kind == "runtime-summary-prompt" else SystemPromptPart
-        return part_type(**decode_fields(part, part_type, {
-            "content": _required_string,
-            "timestamp": _required_datetime,
-            "dynamic_ref": _optional_string,
-        }, required={"part_kind"}))
-    if kind == "user-prompt":
-        return UserPromptPart(**decode_fields(part, UserPromptPart, {
-            "content": _decode_prompt_content,
-            "timestamp": _required_datetime,
-        }, required={"part_kind"}))
-    if kind == "tool-return":
-        return _decode_tool_return_part(part, native=False)
-    if kind == "retry-prompt":
-        return RetryPromptPart(**decode_fields(part, RetryPromptPart, {
-            "content": _retry_content,
-            "tool_name": _optional_string,
-            "tool_call_id": _required_string,
-            "timestamp": _required_datetime,
-        }, required={"part_kind", "tool_call_id"}))
-    if kind == "retry-feedback":
-        if RetryFeedbackPart is None:
-            _require_keys(part, {"part_kind", "content", "retry", "timestamp"})
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        return RetryFeedbackPart(**decode_fields(part, RetryFeedbackPart, {
-            "content": _retry_content,
-            "retry": lambda raw: _decode_retry_info(raw, feedback=True),
-            "timestamp": _required_datetime,
-        }, required={"part_kind"}))
-    if kind == "tool-availability-delta":
-        return ToolAvailabilityDeltaPart(**decode_fields(part, ToolAvailabilityDeltaPart, {
-            "tools_added": lambda raw: _decode_list(raw, _required_string),
-            "tool_call_id": _optional_string,
-        }, required={"part_kind"}))
-    if kind == "model-settings-delta":
-        if ModelSettingsDeltaPart is None:
-            _require_keys(part, {"part_kind", "settings", "top_level"})
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        return ModelSettingsDeltaPart(**decode_fields(part, ModelSettingsDeltaPart, {
-            "settings": _recorded_model_settings,
-            "top_level": _settings_top_level,
-        }, required={"part_kind"}))
-    if kind == "instruction-baseline":
-        return InstructionBaselinePart(**decode_fields(part, InstructionBaselinePart, {
-            "instructions": lambda raw: _decode_list(raw, _decode_instruction_block),
-        }, required={"part_kind"}))
-    if kind == "instruction-delta":
-        return InstructionDeltaPart(**decode_fields(part, InstructionDeltaPart, {
-            "id": _decode_instruction_id,
-            "content": _optional_string,
-            "base_hash": lambda raw: None if raw is None else _instruction_hash(raw),
-        }, required={"part_kind"}))
-    if kind == "compaction":
-        if not hasattr(CompactionPart, "metadata"):
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        return _decode_response_part(part)
-    if kind == "speech":
-        speech = _decode_speech_part(part)
-        if speech.speaker != "user":
-            raise ValueError("request speech speaker is invalid")
-        return speech
-    raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-
-
-def _decode_prompt_content(value: object) -> object:
-    if not isinstance(value, Mapping):
-        raise ValueError("user prompt content is invalid")
-    content_type = value.get("type")
-    if content_type == "text":
-        _require_keys(value, {"type", "value"})
-        return _required_string(value["value"])
-    if content_type == "items":
-        _require_keys(value, {"type", "items"})
-        return _decode_list(value["items"], decode_user_content_item)
-    raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-
-def _recorded_model_settings(value: object) -> dict[str, JsonValue]:
-    if not isinstance(value, Mapping):
-        raise ValueError("recorded model settings must be a mapping")
-    if value.get("thinking") is not None:
-        TypeAdapter(ThinkingEffort).validate_python(value["thinking"], strict=True)
-    return cast(dict[str, JsonValue], _portable_json(value))
-
-
-def _settings_top_level(value: object) -> bool:
-    if not isinstance(value, bool):
-        raise ValueError("model settings top_level must be a boolean")
-    return value
-
-
-def _encode_instruction_block(block: object) -> dict[str, JsonValue]:
-    if isinstance(block, InstructionPart):
-        return {
-            "part_kind": "instruction",
-            "id": _encode_instruction_id(block.id),
-            "content": _required_string(block.content),
-            "dynamic": _instruction_dynamic(block.dynamic),
-            "on_change": _instruction_policy(block.on_change),
-            "name": _optional_string(block.name),
-        }
-    if isinstance(block, InstructionDigest):
-        return {
-            "part_kind": "instruction-digest",
-            "id": _encode_instruction_id(block.id),
-            "dynamic": _instruction_dynamic(block.dynamic),
-            "content_hash": _instruction_hash(block.content_hash),
-        }
-    raise TypeError(f"unsupported instruction baseline block: {type(block).__name__}")
-
-
-def _decode_instruction_block(value: object) -> object:
-    block = _part_mapping(value)
-    kind = block.get("part_kind")
-    if kind == "instruction":
-        return InstructionPart(**decode_fields(block, InstructionPart, {
-            "content": _required_string,
-            "id": _decode_instruction_id,
-            "dynamic": _instruction_dynamic,
-            "on_change": _instruction_policy,
-            "name": _optional_string,
-        }, required={"part_kind"}))
-    if kind == "instruction-digest":
-        return InstructionDigest(**decode_fields(block, InstructionDigest, {
-            "id": _decode_instruction_id,
-            "dynamic": _instruction_dynamic,
-            "content_hash": _instruction_hash,
-        }, required={"part_kind"}))
-    raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-
-def _encode_instruction_id(value: InstructionId | None) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, InstructionId):
-        raise TypeError("instruction id must be an InstructionId")
-    encoded = str(value)
-    if _decode_instruction_id(encoded) != value:
-        raise ValueError("instruction id is invalid")
-    return encoded
-
-
-def _decode_instruction_id(value: object) -> InstructionId | None:
-    if value is None:
-        return None
-    encoded = _required_string(value)
-    result = _INSTRUCTION_ID_ADAPTER.validate_python(encoded)
-    # SDK readers replace unknown source namespaces with None; durable history must not lose them.
-    if result is None:
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    return result
-
-
-def _instruction_dynamic(value: object) -> bool:
-    if not isinstance(value, bool):
-        raise ValueError("instruction dynamic flag is invalid")
-    return value
-
-
-def _instruction_policy(value: object) -> str:
-    if not isinstance(value, str) or value not in {"rewrite", "append"}:
-        raise ValueError("instruction change policy is invalid")
-    return value
-
-
-def _instruction_hash(value: object) -> str:
-    if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
-        raise ValueError("instruction content hash is invalid")
-    return value
-
-
-def _encode_response_part(part: object) -> dict[str, JsonValue]:
-    if isinstance(part, TextPart):
-        return {
-            "part_kind": "text",
-            "content": part.content,
-            "id": part.id,
-            "provider_name": part.provider_name,
-            "provider_details": _encode_optional_mapping(part.provider_details),
-        }
-    if isinstance(part, NativeToolCallPart):
-        return _encode_tool_call_part(part, native=True)
-    if isinstance(part, ToolCallPart):
-        return _encode_tool_call_part(part, native=False)
-    if isinstance(part, NativeToolReturnPart):
-        return _encode_tool_return_part(part, native=True)
-    if isinstance(part, ThinkingPart):
-        return {
-            "part_kind": "thinking",
-            "content": part.content,
-            "id": part.id,
-            "signature": part.signature,
-            "provider_name": part.provider_name,
-            "provider_details": _encode_optional_mapping(part.provider_details),
-        }
-    if isinstance(part, CompactionPart):
-        return {
-            "part_kind": "compaction",
-            "content": part.content,
-            "id": part.id,
-            "provider_name": part.provider_name,
-            "provider_details": _encode_optional_mapping(part.provider_details),
-            **({"metadata": _encode_optional_mapping(part.metadata)}
-               if hasattr(part, "metadata") and part.metadata is not None else {}),
-        }
-    if isinstance(part, FilePart):
-        return {
-            "part_kind": "file",
-            "content": encode_user_content_item(part.content),
-            "id": part.id,
-            "provider_name": part.provider_name,
-            "provider_details": _encode_optional_mapping(part.provider_details),
-        }
-    if isinstance(part, SpeechPart):
-        return _encode_speech_part(part)
-    raise TypeError(f"unsupported model response part: {type(part).__name__}")
-
-
-def _decode_response_part(value: object) -> object:
-    part = _part_mapping(value)
-    kind = part.get("part_kind")
-    if kind == "text":
-        return TextPart(**decode_fields(part, TextPart, {
-            "content": _required_string,
-            "id": _optional_string,
-            "provider_name": _optional_string,
-            "provider_details": _decode_optional_mapping,
-        }, required={"part_kind"}))
-    if kind == "tool-call":
-        return _decode_tool_call_part(part, native=False)
-    if kind == "builtin-tool-call":
-        return _decode_tool_call_part(part, native=True)
-    if kind == "builtin-tool-return":
-        return _decode_tool_return_part(part, native=True)
-    if kind == "thinking":
-        return ThinkingPart(**decode_fields(part, ThinkingPart, {
-            "content": _required_string,
-            "id": _optional_string,
-            "signature": _optional_string,
-            "provider_name": _optional_string,
-            "provider_details": _decode_optional_mapping,
-        }, required={"part_kind"}))
-    if kind == "compaction":
-        if "metadata" in part and not hasattr(CompactionPart, "metadata"):
-            _require_keys(part, {"part_kind", "content", "id", "provider_name", "provider_details", "metadata"})
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        decoders = {
-            "content": _optional_string,
-            "id": _optional_string,
-            "provider_name": _optional_string,
-            "provider_details": _decode_optional_mapping,
-        }
-        if hasattr(CompactionPart, "metadata"):
-            decoders["metadata"] = _decode_optional_mapping
-        return CompactionPart(**decode_fields(part, CompactionPart, decoders, required={"part_kind"}))
-    if kind == "file":
-        return FilePart(**decode_fields(part, FilePart, {
-            "content": _decode_binary_content,
-            "id": _optional_string,
-            "provider_name": _optional_string,
-            "provider_details": _decode_optional_mapping,
-        }, required={"part_kind"}))
-    if kind == "speech":
-        speech = _decode_speech_part(part)
-        if speech.speaker != "assistant":
-            raise ValueError("response speech speaker is invalid")
-        return speech
-    raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-
-
-def _decode_binary_content(value: object) -> BinaryContent:
-    content = decode_user_content_item(value)
-    if not isinstance(content, BinaryContent):
-        raise ValueError("binary message content is invalid")
-    return content
-
-def _encode_tool_call_part(
-    part: ToolCallPart | NativeToolCallPart,
-    *,
-    native: bool,
-) -> dict[str, JsonValue]:
-    tool_kind = _encode_tool_kind(part.tool_kind)
-    result: dict[str, JsonValue] = {
-        "part_kind": "builtin-tool-call" if native else "tool-call",
-        "tool_name": part.tool_name,
-        "args": _portable_json(part.args),
-        "tool_call_id": part.tool_call_id,
-        "tool_kind": tool_kind,
-        "id": part.id,
-        "provider_name": part.provider_name,
-        "provider_details": _encode_optional_mapping(part.provider_details),
-    }
-    return result
-
-
-def _decode_tool_call_part(
-    part: Mapping[str, object],
-    *,
-    native: bool,
-) -> object:
-    part_type = NativeToolCallPart if native else ToolCallPart
-    value = part_type(**decode_fields(part, part_type, {
-        "tool_kind": _decode_tool_kind,
-        "args": _decode_tool_args,
-        "tool_name": _required_string,
-        "tool_call_id": _required_string,
-        "id": _optional_string,
-        "provider_name": _optional_string,
-        "provider_details": _decode_optional_mapping,
-    }, required={"part_kind", "tool_call_id"}))
-    return part_type.narrow_type(value)
-
-
-def _decode_tool_args(value: object) -> object:
-    if value is not None and not isinstance(value, (str, Mapping)):
-        raise ValueError("tool call args are invalid")
-    return dict(value) if isinstance(value, Mapping) else value
-
-def _encode_tool_return_part(
-    part: ToolReturnPart | NativeToolReturnPart,
-    *,
-    native: bool,
-) -> dict[str, JsonValue]:
-    if part.outcome not in _TOOL_OUTCOMES:
-        raise ValueError("tool outcome is invalid")
-    if part.outcome == "retried" and RetryInfo is None:
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    result: dict[str, JsonValue] = {
-        "part_kind": "builtin-tool-return" if native else "tool-return",
-        "tool_name": part.tool_name,
-        "content": encode_tool_return_content(part.content),
-        "tool_call_id": part.tool_call_id,
-        "tool_kind": _encode_tool_kind(part.tool_kind),
-        "metadata": _portable_json(part.metadata),
-        "timestamp": _encode_datetime(part.timestamp),
-        "outcome": part.outcome,
-    }
-    if native:
-        native_part = cast(NativeToolReturnPart, part)
-        result["provider_name"] = native_part.provider_name
-        result["provider_details"] = _encode_optional_mapping(
-            native_part.provider_details
-        )
-    elif RetryInfo is not None:
-        tool_part = cast(ToolReturnPart, part)
-        if tool_part.retry is not None:
-            result["retry"] = _encode_retry_info(tool_part.retry, feedback=False)
-    return result
-
-
-def _decode_tool_return_part(
-    part: Mapping[str, object],
-    *,
-    native: bool,
-) -> object:
-    part_type = NativeToolReturnPart if native else ToolReturnPart
-    decoders: dict[str, Callable[[object], object]] = {
-        "outcome": _decode_tool_outcome,
-        "tool_name": _required_string,
-        "content": decode_tool_return_content,
-        "tool_call_id": _required_string,
-        "tool_kind": _decode_tool_kind,
-        "metadata": _portable_json,
-        "timestamp": _required_datetime,
-    }
-    if native:
-        decoders.update(provider_name=_optional_string, provider_details=_decode_optional_mapping)
-    elif "retry" in part or RetryInfo is not None:
-        decoders["retry"] = lambda raw: None if raw is None else _decode_retry_info(raw, feedback=False)
-    kwargs = decode_fields(part, part_type, decoders, required={"part_kind", "tool_call_id"})
-    if kwargs.get("retry") is None and not any(field.name == "retry" for field in fields(part_type)):
-        kwargs.pop("retry", None)
-    value = part_type(**kwargs)
-    return part_type.narrow_type(value)
-
-
-def _decode_tool_outcome(value: object) -> str:
-    outcome = _choice(value, _TOOL_OUTCOMES)
-    if outcome == "retried" and RetryInfo is None:
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    return outcome
-
-def _retry_content(value: object) -> str | list[ErrorDetails]:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        return _ERROR_DETAILS_ADAPTER.validate_python(value)
-    raise ValueError("retry content is invalid")
-
-
-def _encode_retry_info(value: object, *, feedback: bool) -> dict[str, JsonValue]:
-    if RetryInfo is None or not isinstance(value, RetryInfo):
-        raise TypeError("retry information is invalid")
-    causes = _FEEDBACK_RETRY_CAUSES if feedback else _TOOL_RETRY_CAUSES
-    if not isinstance(value.cause, str) or value.cause not in causes:
-        raise ValueError("retry cause is invalid")
-    for budget in (value.attempt, value.max_retries):
-        if budget is not None and (isinstance(budget, bool) or not isinstance(budget, int)):
-            raise ValueError("retry budget must be an integer or null")
-    return {"cause": value.cause, "attempt": value.attempt, "max_retries": value.max_retries}
-
-
-def _decode_retry_info(value: object, *, feedback: bool) -> "RetryInfo":
-    raw = _part_mapping(value)
-    if RetryInfo is None:
-        _require_keys(raw, {"cause", "attempt", "max_retries"})
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    retry = RetryInfo(**decode_fields(raw, RetryInfo, {
-        "cause": lambda item: item,
-        "attempt": lambda item: item,
-        "max_retries": lambda item: item,
-    }))
-    # The SDK dataclass constructor does not validate its field annotations.
-    _encode_retry_info(retry, feedback=feedback)
-    return retry
-
-def _encode_speech_part(part: SpeechPart) -> dict[str, JsonValue]:
-    return {
-        "part_kind": "speech",
-        "speaker": part.speaker,
-        "transcript": part.transcript,
-        "audio": (
-            None
-            if part.audio is None
-            else encode_user_content_item(part.audio)
-        ),
-        "interrupted_at_ms": part.interrupted_at_ms,
-        "id": part.id,
-        "provider_name": part.provider_name,
-        "provider_details": _encode_optional_mapping(part.provider_details),
-    }
-
-
-def _decode_speech_part(part: Mapping[str, object]) -> SpeechPart:
-    return SpeechPart(**decode_fields(part, SpeechPart, {
-        "speaker": lambda raw: _choice(raw, frozenset({"user", "assistant"})),
-        "transcript": _optional_string,
-        "audio": lambda raw: None if raw is None else _decode_binary_content(raw),
-        "interrupted_at_ms": lambda raw: None if raw is None else _nonnegative_integer(raw),
-        "id": _optional_string,
-        "provider_name": _optional_string,
-        "provider_details": _decode_optional_mapping,
-    }, required={"part_kind"}))
 
 def _encode_model_attempts(attempts: Sequence[object]) -> JsonValue:
     values: list[JsonValue] = []
@@ -961,40 +647,6 @@ def _encode_model_attempts(attempts: Sequence[object]) -> JsonValue:
     return values
 
 
-def _decode_model_attempts(value: object) -> list[object]:
-    if not isinstance(value, list):
-        raise ValueError("model request attempts must be a list")
-    attempts: list[object] = []
-    for item in value:
-        if not isinstance(item, Mapping):
-            raise ValueError("model request attempt must be an object")
-        attempts.append(ModelRequestAttempt(**decode_fields(item, ModelRequestAttempt, {
-            "model_name": _required_string,
-            "provider_name": _optional_string,
-            "outcome": lambda raw: _choice(raw, frozenset({"error", "rejected"})),
-            "error": _optional_string,
-            "timestamp": _attempt_timestamp,
-            "duration_us": _attempt_duration,
-            "usage": lambda raw: None if raw is None else _decode_usage(raw),
-        }, aliases={"duration_us": "duration"})))
-    return attempts
-
-
-def _attempt_timestamp(value: object) -> datetime:
-    timestamp = _required_datetime(value)
-    if timestamp.tzinfo is None:
-        raise ValueError("model request attempt timestamp must include a timezone")
-    return timestamp
-
-
-def _attempt_duration(value: object) -> timedelta:
-    if type(value) is not int or value < 0:
-        raise ValueError("model request attempt duration is invalid")
-    try:
-        return timedelta(microseconds=value)
-    except OverflowError as error:
-        raise ValueError("model request attempt duration is invalid") from error
-
 def _encode_usage(usage: RequestUsage) -> dict[str, JsonValue]:
     known = {
         "input_tokens": usage.input_tokens,
@@ -1016,87 +668,6 @@ def _encode_usage(usage: RequestUsage) -> dict[str, JsonValue]:
     return cast(dict[str, JsonValue], known)
 
 
-def _decode_usage(value: object) -> RequestUsage:
-    if not isinstance(value, Mapping):
-        raise ValueError("usage must be an object")
-    numeric_names = (
-        "input_tokens", "cache_write_tokens", "cache_read_tokens", "output_tokens",
-        "input_audio_tokens", "cache_audio_read_tokens", "output_audio_tokens",
-    )
-    decoders: dict[str, Callable[[object], object]] = {
-        name: _nonnegative_integer for name in numeric_names
-    }
-    decoders.update(details=_usage_details, cost=_usage_cost)
-    kwargs = decode_fields(value, RequestUsage, decoders, required={"extensions"})
-    extensions = value["extensions"]
-    if not isinstance(extensions, Mapping) or any(not isinstance(key, str) for key in extensions):
-        raise ValueError("usage extensions are invalid")
-    if set(extensions) & (set(decoders) | {"extensions"}):
-        raise ValueError("usage extensions cannot override standard fields")
-    return RequestUsage(**kwargs, **dict(extensions))
-
-
-def _usage_details(value: object) -> dict[str, object]:
-    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
-        raise ValueError("usage details are invalid")
-    return dict(value)
-
-
-def _usage_cost(value: object) -> Decimal | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ValueError("usage cost is invalid")
-    try:
-        result = Decimal(value)
-    except (InvalidOperation, ValueError) as error:
-        raise ValueError("usage cost is invalid") from error
-    if not result.is_finite():
-        raise ValueError("usage cost is invalid")
-    return result
-
-
-def _nonnegative_integer(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError("nonnegative integer is required")
-    return value
-
-def _encode_optional_mapping(value: object) -> JsonValue:
-    if value is None:
-        return None
-    encoded = _portable_json(value)
-    if not isinstance(encoded, dict):
-        raise TypeError("durable message metadata must be an object")
-    return encoded
-
-
-def _decode_optional_mapping(value: object) -> dict[str, object] | None:
-    if value is None:
-        return None
-    encoded = _portable_json(value)
-    if not isinstance(encoded, dict):
-        raise ValueError("durable message metadata is invalid")
-    return cast(dict[str, object], encoded)
-
-
-def _encode_tool_kind(value: object) -> JsonValue:
-    if value is None:
-        return None
-    if not isinstance(value, str) or value not in _TOOL_KINDS:
-        raise TypeError("unsupported tool part kind")
-    return value
-
-
-def _decode_tool_kind(value: object) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ValueError("tool part kind is invalid")
-    if value not in _TOOL_KINDS:
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    return value
-
-
 def _encode_datetime(value: datetime | None) -> JsonValue:
     if value is None:
         return None
@@ -1106,61 +677,6 @@ def _encode_datetime(value: datetime | None) -> JsonValue:
     return encoded[:-6] + "Z" if encoded.endswith("+00:00") else encoded
 
 
-def _decode_optional_datetime(value: object) -> datetime | None:
-    if value is None:
-        return None
-    return _required_datetime(value)
-
-
-def _required_datetime(value: object) -> datetime:
-    if not isinstance(value, str):
-        raise ValueError("message timestamp is invalid")
-    try:
-        return datetime.fromisoformat(
-            value[:-1] + "+00:00" if value.endswith("Z") else value
-        )
-    except ValueError as error:
-        raise ValueError("message timestamp is invalid") from error
-
-
-def _optional_string(value: object) -> str | None:
-    if value is not None and not isinstance(value, str):
-        raise ValueError("optional string is invalid")
-    return cast(str | None, value)
-
-
-def _required_string(value: object) -> str:
-    if not isinstance(value, str):
-        raise ValueError("required string is invalid")
-    return value
-
-
-def _part_mapping(value: object) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
-        raise ValueError("message part must be an object")
-    return cast(Mapping[str, object], value)
-
-
-
-def _decode_list(value: object, decode: Callable[[object], object]) -> list[object]:
-    if not isinstance(value, list):
-        raise ValueError("message field must be a list")
-    return [decode(item) for item in value]
-
-
-def _choice(value: object, choices: frozenset[str]) -> str:
-    result = _required_string(value)
-    if result not in choices:
-        raise ValueError("message field has an invalid choice")
-    return result
-
-
-def _require_keys(
-    value: Mapping[object, object],
-    expected: set[str],
-) -> None:
-    if set(value) != expected:
-        raise ValueError("durable message shape is invalid")
 
 
 __all__ = ['RetiredReferencedContent', 'SummaryPromptPart', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'combine_model_message_payloads', 'decode_model_message_payloads', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'model_input_content', 'model_response_usage', 'project_model_response_attempts', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_return_content_digest', 'without_history_system_prompts']

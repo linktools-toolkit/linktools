@@ -37,23 +37,10 @@ def test_model_message_wire_is_linktools_owned() -> None:
     message = ModelRequest(parts=[UserPromptPart(content="hello")])
     value = json.loads(encode_model_messages((message,)).decode("utf-8"))
 
-    assert set(value[0]) == {
-        "version",
-        "kind",
-        "parts",
-        "timestamp",
-        "instructions",
-        "run_id",
-        "agent_conversation_id",
-        "metadata",
-        "state",
-    }
-    assert value[0]["version"] == 1
-    assert set(value[0]["parts"][0]) == {
-        "part_kind",
-        "content",
-        "timestamp",
-    }
+    from pydantic_ai.messages import ModelMessagesTypeAdapter
+
+    native, = ModelMessagesTypeAdapter.dump_python([message], mode="json")
+    assert value == [{**native, "version": 1}]
 
 
 def test_model_message_round_trip_preserves_usage_extensions() -> None:
@@ -152,7 +139,7 @@ def test_model_message_reader_maps_invalid_binary_to_integrity_error() -> None:
         ),
     )
     value = json.loads(encode_model_messages(messages).decode("utf-8"))
-    value[0]["parts"][0]["content"]["items"][0]["data"] = "***"
+    value[0]["parts"][0]["content"][0]["data"] = "***"
 
     with pytest.raises(AIError) as raised:
         decode_model_messages(canonical_json_bytes(value))

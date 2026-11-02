@@ -47,7 +47,7 @@ def test_attempts_round_trip_preserves_order_timing_and_unknown_usage() -> None:
     assert restored.failed_attempts[0].usage is None
     assert restored.failed_attempts[1].usage.__dict__["future_tokens"] == 4
     assert encode_model_messages((restored,)) == wire
-    assert json.loads(wire)[0]["failed_attempts"][0]["duration_us"] == 2000301
+    assert json.loads(wire)[0]["failed_attempts"][0]["duration"] == "PT2.000301S"
 
 
 def test_attempt_projection_redacts_secrets_without_discarding_ordinary_diagnostics() -> None:
@@ -119,7 +119,7 @@ def test_unavailable_attempts_are_not_invented_by_the_message_writer() -> None:
     response = ModelResponse(parts=[], usage=RequestUsage(input_tokens=4))
     value = json.loads(encode_model_messages((response,)))[0]
 
-    assert "failed_attempts" not in value
+    assert value["failed_attempts"] is None
     assert model_response_usage(response).input_tokens == 4
     assert model_attempts_usage(None) is None
     assert decode_model_messages(canonical_json_bytes([value])) == (response,)
@@ -134,12 +134,12 @@ def test_explicit_empty_attempt_observation_is_distinct_from_unavailable() -> No
 
 
 @pytest.mark.parametrize(("field", "value"), [
-    ("duration_us", True),
-    ("duration_us", -1),
-    ("duration_us", 10 ** 40),
+    ("duration", True),
+    ("duration", "-PT1S"),
+    ("duration", "P999999999999999999999999D"),
     ("outcome", "success"),
     ("timestamp", "2026-10-23T12:30:00"),
-    ("usage", {"input_tokens": 1}),
+    ("usage", {"input_tokens": -1}),
 ])
 def test_malformed_attempt_fields_fail_closed(field: str, value: object) -> None:
     response = ModelResponse(parts=[], failed_attempts=[_attempt()])
