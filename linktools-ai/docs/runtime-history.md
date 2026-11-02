@@ -953,3 +953,29 @@ as a valid retry. Terminal-commit runtimes query their existing live request
 index; a shared coordination backend must implement `TurnAdmissionReader` for
 this query. An unsupported backend reports `admission_lookup_not_supported`
 without changing its existing execution capabilities.
+
+## Coordinated upgrades for persisted model response identity
+
+Model response history preserves the SDK's explicit `model_id` and
+`canonical_system` when those fields are available and non-null. A completed
+request resolves a missing model identity before publishing its request fact;
+a producer's existing nonempty identity and usage remain unchanged. The message
+codec preserves explicit values rather than generating an identity while reading
+history. Earlier messages without these optional fields remain readable and are
+not rewritten automatically.
+
+This maintenance change requires a coordinated upgrade of all readers and
+writers of the same Runtime history, checkpoints and archived model messages.
+Do not mix the earlier reader with the new writer. The earlier codec rejects
+messages containing the new identity fields with `STORAGE_INTEGRITY_ERROR`;
+it must not silently discard them or relax durable shape validation.
+
+Before enabling new writers, quiesce old readers/writers and retain a verified
+backup of the pre-upgrade state. Once new-format records have been written,
+do not roll back only the SDK binaries to the old reader. Continue with the
+compatible reader, or use a separately planned, explicitly authorized restore
+of the pre-upgrade backup that accounts for later data and external effects.
+This change provides no automatic downgrade, record rewriting or effect replay.
+Task prepared-input identity and model binding settings remain unchanged;
+successful prepared-input recovery does not make old readers accept new model
+response records.
