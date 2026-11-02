@@ -17,6 +17,7 @@ from ..storage import (
     SqlStorageContext,
     StorageRoute,
     create_sql_storage_context,
+    create_sqlite_storage_context,
     sync_directory,
 )
 from ._memory import InMemoryStateStorageGroup
@@ -121,11 +122,7 @@ class StorageResourceScope:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if read_only and not route.path.exists():
                     raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-                from sqlalchemy import URL
-                from sqlalchemy.ext.asyncio import create_async_engine
-
-                engine = create_async_engine(URL.create("sqlite+aiosqlite", database=str(route.path)))
-                context = create_sql_storage_context(engine, owns_engine=True)
+                context = create_sqlite_storage_context(route.path)
                 self._close_actions.append(context.close)
                 if not read_only:
                     await asyncio.to_thread(route.path.parent.mkdir, parents=True, exist_ok=True)
@@ -168,9 +165,6 @@ async def _provision_sqlite_database(
     register_cleanup: Callable[[Callable[[], Awaitable[None]]], None],
     local: bool = False,
 ) -> None:
-    from sqlalchemy import URL
-    from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
-
     descriptor, name = tempfile.mkstemp(
         prefix=f".{path.name}.init-",
         suffix=".db",
@@ -178,19 +172,15 @@ async def _provision_sqlite_database(
     )
     os.close(descriptor)
     temporary = Path(name)
-    engine: AsyncEngine | None = None
     context: SqlStorageContext | None = None
     async def cleanup() -> None:
         if context is not None:
             await context.close()
-        elif engine is not None:
-            await engine.dispose()
         await asyncio.to_thread(_cleanup_sqlite_temporary, temporary)
 
     register_cleanup(cleanup)
     try:
-        engine = create_async_engine(URL.create("sqlite+aiosqlite", database=str(temporary)))
-        context = create_sql_storage_context(engine, owns_engine=True)
+        context = create_sqlite_storage_context(temporary)
         await context.initialize()
         async with context.engine.begin() as connection:
             await connection.run_sync(metadata.create_all)

@@ -295,6 +295,20 @@ class SqlStorageContext:
         return self._closed
 
 
+def create_sqlite_storage_context(path: str | Path) -> SqlStorageContext:
+    """Create an owned engine whose native failed cursors close on their worker."""
+    from sqlalchemy import URL
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from ._sqlite_driver import _OwnedConnection
+
+    engine = create_async_engine(
+        URL.create("sqlite+aiosqlite", database=str(path)),
+        connect_args={"factory": _OwnedConnection},
+    )
+    return create_sql_storage_context(engine, owns_engine=True)
+
+
 def create_sql_storage_context(engine: "AsyncEngine", *, owns_engine: bool = False) -> SqlStorageContext:
     dialect = dialect_for_name(engine.dialect.name)
     from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
@@ -481,6 +495,7 @@ def _connection_invalidated(error: BaseException) -> bool:
 __all__ = [
     "SqlStorageContext",
     "create_sql_storage_context",
+    "create_sqlite_storage_context",
     "provision_sql",
     "validate_sql",
 ]
