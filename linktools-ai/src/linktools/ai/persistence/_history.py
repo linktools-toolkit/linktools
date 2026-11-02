@@ -746,10 +746,11 @@ class TranscriptRepository:
         require_no_run_history_lock("TranscriptRepository.store_payload")
         if self._object_store is None or raw_size < PAYLOAD_COMPRESS_MINIMUM:
             return StoredPayload.inline_bytes(value)
+        stored_digest = hashlib.sha256(value).hexdigest()
         key = runtime_object_key(
             namespace_digest=self._namespace_digest,
             tenant_digest=self._tenant_digest,
-            stored_digest=hashlib.sha256(value).hexdigest(),
+            stored_digest=stored_digest,
         )
 
         async def chunks() -> AsyncIterator[bytes]:
@@ -759,7 +760,7 @@ class TranscriptRepository:
             key,
             chunks(),
             expected_size=len(value),
-            expected_digest=hashlib.sha256(value).hexdigest(),
+            expected_digest=stored_digest,
         )
         return StoredPayload.object(
             ObjectRef("runtime", key, stat.digest, stat.size)

@@ -7,7 +7,7 @@ from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from ..core import JsonValue, canonical_json_bytes, canonical_sha256
+from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, StoredPayload, read_object
 from ._archive_read import ArchiveFrontierReader, ArchiveNodeRead, ArchiveNodeSlot
@@ -179,14 +179,14 @@ class PreparedArchive:
     owner: tuple[str, str, str] | None = None
     records: dict[bytes, StoredRecord] = field(default_factory=dict)
     nodes: dict[str, ImmutableSequenceNode] = field(default_factory=dict)
-    _verified_content: dict[bytes, str] = field(default_factory=dict, repr=False, compare=False)
+    _verified_content: dict[bytes, StoredRecord] = field(default_factory=dict, repr=False, compare=False)
     _observed_content: dict[bytes, StoredRecord | None] = field(default_factory=dict, repr=False, compare=False)
 
     def content_verified(self, record: StoredRecord) -> bool:
-        return self._verified_content.get(record.key_digest) == hashlib.sha256(record.kind.encode() + b"\0" + canonical_json_bytes(record.data)).hexdigest()
+        return self._verified_content.get(record.key_digest) is record
 
     def verify_content(self, record: StoredRecord) -> None:
-        self._verified_content[record.key_digest] = hashlib.sha256(record.kind.encode() + b"\0" + canonical_json_bytes(record.data)).hexdigest()
+        self._verified_content[record.key_digest] = record
 
     def clear_verified_content(self) -> None:
         self._verified_content.clear()
@@ -336,11 +336,12 @@ class ContentArchive:
             if self._objects is None or size < PAYLOAD_COMPRESS_MINIMUM:
                 payload = StoredPayload.inline_bytes(encoded)
             else:
-                object_key = self._object_prefix + hashlib.sha256(encoded).hexdigest()
+                stored_digest = hashlib.sha256(encoded).hexdigest()
+                object_key = self._object_prefix + stored_digest
                 async def chunks(value: bytes = encoded) -> AsyncIterator[bytes]:
                     yield value
                 stat = await self._objects.put(object_key, chunks(), expected_size=len(encoded),
-                                               expected_digest=hashlib.sha256(encoded).hexdigest())
+                                               expected_digest=stored_digest)
                 payload = StoredPayload.object(ObjectRef("runtime", object_key, stat.digest, stat.size))
             content = ContentRecord(codec, digest, size, compression, payload)
             prepared.records[key] = self._record("archive_content", identity, content.to_json())
