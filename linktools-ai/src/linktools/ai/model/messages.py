@@ -17,7 +17,7 @@ from pydantic_ai import RequestUsage
 from pydantic_ai.settings import ThinkingEffort
 from typing import get_args
 from pydantic_ai.messages import (
-    BinaryContent, InstructionBaselinePart, InstructionDeltaPart, InstructionDigest,
+    BinaryContent, FilePart, InstructionBaselinePart, InstructionDeltaPart, InstructionDigest,
     InstructionId, InstructionPart, SerializedInstructionId, ModelMessage, ModelMessagesTypeAdapter, ModelRequest,
     ModelRequestAttempt, ModelResponse, NativeToolReturnPart, RetryPromptPart,
     SpeechPart, SystemPromptPart, TextContent, ToolReturnPart, UserPromptPart,
@@ -404,6 +404,13 @@ def _validate_message_facts(message: ModelMessage) -> None:
             if type(count) is not int or count < 0:
                 raise ValueError("usage token count must be a nonnegative integer")
     for part in message.parts:
+        content = (part.content if isinstance(part, UserPromptPart) else
+                   [part.content] if isinstance(part, FilePart) else
+                   [part.audio] if isinstance(part, SpeechPart) else ())
+        if not isinstance(content, str):
+            for item in content:
+                if isinstance(item, BinaryContent) and (not isinstance(item.media_type, str) or not item.media_type):
+                    raise ValueError("binary content media type is invalid")
         if isinstance(part, SpeechPart) and part.interrupted_at_ms is not None:
             if type(part.interrupted_at_ms) is not int or part.interrupted_at_ms < 0:
                 raise ValueError("speech interruption position is invalid")
@@ -554,6 +561,13 @@ def _decode_message(value: object) -> ModelMessage:
         if not isinstance(part, dict) or "part_kind" not in part:
             raise ValueError("durable part discriminator is required")
         kind = part["part_kind"]
+        content = (part.get("content") if kind == "user-prompt" else
+                   [part.get("content")] if kind == "file" else
+                   [part.get("audio")] if kind == "speech" else ())
+        if isinstance(content, (list, tuple)):
+            for item in content:
+                if isinstance(item, dict) and "kind" not in item:
+                    raise ValueError("durable content discriminator is required")
         instructions = (part.get("instructions", ()) if kind == "instruction-baseline"
                         else [part] if kind == "instruction-delta" else ())
         if isinstance(instructions, list):

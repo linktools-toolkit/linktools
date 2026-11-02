@@ -25,19 +25,29 @@ def _items():
     yield sdk.CachePoint(), ['ttl']
 
 
-def _read(item: dict, route: str) -> object:
+def _wire(item: object, route: str) -> dict:
+    if route == 'input':
+        return encode_user_content_item(item)
+    message = sdk.ModelRequest(parts=[sdk.UserPromptPart([item])])
+    value = json.loads(encode_model_messages((message,)))[0]['parts'][0]['content'][0]
+    return value['value'] if value.get('kind') == 'linktools-content' else value
+
+
+def _read(item: dict, route: str, *, host_content: bool = False) -> object:
     if route == 'input':
         return decode_user_content_payload({'items': [item]})[0]
     message = sdk.ModelRequest(parts=[sdk.UserPromptPart([], timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc))])
     wire = json.loads(encode_model_messages((message,)))
-    wire[0]['parts'][0]['content'] = {'type': 'items', 'items': [item]}
+    if host_content or item.get('kind') == 'referenced-content':
+        item = {'kind': 'linktools-content', 'value': item}
+    wire[0]['parts'][0]['content'] = [item]
     return decode_model_messages(canonical_json_bytes(wire))[0].parts[0].content[0]
 
 
 @pytest.mark.parametrize('route', ['input', 'message'])
 @pytest.mark.parametrize('item,field', [pytest.param(item, field, id=f'{type(item).__name__}-{field}') for item, names in _items() for field in names])
 def test_omitted_content_fields_use_constructor_defaults(item: object, field: str, route: str) -> None:
-    wire = encode_user_content_item(item)
+    wire = _wire(item, route)
     del wire[field]
     original = copy.deepcopy(wire)
     restored = _read(wire, route)
@@ -98,12 +108,17 @@ def test_retired_reference_provenance_survives_only_when_explicit(route: str) ->
 
     reference = _reference(identifier='attachment')
     summary = RetiredReferencedContent(reference, 'retired')
-    wire = encode_user_content_item(summary)
-    restored = _read(wire, route)
+    wire = _wire(summary, route)
+    restored = _read(wire, route, host_content=True)
     assert isinstance(restored, RetiredReferencedContent)
     assert restored.reference == reference
     assert isinstance(restored.reference, ReferencedContent)
     del wire['metadata']
+    if route == 'message':
+        with pytest.raises(AIError) as missing:
+            _read(wire, route, host_content=True)
+        assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        return
     ordinary = _read(wire, route)
     assert type(ordinary) is sdk.TextContent
     assert ordinary.content == 'retired' and ordinary.metadata is None
@@ -114,7 +129,7 @@ def test_retired_reference_provenance_survives_only_when_explicit(route: str) ->
 def test_reference_identity_and_provenance_are_not_defaulted(route: str, mutation: str) -> None:
     from .test_referenced_attachment_facts import _reference
 
-    wire = encode_user_content_item(_reference())
+    wire = _wire(_reference(), route)
     if mutation in {'ref', 'source', 'media_type'}:
         del wire[mutation]
     elif mutation == 'revision':
@@ -126,7 +141,7 @@ def test_reference_identity_and_provenance_are_not_defaulted(route: str, mutatio
     else:
         wire = {'kind': 'text-content', 'content': 'retired', 'metadata': {'referenced_content': {'kind': 'text', 'text': 'not a descriptor'}}}
     with pytest.raises(AIError) as caught:
-        _read(wire, route)
+        _read(wire, route, host_content=True)
     assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
@@ -156,6 +171,15 @@ def test_shared_default_detection_keeps_noninit_and_no_default_required() -> Non
     sdk.CachePoint(ttl='1h'),
 ])
 def test_explicit_content_values_are_never_replaced_with_defaults(item: object, route: str) -> None:
-    wire = encode_user_content_item(item)
+    wire = _wire(item, route)
     restored = _read(wire, route)
-    assert encode_user_content_item(restored) == wire
+    assert _wire(restored, route) == wire
+
+
+def test_native_text_metadata_does_not_create_reference_authority() -> None:
+    text = sdk.TextContent('ordinary', metadata={'referenced_content': {'not': 'a descriptor'}})
+    message = sdk.ModelRequest([sdk.UserPromptPart([text])])
+    restored, = decode_model_messages(encode_model_messages([message]))
+    content = restored.parts[0].content[0]
+    assert type(content) is sdk.TextContent
+    assert content == text

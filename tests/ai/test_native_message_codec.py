@@ -410,3 +410,29 @@ def test_core_tool_kind_still_rejects_unsubstantiated_content() -> None:
     with pytest.raises(AIError) as caught:
         decode_model_messages(canonical_json_bytes(wire))
     assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("location", ["prompt", "file", "speech"])
+def test_native_binary_content_keeps_durable_media_and_kind_requirements(location: str) -> None:
+    binary = sdk.BinaryContent(b"content", media_type="audio/wav" if location == "speech" else "image/png")
+    if location == "prompt":
+        message = sdk.ModelRequest([sdk.UserPromptPart([binary])])
+    elif location == "file":
+        message = sdk.ModelResponse([sdk.FilePart(binary)])
+    else:
+        message = sdk.ModelRequest([sdk.SpeechPart(speaker="user", audio=binary)])
+    wire = json.loads(encode_model_messages([message]))
+    part = wire[0]["parts"][0]
+    content = part["content"][0] if location == "prompt" else part["content"] if location == "file" else part["audio"]
+    del content["kind"]
+    with pytest.raises(AIError) as missing:
+        decode_model_messages(canonical_json_bytes(wire))
+    assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    content["kind"] = "binary"
+    content["media_type"] = ""
+    with pytest.raises(AIError) as malformed:
+        decode_model_messages(canonical_json_bytes(wire))
+    assert malformed.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    binary.media_type = ""
+    with pytest.raises(ValueError, match="media type"):
+        encode_model_messages([message])
