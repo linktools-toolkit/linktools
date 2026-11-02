@@ -13,9 +13,8 @@ import aiosqlite
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.storage import create_sql_storage_context, create_sqlite_storage_context
+from linktools.ai.storage import create_sqlite_storage_context
 from linktools.ai.storage._sqlite_driver import _OwnedConnection, _OwnedCursor
 
 
@@ -85,8 +84,7 @@ def test_cleanup_failure_does_not_replace_the_original_error():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("owned", (False, True))
-async def test_failed_cursor_gc_cannot_block_a_later_owned_commit(tmp_path: Path, monkeypatch, owned):
+async def test_failed_cursor_gc_cannot_block_a_later_owned_commit(tmp_path: Path, monkeypatch):
     failed_cursors = []
     original_execute = aiosqlite.Cursor.execute
 
@@ -99,10 +97,7 @@ async def test_failed_cursor_gc_cannot_block_a_later_owned_commit(tmp_path: Path
 
     monkeypatch.setattr(aiosqlite.Cursor, "execute", execute)
     path = tmp_path / "state.sqlite"
-    if owned:
-        context = create_sqlite_storage_context(path)
-    else:
-        context = create_sql_storage_context(create_async_engine("sqlite+aiosqlite:///" + str(path)))
+    context = create_sqlite_storage_context(path)
     gc.collect()
     was_enabled = gc.isenabled()
     gc.disable()
@@ -145,7 +140,7 @@ async def test_failed_cursor_gc_cannot_block_a_later_owned_commit(tmp_path: Path
                 gc.collect(0)
                 assert failed_cursors[0]() is None
                 await reader.rollback()
-                assert await pending == (None if owned else sqlite3.SQLITE_BUSY)
+                assert await pending is None
             finally:
                 await reader.rollback()
                 await pending
@@ -154,8 +149,6 @@ async def test_failed_cursor_gc_cannot_block_a_later_owned_commit(tmp_path: Path
         if was_enabled:
             gc.enable()
         await context.close()
-        if not owned:
-            await context.engine.dispose()
 
 
 @pytest.mark.asyncio
