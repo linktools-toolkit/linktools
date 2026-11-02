@@ -255,3 +255,51 @@ def test_legacy_tool_return_class_accepts_explicit_null_retry(monkeypatch: pytes
     assert restored.parts[0].tool_call_id == 'call'
     assert restored.parts[0].content == 'done'
     assert not hasattr(restored.parts[0], 'retry')
+
+
+@pytest.mark.parametrize('name', ['model_id', 'canonical_system'])
+def test_response_optional_sdk_identity_survives_durable_round_trip(name: str) -> None:
+    if name not in {field.name for field in fields(sdk.ModelResponse)}:
+        pytest.skip('installed SDK does not expose this response identity')
+    response = sdk.ModelResponse(parts=[sdk.TextPart('answer')], timestamp=_STAMP, **{name: 'provider:model'})
+    restored = codec.decode_model_messages(codec.encode_model_messages((response,)))
+    assert restored == (response,)
+    assert getattr(restored[0], name) == 'provider:model'
+    original_default = codec.decode_model_messages(codec.encode_model_messages((sdk.ModelResponse(parts=[], timestamp=_STAMP),)))
+    assert getattr(original_default[0], name) is None
+
+
+@pytest.mark.parametrize('name', ['model_id', 'canonical_system'])
+@pytest.mark.parametrize('value', [None, '', 'provider:model'])
+def test_response_identity_values_and_usage_are_not_replaced(name: str, value: str | None) -> None:
+    if name not in {field.name for field in fields(sdk.ModelResponse)}:
+        pytest.skip('installed SDK does not expose this response identity')
+    response = sdk.ModelResponse(parts=[sdk.TextPart('answer')], timestamp=_STAMP,
+                                 usage=RequestUsage(input_tokens=17, output_tokens=3), **{name: value})
+    encoded = codec.encode_model_messages((response,))
+    wire = json.loads(encoded)
+    assert (name in wire[0]) is (value is not None)
+    restored = codec.decode_model_messages(encoded)[0]
+    assert restored == response and getattr(restored, name) == value
+    assert codec.encode_model_messages((restored,)) == encoded
+
+
+@pytest.mark.parametrize('name', ['model_id', 'canonical_system'])
+@pytest.mark.parametrize('value', [False, 17, [], {}])
+def test_response_identity_invalid_explicit_values_are_rejected(name: str, value: object) -> None:
+    wire = json.loads(codec.encode_model_messages((sdk.ModelResponse(parts=[], timestamp=_STAMP),)))
+    wire[0][name] = value
+    with pytest.raises(AIError) as caught:
+        codec.decode_model_messages(canonical_json_bytes(wire))
+    assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize('name', ['model_id', 'canonical_system'])
+def test_reader_without_identity_fields_rejects_new_payload(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    if name not in {field.name for field in fields(sdk.ModelResponse)}:
+        pytest.skip('installed SDK does not expose this response identity')
+    encoded = codec.encode_model_messages((sdk.ModelResponse(parts=[], timestamp=_STAMP, **{name: 'resolved'}),))
+    monkeypatch.setattr(codec, '_RESPONSE_IDENTITY_FIELDS', frozenset())
+    with pytest.raises(AIError) as caught:
+        codec.decode_model_messages(encoded)
+    assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
