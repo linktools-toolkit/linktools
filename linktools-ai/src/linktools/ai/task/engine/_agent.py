@@ -7,6 +7,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Generic, TypeVar
 
+from linktools.core import environ
+
 from ...agent import AgentBindingContract
 from ...core import (
     ImmutableJsonMapping,
@@ -22,6 +24,7 @@ from ...core import (
 from ...errors import AIError, ErrorCode
 from ...task.deadlines import deadline_policy
 from ...task import (
+    AgentTaskNode,
     Task,
     TaskNode,
     TaskNodeInvocation,
@@ -33,6 +36,7 @@ from ...task import (
 from ...inputs import decode_task_prompt_draft, merge_captured_input_files, task_prompt_draft
 from ...execution import StoredUserInput
 from ...persistence.contracts import TaskPreparedInputRecord
+from ...persistence.codec import encode_domain
 from ...inputs import (
     AgentTaskInput,
     AgentTaskInputBuilder,
@@ -42,12 +46,14 @@ from ...inputs import (
 from ...model import CanonicalUserInput, validate_user_input
 
 if TYPE_CHECKING:
+    from ...inputs import ExecutionInputMaterializer
     from ...runtime.agent_execution import AgentExecutionPort
     from ...core import RunBudget
     from ...execution import ExecutionView
 
 
 AppT = TypeVar("AppT")
+_logger = environ.get_logger("ai.runtime.planner")
 _DEADLINE_CANCEL_TIMEOUT_SECONDS = 5.0
 _TRANSIENT_INPUT_CODES = frozenset({
     ErrorCode.STORAGE_UNAVAILABLE,
@@ -176,6 +182,65 @@ class AgentTaskRunner(Generic[AppT]):
         if self.input_mode == "literal" and task_input.stored_prompt is None:
             validate_user_input(task_input.prompt)
         return dict(task_input)
+
+    async def materialize_admission_input(
+        self,
+        node: TaskNode,
+        *,
+        tenant_id: str,
+        contract: Mapping[str, JsonValue],
+        materializer: "ExecutionInputMaterializer | None",
+    ) -> TaskNode:
+        """Freeze Agent input through its producer before graph execution starts."""
+        port = self.execution_port
+        if port is None:
+            raise AIError(ErrorCode.BINDING_NOT_REGISTERED)
+        task_input = AgentTaskInput.from_mapping(node.input)
+        config = contract.get("config")
+        input_mode = config.get("input_mode") if isinstance(config, Mapping) else None
+        if task_input.stored_prompt is not None:
+            return node
+        if input_mode == "projected":
+            if not task_input.files:
+                return node
+            if materializer is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            body = dict(task_input)
+            body["files"] = list(await port.canonicalize_files(task_input.files))
+        else:
+            if not task_input.files and isinstance(task_input.prompt, str):
+                return node
+            if materializer is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            content = await port.materialize_input(task_input.prompt, task_input.files)
+            stored = await materializer.store(content, tenant_id=tenant_id)
+            body = dict(task_input)
+            body["prompt"] = {
+                "kind": "stored-user-content-v1",
+                "intent": "task-admission",
+                "source_intent_digest": canonical_sha256(task_input["prompt"]),
+                "value": encode_domain(stored),
+            }
+            _logger.info("task input resolved: node=%s", node.node_id)
+        return AgentTaskNode.from_resolved(
+            node.node_id,
+            node.dependencies,
+            task=node.task,
+            input=body,
+            budget_cost=node.budget_cost,
+            expander=node.expander,
+            input_refs=node.input_refs,
+            input_capture=node.input_capture,
+            original_input=node.original_input,
+            timeout_seconds=node.timeout_seconds,
+            max_attempts=node.max_attempts,
+            retry_delay_seconds=node.retry_delay_seconds,
+            output_contract=node.output_contract,
+            effect_policy=node.effect_policy,
+            reconcile=node.reconcile,
+            dependency_policy=node.dependency_policy,
+            failure_policy=node.failure_policy,
+        )
 
     async def run(
         self,
