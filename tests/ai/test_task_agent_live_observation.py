@@ -79,15 +79,21 @@ async def test_graph_observes_tools_before_models_finish_and_replays_after_reope
                     observed[int(event.node_id.removeprefix("node-"))].set()
 
         waiting = asyncio.create_task(run.wait(on_event=observe, include_event_content=True, timeout_seconds=10))
+        ready = asyncio.gather(*(event.wait() for event in (*entered, *observed)))
         try:
-            sqlite_failure_phase("entered.wait.begin")
-            await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered)), 3)
-            sqlite_failure_phase("entered.wait.done")
-            await asyncio.wait_for(asyncio.gather(*(event.wait() for event in observed)), 3)
+            sqlite_failure_phase("live.ready.wait.begin")
+            # The graph's bounded wait guards progress; delivery must precede model release.
+            done, _ = await asyncio.wait((ready, waiting), return_when=asyncio.FIRST_COMPLETED)
+            if waiting in done:
+                await waiting
+            assert ready in done, "Every producer must expose its tool result before model completion"
             assert not release.is_set() and not waiting.done()
+            sqlite_failure_phase("live.ready.wait.done")
         finally:
             sqlite_failure_phase("models.release")
             release.set()
+            ready.cancel()
+            await asyncio.gather(ready, return_exceptions=True)
             outcome = await waiting
         assert outcome.result.status is TaskStatus.SUCCEEDED
         assert outcome.observation_error is None
