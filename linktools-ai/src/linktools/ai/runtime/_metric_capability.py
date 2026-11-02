@@ -417,6 +417,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         self._prepared_models: dict[int, PreparedRequestModel] = {}
         self._client_recorders: dict[int, ModelClientRequestRecorder] = {}
         self._provider_errors: dict[int, Exception] = {}
+        self._serving_model_ids: dict[int, str] = {}
         self._pending_model_failure: Callable[[Sequence[ModelMessage]], Awaitable[None]] | None = None
 
     def get_ordering(self) -> CapabilityOrdering:
@@ -697,6 +698,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                             self._client_recorders.pop(model_request_seq, None)
                             self._prepared_models.pop(model_request_seq, None)
                             self._provider_errors.pop(model_request_seq, None)
+                            self._serving_model_ids.pop(model_request_seq, None)
                             self._journal.consume(model_request_seq)
                     self._pending_model_failure = finish_failed_request
 
@@ -773,11 +775,13 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                         raise safe_error from None
                     raise
 
-                # Freeze the resolved SDK identity before publishing the completed request.
+                # Freeze run correlation before publishing the completed request.
                 response.run_id = response.run_id or ctx.run_id
                 response.conversation_id = response.conversation_id or ctx.conversation_id
+                # Short-circuit wrappers may return without the native after hook.
                 if hasattr(response, "model_id"):
-                    response.model_id = response.model_id or request_context.model_id or selected_model.model_id
+                    response.model_id = (response.model_id or self._serving_model_ids.get(model_request_seq)
+                                         or request_context.model_id or selected_model.model_id)
                 interrupted = await self._complete_request(
                     fact,
                     run_context,
@@ -796,6 +800,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                     self._client_recorders.pop(model_request_seq, None)
                     self._prepared_models.pop(model_request_seq, None)
                     self._provider_errors.pop(model_request_seq, None)
+                    self._serving_model_ids.pop(model_request_seq, None)
                     self._journal.consume(model_request_seq)
 
     async def after_model_request(
@@ -805,8 +810,10 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         request_context: ModelRequestContext,
         response: ModelResponse,
     ) -> ModelResponse:
-        del request_context
+        # Later hooks may replace the response; retain the serving identity for publication.
         fact = self._journal.latest_for_step(ctx.run_step)
+        if fact is not None and hasattr(response, "model_id"):
+            self._serving_model_ids[fact.model_request_seq] = request_context.model_id or request_context.model.model_id
         recorder = None if fact is None else self._client_recorders.get(fact.model_request_seq)
         return project_model_response_attempts(
             response, content_omission_reason=recorder.body_omission_reason if recorder else None,
