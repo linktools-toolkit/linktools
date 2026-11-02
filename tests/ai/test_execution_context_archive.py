@@ -56,7 +56,7 @@ async def test_accepted_context_reuses_verified_same_group_history_without_prefi
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_context_archive_handle_is_bound_and_failed_open_is_retryable(tmp_path, monkeypatch, backend):
     from linktools.ai.errors import AIError
 

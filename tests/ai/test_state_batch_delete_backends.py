@@ -14,8 +14,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.persistence._filesystem import FilesystemStateStore
-from linktools.ai.persistence._filesystem_layout import _CowMap, _FactStreamInfo
 from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._sql import SqlStateStore, _SqlTransaction
 from linktools.ai.persistence.state import (
@@ -24,7 +22,7 @@ from linktools.ai.persistence.state import (
 )
 
 pytestmark = pytest.mark.asyncio
-_BACKENDS = ("memory", "filesystem", "sql")
+_BACKENDS = ("memory", "sql")
 
 
 def _digest(value: str) -> bytes:
@@ -54,11 +52,6 @@ async def _open_store(backend: str, root: Path) -> AsyncIterator[StateStore]:
     engine = None
     if backend == "memory":
         store = InMemoryStateStore()
-    elif backend == "filesystem":
-        store = FilesystemStateStore(
-            root, namespace="batch-delete", tenant_id="tenant",
-            runtime_domain="conversation", _range_index=True,
-        )
     else:
         root.mkdir(parents=True, exist_ok=True)
         engine = create_async_engine(f"sqlite+aiosqlite:///{root / 'state.db'}")
@@ -280,49 +273,3 @@ async def test_sql_batch_delete_preserves_other_logical_stores(tmp_path: Path) -
             await other.validate_integrity()
         finally:
             await other.close()
-
-
-async def test_filesystem_batch_delete_relationship_work_grows_linearly(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    examined = []
-    for size in (8, 64):
-        async with _open_store("filesystem", tmp_path / str(size)) as store:
-            assert isinstance(store, FilesystemStateStore)
-            records = tuple(_record(index) for index in range(2 * size))
-            await _seed(store, records)
-            cache = store._require_index().cache
-            aliases = cache.list_aliases
-            streams = cache.list_fact_streams
-            deleted = _CowMap.deleted
-            work = {"aliases": 0, "streams": 0, "tombstones": 0}
-
-            def count_aliases() -> tuple[tuple[bytes, bytes], ...]:
-                values = aliases()
-                work["aliases"] += len(values)
-                return values
-
-            def count_streams() -> tuple[_FactStreamInfo, ...]:
-                values = streams()
-                work["streams"] += len(values)
-                return values
-
-            def count_deleted(mapping: _CowMap) -> frozenset[object]:
-                values = deleted(mapping)
-                work["tombstones"] += len(values)
-                return values
-
-            with monkeypatch.context() as patch:
-                patch.setattr(cache, "list_aliases", count_aliases)
-                patch.setattr(cache, "list_fact_streams", count_streams)
-                patch.setattr(_CowMap, "deleted", count_deleted)
-                await store.mutate(lambda transaction: transaction.delete_records(
-                    tuple(record.key_digest for record in records[:size])
-                ))
-            examined.append(work)
-            assert len(await store.read(lambda transaction: transaction.scan_records())) == size
-            await store.validate_integrity()
-    for name in examined[0]:
-        assert examined[1][name] <= 8 * examined[0][name] + 64, (name, examined)
-    assert examined[1]["aliases"] <= 2 * 64
-    assert examined[1]["streams"] <= 2 * 64

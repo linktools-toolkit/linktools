@@ -42,7 +42,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..session import SessionPendingExecutionLookup
-from ..observe import Metrics
+from ..observe import MetricRecorderProvider
 from ..model import ModelBinding
 from ..spec import (
     AgentSpec,
@@ -50,7 +50,7 @@ from ..spec import (
     RepositoryInstructionResolver,
     RepositoryInstructions,
 )
-from ..storage import BatchWriteScope, CacheBackend, ObjectStore, PayloadPolicy, StreamBackend, TurnCoordinationBackend
+from ..storage import CacheBackend, ObjectStore, PayloadPolicy, StreamBackend, TurnCoordinationBackend
 from ..workspace import (
     WorkspaceInstructionResolver,
     LocalWorkspaceBackend,
@@ -176,7 +176,7 @@ async def compose_runtime_components(
     *,
     persistence: Persistence,
     app: "AppT | None" = None,
-    metrics: Metrics | None = None,
+    metrics: MetricRecorderProvider | None = None,
     features: "RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None" = None,
     auto_recover: bool = True,
     authorization: AuthorizationPolicy | None = None,
@@ -611,7 +611,7 @@ async def _build_local_components(
     state: Persistence,
     lifecycle: "_AgentLifecycle",
     run_store: RuntimeAgentRunStore,
-    metrics: Metrics | None,
+    metrics: MetricRecorderProvider | None,
     commit: CommitPolicy,
     coordination: CacheBackend | TurnCoordinationBackend | StreamBackend | None,
     catalog: AgentCatalog,
@@ -684,9 +684,7 @@ async def _build_local_components(
             isinstance(value, ExecutionCapability) and value.retain_history
             for value in persistence_capabilities
         )
-        batch_scopes = BatchWriteScope.scoped_factory()
-        run_store.trace_persistence.bind_batch_scopes(batch_scopes)
-        metric_buffer = None if metrics is None else MetricsService(metrics, batch_scopes=batch_scopes)
+        metric_buffer = None if metrics is None else MetricsService(metrics)
         lifecycle.metric_buffer = metric_buffer
         metric_source_namespace = None if metric_buffer is None else namespace
         if coordination is not None:
@@ -740,7 +738,7 @@ async def _build_local_components(
             restart_checkpoints=restart_checkpoints,
             durable_trace=durable_trace,
             conversation=conversation,
-            terminal_commit=commit.mode == "terminal",
+            commit=commit,
             context_archive=ExecutionContextArchive(
                 state.execution.executions.state_store,
                 state.archive_object_store(PersistenceDomain.EXECUTION),
@@ -799,7 +797,7 @@ async def _build_local_components(
     async def worker_completed(execution_id: str) -> None:
         await execution.resume_terminal_handoff(execution_id, tenant_id=tenant_id)
 
-    exclusive_execution_writer = state.plan.route(PersistenceDomain.EXECUTION).kind == "filesystem"
+    exclusive_execution_writer = state.exclusive_execution_writer
     try:
         backend = LocalExecutionBackend(
             state.conversation,
@@ -846,6 +844,9 @@ async def _build_local_components(
             metric_recorder=metric_buffer,
             worker_completed=worker_completed,
             exclusive_execution_writer=exclusive_execution_writer,
+            commit=commit,
+            trace_commit=next((value.commit for value in persistence_capabilities
+                               if isinstance(value, TraceCapability)), None),
             pending_turns=runtime_bridge.pending_turns,
             pending_cancel=lambda execution_id, principal: execution.cancel(
                 execution_id, CancelExecutionRequest(principal, f"pending-cancel:{execution_id}"),

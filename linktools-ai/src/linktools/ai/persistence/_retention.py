@@ -54,16 +54,14 @@ class RuntimeRetentionController:
         self, execution_id: str, *, tenant_id: str, terminal_commit: bool = False,
     ) -> bool:
         repository = self._execution.executions
-        retained = await repository.get(execution_id, tenant_id=tenant_id)
-        if retained is None or not retained.retention_closed:
-            async def read_source(transaction: "StateTransaction") -> "ExecutionRecord | None":
-                return await repository.get_in_transaction(transaction, execution_id, tenant_id=tenant_id)
+        async def read_source(transaction: "StateTransaction") -> "ExecutionRecord | None":
+            return await repository.get_in_transaction(transaction, execution_id, tenant_id=tenant_id)
 
-            retained = await repository.state_store.read(read_source)
-            if retained is not None and retained.status not in {
-                ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
-            }:
-                return False
+        retained = await repository.state_store.read(read_source)
+        if retained is not None and retained.status not in {
+            ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+        }:
+            return False
         if (retained is not None and not retained.retention_closed and retained.session_id is not None
                 and retained.conversation):
             sessions = self._conversation.sessions
@@ -86,15 +84,7 @@ class RuntimeRetentionController:
             # need cleanup, without a second lookup that could observe new work.
             released, execution = True, None
         elif type(repository) is ExecutionRepositoryImpl:
-            async def read_closed(_transaction: "StateTransaction") -> "ExecutionRecord | None":
-                current = await repository.get(execution_id, tenant_id=tenant_id)
-                if (current is not None and current.conversation and current.retention_closed
-                        and current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED,
-                                               ExecutionStatus.CANCELLED}):
-                    return current
-                return None
-
-            execution = await repository.state_store.read(read_closed) if terminal_commit else None
+            execution = (retained if terminal_commit and retained.conversation and retained.retention_closed else None)
             # Keep the closing decision and its metadata in the same transaction;
             # cleanup belongs outside this retryable mutation callback.
             if execution is None:

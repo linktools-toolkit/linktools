@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Filesystem state and directory asset behavior."""
+"""State deletion and directory asset behavior."""
 
 import hashlib
 from pathlib import Path
@@ -13,7 +13,7 @@ from linktools.ai.asset import (
     PrefixAssetPathAdapter,
 )
 from linktools.ai.errors import AIError
-from linktools.ai.persistence._filesystem import FilesystemStateStore
+from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.state import StoredRecord
 from linktools.ai.storage import StorageEntryRevision
 
@@ -36,17 +36,13 @@ def _record(value: str) -> StoredRecord:
 
 
 @pytest.mark.asyncio
-async def test_filesystem_deleted_record_does_not_resurface_from_cache(
+async def test_sql_deleted_record_does_not_resurface_from_cache(
     tmp_path: Path,
 ) -> None:
-    store = FilesystemStateStore(
-        tmp_path / "state",
-        namespace="test",
-        tenant_id="tenant",
-        runtime_domain="conversation",
-    )
+    owner = Persistence(PersistenceStorage.sqlite(tmp_path / "state.db"))
+    await owner.initialize(namespace="test", tenant_id="tenant")
+    store = owner.conversation.sessions.state_store
     record = _record("record")
-    await store.initialize()
     try:
         await store.mutate(lambda transaction: transaction.insert_record(record))
         assert (
@@ -65,7 +61,7 @@ async def test_filesystem_deleted_record_does_not_resurface_from_cache(
             is None
         )
     finally:
-        await store.close()
+        await owner.close()
 
 
 @pytest.mark.asyncio

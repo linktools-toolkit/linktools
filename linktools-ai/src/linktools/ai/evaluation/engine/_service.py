@@ -763,8 +763,10 @@ class Evaluations:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            _logger.warning("evaluation needs reconciliation: experiment=%s", experiment_id, exc_info=environ.debug)
-            await self._disposition(experiment_id, "coordinator", str(error.code) if isinstance(error, AIError) else type(error).__name__, retryable=True)
+            reason = str(error.code) if isinstance(error, AIError) else type(error).__name__
+            _logger.warning("evaluation needs reconciliation: experiment=%s reason=%s",
+                            experiment_id, reason, exc_info=environ.debug)
+            await self._disposition(experiment_id, "coordinator", reason, retryable=True)
         finally:
             try:
                 await self._close_trial_scopes(experiment_id)

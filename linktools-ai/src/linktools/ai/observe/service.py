@@ -13,14 +13,13 @@ from time import monotonic, monotonic_ns
 from linktools.core import environ
 
 from ..core import CorrelationData, UsageMetrics, normalize_correlation
-from ..storage import BatchWriteScopeFactory
 from ..errors import AIError, ErrorCode
 from ..observe import (
     MetricFlushResult,
     MetricMeasurement,
     MetricRecorder,
     MetricRecorderStatus,
-    Metrics,
+    MetricRecorderProvider,
     Observation,
 )
 from .identity import stable_observation_id
@@ -62,18 +61,18 @@ def metric_correlation(
 
 
 class MetricsService:
-    """Own one recording lifetime over a borrowed dataset and enrich observations.
+    """Own one recording lifetime over a borrowed provider and enrich observations.
 
-    Closing drains this producer's recorder without closing its borrowed dataset,
-    cache or engine. Independent producers own independent recording scopes.
+    Closing drains this producer's recorder without closing its provider or
+    borrowed clients. Independent producers own independent recording scopes.
     """
 
     def __init__(
-        self, metrics: Metrics, *, batch_scopes: BatchWriteScopeFactory | None = None,
+        self, metrics: MetricRecorderProvider,
     ) -> None:
-        if not isinstance(metrics, Metrics):
-            raise TypeError("metrics must be Metrics")
-        self._recorder = metrics.recorder(batch_scopes=batch_scopes)
+        if not isinstance(metrics, MetricRecorderProvider):
+            raise TypeError("metrics must be MetricRecorderProvider")
+        self._recorder = metrics.recorder()
         self._execution_contexts: dict[str, CorrelationData] = {}
         self._runtime_dimensions: dict[str, str] = {}
         self._runtime_dimensions_configured = False

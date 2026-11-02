@@ -24,7 +24,7 @@ from .test_evaluation_persistence import NOW, storage_for
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite"))
 @pytest.mark.parametrize("fault", (None, "missing", "wrong_type"))
 async def test_dataset_expiry_preserves_all_case_deadlines_and_integrity(
     tmp_path: Path, backend: str, fault: str | None,
@@ -82,7 +82,7 @@ async def test_dataset_expiry_preserves_all_case_deadlines_and_integrity(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite"))
 async def test_case_pages_batch_only_selected_content_in_original_order(tmp_path: Path, backend: str) -> None:
     from linktools.ai.core import service_principal
     from linktools.ai.evaluation import CaseSpec, DatasetSpec
@@ -137,7 +137,7 @@ async def test_case_pages_batch_only_selected_content_in_original_order(tmp_path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite"))
 @pytest.mark.parametrize("fault", ("missing", "tombstone", "expired", "wrong_type"))
 async def test_required_case_batch_preserves_first_unavailable_position(
     tmp_path: Path, backend: str, fault: str,

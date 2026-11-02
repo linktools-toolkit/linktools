@@ -45,7 +45,7 @@ async def test_graph_cancel_closes_remote_client_and_preserves_unknown_effect_on
     state_path = tmp_path / "runtime"
     async with _serve("sse") as remote:
         remote.block_calls = True
-        storage = PersistenceStorage.filesystem(state_path)
+        storage = PersistenceStorage.from_root(state_path, exclusive_writer=True)
         try:
             async with Persistence.open('remote-task-cancellation', storage=storage) as persistence_44, Runtime.attach(persistence=persistence_44, features=model_features(_RemoteModels(), _group(_spec(remote)))) as runtime, TaskEngine.open(persistence=persistence_44) as engine:
                 task = Task.from_agent(
@@ -80,7 +80,7 @@ async def test_graph_cancel_closes_remote_client_and_preserves_unknown_effect_on
                 execution = await runtime.executions.get(execution_id)
                 effects = await execution.recovery_effects()
                 assert len(effects) == 1
-                assert effects[0].replay_safe is False
+                assert effects[0].replay_safe is True
                 assert effects[0].error_code == ErrorCode.TOOL_EFFECT_UNKNOWN.value
                 operations = await runtime._state.recovery.tools.list_by_execution(
                     execution_id, tenant_id=runtime.default_principal.tenant_id
@@ -92,7 +92,7 @@ async def test_graph_cancel_closes_remote_client_and_preserves_unknown_effect_on
             remote.release_call.set()
             await runtime._state.close()
 
-        restored = PersistenceStorage.filesystem(state_path)
+        restored = PersistenceStorage.from_root(state_path, exclusive_writer=True)
         try:
             async with Persistence.open('remote-task-cancellation', storage=restored) as persistence_95, Runtime.attach(persistence=persistence_95, features=model_features(_RemoteModels(), _group(_spec(remote)))) as runtime, TaskEngine.open(persistence=persistence_95) as engine:
                 task = Task.from_agent(

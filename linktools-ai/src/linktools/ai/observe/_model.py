@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from types import MappingProxyType
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from ..core import (
     validate_persistence_namespace,
@@ -603,6 +603,18 @@ class MetricRecorder(Protocol):
     async def close(self) -> None: ...
 
 
+@runtime_checkable
+class MetricRecorderProvider(Protocol):
+    """Create independent producer scopes over host-owned resources.
+
+    Construction is synchronous and starts no I/O or background work. Each
+    recorder owns only its own work; closing it must not close this provider
+    or any client borrowed by other producers.
+    """
+
+    def recorder(self) -> MetricRecorder: ...
+
+
 __all__ = [
     "MetricRecorderStatus",
     "MetricFlushResult",
@@ -613,6 +625,7 @@ __all__ = [
     "MetricQuery",
     "MetricQueryResult",
     "MetricRecorder",
+    "MetricRecorderProvider",
     "MetricSource",
     "MetricSourceKind",
     "MetricType",

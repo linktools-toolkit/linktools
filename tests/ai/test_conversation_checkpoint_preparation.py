@@ -109,7 +109,7 @@ async def test_conversation_preparation_preserves_custom_owner_operations(
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_conversation_preparation_keeps_fresh_commit_guard(
     tmp_path: Path, backend: str,
 ) -> None:

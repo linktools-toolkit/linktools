@@ -175,7 +175,7 @@ async def test_runtime_shared_failures_preserve_attempts_terminal_event_and_reop
     features.agent("default", allow_tools=())
     features.model("default", FallbackBinding(*(Binding() for _ in range(11))))
     features.capability(TraceCapability(), scope="runtime")
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open('alias-persistence', storage=storage) as persistence_176, Runtime.attach(persistence=persistence_176, features=features) as runtime:
         result = (await runtime.agents.get().run("synthetic offline failure", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.FAILED

@@ -464,6 +464,7 @@ async def test_binding_resolution_restores_mcp_execution_contract(tmp_path: Path
     assert pin.contract["execution_policy"] == {
         "version": 1,
         "boundary": "host-stdio",
+        "tool_effect_policy": "replay_safe",
     }
     resource_versions = MCPServerSpecCodec().decode_binding_payload(
         pin.contract,
@@ -521,9 +522,16 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
     )
 
     pin = next(item for item in resolved.binding_contract.selected if item.kind == "mcp")
-    assert pin.contract["execution_policy"] == sandbox(tmp_path).stdio_execution_policy()
+    assert pin.contract["execution_policy"] == {
+        **sandbox(tmp_path).stdio_execution_policy(),
+        "tool_effect_policy": "replay_safe",
+    }
     if backend != "bubblewrap":
-        assert pin.contract["execution_policy"] == {"version": 1, "boundary": "host-stdio"}
+        assert pin.contract["execution_policy"] == {
+            "version": 1,
+            "boundary": "host-stdio",
+            "tool_effect_policy": "replay_safe",
+        }
 
 
 @pytest.mark.asyncio
@@ -613,7 +621,7 @@ async def test_runtime_storage_snapshot_preserves_asset_version_refs(
 ) -> None:
     fixture = await _fixture()
     storage_root = tmp_path / "state"
-    state = Persistence(PersistenceStorage.filesystem(storage_root))
+    state = Persistence(PersistenceStorage.from_root(storage_root, exclusive_writer=True))
     await state.initialize(namespace="namespace", tenant_id="tenant")
     try:
         resolved = await fixture.resolver.resolve(fixture.binding)
@@ -657,7 +665,7 @@ async def test_runtime_storage_snapshot_preserves_asset_version_refs(
     )
 
     snapshot_store = InMemoryObjectStore("snapshot")
-    read_state = Persistence(PersistenceStorage.filesystem(storage_root))
+    read_state = Persistence(PersistenceStorage.from_root(storage_root, exclusive_writer=True))
     await read_state.initialize(
         namespace="namespace",
         tenant_id="tenant",
@@ -724,7 +732,7 @@ async def test_runtime_storage_snapshot_restores_task_binding_capture(
         },
     )
     storage_root = tmp_path / "task-state"
-    state = Persistence(PersistenceStorage.filesystem(storage_root))
+    state = Persistence(PersistenceStorage.from_root(storage_root, exclusive_writer=True))
     await state.initialize(namespace="namespace", tenant_id="tenant")
     graph = TaskGraph(
         "graph",
@@ -755,7 +763,7 @@ async def test_runtime_storage_snapshot_restores_task_binding_capture(
         await state.close()
 
     snapshot_store = InMemoryObjectStore("task-snapshot")
-    read_state = Persistence(PersistenceStorage.filesystem(storage_root))
+    read_state = Persistence(PersistenceStorage.from_root(storage_root, exclusive_writer=True))
     await read_state.initialize(
         namespace="namespace",
         tenant_id="tenant",

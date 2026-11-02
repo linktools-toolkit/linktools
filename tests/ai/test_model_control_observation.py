@@ -29,8 +29,6 @@ from .test_step_projection import _execution
 async def _state(backend: str, path: Path, cache=None):
     if backend == "memory":
         state = Persistence(PersistenceStorage.in_memory(cache=cache))
-    elif backend == "filesystem":
-        state = Persistence(PersistenceStorage.filesystem(path, cache=cache))
     else:
         state = Persistence(PersistenceStorage.sqlite(path / "state.db", cache=cache))
     await state.initialize(namespace="model-control", tenant_id="tenant")
@@ -56,7 +54,7 @@ async def _seed(state, *, restart: bool = False):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 async def test_model_pair_uses_one_cached_source_capture(
     tmp_path: Path, backend: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -97,7 +95,7 @@ async def _advance_pair(repository):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 async def test_no_restart_model_boundaries_reuse_the_pair(
     tmp_path: Path, backend: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -121,7 +119,7 @@ async def test_no_restart_model_boundaries_reuse_the_pair(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 async def test_pair_without_cache_reads_source_each_time(
     tmp_path: Path, backend: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -143,7 +141,7 @@ async def test_pair_without_cache_reads_source_each_time(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 async def test_pair_inside_transaction_observes_source_not_cached_values(tmp_path: Path, backend: str) -> None:
     async with _state(backend, tmp_path, InMemoryCacheBackend(max_bytes=1000000)) as state:
         await _seed(state)

@@ -82,7 +82,7 @@ async def test_tool_created_child_capture_runs_independently_in_evaluation(tmp_p
     instructions.write_text("Historical child repository context", encoding="utf-8")
     state = tmp_path / "state"
     async with (
-        Persistence.open('child-capture-consumer', storage=PersistenceStorage.filesystem(state), tenant_id='evaluation-consumers') as persistence_77,
+        Persistence.open('child-capture-consumer', storage=PersistenceStorage.from_root(state, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_77,
         Runtime.attach(persistence=persistence_77, context=CONTEXT, features=model_features(models, child_capabilities(1, 'Historical child behavior', workspace=Workspace.load(work)))) as runtime,
         History.open(persistence=persistence_77, authorization=None) as history,
     ):
@@ -108,7 +108,7 @@ async def test_tool_created_child_capture_runs_independently_in_evaluation(tmp_p
     instructions.write_text("Changed live repository context", encoding="utf-8")
     scorer = Task("consumer.captured-child-score", exact, effect_policy="none")
     async with (
-        Persistence.open('child-capture-consumer', storage=PersistenceStorage.filesystem(state), tenant_id='evaluation-consumers') as persistence_100,
+        Persistence.open('child-capture-consumer', storage=PersistenceStorage.from_root(state, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_100,
         Runtime.attach(persistence=persistence_100, context=CONTEXT, features=model_features(models, child_capabilities(2, 'Changed current child behavior', workspace=Workspace.load(work)))) as runtime,
         History.open(persistence=persistence_100, authorization=None) as history,
     ):
@@ -173,7 +173,7 @@ async def test_graph_capture_ref_evaluates_new_inputs_after_reopen(tmp_path: Pat
     consumer = Task("consumer.capture-answer", answer, effect_policy="none")
     scorer = Task("consumer.capture-graph-score", score, effect_policy="none")
     async with (
-        Persistence.open('graph-capture-ref', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_159,
+        Persistence.open('graph-capture-ref', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_159,
         TaskEngine.open(producer, consumer, persistence=persistence_159, context=CONTEXT) as engine,
     ):
         original = await engine.start(TaskGraph("source-captured-graph", nodes=(
@@ -187,7 +187,7 @@ async def test_graph_capture_ref_evaluates_new_inputs_after_reopen(tmp_path: Pat
         capture = await engine.inputs.capture_graph(original.graph_id, CaptureGraphRequest(PRINCIPAL, "capture-whole-graph"))
 
     async with (
-        Persistence.open('graph-capture-ref', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_171,
+        Persistence.open('graph-capture-ref', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_171,
         TaskEngine.open(producer, consumer, scorer, persistence=persistence_171, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):

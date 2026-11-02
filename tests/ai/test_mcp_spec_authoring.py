@@ -355,3 +355,25 @@ async def test_old_workspace_cwd_binding_cannot_silently_change_execution(
             tool_operations=None, tool_metrics=None,
         )
     assert raised.value.code is ErrorCode.CAPABILITY_POLICY_CONFLICT
+
+
+@pytest.mark.parametrize("effect_policy", (None, "replay_safe", "non_replay_safe"))
+def test_mcp_bound_tool_policy_preserves_omission_and_explicit_value(effect_policy: str | None) -> None:
+    server = MCPServerSpec("server", transport="streamable-http", url="https://example.test/mcp")
+    codec = MCPServerSpecCodec()
+    policy = {"version": 1, "boundary": "host-network"}
+    if effect_policy is not None:
+        policy["tool_effect_policy"] = effect_policy
+    payload = codec.to_binding_payload(server, None, execution_policy=policy)
+    assert payload["execution_policy"] == policy
+    assert codec.decode_binding_payload(payload, declaration=server) is None
+
+
+@pytest.mark.parametrize("effect_policy", (None, [], "unknown"))
+def test_mcp_bound_tool_policy_rejects_invalid_present_value(effect_policy: object) -> None:
+    with pytest.raises(AIError) as raised:
+        MCPServerSpecCodec().to_binding_payload(
+            MCPServerSpec("server", transport="streamable-http", url="https://example.test/mcp"),
+            None, execution_policy={"version": 1, "boundary": "host-network", "tool_effect_policy": effect_policy},
+        )
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

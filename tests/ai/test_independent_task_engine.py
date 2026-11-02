@@ -33,7 +33,7 @@ async def test_function_graph_expansion_and_definition_views_share_only_their_ow
         return (TaskNode("child", task=second, dependencies=(context.source_node.node_id,)),)
 
     expander = TaskExpander("expand", expand)
-    storage = PersistenceStorage.filesystem(tmp_path) if durable else PersistenceStorage.in_memory()
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True) if durable else PersistenceStorage.in_memory()
     principal = Principal("caller", "tenant")
     async with Persistence.open("independent", storage=storage, tenant_id="tenant") as persistence:
         async with TaskEngine.open(first, expander, persistence=persistence, context=ExecutionContext("application")) as engine:
@@ -97,15 +97,13 @@ async def test_closing_one_task_producer_cancels_its_work_without_closing_peer_o
 
 @pytest.mark.asyncio
 async def test_task_producers_own_independent_recorders_over_one_dataset() -> None:
-    from linktools.ai.core import CommitPolicy
     from linktools.ai.observe import MetricRecorder, Metrics
-    from linktools.ai.storage import BatchWriteScopeFactory, InMemoryCacheBackend
 
     recorders: list[MetricRecorder] = []
 
     class RecordingMetrics(Metrics):
-        def recorder(self, *, batch_scopes: BatchWriteScopeFactory | None = None) -> MetricRecorder:
-            recorder = super().recorder(batch_scopes=batch_scopes)
+        def recorder(self) -> MetricRecorder:
+            recorder = super().recorder()
             recorders.append(recorder)
             return recorder
 
@@ -113,9 +111,7 @@ async def test_task_producers_own_independent_recorders_over_one_dataset() -> No
         return "done"
 
     task = Task("work", work, effect_policy="none")
-    metrics = RecordingMetrics.in_memory(commit=CommitPolicy.batch(
-        buffer=InMemoryCacheBackend(max_bytes=2**20), batch_size=128, flush_interval=60,
-    ))
+    metrics = RecordingMetrics.in_memory()
     async with Persistence.open("metrics", storage=PersistenceStorage.in_memory()) as persistence:
         async with TaskEngine.open(task, persistence=persistence, metrics=metrics) as peer:
             async with TaskEngine.open(task, persistence=persistence, metrics=metrics) as first:
@@ -147,13 +143,13 @@ async def test_reopening_task_engine_preserves_admitted_principal_and_execution_
         return context.principal.principal_id
 
     task = Task("effect", effect, effect_policy="non_replay_safe")
-    async with Persistence.open("recovery", storage=PersistenceStorage.filesystem(tmp_path), tenant_id="tenant") as persistence:
+    async with Persistence.open("recovery", storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id="tenant") as persistence:
         async with TaskEngine.open(task, persistence=persistence) as engine:
             run = await engine.start(TaskGraph("effect", (TaskNode("n", task=task, max_attempts=2),)), principal=original, idempotency_key="effect")
             assert (await run.wait(timeout_seconds=10)).result.status is TaskStatus.RECOVERY_REQUIRED
             state = await run.state()
             execution_id = state.node_states[0].execution_id
-    async with Persistence.open("recovery", storage=PersistenceStorage.filesystem(tmp_path), tenant_id="tenant") as persistence:
+    async with Persistence.open("recovery", storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id="tenant") as persistence:
         async with TaskEngine.open(task, persistence=persistence) as engine:
             run = await engine.get("effect", principal=operator)
             state = await run.state()

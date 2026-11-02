@@ -38,7 +38,7 @@ async def test_close_persists_queued_projection_referencing_external_transcript(
 
     cache = Cache(max_bytes=1024 * 1024)
     root = tmp_path / "state"
-    storage = Persistence(PersistenceStorage.filesystem(root, cache=cache))
+    storage = Persistence(PersistenceStorage.from_root(root, cache=cache, exclusive_writer=True))
     await storage.initialize(
         namespace="close-projection", tenant_id="tenant",
     )
@@ -86,7 +86,7 @@ async def test_close_persists_queued_projection_referencing_external_transcript(
     finally:
         await storage.close()
 
-    reopened = Persistence(PersistenceStorage.filesystem(root, cache=cache))
+    reopened = Persistence(PersistenceStorage.from_root(root, cache=cache, exclusive_writer=True))
     await reopened.initialize(
         namespace="close-projection", tenant_id="tenant", read_only=True,
     )

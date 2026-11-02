@@ -21,8 +21,8 @@ from .test_step_projection import _execution
 async def _setup(tmp_path: Path, backend: str, cache: object | None = None, *, buffer=None):
     if backend == "memory":
         state = Persistence(PersistenceStorage.in_memory(cache=cache))
-    elif backend == "filesystem":
-        state = Persistence(PersistenceStorage.filesystem(tmp_path / "state", cache=cache))
+    elif backend == "local_sqlite":
+        state = Persistence(PersistenceStorage.from_root(tmp_path / "state", cache=cache, exclusive_writer=True))
     else:
         state = Persistence(PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache))
     await state.initialize(namespace="projection-buffer", tenant_id="tenant")
@@ -62,7 +62,7 @@ class _HotContentCache:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite"))
 @pytest.mark.parametrize("hot_cache", (False, True))
 async def test_observations_without_write_buffer_persist_at_each_boundary(
     tmp_path: Path, backend: str, hot_cache: bool,
@@ -88,7 +88,7 @@ def test_observation_policy_keeps_approved_window_and_threshold() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite"))
 async def test_required_drain_repeated_cancellation_waits_for_source_confirmation(
     tmp_path: Path, backend: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -151,7 +151,7 @@ class _WriteOnlyCache:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite"))
 @pytest.mark.parametrize("source_fails", (False, True))
 async def test_write_only_cache_batches_trace_without_hot_content_operations(
     tmp_path: Path, backend: str, source_fails: bool, monkeypatch: pytest.MonkeyPatch,
@@ -163,8 +163,10 @@ async def test_write_only_cache_batches_trace_without_hot_content_operations(
     archive = store.read_store(PersistenceDomain.TRACE)
     original = archive.sync_prepared_projection
     source_error = AIError(ErrorCode.STORAGE_UNAVAILABLE)
+    attempted = asyncio.Event()
 
     async def fail_source(*args, **kwargs):
+        attempted.set()
         raise source_error
 
     if source_fails:
@@ -173,9 +175,11 @@ async def test_write_only_cache_batches_trace_without_hot_content_operations(
         await _observe(state, 1)
         assert await archive.list_events(agent_run_id="run") == []
         await _observe(state, 2)
-        await asyncio.wait_for(cache.acknowledged.wait(), 2)
+        await asyncio.wait_for((attempted if source_fails else cache.acknowledged).wait(), 2)
         assert cache.accepted == 2
         if source_fails:
+            assert not cache.acknowledged.is_set()
+            assert cache._queue._pending_count == 2
             assert await archive.list_events(agent_run_id="run") == []
             with pytest.raises(AIError) as caught:
                 await store.flush_execution_projection("run", execution_id="execution", producer_generation=1)

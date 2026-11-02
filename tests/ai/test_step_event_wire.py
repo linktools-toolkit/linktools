@@ -69,20 +69,16 @@ def test_step_event_wire_accepts_additive_metadata_fields() -> None:
     assert _decode_step_envelope(encoded) == event
 
 
-def _storage(backend: str, root: Path) -> PersistenceStorage:
-    if backend == "filesystem":
-        return PersistenceStorage.filesystem(root)
+def _storage(root: Path) -> PersistenceStorage:
     return PersistenceStorage.sqlite(root / "state.db")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
 async def test_step_event_archive_and_idempotency_survive_snapshot(
-    backend: str,
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "runtime"
-    state = Persistence(_storage(backend, root))
+    state = Persistence(_storage(root))
     await state.initialize(namespace="steps", tenant_id="tenant")
     try:
         archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
@@ -107,7 +103,7 @@ async def test_step_event_archive_and_idempotency_survive_snapshot(
 
     objects = InMemoryObjectStore("snapshot")
     limits = SnapshotLimits(max_entries=100, max_bytes=1024 * 1024)
-    reader = Persistence(_storage(backend, root))
+    reader = Persistence(_storage(root))
     await reader.initialize(namespace="steps", tenant_id="tenant", read_only=True)
     try:
         reference = await reader.export_snapshot(object_store=objects, limits=limits)

@@ -152,6 +152,8 @@ class ExecutionProjectionBatch:
     base_interaction_offset: int = 0
     target_interaction_offset: int = 0
     transcript: StagedTranscript | None = None
+    payloads: tuple[tuple[str, bytes], ...] = ()
+    local_messages: Sequence[ModelMessage] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +270,8 @@ class CapturedExecutionProjection:
     base_message_index: int = 0
     target_message_index: int = 0
     producer_generation: int | None = None
+    payloads: tuple[tuple[str, bytes], ...] = ()
+    local_messages: Sequence[ModelMessage] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -795,6 +799,11 @@ class StagingAgentRunStore(AgentRunStore):
             for sequence in sorted(dirty)
         ) if interactions else ()
         transcript = self.staged_transcript(agent_run_id)
+        local_messages = () if transcript is None else transcript.messages
+        payload_digests = {
+            digest for interaction in captured_interactions for digest, _ in interaction.payload_dependencies()
+        }
+        payloads = tuple((digest, self.staged_payload(agent_run_id, digest)) for digest in sorted(payload_digests))
         target_message_index = offset.transcript_messages
         if transcript is not None:
             target_message_index = len(transcript.messages)
@@ -819,6 +828,8 @@ class StagingAgentRunStore(AgentRunStore):
             offset.interactions,
             interactions[-1].model_request_seq if interactions else offset.interactions,
             transcript,
+            payloads,
+            local_messages,
         )
 
     def _ensure_open(self) -> None:
@@ -3644,18 +3655,29 @@ class StateStepArchive(AgentRunStore):
                     return await scan_captured(transaction)
                 sequences.append(sequence)
             result: list[tuple[int, StepEvent]] = []
-            for record, sequence in zip(records, sequences, strict=True):
+            start = 0
+            while start < len(sequences):
+                end = start + 1
+                # Bound raw fact residency without reordering the timestamp page.
+                while (end < len(sequences) and end - start < 32
+                       and sequences[end] == sequences[end - 1] + 1):
+                    end += 1
                 facts = await transaction.list_facts(FactQuery(
-                    self._stream(agent_run_id, "event"), after_sequence=sequence - 1, limit=1,
+                    self._stream(agent_run_id, "event"),
+                    after_sequence=sequences[start] - 1, limit=end - start,
                 ))
-                if len(facts) != 1 or facts[0].sequence != sequence:
+                if [fact.sequence for fact in facts] != sequences[start:end]:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                event = _decode_step(facts[0].data)
-                if (not isinstance(event, StepEvent) or event.agent_run_id != agent_run_id
-                        or record.sort_key != f"trace:{event.timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{sequence:020d}"
-                        or not matches(sequence, event)):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                result.append((sequence, event))
+                for index, fact in enumerate(facts, start):
+                    sequence, record = sequences[index], records[index]
+                    event = _decode_step(fact.data)
+                    if (not isinstance(event, StepEvent) or event.agent_run_id != agent_run_id
+                            or record.sort_key != f"trace:{event.timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{sequence:020d}"
+                            or not matches(sequence, event)):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    result.append((sequence, event))
+                del facts, fact
+                start = end
             return result
 
         return await self._store.read(read)

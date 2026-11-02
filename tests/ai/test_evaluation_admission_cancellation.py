@@ -32,7 +32,7 @@ from .test_evaluation_persistence import storage_for
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("local_sqlite", "sqlite"))
 @pytest.mark.parametrize("winner", ("cancel", "start"))
 async def test_admission_cancellation_fences_both_start_orderings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, winner: str,
@@ -129,7 +129,7 @@ async def test_admission_cancellation_preserves_authorization_and_request_identi
     authorization = Authorization(PRINCIPAL.tenant_id)
     target = Task("cancel-security.target", echo, effect_policy="none")
     scorer = Task("cancel-security.score", exact, effect_policy="none")
-    storage = storage_for("filesystem", tmp_path)
+    storage = storage_for("local_sqlite", tmp_path)
     async with (
         Persistence.open('cancel-security', storage=storage, tenant_id='evaluation-consumers') as persistence_130,
     ):

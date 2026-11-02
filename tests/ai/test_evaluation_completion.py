@@ -30,7 +30,7 @@ async def test_target_graph_recovery_does_not_hide_successful_execution(
     target = Task("completion.target", echo, effect_policy="none")
     scorer = Task("completion.score", exact, effect_policy="none")
     async with (
-        Persistence.open('completion', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_29,
+        Persistence.open('completion', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_29,
         TaskEngine.open(target, scorer, persistence=persistence_29, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):

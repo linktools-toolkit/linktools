@@ -39,13 +39,13 @@ PRINCIPAL = service_principal("tenant", "owner")
 def storage_for(kind: str, path: Path) -> PersistenceStorage:
     if kind == "memory":
         return PersistenceStorage.in_memory()
-    if kind == "filesystem":
-        return PersistenceStorage.filesystem(path)
+    if kind == "local_sqlite":
+        return PersistenceStorage.from_root(path, exclusive_writer=True)
     if kind == "sqlite":
         return PersistenceStorage.sqlite(path / "state.sqlite")
     return PersistenceStorage.from_plan(PersistencePlan(
         execution=StorageRoute.sqlite(path / "execution.sqlite"),
-        task=StorageRoute.filesystem(path / "task"),
+        task=StorageRoute.sqlite((path / "task") / "state.db"),
         evaluation=StorageRoute.sqlite(path / "evaluation.sqlite"),
     ))
 
@@ -134,7 +134,7 @@ def test_evaluation_identity_round_trips_through_record_and_retention_wire() -> 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "mixed"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite", "mixed"))
 async def test_dataset_publication_and_slot_arbitration_are_backend_atomic(backend: str, tmp_path: Path) -> None:
     storage = storage_for(backend, tmp_path)
     storage = Persistence(storage)
@@ -258,7 +258,7 @@ def test_disposition_wire_preserves_validated_derived_flags(kind: str, persisted
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "mixed"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite", "mixed"))
 @pytest.mark.parametrize("kind", (
     "permanent_unavailable", "permanent_invalid", "cancelled", "recoverable_blocked",
 ))
@@ -295,7 +295,7 @@ async def test_disposition_recovery_and_terminal_arbitration_persist(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "mixed"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite", "mixed"))
 async def test_content_purge_persists_terminal_disposition_projections(backend: str, tmp_path: Path) -> None:
     storage = Persistence(storage_for(backend, tmp_path))
     await storage.initialize(namespace="evaluation", tenant_id="tenant")

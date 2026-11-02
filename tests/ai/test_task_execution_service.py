@@ -19,7 +19,7 @@ from linktools.ai.task import TaskBindingContract
 async def test_callable_settlement_round_trips_without_agent_host(tmp_path: Path, outcome: str) -> None:
     principal = Principal("worker", "tenant")
     binding = TaskBindingContract("callable", 1, "none", {"kind": "json"}, None, 1, 0)
-    state = Persistence(PersistenceStorage.filesystem(tmp_path))
+    state = Persistence(PersistenceStorage.from_root(tmp_path, exclusive_writer=True))
     await state.initialize(namespace="independent-task", tenant_id="tenant")
     try:
         service = TaskExecutionService(
@@ -49,7 +49,7 @@ async def test_callable_settlement_round_trips_without_agent_host(tmp_path: Path
     finally:
         await state.close()
 
-    reopened = Persistence(PersistenceStorage.filesystem(tmp_path))
+    reopened = Persistence(PersistenceStorage.from_root(tmp_path, exclusive_writer=True))
     await reopened.initialize(namespace="independent-task", tenant_id="tenant")
     try:
         service = TaskExecutionService(

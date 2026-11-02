@@ -216,7 +216,7 @@ async def test_evaluation_reopens_a_known_graph_after_waiting_stage_resumes():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["memory", "filesystem"])
+@pytest.mark.parametrize("backend", ["memory", "local_sqlite"])
 async def test_evaluation_real_task_graphs_watch_and_wait_share_resumable_events(tmp_path, backend):
     from linktools.ai.evaluation import (
         CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationSpec, EvaluationPolicy, StartEvaluationRequest,
@@ -225,7 +225,7 @@ async def test_evaluation_real_task_graphs_watch_and_wait_share_resumable_events
     from linktools.ai.task import Task
     from .test_evaluation_consumers import echo, exact, rule_scorer, CONTEXT, PRINCIPAL as principal
 
-    storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     target = Task("watch.echo", echo, effect_policy="none")
     scorer = Task("watch.exact", exact, effect_policy="none")
     async with (

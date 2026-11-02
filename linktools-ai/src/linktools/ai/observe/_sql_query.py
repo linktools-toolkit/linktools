@@ -193,8 +193,9 @@ FROM (
     FROM ai_metric_observations
     WHERE namespace_digest = :namespace_key
       AND kind = :kind
-      AND occurred_at >= :window_start
-      AND occurred_at < :window_end
+      AND pruned_at IS NULL
+      AND active_occurred_at >= :window_start
+      AND active_occurred_at < :window_end
     LIMIT :scan_cap
 ) AS bounded_metric_scan
 """
@@ -207,6 +208,7 @@ def _bounded_observations_sql(
         columns = tuple(dict.fromkeys((
             *columns, "namespace_digest", "kind", "occurred_at",
             "observation_digest", "payload_digest", "payload_json",
+            "namespace", "observation_id", "active_occurred_at", "pruned_at",
         )))
     projection = ", ".join(columns)
     bounded = f"""bounded_observations AS (
@@ -214,8 +216,9 @@ def _bounded_observations_sql(
     FROM ai_metric_observations
     WHERE namespace_digest = :namespace_key
       AND kind = :kind
-      AND occurred_at >= :window_start
-      AND occurred_at < :window_end
+      AND pruned_at IS NULL
+      AND active_occurred_at >= :window_start
+      AND active_occurred_at < :window_end
     LIMIT :scan_cap
 ), scan_stats AS (
     SELECT COUNT(*) AS scanned_count
@@ -230,7 +233,8 @@ def _bounded_observations_sql(
         CASE WHEN scanned_count < :scan_cap THEN (
             SELECT MAX(linktools_metric_verify(
                 :verified_namespace, :namespace_key, namespace_digest, observation_digest, payload_digest,
-                kind, occurred_at, payload_json
+                kind, occurred_at, payload_json, namespace, observation_id,
+                active_occurred_at, pruned_at
             )) FROM bounded_observations
         ) ELSE NULL END AS record_error
     FROM scan_stats

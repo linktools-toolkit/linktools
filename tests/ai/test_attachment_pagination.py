@@ -254,7 +254,7 @@ async def test_attachment_cursor_from_request_started_survives_archive_reopen(
     first = None
     started_items = ()
     group.capability(TraceCapability(), scope="runtime")
-    async with Persistence.open('attachment-pagination', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_252, Runtime.attach(persistence=persistence_252, features=model_features(models, group)) as runtime:
+    async with Persistence.open('attachment-pagination', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_252, Runtime.attach(persistence=persistence_252, features=model_features(models, group)) as runtime:
         principal = runtime.default_principal
         prompt = ["summarize", BinaryContent(b"initial", media_type="image/png")] if initial_attachment else "summarize"
         execution = await runtime.agents.get().start(prompt, input_context=imported)
@@ -295,7 +295,7 @@ async def test_attachment_cursor_from_request_started_survives_archive_reopen(
             cursor = tail.next_cursor
         assert tuple(items) == prepared.items
 
-    async with Persistence.open('attachment-pagination', storage=PersistenceStorage.filesystem(tmp_path), tenant_id="default", read_only=True) as history_persistence_296, History.open(persistence=history_persistence_296) as archived:
+    async with Persistence.open('attachment-pagination', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id="default", read_only=True) as history_persistence_296, History.open(persistence=history_persistence_296) as archived:
         items = list(first.items)
         cursor = first.next_cursor
         while cursor is not None:

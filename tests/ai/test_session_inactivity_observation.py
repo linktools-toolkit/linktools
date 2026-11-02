@@ -82,7 +82,7 @@ async def _cancel_observer(task):
         await task
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("terminal", (False, True))
 async def test_inactive_observation_does_not_write_or_release_retained_turn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, terminal: bool,

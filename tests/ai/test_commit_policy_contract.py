@@ -79,8 +79,10 @@ def test_write_buffer_is_borrowed_and_separate_from_policy_value() -> None:
         policy.buffer = second
     with pytest.raises(ValueError):
         CommitPolicy("sync", buffer=first)
-    with pytest.raises(ValueError):
-        CommitPolicy("terminal", buffer=first)
+    terminal = CommitPolicy.terminal(buffer=first)
+    assert terminal.buffer is first
+    assert terminal == CommitPolicy.terminal(buffer=second)
+    assert terminal.resolve_batch(batch_size=1, flush_interval=1) is terminal
 
 
 def test_write_policy_requires_a_complete_write_buffer() -> None:
@@ -132,6 +134,7 @@ assert StorageBuffer is WriteBufferBackend
 assert StorageEntry is WriteBufferEntry
 assert get_type_hints(CommitPolicy)['buffer'] == WriteBufferBackend | None
 assert get_type_hints(CommitPolicy.batch)['buffer'] == WriteBufferBackend | None
+assert get_type_hints(CommitPolicy.terminal)['buffer'] == WriteBufferBackend | None
 """
     subprocess.run([sys.executable, "-c", code], check=True, capture_output=True, text=True)
 

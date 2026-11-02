@@ -106,7 +106,7 @@ async def test_memory_declaration_rejects_agent_scope_and_duplicates(shape: str,
 
 @pytest.mark.asyncio
 async def test_retry_retains_admitted_memory_after_host_configuration_changes(tmp_path: Path) -> None:
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Runtime.open("memory-retry", storage=storage, features=_features("original")) as runtime:
         source = await runtime.agents.get().start("first", idempotency_key="first")
         assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -202,7 +202,7 @@ async def test_memory_tools_retry_uses_admitted_store_after_host_change(tmp_path
             result.agent("default", allow_tools=("read_memory", "write_memory"))
         return result
 
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Runtime.open("admitted-memory-tools", storage=storage, features=features("original", selected=True)) as runtime:
         original = await runtime.agents.get().run("remember")
         assert original.result.status is ExecutionStatus.SUCCEEDED
@@ -278,7 +278,7 @@ async def test_imported_memory_retains_tools_without_host_memory(tmp_path: Path)
     context = ExecutionInputContext.from_messages((), memory={
         "memory/MEMORY.md": {"content": "captured memory", "version": "m1:" + "1" * 64},
     })
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Runtime.open("imported-memory-tools", storage=storage, features=features) as runtime:
         agent = runtime.agents.get()
         assert (await agent.run("ordinary")).result.status is ExecutionStatus.SUCCEEDED
@@ -353,7 +353,7 @@ async def test_memory_restore_keeps_other_same_named_business_pins(tmp_path: Pat
         result.tool(write_memory, effect_policy="none")
         return result
 
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Runtime.open("mixed-memory-pins", storage=storage, features=features(True)) as runtime:
         original = await runtime.agents.get().run("original")
         assert original.result.status is ExecutionStatus.SUCCEEDED

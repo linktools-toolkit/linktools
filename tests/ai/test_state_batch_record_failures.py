@@ -16,7 +16,7 @@ from tests.ai.test_state_batch_delete_backends import _open_store, _record
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sql"))
 async def test_record_storage_revision_is_independent_of_domain_revision(
     backend: str, tmp_path: Path,
 ) -> None:
@@ -70,7 +70,7 @@ async def test_record_storage_revision_is_independent_of_domain_revision(
         assert await store.read(lambda tx: tx.get_record(record.key_digest)) is None
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sql"))
 async def test_caught_insert_conflict_preserves_batch_atomicity(
     backend: str, tmp_path: Path,
 ) -> None:
@@ -90,7 +90,7 @@ async def test_caught_insert_conflict_preserves_batch_atomicity(
         assert await store.read(lambda tx: tx.get_record(other.key_digest)) == other
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sql"))
 async def test_caught_replace_precondition_allows_unrelated_write(
     backend: str, tmp_path: Path,
 ) -> None:
@@ -116,57 +116,3 @@ async def test_caught_replace_precondition_allows_unrelated_write(
             record.key_digest: record for record in records
         }
         assert await store.read(lambda tx: tx.get_record(other.key_digest)) == other
-
-
-@pytest.mark.parametrize("bulk,cancel_read", ((False, "list_aliases"), (True, "list_aliases"),
-                                             (True, "load_fact_subjects")))
-async def test_caught_filesystem_delete_cancel_preserves_all_relationships(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bulk: bool, cancel_read: str,
-) -> None:
-    import asyncio
-
-    from tests.ai.test_state_batch_delete_backends import _alias, _fact, _seed
-
-    root = tmp_path / "filesystem"
-    records = (_record(1), _record(2))
-    async with _open_store("filesystem", root) as store:
-        await _seed(store, records)
-    async with _open_store("filesystem", root) as store:
-        entered, release = asyncio.Event(), asyncio.Event()
-        to_thread = asyncio.to_thread
-        reads = 0
-
-        async def pause(function, *args, **kwargs):
-            nonlocal reads
-            if function.__name__ == cancel_read:
-                reads += 1
-                if cancel_read == "list_aliases" or reads == 2:
-                    entered.set()
-                    await release.wait()
-            return await to_thread(function, *args, **kwargs)
-
-        async def callback(transaction):
-            try:
-                if bulk:
-                    await transaction.delete_records(tuple(r.key_digest for r in records))
-                else:
-                    await transaction.delete_record(records[0].key_digest)
-            except asyncio.CancelledError:
-                await transaction.insert_record(_record(3))
-
-        with monkeypatch.context() as patch:
-            patch.setattr(asyncio, "to_thread", pause)
-            task = asyncio.create_task(store.mutate(callback))
-            try:
-                await asyncio.wait_for(entered.wait(), 5)
-                task.cancel()
-                await task
-            finally:
-                release.set()
-                await asyncio.gather(task, return_exceptions=True)
-        assert len(await store.read(lambda tx: tx.scan_records())) == 3
-        assert set(await store.read(lambda tx: tx.scan_aliases())) == {_alias(r) for r in records}
-        assert {fact.stream_digest: fact for fact in await store.read(lambda tx: tx.scan_facts())} == {
-            _fact(r).stream_digest: _fact(r) for r in records
-        }
-        await store.validate_integrity()

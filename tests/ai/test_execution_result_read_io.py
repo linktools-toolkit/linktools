@@ -55,7 +55,7 @@ async def _seed(state, *, output=None):
     return execution
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("history,method", (
     (False, "result"), (False, "result_payload_size"), (False, "wait"), (True, "result"),
 ))

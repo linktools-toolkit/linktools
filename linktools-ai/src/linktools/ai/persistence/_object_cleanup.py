@@ -18,6 +18,7 @@ from ..storage import (
     read_object,
 )
 from ._archive_closure import ArchiveClosure, iter_archive_content_refs, iter_archive_roots
+from ._capability_marker import has_capability_partition_marker
 from .codec import iter_runtime_object_dependencies, iter_runtime_object_refs
 from .captures import (
     input_capture_expiry_key,
@@ -52,6 +53,7 @@ async def purge_unreferenced_objects(
     object_stores: Mapping[PersistenceDomain, ObjectStore],
     exclusive: SnapshotExclusiveGuard, limit: int = 100,
     archive_object_stores: Mapping[PersistenceDomain, ObjectStore] | None = None,
+    capability_stores: Mapping[str, StateStore] | None = None,
 ) -> ObjectCleanupResult:
     """Delete only after the caller quiesces all users of the routed stores.
 
@@ -77,12 +79,18 @@ async def purge_unreferenced_objects(
     if any(not isinstance(group, StateStorageGroup) for group in groups):
         return ObjectCleanupResult(blocked=selected)
     async with exclusive.offline_exclusivity():
+        if capability_stores:
+            return ObjectCleanupResult(blocked=selected)
         archive_closures = {}
         archive_stores = {}
         partitions = {}
         for group, domain in groups.items():
             for partition in await group.scan_stores():
                 partitions.setdefault(partition, domain)
+        for partition in partitions:
+            if await partition.read(has_capability_partition_marker):
+                return ObjectCleanupResult(blocked=selected)
+        for group, domain in groups.items():
             opened = await group.open_archive()
             if opened is not None:
                 scope, archive = opened

@@ -3,8 +3,7 @@
 """Focused I/O invariants for Runtime storage optimization."""
 
 import hashlib
-from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import replace
+from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,27 +16,19 @@ from linktools.ai.runtime._harness import HarnessPlanStoreAdapter
 from linktools.ai.runtime._plan import RuntimePlanStore
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.codec import (
-    _encode_persisted_domain,
-    encode_envelope,
-)
 from linktools.ai.persistence.contracts import (
     ApprovalRecord,
     ContextProjection,
     LoadedModelContext,
 )
-from linktools.ai.persistence._filesystem import FilesystemStateStore
-from linktools.ai.persistence._filesystem_transaction import _FilesystemTransaction
 from linktools.ai.persistence._history import TranscriptRepository
 from linktools.ai.persistence._recovery_repositories import (
     RecoveryApprovalRepositoryImpl,
 )
-from linktools.ai.persistence.state import FactQuery, StoredFact, StoredRecord
 from linktools.ai.persistence._sql import SqlStateStore
 from linktools.ai.storage import (
     FilesystemObjectStore,
     SqlObjectStore,
-    StoredPayload,
 )
 from linktools.ai.storage import _object_filesystem as object_module
 from pydantic_ai_harness.planning import PlanItem as HarnessPlanItem
@@ -49,215 +40,6 @@ pytestmark = pytest.mark.asyncio
 
 async def _chunks(value: bytes) -> AsyncIterator[bytes]:
     yield value
-
-
-def _filesystem_fact_record(owner: bytes) -> StoredRecord:
-    return StoredRecord(
-        owner,
-        None,
-        None,
-        "owner",
-        "owner",
-        None,
-        0,
-        None,
-        0,
-        None,
-        {},
-    )
-
-
-def _filesystem_fact(
-    stream: bytes,
-    sequence: int,
-    owner: bytes,
-    subject: bytes | None,
-) -> StoredFact:
-    return StoredFact(
-        stream,
-        sequence,
-        owner,
-        "test_fact",
-        subject,
-        None,
-        {"sequence": sequence},
-    )
-
-
-async def test_filesystem_fact_batch_limits_stream_and_subject_staging(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "state"
-    owner = b"o" * 32
-    stream = b"s" * 32
-    subject_a = b"a" * 32
-    subject_b = b"b" * 32
-    store = FilesystemStateStore(
-        root,
-        namespace="fact-batch",
-        tenant_id="tenant",
-        runtime_domain="execution",
-    )
-    await store.initialize()
-    try:
-        async def seed(transaction: _FilesystemTransaction) -> None:
-            await transaction.insert_record(_filesystem_fact_record(owner))
-            await transaction.insert_facts(
-                (
-                    _filesystem_fact(stream, 1, owner, subject_a),
-                    _filesystem_fact(stream, 2, owner, subject_b),
-                )
-            )
-
-        await store.mutate(seed)
-    finally:
-        await store.close()
-
-    reopened = FilesystemStateStore(
-        root,
-        namespace="fact-batch",
-        tenant_id="tenant",
-        runtime_domain="execution",
-    )
-    await reopened.initialize()
-    try:
-        staged: list[str] = []
-        subject_loads = 0
-        appended = (
-            _filesystem_fact(stream, 3, owner, subject_a),
-            _filesystem_fact(stream, 4, owner, subject_a),
-            _filesystem_fact(stream, 5, owner, None),
-        )
-
-        async def append(
-            transaction: _FilesystemTransaction,
-        ) -> tuple[StoredFact, ...]:
-            nonlocal subject_loads
-            original_write = transaction._write
-            original_load = transaction._cache.load_fact_subjects
-
-            def write(relative: object, value: object) -> None:
-                staged.append(str(relative))
-                original_write(relative, value)
-
-            def load_subjects(info: object) -> None:
-                nonlocal subject_loads
-                subject_loads += 1
-                original_load(info)
-
-            assert await transaction.guard_record(
-                owner,
-                expected_storage_revision=0,
-            ) is not None
-            monkeypatch.setattr(transaction, "_write", write)
-            monkeypatch.setattr(transaction._cache, "load_fact_subjects", load_subjects)
-            await transaction.insert_facts(appended)
-            assert subject_loads == 0
-            values = await transaction.list_facts(
-                FactQuery(stream, after_sequence=None)
-            )
-            latest = await transaction.list_facts(
-                FactQuery(stream, subject_digest=subject_a, latest=True)
-            )
-            assert tuple(value.sequence for value in values) == (1, 2, 3, 4, 5)
-            assert tuple(value.sequence for value in latest) == (4,)
-            return values
-
-        await reopened.mutate(append)
-        assert sum(path.endswith("/meta.json") for path in staged) == 1
-        assert sum("/subjects/" in path for path in staged) == 1
-        assert sum("/items/" in path for path in staged) == 3
-
-        values = await reopened.read(
-            lambda transaction: transaction.list_facts(FactQuery(stream))
-        )
-        assert tuple(value.sequence for value in values) == (1, 2, 3, 4, 5)
-        latest = await reopened.read(
-            lambda transaction: transaction.list_facts(
-                FactQuery(stream, subject_digest=subject_a, latest=True)
-            )
-        )
-        assert tuple(value.sequence for value in latest) == (4,)
-    finally:
-        await reopened.close()
-
-
-async def test_filesystem_fact_batch_stages_each_stream_once(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "state"
-    owner = b"o" * 32
-    stream_a = b"a" * 32
-    stream_b = b"b" * 32
-    subject_a = b"c" * 32
-    subject_b = b"d" * 32
-    store = FilesystemStateStore(
-        root,
-        namespace="fact-batch-multi",
-        tenant_id="tenant",
-        runtime_domain="execution",
-    )
-    await store.initialize()
-    try:
-        async def seed(transaction: _FilesystemTransaction) -> None:
-            await transaction.insert_record(_filesystem_fact_record(owner))
-            await transaction.insert_facts(
-                (
-                    _filesystem_fact(stream_a, 1, owner, subject_a),
-                    _filesystem_fact(stream_b, 1, owner, subject_b),
-                )
-            )
-
-        await store.mutate(seed)
-    finally:
-        await store.close()
-
-    reopened = FilesystemStateStore(
-        root,
-        namespace="fact-batch-multi",
-        tenant_id="tenant",
-        runtime_domain="execution",
-    )
-    await reopened.initialize()
-    try:
-        staged: list[str] = []
-
-        async def append(transaction: _FilesystemTransaction) -> None:
-            assert await transaction.guard_record(
-                owner,
-                expected_storage_revision=0,
-            ) is not None
-            original_write = transaction._write
-
-            def write(relative: object, value: object) -> None:
-                staged.append(str(relative))
-                original_write(relative, value)
-
-            monkeypatch.setattr(transaction, "_write", write)
-            await transaction.insert_facts(
-                (
-                    _filesystem_fact(stream_a, 2, owner, subject_a),
-                    _filesystem_fact(stream_b, 2, owner, subject_b),
-                    _filesystem_fact(stream_a, 3, owner, subject_a),
-                )
-            )
-
-        await reopened.mutate(append)
-        assert sum("/items/" in path for path in staged) == 3
-        assert sum(path.endswith("/meta.json") for path in staged) == 2
-        assert sum("/subjects/" in path for path in staged) == 2
-        expected_sequences = {stream_a: (1, 2, 3), stream_b: (1, 2)}
-        for stream, expected in expected_sequences.items():
-            values = await reopened.read(
-                lambda transaction, current_stream=stream: transaction.list_facts(
-                    FactQuery(current_stream)
-                )
-            )
-            assert tuple(value.sequence for value in values) == expected
-    finally:
-        await reopened.close()
 
 
 async def test_filesystem_object_store_syncs_payload_before_publish(

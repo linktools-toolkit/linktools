@@ -5,6 +5,7 @@
 import asyncio
 import json
 import math
+import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
@@ -37,6 +38,7 @@ from ..history import (
 from ..inputs import InputFileSource, stored_user_input_view
 from ..execution import (
     CancelExecutionRequest,
+    CreateSessionRequest,
     ExecutionHandle,
     ExecutionRequest,
     ExecutionService,
@@ -142,6 +144,32 @@ class _SessionExecutionAdapter:
 
 class RuntimeSessionService(SessionManager[ExecutionHandle]):
     """Enforce session ownership, Agent identity immutability, and revision CAS."""
+
+    async def _prepare_resume_session(
+        self, agent_id: str, session_id: str, principal: Principal,
+    ) -> SessionRecord:
+        # Runtime starts preserve lazy session creation, but the authorized
+        # record is consumed by this same resume rather than fetched twice.
+        try:
+            record = await self.read_authorized(session_id, principal, AuthorizationAction.SESSION_READ)
+        except AIError as error:
+            if error.code not in {ErrorCode.SESSION_NOT_FOUND, ErrorCode.AUTHORIZATION_DENIED}:
+                raise
+            try:
+                await self.create(agent_id, CreateSessionRequest(
+                    principal, session_id, secrets.token_urlsafe(32), None, {},
+                ))
+            except AIError as create_error:
+                if create_error.code is not ErrorCode.STORAGE_CONFLICT:
+                    raise
+            # Both a created session and a concurrent winner require a fresh
+            # read authorization; a create conflict is not an ownership proof.
+            record = await self.read_authorized(session_id, principal, AuthorizationAction.SESSION_READ)
+        if record.status is not SessionStatus.OPEN:
+            raise AIError(ErrorCode.SESSION_CONFLICT)
+        if record.agent_id != agent_id:
+            raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
+        return record
 
     async def lookup_admission(
         self, session_id: str, *, principal: Principal, idempotency_key: str,

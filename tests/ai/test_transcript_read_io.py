@@ -116,7 +116,7 @@ async def test_bounded_transcript_read_has_a_metadata_io_budget(
         await engine.dispose()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("reader", ("owner", "session"))
 @pytest.mark.parametrize("page_size", (1, 64))
 async def test_transcript_range_excludes_appends_after_reading_starts(
@@ -158,7 +158,7 @@ async def test_transcript_range_excludes_appends_after_reading_starts(
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("corruption", ("missing_tail", "overlap"))
 @pytest.mark.parametrize("page_size", (1, 64))
 async def test_transcript_range_checks_all_returned_facts_before_finishing(
@@ -200,7 +200,7 @@ async def test_transcript_range_checks_all_returned_facts_before_finishing(
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("reader", ("owner", "session"))
 @pytest.mark.parametrize("finish", ("close", "cancel"))
 async def test_transcript_payload_and_yield_release_state_scope(

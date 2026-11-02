@@ -17,7 +17,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.persistence._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
 from linktools.ai.persistence._memory import InMemoryStateStorageGroup, InMemoryStateStore
 from linktools.ai.persistence._sql import SqlStateStore
 from linktools.ai.persistence.state import (
@@ -26,7 +25,7 @@ from linktools.ai.persistence.state import (
 )
 
 pytestmark = pytest.mark.asyncio
-_BACKENDS = ("memory", "filesystem", "sql")
+_BACKENDS = ("memory", "sql")
 
 
 def _digest(value: str) -> bytes:
@@ -38,13 +37,6 @@ def _record(value: int) -> StoredRecord:
                         value - 1, None, 0, None, {"value": value})
 
 
-def _filesystem_stores(root: Path, *, read_only: bool = False) -> tuple[FilesystemStateStore, ...]:
-    group = FilesystemStateStorageGroup(
-        root, namespace="group-read", tenant_id="tenant", scope_digest="scope", read_only=read_only,
-    )
-    return tuple(FilesystemStateStore(
-        root / domain, namespace="group-read", tenant_id="tenant", runtime_domain=domain, group=group,
-    ) for domain in ("conversation", "execution", "step"))
 
 
 @asynccontextmanager
@@ -53,8 +45,6 @@ async def _open_stores(backend: str, root: Path) -> AsyncIterator[tuple[StateSto
     if backend == "memory":
         group = InMemoryStateStorageGroup()
         stores = tuple(InMemoryStateStore(group) for _ in range(3))
-    elif backend == "filesystem":
-        stores = _filesystem_stores(root)
     else:
         root.mkdir(parents=True)
         engine = create_async_engine(f"sqlite+aiosqlite:///{root / 'state.db'}", pool_size=1, max_overflow=1)
@@ -313,88 +303,3 @@ async def test_sql_group_clock_is_database_sourced_and_transaction_scoped(
         # The pooled connection and a nested scope must not extend timestamp lifetime.
         await first.read(lambda tx: tx.now())
         assert len(samples) == attempts + 2
-
-
-async def test_state_group_read_scope_filesystem_releases_partial_locks_and_ignores_other_members(
-    tmp_path: Path,
-) -> None:
-    async with _open_stores("filesystem", tmp_path / "fs") as (first, second, unrelated):
-        await second._consistency_lock.acquire()
-        entered = asyncio.Event()
-        acquire = first._consistency_lock.acquire
-
-        async def acquired() -> None:
-            await acquire()
-            entered.set()
-
-        first._consistency_lock.acquire = acquired
-        task = asyncio.create_task(first.storage_group.read_many(
-            (second, first), lambda scope: first.read(lambda tx: tx.scan_records())
-        ))
-        try:
-            await asyncio.wait_for(entered.wait(), 5)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-            assert not first._consistency_lock.locked()
-        finally:
-            second._consistency_lock.release()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        await unrelated._consistency_lock.acquire()
-        try:
-            assert await asyncio.wait_for(first.storage_group.read_many(
-                (second, first), lambda scope: first.read(lambda tx: tx.scan_records())
-            ), 5) == ()
-        finally:
-            unrelated._consistency_lock.release()
-
-
-@pytest.mark.parametrize("failure", (None, RuntimeError, asyncio.CancelledError))
-async def test_state_group_read_scope_filesystem_live_reader_holds_all_publication_fences(
-    tmp_path: Path, failure: type[BaseException] | None,
-) -> None:
-    root = tmp_path / "fs"
-    async with _open_stores("filesystem", root) as writers:
-        for store in writers[:2]:
-            await store.mutate(lambda tx: tx.insert_record(_record(1)))
-        readers = _filesystem_stores(root, read_only=True)
-        for store in readers:
-            await store.initialize()
-        start, attempting = asyncio.Event(), asyncio.Event()
-
-        async def writer() -> None:
-            await start.wait()
-            attempting.set()
-
-            async def change(scope: StateGroupTransaction) -> None:
-                for store in writers[:2]:
-                    assert await scope.transaction(store).replace_record(_record(2), expected_storage_revision=0)
-
-            await writers[0].storage_group.mutate(writers[:2], change)
-
-        task = asyncio.create_task(writer())
-
-        async def inspect(scope: StateGroupTransaction) -> None:
-            assert await readers[0].read(lambda tx: tx.get_record(_digest("record"))) == _record(1)
-            start.set()
-            await attempting.wait()
-            await asyncio.sleep(0)
-            assert not task.done()
-            assert await readers[1].read(lambda tx: tx.get_record(_digest("record"))) == _record(1)
-            if failure is not None:
-                raise failure()
-
-        try:
-            if failure is None:
-                await readers[0].storage_group.read_many(readers[:2], inspect)
-            else:
-                with pytest.raises(failure):
-                    await readers[0].storage_group.read_many(readers[:2], inspect)
-            await asyncio.wait_for(task, 5)
-            assert await readers[1].read(lambda tx: tx.get_record(_digest("record"))) == _record(2)
-        finally:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            for store in reversed(readers):
-                await store.close()

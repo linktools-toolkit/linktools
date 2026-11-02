@@ -44,8 +44,6 @@ async def _storage(root: Path, backend: str) -> AsyncIterator[PersistenceStorage
     engine = None
     if backend == "memory":
         storage = PersistenceStorage.in_memory()
-    elif backend == "filesystem":
-        storage = PersistenceStorage.filesystem(root / "state")
     elif backend == "sqlite":
         storage = PersistenceStorage.sqlite(root / "state.db")
     elif backend == "split":
@@ -65,7 +63,7 @@ async def _storage(root: Path, backend: str) -> AsyncIterator[PersistenceStorage
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "sql", "split"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite", "sql", "split"))
 async def test_session_reloads_known_scopes_before_first_model_request(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -193,7 +191,7 @@ def _session() -> SessionRecord:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite", "sql"))
 async def test_session_scope_union_is_transactional_and_requires_execution_owner(
     tmp_path: Path, backend: str,
 ) -> None:

@@ -40,7 +40,7 @@ class _ToolModels(_ToolModelBinding):
     pass
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem"))
+@pytest.mark.parametrize("backend", ("memory", "exclusive_sqlite"))
 @pytest.mark.asyncio
 async def test_composed_runtime_ask_enters_approval_wait(
     tmp_path: Path,
@@ -56,7 +56,7 @@ async def test_composed_runtime_ask_enters_approval_wait(
     state = (
         PersistenceStorage.in_memory()
         if backend == "memory"
-        else PersistenceStorage.filesystem(tmp_path / "runtime-state")
+        else PersistenceStorage.from_root(tmp_path / "runtime-state", exclusive_writer=True)
     )
     application = workspace_features("application", workspace=workspace)
     application.agent(

@@ -3,6 +3,7 @@
 """Sticky evidence that portable snapshots cannot represent every partition."""
 
 import hashlib
+from typing import Protocol
 
 from ..errors import AIError, ErrorCode
 from .state import StateTransaction, StoredOperation
@@ -10,7 +11,11 @@ from .state import StateTransaction, StoredOperation
 _KEY = hashlib.sha256(b"linktools.runtime.capability-partitions").digest()
 
 
-async def has_capability_partition_marker(transaction: StateTransaction) -> bool:
+class _OperationReader(Protocol):
+    async def get_operation(self, key: bytes) -> StoredOperation | None: ...
+
+
+async def has_capability_partition_marker(transaction: _OperationReader) -> bool:
     """Read the durable presence marker without discovering custom routes."""
     marker = await transaction.get_operation(_KEY)
     if marker is None:

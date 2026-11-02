@@ -174,7 +174,7 @@ class RuntimeFeatures(Generic[AppT]):
         *,
         name: "str | None" = None,
         revision: int = 1,
-        effect_policy: ToolEffectPolicy = "non_replay_safe",
+        effect_policy: ToolEffectPolicy = "replay_safe",
         plan_safe: bool = False,
     ) -> "Tool[AgentContext[AppT]]":
         """Register one ordinary model-visible Python tool."""

@@ -64,12 +64,12 @@ class _Launcher:
 def _storage(backend: str, path: Path) -> PersistenceStorage:
     if backend == "memory":
         return PersistenceStorage.in_memory()
-    if backend == "filesystem":
-        return PersistenceStorage.filesystem(path)
+    if backend == "local_sqlite":
+        return PersistenceStorage.from_root(path, exclusive_writer=True)
     if backend == "sqlite":
         return PersistenceStorage.sqlite(path / "state.db")
     return PersistenceStorage(PersistencePlan(
-        task=StorageRoute.filesystem(path / "task"),
+        task=StorageRoute.sqlite(path / "task" / "state.db"),
         evaluation=StorageRoute.sqlite(path / "evaluation.db"),
         execution=StorageRoute.sqlite(path / "execution.db"),
     ))
@@ -88,7 +88,7 @@ def _service(state: Persistence, launcher: _Launcher) -> DefaultTaskGraphService
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "mixed"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite", "mixed"))
 async def test_cancelled_preparation_never_admits_and_releases_sensitive_payload(
     backend: str, tmp_path: Path,
 ) -> None:
@@ -138,7 +138,7 @@ async def test_cancelled_preparation_never_admits_and_releases_sensitive_payload
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "mixed"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite", "mixed"))
 @pytest.mark.parametrize("admit_first", (False, True))
 async def test_submission_cancel_serializes_with_admission_and_blocks_node_claims(
     backend: str, tmp_path: Path, admit_first: bool,

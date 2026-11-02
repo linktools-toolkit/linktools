@@ -52,7 +52,7 @@ async def test_program_scorer_uses_frozen_case_context_for_identical_inputs_and_
                                expected="same answer", label_provenance=label)
                   for index, label in enumerate(labels))
     async with (
-        Persistence.open('scoring-context', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_51,
+        Persistence.open('scoring-context', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_51,
         TaskEngine.open(target, scorer, persistence=persistence_51, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -98,7 +98,7 @@ async def test_program_scorer_uses_frozen_case_context_for_identical_inputs_and_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("include_case_context", (False, True), ids=("without-case-context", "with-case-context"))
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("local_sqlite", "sqlite"))
 async def test_scoring_intent_replays_original_input_and_rejects_changed_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, include_case_context: bool, backend: str,
 ) -> None:
@@ -118,7 +118,7 @@ async def test_scoring_intent_replays_original_input_and_rejects_changed_context
     case = CaseSpec.task(CaseRef("replay", "case", 1), input={"answer": "yes"}, expected="yes",
                          label_provenance=LabelProvenance("assessment:42", "reviewer", "human-confirmed", "3"))
     def storage() -> PersistenceStorage:
-        return (PersistenceStorage.filesystem(tmp_path) if backend == "filesystem"
+        return (PersistenceStorage.from_root(tmp_path, exclusive_writer=True) if backend == "local_sqlite"
                 else PersistenceStorage.sqlite(tmp_path / "state.sqlite"))
 
     initial = storage()

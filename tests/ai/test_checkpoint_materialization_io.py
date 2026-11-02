@@ -142,7 +142,7 @@ async def test_recovery_preparation_bounds_metadata_read_transactions(tmp_path: 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 async def test_checkpoint_relocation_scopes_metadata_without_holding_body_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
@@ -188,7 +188,7 @@ async def test_checkpoint_relocation_scopes_metadata_without_holding_body_reads(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 async def test_recovery_metadata_cancellation_releases_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:

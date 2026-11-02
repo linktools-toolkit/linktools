@@ -136,7 +136,7 @@ async def test_checkpoint_metadata_batches_reads_without_changing_prepared_value
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("failure", ("different_run", "missing_head", "short_prefix", "changed_prefix"))
 @pytest.mark.parametrize("composed", (False, True))
 async def test_checkpoint_relocation_keeps_integrity_failures(
@@ -174,7 +174,7 @@ async def test_checkpoint_relocation_keeps_integrity_failures(
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("composed", (False, True))
 async def test_checkpoint_preparation_rereads_after_body_io_and_commit_rejects_stale_append(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, composed: bool,

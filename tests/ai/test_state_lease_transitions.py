@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sql"))
 async def test_lease_transitions_preserve_fencing_and_snapshot_data(
     backend: str, tmp_path: Path,
 ) -> None:
@@ -65,7 +65,7 @@ async def test_lease_transitions_preserve_fencing_and_snapshot_data(
             ))
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sql"))
 async def test_expired_lease_cannot_renew_or_release_but_can_be_taken_over(
     backend: str, tmp_path: Path,
 ) -> None:
@@ -147,7 +147,7 @@ async def test_sql_lease_resamples_time_after_cas_and_rolls_back_caught_conflict
             assert await store.read(lambda tx: tx.get_record(record.key_digest)) == result
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sql"))
 async def test_guarded_record_still_requires_current_revision_for_lease_transition(
     backend: str, tmp_path: Path,
 ) -> None:

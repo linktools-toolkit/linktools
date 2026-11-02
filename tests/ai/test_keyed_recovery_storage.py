@@ -35,14 +35,14 @@ _NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 _NAMESPACE = "keyed-recovery"
 
 
-@pytest_asyncio.fixture(params=("memory", "filesystem", "sqlite"))
+@pytest_asyncio.fixture(params=("memory", "local_sqlite", "sqlite"))
 async def storage(
     request: pytest.FixtureRequest, tmp_path: Path,
 ) -> AsyncIterator[Persistence]:
     if request.param == "memory":
         state = Persistence(PersistenceStorage.in_memory())
-    elif request.param == "filesystem":
-        state = Persistence(PersistenceStorage.filesystem(tmp_path / "state"))
+    elif request.param == "local_sqlite":
+        state = Persistence(PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True))
     else:
         state = Persistence(PersistenceStorage.sqlite(tmp_path / "state.db"))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")

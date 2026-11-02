@@ -14,7 +14,7 @@ from .test_shared_content_archive import _archive, _publish
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_archive_plans_preserve_all_ranges_and_unpublished_occurrences(tmp_path: Path, backend: str) -> None:
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
@@ -39,7 +39,7 @@ async def test_archive_plans_preserve_all_ranges_and_unpublished_occurrences(tmp
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_prepared_frontier_reuse_does_not_bypass_publication_integrity(tmp_path: Path, backend: str) -> None:
     from dataclasses import replace
 
@@ -69,7 +69,7 @@ async def test_prepared_frontier_reuse_does_not_bypass_publication_integrity(tmp
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("has_baseline", (False, True))
 async def test_empty_model_projection_does_not_open_archive_or_keep_baseline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, has_baseline: bool,

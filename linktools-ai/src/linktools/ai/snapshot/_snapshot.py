@@ -9,7 +9,7 @@ import os
 import posixpath
 import shutil
 import secrets
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -30,20 +30,22 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..storage import (
     FilesystemMutationLock,
+    FilesystemObjectStore,
     InMemoryObjectStore,
     ObjectRef,
     ObjectStore,
     read_object,
+    create_sql_storage_context,
 )
+from ..observe.stream import await_stream_cleanup
 from ..history import History
 from ..persistence.snapshots import (
     SnapshotExclusiveGuard,
     SnapshotLimits,
-    reject_filesystem_capability_partitions,
     snapshot_object_ref_payload as _object_ref_payload,
     snapshot_object_ref_from_payload as _object_ref_from_payload,
 )
-from ..persistence import PersistenceStorage, Persistence, PersistenceDomain
+from ..persistence import PersistenceStorage, Persistence
 
 if TYPE_CHECKING:
     from ..workspace import Workspace
@@ -98,23 +100,27 @@ class Snapshot:
         persistence: Persistence,
         object_store: ObjectStore,
         workspace: "Workspace | None" = None,
+        workspace_exclude_paths: Sequence[str | Path] = (),
         exclusive: SnapshotExclusiveGuard,
         limits: SnapshotLimits,
     ) -> ObjectRef:
-        """Capture read-only persistence and Workspace under caller-owned quiescence."""
+        """Capture read-only persistence and Workspace under caller-owned quiescence.
+
+        Known state and filesystem object paths are excluded automatically.
+        Use workspace_exclude_paths for additional local paths, including custom
+        object stores. These exclusions do not change persistence object export.
+        """
         if not persistence.ready:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         resolved_namespace = persistence.namespace
         resolved_tenant = persistence.tenant_id
         if not isinstance(limits, SnapshotLimits):
             raise TypeError("limits must be SnapshotLimits")
+        if isinstance(workspace_exclude_paths, (str, bytes)):
+            raise TypeError("workspace_exclude_paths must be a sequence of paths")
+        exclude_paths = tuple(workspace_exclude_paths)
 
         async def publish() -> ObjectRef:
-            await asyncio.to_thread(
-                reject_filesystem_capability_partitions,
-                tuple(persistence.plan.route(domain) for domain in PersistenceDomain),
-                resolved_namespace, resolved_tenant,
-            )
             storage_ref = await persistence.export_snapshot(
                 object_store=object_store,
                 limits=limits,
@@ -135,6 +141,7 @@ class Snapshot:
                 workspace,
                 storage=persistence,
                 object_store=object_store,
+                exclude_paths=exclude_paths,
                 limits=limits,
             )
             manifest: dict[str, JsonValue] = {
@@ -300,9 +307,12 @@ class Snapshot:
         tenant_id: str,
         limits: SnapshotLimits,
         replace_policy: str = "same",
+        exclusive_writer: bool = False,
         expected_generation: str | None = None,
         exclusive: SnapshotExclusiveGuard | None = None,
     ) -> RestoredSnapshot:
+        if not isinstance(exclusive_writer, bool):
+            raise TypeError("exclusive_writer must be a bool")
         manifest = await cls._verified_manifest(ref, object_store, limits)
         resolved_namespace = validate_persistence_namespace(namespace)
         resolved_tenant = validate_tenant_id(tenant_id)
@@ -330,7 +340,9 @@ class Snapshot:
             )
             if inspection.status != "matching":
                 raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-            return _restored_runtime(root, current)
+            restored = _restored_runtime(root, current)
+            await _require_restored_writer_profile(restored, exclusive_writer)
+            return restored
         if replace_policy == "replace" and (
             expected_generation is None or exclusive is None
         ):
@@ -359,6 +371,7 @@ class Snapshot:
                     object_store=object_store,
                     root=storage_root,
                     limits=limits,
+                    exclusive_writer=exclusive_writer,
                 )
                 workspace_root = await _restore_workspace(
                     manifest.get("workspace"),
@@ -397,7 +410,9 @@ class Snapshot:
                             )
                             if inspection.status != "matching":
                                 raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-                            return _restored_runtime(root, latest)
+                            restored = _restored_runtime(root, latest)
+                            await _require_restored_writer_profile(restored, exclusive_writer)
+                            return restored
                         if replace_policy == "replace":
                             if (
                                 latest is None
@@ -541,6 +556,7 @@ async def _capture_workspace(
     *,
     storage: "Persistence",
     object_store: ObjectStore,
+    exclude_paths: Sequence[str | Path],
     limits: SnapshotLimits,
 ) -> dict[str, JsonValue]:
     if workspace is None:
@@ -549,10 +565,10 @@ async def _capture_workspace(
             "entries": [],
         }
     root = workspace.root.resolve()
-    excluded = tuple(
-        path.resolve()
-        for path in (*storage.local_paths(), *object_store.local_paths())
-    )
+    paths = (*storage.local_paths(), *exclude_paths)
+    if isinstance(object_store, FilesystemObjectStore):
+        paths = (*paths, object_store.root)
+    excluded = tuple(Path(path).expanduser().resolve() for path in paths)
     if any(path == root for path in excluded):
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
 
@@ -880,6 +896,38 @@ def _resolve_workspace_entry_kind(
         if not isinstance(target, str):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         current = _safe_symlink_target(current, target)
+
+
+async def _require_restored_writer_profile(restored: RestoredSnapshot, expected: bool) -> None:
+    from sqlalchemy import URL
+    from sqlalchemy.exc import SQLAlchemyError
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    path = restored.storage_root / "runtime.db"
+    if not path.is_file():
+        raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+    engine = create_async_engine(URL.create(
+        "sqlite+aiosqlite", database=path.as_uri(), query={"mode": "ro", "uri": "true"},
+    ))
+    context = create_sql_storage_context(engine, owns_engine=True)
+    primary_error: BaseException | None = None
+    try:
+        actual = await context.is_local_sqlite_source(path)
+        if actual != expected:
+            raise AIError(ErrorCode.SNAPSHOT_CONFLICT, "Restored SQLite writer profile does not match")
+    except (OSError, SQLAlchemyError) as error:
+        primary_error = AIError(ErrorCode.STORAGE_UNAVAILABLE)
+        raise primary_error from error
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        try:
+            await await_stream_cleanup(context.close(), primary_error)
+        except BaseException as cleanup_error:
+            if primary_error is not None:
+                raise primary_error from cleanup_error
+            raise
 
 
 async def _verify_restored_generation(

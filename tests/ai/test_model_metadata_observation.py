@@ -283,7 +283,7 @@ async def test_model_metadata_public_history_authorizes_every_port() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "exclusive_sqlite", "sqlite"))
 async def test_model_metadata_live_and_archived_backend_contract(backend: str, tmp_path: Path) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -297,8 +297,8 @@ async def test_model_metadata_live_and_archived_backend_contract(backend: str, t
     def storage() -> PersistenceStorage:
         if backend == "memory":
             return PersistenceStorage.in_memory()
-        if backend == "filesystem":
-            return PersistenceStorage.filesystem(tmp_path / "state")
+        if backend == "exclusive_sqlite":
+            return PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
         return PersistenceStorage.sqlite(tmp_path / "state.db")
 
     group = RuntimeFeatures[None]("metadata")
@@ -383,7 +383,7 @@ async def test_live_request_progress_precedes_scheduled_canonical_publication(
         return ModelResponse(parts=[TextPart("published answer")])
 
     storage_path = tmp_path / "scheduled"
-    storage = PersistenceStorage.filesystem(storage_path)
+    storage = PersistenceStorage.from_root(storage_path, exclusive_writer=True)
     group = RuntimeFeatures("scheduled-history")
     group.capability(TraceCapability(commit=CommitPolicy.batch(
         buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=0.1,
@@ -416,7 +416,7 @@ async def test_live_request_progress_precedes_scheduled_canonical_publication(
             assert progress.payload["agent_run_seq"] == progress.payload["model_request_seq"] == 1
             assert "scheduled prompt" not in str(progress.payload)
             await asyncio.wait_for(publication_started.wait(), 5)
-            async with Persistence.open('scheduled-history', storage=PersistenceStorage.filesystem(storage_path), tenant_id="default", read_only=True) as history_persistence_418, History.open(persistence=history_persistence_418) as independent:
+            async with Persistence.open('scheduled-history', storage=PersistenceStorage.from_root(storage_path, exclusive_writer=True), tenant_id="default", read_only=True) as history_persistence_418, History.open(persistence=history_persistence_418) as independent:
                 admitted = await independent.model_interactions(
                     execution.execution_id, principal=principal, include_content=True,
                 )

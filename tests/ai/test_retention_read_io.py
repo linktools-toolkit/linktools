@@ -50,7 +50,7 @@ def _controller(repository, calls):
     return controller
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("condition", ("terminal", "closed", "missing", "running", "hold"))
 async def test_retention_cleanup_observes_committed_closure(
     tmp_path: Path, backend: str, condition: str,
@@ -94,7 +94,7 @@ async def test_retention_failure_does_not_start_cleanup(
                 if failure == "cancel":
                     raise asyncio.CancelledError()
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            monkeypatch.setattr(repository, "get", fail)
+            monkeypatch.setattr(repository, "get_in_transaction", fail)
         elif failure == "cas":
             from linktools.ai.persistence._sql import _SqlTransaction
             async def fail(*args, **kwargs):
@@ -278,3 +278,40 @@ async def test_runtime_releases_only_producer_staging_after_durable_handoff(
             assert ("own-run" in own._execution_producers) is not released
             assert "unrelated-run" in own._execution_producers
             assert "peer-run" in peer._run_store._execution_producers
+
+
+async def test_terminal_handoff_reuses_one_source_closure_read(tmp_path: Path) -> None:
+    state = Persistence(_storage("sqlite", tmp_path))
+    await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
+    try:
+        repository = state.execution.executions
+        await repository.create_with_history_head(replace(
+            _execution(), session_id=None, status=ExecutionStatus.SUCCEEDED,
+            conversation=True, retention_closed=True,
+        ))
+        controller = _controller(repository, [])
+        releases = []
+
+        async def release_object_scope(domain, *, owner_scope):
+            assert active_state_scope() is None
+            releases.append((domain, owner_scope))
+
+        controller._objects = SimpleNamespace(release_object_scope=release_object_scope)
+        engine = repository.state_store.storage_group.context.engine.sync_engine
+        statements = []
+
+        def capture(_connection, _cursor, statement, _parameters, _context, _many):
+            statements.append(statement.split()[0].upper())
+
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            assert await controller.release_execution_handoff(
+                "execution", tenant_id="tenant", terminal_commit=True,
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+        assert statements.count("SELECT") == 1
+        assert not set(statements) & {"INSERT", "UPDATE", "DELETE"}
+        assert releases == [(PersistenceDomain.TRACE, "execution:execution")]
+    finally:
+        await state.close()

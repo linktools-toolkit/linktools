@@ -210,7 +210,7 @@ def test_storage_inspection_tolerates_only_transaction_directory_cleanup(tmp_pat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("media_type", ("image/png", "text/plain"))
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("exclusive_sqlite", "sqlite"))
 @pytest.mark.parametrize("kind", ("none", "replay_safe", "non_replay_safe", "mcp", "read_file"))
 async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
     tmp_path: Path, kind: str, backend: str, media_type: str,
@@ -332,7 +332,7 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
         features.tool(render, effect_policy=kind)
         selected = "render"
     features.agent("reader", allow_tools=(selected, "finish"), allow_skills=(), allow_subagents=())
-    storage = PersistenceStorage.filesystem(state) if backend == "filesystem" else PersistenceStorage.from_root(state)
+    storage = PersistenceStorage.from_root(state, exclusive_writer=True) if backend == "exclusive_sqlite" else PersistenceStorage.from_root(state)
     async with Persistence.open('projection', storage=storage) as persistence_266, Runtime.attach(persistence=persistence_266, features=features) as runtime:
         execution = await runtime.agents.get("reader").start("Render page one.", principal=principal)
         result = (await execution.wait(timeout_seconds=15)).result
@@ -349,7 +349,7 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
         assert len(operations) == (0 if kind in {"none", "read_file"} else 1)
         if operations:
             assert operations[0].status is ToolOperationStatus.COMPLETED
-            assert operations[0].replay_safe is (kind == "replay_safe")
+            assert operations[0].replay_safe is (kind in {"replay_safe", "mcp"})
     assert provider_counts == [0, 1, 0] and len(loads) == 1
     assert pipeline == ["project", "observe"]
     assert len(after_hooks) == 2 and after_hooks[1] == "finish"
@@ -400,7 +400,7 @@ async def test_projection_failure_preserves_effect_classification(
         selected = "render"
     features.agent("reader", allow_tools=(selected,), allow_skills=(), allow_subagents=())
     state = tmp_path / "state"
-    async with Persistence.open('projection-failure', storage=PersistenceStorage.filesystem(state)) as persistence_333, Runtime.attach(persistence=persistence_333, features=features) as runtime:
+    async with Persistence.open('projection-failure', storage=PersistenceStorage.from_root(state, exclusive_writer=True)) as persistence_333, Runtime.attach(persistence=persistence_333, features=features) as runtime:
         execution = await runtime.agents.get("reader").start("Render.")
         try:
             await execution.wait(timeout_seconds=15)
@@ -416,7 +416,7 @@ async def test_projection_failure_preserves_effect_classification(
             assert len(operations) == 1
             assert operations[0].status is ToolOperationStatus.EFFECT_UNKNOWN
             assert operations[0].result_payload is None
-            assert operations[0].replay_safe is (kind == "replay_safe")
+            assert operations[0].replay_safe is (kind in {"replay_safe", "mcp"})
             with pytest.raises(AIError) as raised:
                 await execution.recover()
             assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
@@ -688,13 +688,13 @@ async def test_captured_execution_rebinds_result_capability_after_runtime_reopen
         result.agent("reader", allow_tools=("read_text",), allow_skills=(), allow_subagents=())
         return result
 
-    async with Persistence.open('reopen-projection', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_620, Runtime.attach(persistence=persistence_620, features=features('original')) as runtime, TaskEngine.open(persistence=persistence_620) as engine:
+    async with Persistence.open('reopen-projection', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_620, Runtime.attach(persistence=persistence_620, features=features('original')) as runtime, TaskEngine.open(persistence=persistence_620) as engine:
         source = await runtime.agents.get("reader").start("Inspect the synthetic document.", principal=principal)
         assert (await source.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
         capture = await runtime.executions.capture_input(
             source.execution_id, CaptureInputRequest(principal, "read-capture", "clean"),
         )
-    async with Persistence.open('reopen-projection', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_627, Runtime.attach(persistence=persistence_627, features=features('reopened')) as runtime, TaskEngine.open(persistence=persistence_627) as engine:
+    async with Persistence.open('reopen-projection', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_627, Runtime.attach(persistence=persistence_627, features=features('reopened')) as runtime, TaskEngine.open(persistence=persistence_627) as engine:
         captured = await engine.inputs.read_agent(capture, principal=principal)
         captured.require_importable()
         assert captured.binding is not None

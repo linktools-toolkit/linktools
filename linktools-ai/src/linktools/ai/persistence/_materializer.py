@@ -2,11 +2,9 @@
 # -*- coding: utf-8 -*-
 """Materialize Runtime repositories and their owned StateStore resources."""
 
-import hashlib
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from linktools.core import environ
@@ -19,7 +17,6 @@ from ..storage import (
     ObjectStore,
     SqlStorageContext,
     build_object_sql_metadata,
-    namespace_digest,
 )
 from .contracts import (
     ArtifactRepositories,
@@ -30,7 +27,6 @@ from .contracts import (
     RecoveryRepositories,
     TaskRepositories,
 )
-from ._filesystem import FilesystemStateStore
 from ._memory import InMemoryStateStore
 from ._object_router import _RuntimeObjectRouter, build_runtime_object_router
 from ._plan import PersistenceDomain, PersistencePlan, runtime_domain_uses_object_store
@@ -41,7 +37,7 @@ from .repositories import (
     build_repository_bundle,
 )
 from ._resource_scope import (
-    FilesystemResource, MemoryResource, StorageResourceRequest, StorageResourceScope,
+    MemoryResource, StorageResourceRequest, StorageResourceScope,
 )
 from ._retention import RuntimeRetentionController
 from ._sql import SqlStateStore
@@ -126,10 +122,6 @@ async def materialize_runtime_storage(
         StorageResourceRequest(
             name=domain.value,
             route=plan.route(domain),
-            member_path=(
-                _route_domain_path(plan, domain, namespace, tenant_id)
-                if plan.route(domain).kind == "filesystem" else None
-            ),
             configure_schema=partial(configure_schema, domain),
             uses_archive=domain in {
                 PersistenceDomain.CONVERSATION, PersistenceDomain.EXECUTION,
@@ -142,9 +134,6 @@ async def materialize_runtime_storage(
     requests += tuple(
         StorageResourceRequest(
             name=f"capability:{identity}", route=route,
-            member_path=(route.path / "capabilities" / hashlib.sha256(identity.encode()).hexdigest()
-                         / namespace_digest(namespace) / _tenant_scope_digest(tenant_id)
-                         if route.kind == "filesystem" and route.path is not None else None),
             configure_schema=lambda metadata: build_runtime_sql_metadata(frozenset({PersistenceDomain.EXECUTION}), metadata=metadata),
         )
         for identity, route in participant_routes.items()
@@ -165,16 +154,6 @@ async def materialize_runtime_storage(
         store: StateStore
         if isinstance(resource, MemoryResource):
             store = InMemoryStateStore(resource.group, cache=cache)
-        elif isinstance(resource, FilesystemResource):
-            store = FilesystemStateStore(
-                resource.member_path,
-                namespace=namespace,
-                tenant_id=tenant_id,
-                runtime_domain=domain.value,
-                _range_index=domain is PersistenceDomain.MEMORY,
-                group=resource.group,
-                cache=cache,
-            )
         else:
             store = SqlStateStore(
                 resource.context.engine,
@@ -194,11 +173,6 @@ async def materialize_runtime_storage(
         partition = f"capability:{identity}"
         if isinstance(resource, MemoryResource):
             store = InMemoryStateStore(resource.group, cache=route.cache)
-        elif isinstance(resource, FilesystemResource):
-            store = FilesystemStateStore(
-                resource.member_path, namespace=namespace, tenant_id=tenant_id,
-                runtime_domain=partition, group=resource.group, cache=route.cache,
-            )
         else:
             store = SqlStateStore(
                 resource.context.engine, metadata=resource.metadata, context=resource.context,
@@ -209,7 +183,6 @@ async def materialize_runtime_storage(
         cleanups.append(store.close)
         register_cleanup((store.close,))
 
-    # Filesystem groups seal their membership when initialization starts.
     for store in (*stores.values(), *capability_stores.values()):
         await store.initialize()
 
@@ -383,20 +356,6 @@ def _unique(values: tuple[RepositoryBase, ...]) -> tuple[RepositoryBase, ...]:
             result.append(value)
             seen.add(id(value))
     return tuple(result)
-
-
-def _tenant_scope_digest(tenant_id: str) -> str:
-    return hashlib.sha256(("tenant:" + tenant_id).encode("utf-8")).hexdigest()
-
-
-def _route_domain_path(
-    plan: PersistencePlan,
-    domain: PersistenceDomain,
-    namespace: str,
-    tenant_id: str,
-) -> Path:
-    path = plan.filesystem_path(domain)
-    return path / namespace_digest(namespace) / _tenant_scope_digest(tenant_id)
 
 
 __all__ = ["materialize_runtime_storage"]

@@ -57,7 +57,7 @@ async def test_in_memory_session_run_restores_timeline() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem"))
+@pytest.mark.parametrize("backend", ("memory", "exclusive_sqlite"))
 async def test_session_timeline_fork_reads_match_live_and_reopened_history(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -67,7 +67,7 @@ async def test_session_timeline_fork_reads_match_live_and_reopened_history(
     storage = (
         PersistenceStorage.in_memory()
         if backend == "memory"
-        else PersistenceStorage.filesystem(tmp_path)
+        else PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     )
 
     async def check_pages(
@@ -116,8 +116,8 @@ async def test_session_timeline_fork_reads_match_live_and_reopened_history(
             page.items,
         )
 
-    if backend == "filesystem":
-        async with Persistence.open('default', storage=PersistenceStorage.filesystem(tmp_path), tenant_id="default", read_only=True) as history_persistence_118, History.open(persistence=history_persistence_118) as history:
+    if backend == "exclusive_sqlite":
+        async with Persistence.open('default', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id="default", read_only=True) as history_persistence_118, History.open(persistence=history_persistence_118) as history:
             await check_pages(
                 partial(history.session_timeline, "child", principal=principal),
                 page.items,

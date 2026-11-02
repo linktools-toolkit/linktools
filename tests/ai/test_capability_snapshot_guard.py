@@ -15,11 +15,11 @@ from linktools.ai.storage import InMemoryObjectStore, StorageRoute
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("sqlite", "filesystem"))
+@pytest.mark.parametrize("backend", ("sqlite",))
 @pytest.mark.parametrize("custom", (False, True))
 async def test_portable_snapshot_rejects_custom_partitions_only(tmp_path: Path, backend: str, custom: bool) -> None:
-    storage = PersistenceStorage.sqlite(tmp_path / "state.db") if backend == "sqlite" else PersistenceStorage.filesystem(tmp_path / "state")
-    route = StorageRoute.sqlite(tmp_path / "state.db") if backend == "sqlite" else StorageRoute.filesystem(tmp_path / "state")
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db")
+    route = StorageRoute.sqlite(tmp_path / "state.db")
     routes = {"app.audit": route} if custom else {}
     storage = PersistenceStorage(replace(storage.plan, capability_routes=routes))
     source = Persistence(storage)
@@ -42,7 +42,7 @@ async def test_portable_snapshot_rejects_custom_partitions_only(tmp_path: Path, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("sqlite", "filesystem"))
+@pytest.mark.parametrize("backend", ("sqlite",))
 @pytest.mark.parametrize("with_features", (False, True))
 @pytest.mark.parametrize("separate_resource", (False, True))
 async def test_public_snapshot_detects_committed_custom_partitions_without_configuration(
@@ -64,9 +64,9 @@ async def test_public_snapshot_detects_committed_custom_partitions_without_confi
         features = RuntimeFeatures("snapshot-capabilities")
         for template in opened.templates:
             features.capability(template)
-    async with Persistence.open('atomic-capabilities', storage=PersistenceStorage.sqlite(tmp_path / 'state.db') if backend == 'sqlite' else PersistenceStorage.filesystem(tmp_path / 'state'), tenant_id='default', read_only=True) as history_persistence_65, History.open(persistence=history_persistence_65, authorization=None) as history:
+    async with Persistence.open('atomic-capabilities', storage=PersistenceStorage.sqlite(tmp_path / 'state.db'), tenant_id='default', read_only=True) as history_persistence_65, History.open(persistence=history_persistence_65, authorization=None) as history:
         assert history is not None
-    storage = PersistenceStorage.sqlite(tmp_path / "state.db") if backend == "sqlite" else PersistenceStorage.filesystem(tmp_path / "state")
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db")
     if with_features:
         storage = PersistenceStorage(replace(storage.plan, capability_routes={
             identity: route for identity in ("audit", "index") if route is not None
@@ -80,7 +80,7 @@ async def test_public_snapshot_detects_committed_custom_partitions_without_confi
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("sqlite", "filesystem"))
+@pytest.mark.parametrize("backend", ("sqlite",))
 @pytest.mark.parametrize("with_features", (False, True))
 @pytest.mark.parametrize("mixed", (False, True))
 async def test_volatile_custom_writes_do_not_block_durable_core_snapshots(
@@ -105,7 +105,7 @@ async def test_volatile_custom_writes_do_not_block_durable_core_snapshots(
         features = RuntimeFeatures("snapshot-capabilities")
         for template in opened.templates:
             features.capability(template)
-    storage = PersistenceStorage.sqlite(tmp_path / "state.db") if backend == "sqlite" else PersistenceStorage.filesystem(tmp_path / "state")
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db")
     if with_features:
         storage = PersistenceStorage(replace(storage.plan, capability_routes={
             identity: route for identity, route in zip(("audit", "index"), routes) if route is not None

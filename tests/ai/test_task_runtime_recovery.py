@@ -208,7 +208,7 @@ async def test_runtime_batch_recovery_keeps_run_only_actor_at_safe_service_bound
     actor = Principal("operator", "default")
     storage_root = tmp_path / "recovery-actor"
 
-    async with Persistence.open('recovery-actor', storage=PersistenceStorage.filesystem(storage_root)) as persistence_216, TaskEngine.open(handler, persistence=persistence_216) as engine:
+    async with Persistence.open('recovery-actor', storage=PersistenceStorage.from_root(storage_root, exclusive_writer=True)) as persistence_216, TaskEngine.open(handler, persistence=persistence_216) as engine:
         await engine.start(
             graph,
             idempotency_key="recovery-actor-run-0001",
@@ -233,7 +233,7 @@ async def test_runtime_batch_recovery_keeps_run_only_actor_at_safe_service_bound
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
     authorization = RecoveryAuthorization()
-    async with Persistence.open('recovery-actor', storage=PersistenceStorage.filesystem(storage_root)) as persistence_245, TaskEngine.open(handler, persistence=persistence_245, authorization=authorization) as engine:
+    async with Persistence.open('recovery-actor', storage=PersistenceStorage.from_root(storage_root, exclusive_writer=True)) as persistence_245, TaskEngine.open(handler, persistence=persistence_245, authorization=authorization) as engine:
         with pytest.raises(AIError) as read_denied:
             await engine._graph_service.state(graph.graph_id, principal=actor)
         assert read_denied.value.code is ErrorCode.AUTHORIZATION_DENIED

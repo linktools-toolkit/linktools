@@ -13,7 +13,6 @@ from sqlalchemy.sql import Executable
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.persistence._filesystem import FilesystemStateStore
 from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence._schema import build_runtime_sql_metadata
@@ -53,18 +52,13 @@ async def _assert_reservations(store: StateStore) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 async def test_sequence_reservations_preserve_batch_rollback_and_concurrent_truth(
     tmp_path: Path, backend: str,
 ) -> None:
     engine = None
     if backend == "memory":
         store = InMemoryStateStore()
-    elif backend == "filesystem":
-        store = FilesystemStateStore(
-            tmp_path / "state", namespace="sequence", tenant_id="tenant",
-            runtime_domain="conversation",
-        )
     else:
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'state.db'}")
         await provision_database(engine)

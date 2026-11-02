@@ -68,7 +68,7 @@ async def _conversation(state):
     return await store.read(read)
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_sessionless_pending_commit_replay_and_unique_result(tmp_path: Path, backend: str):
     async with _turn_state(backend, tmp_path) as state:
         turn = _standalone(state)
@@ -102,7 +102,7 @@ async def test_sessionless_pending_commit_replay_and_unique_result(tmp_path: Pat
         assert await state.storage.execution.executions.get("loser", tenant_id="tenant") is None
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("invalid", ("session", "cursor", "run", "checkpoint", "previous", "fork", "root", "execution_session"))
 async def test_sessionless_pending_rejects_partial_context_and_lineage(tmp_path: Path, backend: str, invalid: str):
     async with _turn_state(backend, tmp_path) as state:
@@ -127,7 +127,7 @@ async def test_sessionless_pending_rejects_partial_context_and_lineage(tmp_path:
         assert await _snapshot(state) == before
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_sessionless_pending_failure_rolls_back_every_domain(tmp_path: Path, backend: str, monkeypatch):
     async with _turn_state(backend, tmp_path) as state:
         turn = _standalone(state)
@@ -149,7 +149,7 @@ async def test_sessionless_pending_failure_rolls_back_every_domain(tmp_path: Pat
         assert await _snapshot(state) == before
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("readable", (True, False))
 async def test_sessionless_pending_lost_ack_requires_strong_confirmation(tmp_path: Path, backend: str, readable: bool, monkeypatch):
     async with _turn_state(backend, tmp_path) as state:
@@ -184,7 +184,7 @@ async def test_sessionless_pending_lost_ack_requires_strong_confirmation(tmp_pat
         assert (await _commit(state, turn)).execution.status is ExecutionStatus.SUCCEEDED
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("prepared", (False, True))
 async def test_sessionless_pending_promotes_before_effects(tmp_path: Path, backend: str, prepared: bool):
     async with _turn_state(backend, tmp_path) as state:

@@ -55,8 +55,10 @@ class FilesystemObjectStore:
     def store_id(self) -> str:
         return self._store_id
 
-    def local_paths(self) -> tuple[Path, ...]:
-        return (self._root,)
+    @property
+    def root(self) -> Path:
+        """Normalized directory containing this filesystem store's objects."""
+        return self._root
 
     @property
     def pending_background_tasks(self) -> tuple[asyncio.Task[Any], ...]:

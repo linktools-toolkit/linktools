@@ -39,6 +39,7 @@ from .test_evaluation_consumers import (
 )
 from .test_evaluation_evidence_read_reuse import Policy, completed, report_count
 from .test_evaluation_retention import Offline
+from ._sqlite_failure_timeline import sqlite_failure_evidence
 
 
 @contextmanager
@@ -78,6 +79,7 @@ async def _add_attachment(storage: Persistence, experiment_id: str, index: int) 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("count", (2, 3))
+@sqlite_failure_evidence
 async def test_current_pages_hydrate_only_the_manifest_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, count: int,
 ) -> None:
@@ -183,12 +185,14 @@ async def test_current_cursor_survives_mutable_revision_and_reads_new_native_sta
 
 
 @pytest.mark.asyncio
+@sqlite_failure_evidence
 async def test_current_cursor_rejects_wrong_scope_manifest_and_position(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with completed(tmp_path) as (evaluations, storage, run, scorer, policy):
         other = await run.rescore(RescoreRequest((rule_scorer(scorer),), "cursor-other"))
-        assert (await other.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
+        result = (await other.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
+        assert result.completion == "complete", result
         await evaluations.close()
         owner = evaluations
         first = await run.current_trials(limit=1)

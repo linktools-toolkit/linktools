@@ -123,7 +123,7 @@ async def _change_execution_display(state, value, execution_id="active"):
     )
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_display_cache_returns_whole_old_page_until_fixed_expiry(tmp_path, monkeypatch, backend):
     clock = _clock(monkeypatch)
     state, cache = _storage(backend, tmp_path), _Cache()
@@ -1012,7 +1012,7 @@ async def test_display_refresh_without_key_value_cache_keeps_fresh_source(cache:
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("sqlite",))
 async def test_display_cache_is_shared_across_readers_without_renewing_capture(
     tmp_path, monkeypatch, backend,
 ):

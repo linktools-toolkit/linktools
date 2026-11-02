@@ -17,7 +17,7 @@ from .test_step_projection import _execution
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_active_projection_refresh_preserves_all_admitted_identities(
     tmp_path: Path, backend: str,
 ) -> None:

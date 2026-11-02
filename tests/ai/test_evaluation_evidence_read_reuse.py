@@ -30,6 +30,8 @@ from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.state import RecordQuery
 from linktools.ai.task import Task
 
+from ._sqlite_failure_timeline import sqlite_failure_evidence
+
 from .test_evaluation_consumers import (
     CONTEXT, EVALUATION_COMPLETION_TIMEOUT_SECONDS, PRINCIPAL, echo, exact, rule_scorer,
 )
@@ -170,6 +172,7 @@ async def test_snapshot_full_source_reads_are_bounded_and_source_owner_is_preser
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("boundary", ("evidence", "source", "owner"))
+@sqlite_failure_evidence
 async def test_snapshot_checks_each_evidence_policy_after_revocation(tmp_path: Path, boundary: str) -> None:
     async with completed(tmp_path) as (evaluations, storage, run, _scorer, policy):
         await evaluations.close()

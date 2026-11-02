@@ -99,7 +99,7 @@ def test_persisted_explicit_null_schema_is_integrity_error() -> None:
 async def test_transcript_decoders_preserve_future_schema_unsupported(
     tmp_path: Path,
 ) -> None:
-    state = Persistence(PersistenceStorage.filesystem(tmp_path / "runtime"))
+    state = Persistence(PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True))
     await state.initialize(namespace="future-transcript-schema", tenant_id="tenant")
     try:
         history = state.run_store.read_store(

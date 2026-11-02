@@ -290,13 +290,13 @@ async def test_two_sources_are_selected_and_restored_after_runtime_reopen(tmp_pa
         result.agent("reader", allow_tools=(), allow_skills=(), allow_subagents=())
         return result
 
-    async with Persistence.open('two-source-reopen', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_288, Runtime.attach(persistence=persistence_288, features=features('original')) as runtime, TaskEngine.open(persistence=persistence_288, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('two-source-reopen', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_288, Runtime.attach(persistence=persistence_288, features=features('original')) as runtime, TaskEngine.open(persistence=persistence_288, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         execution = await runtime.agents.get("reader").start([first, second], principal=principal)
         assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
         capture = await runtime_engine.inputs.capture_input(
             execution.execution_id, CaptureInputRequest(principal, "two-source-capture", "clean"),
         )
-    async with Persistence.open('two-source-reopen', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_295, Runtime.attach(persistence=persistence_295, features=features('reopened')) as runtime, TaskEngine.open(persistence=persistence_295, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('two-source-reopen', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_295, Runtime.attach(persistence=persistence_295, features=features('reopened')) as runtime, TaskEngine.open(persistence=persistence_295, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         task_capture = await runtime_engine.inputs.read_agent(capture, principal=principal)
         task_capture.require_importable()
         task = Task.from_agent("captured-sources", runtime.agents.restore(task_capture.binding))
@@ -307,7 +307,7 @@ async def test_two_sources_are_selected_and_restored_after_runtime_reopen(tmp_pa
         execution = await graph.execution("read")
         assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
     assert calls == [("original", "first"), ("original", "second"), ("reopened", "first"), ("reopened", "second")]
-    async with Persistence.open('two-source-reopen', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_305, Runtime.attach(persistence=persistence_305, features=features('changed', revision=2)) as runtime, TaskEngine.open(persistence=persistence_305, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('two-source-reopen', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_305, Runtime.attach(persistence=persistence_305, features=features('changed', revision=2)) as runtime, TaskEngine.open(persistence=persistence_305, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         with pytest.raises(AIError) as unavailable:
             Task.from_agent("unavailable-sources", runtime.agents.restore((await runtime_engine.inputs.read_agent(capture, principal=principal)).binding))
         assert unavailable.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE

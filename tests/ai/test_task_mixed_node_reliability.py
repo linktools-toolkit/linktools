@@ -217,7 +217,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
         allow_subagents=(),
     )
     storage_root = tmp_path / "state"
-    state = PersistenceStorage.filesystem(storage_root)
+    state = PersistenceStorage.from_root(storage_root, exclusive_writer=True)
     async with Persistence.open('attachment-test', storage=state) as persistence_220, Runtime.attach(persistence=persistence_220, features=model_features(_TaskTestModels(), application)) as runtime, task_engine_scope(runtime, persistence_220) as runtime_engine:
         node = agent_task_node(runtime,
             "consumer",
@@ -286,7 +286,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
         assert record.stored_user_input.view["files"] == stored.view["files"]
 
     archive = InMemoryObjectStore("archive")
-    read_state = PersistenceStorage.filesystem(storage_root)
+    read_state = PersistenceStorage.from_root(storage_root, exclusive_writer=True)
     read_state = Persistence(read_state)
     await read_state.initialize(
         namespace="attachment-test", tenant_id="default", read_only=True
@@ -1325,7 +1325,7 @@ async def test_cancel_and_reopen_preserve_accepted_execution_before_task_binding
     graph = TaskGraph("accepted-before-bind", (TaskNode("node", task=task),))
     principal: Principal
 
-    async with Persistence.open('default', storage=PersistenceStorage.filesystem(storage_root)) as persistence_1363, Runtime.attach(persistence=persistence_1363, features=model_features(_TaskTestModels())) as runtime, task_engine_scope(runtime, persistence_1363) as runtime_engine:
+    async with Persistence.open('default', storage=PersistenceStorage.from_root(storage_root, exclusive_writer=True)) as persistence_1363, Runtime.attach(persistence=persistence_1363, features=model_features(_TaskTestModels())) as runtime, task_engine_scope(runtime, persistence_1363) as runtime_engine:
         runner.engine = runtime_engine
         principal = runtime.default_principal
         graph_run = await runtime_engine.with_definitions(task).start(
@@ -1365,7 +1365,7 @@ async def test_cancel_and_reopen_preserve_accepted_execution_before_task_binding
         assert execution.status.value == "STARTED"
         assert execution.task_attempt == 0
 
-    async with Persistence.open('default', storage=PersistenceStorage.filesystem(storage_root)) as persistence_1407, Runtime.attach(persistence=persistence_1407, features=model_features(_TaskTestModels())) as reopened_runtime, task_engine_scope(reopened_runtime, persistence_1407) as reopened_runtime_engine:
+    async with Persistence.open('default', storage=PersistenceStorage.from_root(storage_root, exclusive_writer=True)) as persistence_1407, Runtime.attach(persistence=persistence_1407, features=model_features(_TaskTestModels())) as reopened_runtime, task_engine_scope(reopened_runtime, persistence_1407) as reopened_runtime_engine:
         runner.runtime = reopened_runtime
         reopened_run = await reopened_runtime_engine.with_definitions(task).get(
             graph.graph_id,
@@ -2559,7 +2559,7 @@ async def test_any_succeeded_waits_for_all_terminal_dependencies_and_filters_res
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "exclusive_sqlite", "sqlite"))
 async def test_task_policy_matrix_persists_in_each_runtime_backend(
     backend: str,
     tmp_path: Path,
@@ -2581,10 +2581,10 @@ async def test_task_policy_matrix_persists_in_each_runtime_backend(
     if backend == "memory":
         storage = PersistenceStorage.in_memory()
         reopen_storage = None
-    elif backend == "filesystem":
+    elif backend == "exclusive_sqlite":
         storage_path = tmp_path / "runtime"
-        storage = PersistenceStorage.filesystem(storage_path)
-        reopen_storage = PersistenceStorage.filesystem(storage_path)
+        storage = PersistenceStorage.from_root(storage_path, exclusive_writer=True)
+        reopen_storage = PersistenceStorage.from_root(storage_path, exclusive_writer=True)
     else:
         storage_path = tmp_path / "runtime.sqlite"
         storage = PersistenceStorage.sqlite(storage_path)
@@ -3473,7 +3473,7 @@ async def test_runner_task_contract_is_persisted_and_validated_after_reopen(
         return ()
 
     expander = TaskExpander("example.contract-runner.expander", expand)
-    state = PersistenceStorage.filesystem(storage_root)
+    state = PersistenceStorage.from_root(storage_root, exclusive_writer=True)
     async with Persistence.open('runner-contract', storage=state) as persistence_3577, Runtime.attach(persistence=persistence_3577, features=model_features(_TaskTestModels())) as runtime, task_engine_scope(runtime, persistence_3577) as runtime_engine:
         runner = _ExecutionBackedContractRunner(runtime_engine._execution_service)
         task = Task.from_runner(
@@ -3521,7 +3521,7 @@ async def test_runner_task_contract_is_persisted_and_validated_after_reopen(
         assert runner_node.reconcile is False
         assert runner.calls == 0
 
-    recovered_storage = PersistenceStorage.filesystem(storage_root)
+    recovered_storage = PersistenceStorage.from_root(storage_root, exclusive_writer=True)
     async with Persistence.open('runner-contract', storage=recovered_storage) as persistence_3629, Runtime.attach(persistence=persistence_3629, features=model_features(_TaskTestModels())) as runtime, task_engine_scope(runtime, persistence_3629) as runtime_engine:
         runner = _ExecutionBackedContractRunner(runtime_engine._execution_service)
         task = Task.from_runner(
@@ -3749,7 +3749,7 @@ async def test_projected_agent_file_is_reused_from_prepared_input_on_recovery(
         return f"inspect projected ticket {source['ticket']}"
 
     source = Task("example.projected-file-source", source_task, effect_policy="none")
-    state = PersistenceStorage.filesystem(storage_root)
+    state = PersistenceStorage.from_root(storage_root, exclusive_writer=True)
     graph_id = "projected-file-recovery-graph"
 
     async with Persistence.open('projected-file-recovery', storage=state) as persistence_3867, Runtime.attach(persistence=persistence_3867, features=model_features(models, application)) as runtime, task_engine_scope(runtime, persistence_3867) as runtime_engine:
@@ -3804,7 +3804,7 @@ async def test_projected_agent_file_is_reused_from_prepared_input_on_recovery(
 
     attachment_path.unlink()
     await asyncio.sleep(1.1)
-    recovered_storage = PersistenceStorage.filesystem(storage_root)
+    recovered_storage = PersistenceStorage.from_root(storage_root, exclusive_writer=True)
     async with Persistence.open('projected-file-recovery', storage=recovered_storage) as persistence_3924, Runtime.attach(persistence=persistence_3924, features=model_features(models, application)) as runtime, task_engine_scope(runtime, persistence_3924) as runtime_engine:
         worker = Task.from_agent(
             "example.projected-file-worker",
@@ -4056,7 +4056,7 @@ async def test_task_execution_port_replay_rejects_changed_runtime_memory_scope()
 async def test_task_execution_scope_survives_unknown_and_bound_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, admitted_scope: str | None, phase: str,
 ) -> None:
-    from linktools.ai.persistence import _filesystem
+    from linktools.ai.storage._dialects import SQLiteDialect
 
     entered = asyncio.Event()
     execution_ids: list[str] = []
@@ -4085,7 +4085,7 @@ async def test_task_execution_scope_survives_unknown_and_bound_recovery(
 
     original_wait = AgentTaskRunner._wait_execution
 
-    async with Persistence.open("task-recovery", storage=PersistenceStorage.filesystem(storage_root)) as persistence:
+    async with Persistence.open("task-recovery", storage=PersistenceStorage.from_root(storage_root, exclusive_writer=True)) as persistence:
         async with Runtime.attach(persistence=persistence, features=features(admitted_scope)) as runtime, task_engine_scope(runtime, persistence) as runtime_engine:
             worker = Task.from_agent("recovery.worker", runtime.agents.get())
             port_type = type(worker.agent_execution)
@@ -4142,8 +4142,12 @@ async def test_task_execution_scope_survives_unknown_and_bound_recovery(
 
     # Keep the live admission window intact, then expire only the abandoned lease.
     monkeypatch.setattr(task_local, "datetime", AfterLeaseExpiry)
-    monkeypatch.setattr(_filesystem, "datetime", AfterLeaseExpiry)
-    async with Persistence.open("task-recovery", storage=PersistenceStorage.filesystem(storage_root)) as persistence:
+    async def database_after_expiry(self, session) -> datetime:
+        return expired_at
+
+    monkeypatch.setattr(SQLiteDialect, "database_now", database_after_expiry)
+    monkeypatch.setattr(SQLiteDialect, "database_current_time", database_after_expiry)
+    async with Persistence.open("task-recovery", storage=PersistenceStorage.from_root(storage_root, exclusive_writer=True)) as persistence:
         async with Runtime.attach(persistence=persistence, features=features(admitted_scope if phase == "unknown-admission" else "changed-host")) as runtime, task_engine_scope(runtime, persistence) as runtime_engine:
             worker = Task.from_agent("recovery.worker", runtime.agents.get())
 
@@ -4244,7 +4248,7 @@ async def test_reopened_expansion_uses_captured_candidates_and_supports_nesting(
     initial_application.task(handler, effect_policy="none")
     initial_application.task(unused, effect_policy="none")
     initial_application.task_expander(expander)
-    async with Persistence.open('reopened-expansion', storage=PersistenceStorage.filesystem(storage_root)) as persistence_4178, Runtime.attach(persistence=persistence_4178, features=model_features(_TaskTestModels(), initial_application)) as runtime, task_engine_scope(runtime, persistence_4178) as runtime_engine:
+    async with Persistence.open('reopened-expansion', storage=PersistenceStorage.from_root(storage_root, exclusive_writer=True)) as persistence_4178, Runtime.attach(persistence=persistence_4178, features=model_features(_TaskTestModels(), initial_application)) as runtime, task_engine_scope(runtime, persistence_4178) as runtime_engine:
         await start_task_graph(runtime,
             graph,
             idempotency_key="reopened-expansion-run-0001",
@@ -4255,7 +4259,7 @@ async def test_reopened_expansion_uses_captured_candidates_and_supports_nesting(
     application.task(handler, effect_policy="none")
     application.task(unused, effect_policy="replay_safe")
     application.task_expander(expander)
-    async with Persistence.open('reopened-expansion', storage=PersistenceStorage.filesystem(storage_root)) as persistence_4193, Runtime.attach(persistence=persistence_4193, features=model_features(_TaskTestModels(), application)) as runtime, task_engine_scope(runtime, persistence_4193) as runtime_engine:
+    async with Persistence.open('reopened-expansion', storage=PersistenceStorage.from_root(storage_root, exclusive_writer=True)) as persistence_4193, Runtime.attach(persistence=persistence_4193, features=model_features(_TaskTestModels(), application)) as runtime, task_engine_scope(runtime, persistence_4193) as runtime_engine:
         principal = runtime.default_principal
         await task_graph_resume(runtime,
             graph.graph_id,
@@ -4307,14 +4311,14 @@ async def test_reopened_expansion_rejects_a_new_runtime_task_candidate(
         ),
     )
     storage_root = tmp_path / "state"
-    async with Persistence.open('reopened-added-candidate', storage=PersistenceStorage.filesystem(storage_root)) as persistence_4249, Runtime.attach(persistence=persistence_4249, features=model_features(_TaskTestModels())) as runtime, task_engine_scope(runtime, persistence_4249) as runtime_engine:
+    async with Persistence.open('reopened-added-candidate', storage=PersistenceStorage.from_root(storage_root, exclusive_writer=True)) as persistence_4249, Runtime.attach(persistence=persistence_4249, features=model_features(_TaskTestModels())) as runtime, task_engine_scope(runtime, persistence_4249) as runtime_engine:
         await runtime_engine.with_definitions(required, expander).start(
             graph,
             idempotency_key="reopened-added-candidate-run-0001",
          principal=runtime.default_principal)
         wait_id = await _wait_for_input_execution(runtime, graph.graph_id)
 
-    async with Persistence.open('reopened-added-candidate', storage=PersistenceStorage.filesystem(storage_root)) as persistence_4260, Runtime.attach(persistence=persistence_4260, features=model_features(_TaskTestModels())) as runtime, task_engine_scope(runtime, persistence_4260) as runtime_engine:
+    async with Persistence.open('reopened-added-candidate', storage=PersistenceStorage.from_root(storage_root, exclusive_writer=True)) as persistence_4260, Runtime.attach(persistence=persistence_4260, features=model_features(_TaskTestModels())) as runtime, task_engine_scope(runtime, persistence_4260) as runtime_engine:
         principal = runtime.default_principal
         run = await runtime_engine.with_definitions(required, added, expander).get(
             graph.graph_id,
@@ -4410,7 +4414,7 @@ async def test_persisted_node_output_contracts_survive_runtime_reopen(
         allow_subagents=(),
     )
 
-    state = PersistenceStorage.filesystem(storage_root)
+    state = PersistenceStorage.from_root(storage_root, exclusive_writer=True)
     async with Persistence.open('typed-contract-reopen', storage=state) as persistence_4365, Runtime.attach(persistence=persistence_4365, features=model_features(_StructuredTaskTestModels(), application)) as runtime, task_engine_scope(runtime, persistence_4365) as runtime_engine:
         graph = TaskGraph(
             "typed-contract-reopen",
@@ -4456,7 +4460,7 @@ async def test_persisted_node_output_contracts_survive_runtime_reopen(
             invalid_custom_graph.graph_id,
         )
 
-    state = PersistenceStorage.filesystem(storage_root)
+    state = PersistenceStorage.from_root(storage_root, exclusive_writer=True)
     async with Persistence.open('typed-contract-reopen', storage=state) as persistence_4415, Runtime.attach(persistence=persistence_4415, features=model_features(_StructuredTaskTestModels(), application)) as runtime, task_engine_scope(runtime, persistence_4415) as runtime_engine:
         recovered = await task_graph_state(runtime,
             "typed-contract-reopen",
@@ -5474,7 +5478,7 @@ async def test_runtime_recovery_rejects_same_revision_task_semantic_drift(
         output_type=_EffectOutput,
         reconcile=reconcile,
     )
-    state = PersistenceStorage.filesystem(storage_root)
+    state = PersistenceStorage.from_root(storage_root, exclusive_writer=True)
     graph = TaskGraph("semantic-drift", (handler.node("node"),))
 
     async with Persistence.open('semantic-drift', storage=state) as persistence_5469, Runtime.attach(persistence=persistence_5469, features=model_features(_TaskTestModels(), first)) as runtime, task_engine_scope(runtime, persistence_5469) as runtime_engine:
@@ -5491,7 +5495,7 @@ async def test_runtime_recovery_rejects_same_revision_task_semantic_drift(
         output_type=_EffectOutput,
     )
     with pytest.raises(AIError) as reconcile_error:
-        async with Persistence.open('semantic-drift', storage=PersistenceStorage.filesystem(storage_root)) as persistence_5487, Runtime.attach(persistence=persistence_5487, features=model_features(_TaskTestModels(), reconcile_removed)) as runtime, task_engine_scope(runtime, persistence_5487) as runtime_engine:
+        async with Persistence.open('semantic-drift', storage=PersistenceStorage.from_root(storage_root, exclusive_writer=True)) as persistence_5487, Runtime.attach(persistence=persistence_5487, features=model_features(_TaskTestModels(), reconcile_removed)) as runtime, task_engine_scope(runtime, persistence_5487) as runtime_engine:
             await task_engine(runtime).recover_pending()
     assert reconcile_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     assert reconcile_error.value.safe_details["reason"] == "task_reconcile_changed"
@@ -5508,7 +5512,7 @@ async def test_runtime_recovery_rejects_same_revision_task_semantic_drift(
         reconcile=reconcile,
     )
     with pytest.raises(AIError) as cancel_error:
-        async with Persistence.open('semantic-drift', storage=PersistenceStorage.filesystem(storage_root)) as persistence_5508, Runtime.attach(persistence=persistence_5508, features=model_features(_TaskTestModels(), cancel_added)) as runtime, task_engine_scope(runtime, persistence_5508) as runtime_engine:
+        async with Persistence.open('semantic-drift', storage=PersistenceStorage.from_root(storage_root, exclusive_writer=True)) as persistence_5508, Runtime.attach(persistence=persistence_5508, features=model_features(_TaskTestModels(), cancel_added)) as runtime, task_engine_scope(runtime, persistence_5508) as runtime_engine:
             await task_engine(runtime).recover_pending()
     assert cancel_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     assert cancel_error.value.safe_details["reason"] == "task_cancel_changed"
@@ -5521,7 +5525,7 @@ async def test_runtime_recovery_rejects_same_revision_task_semantic_drift(
         reconcile=reconcile,
     )
     with pytest.raises(AIError) as output_error:
-        async with Persistence.open('semantic-drift', storage=PersistenceStorage.filesystem(storage_root)) as persistence_5525, Runtime.attach(persistence=persistence_5525, features=model_features(_TaskTestModels(), output_changed)) as runtime, task_engine_scope(runtime, persistence_5525) as runtime_engine:
+        async with Persistence.open('semantic-drift', storage=PersistenceStorage.from_root(storage_root, exclusive_writer=True)) as persistence_5525, Runtime.attach(persistence=persistence_5525, features=model_features(_TaskTestModels(), output_changed)) as runtime, task_engine_scope(runtime, persistence_5525) as runtime_engine:
             await task_engine(runtime).recover_pending()
     assert output_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     assert output_error.value.safe_details["reason"] == "task_output_contract_changed"
@@ -5533,7 +5537,7 @@ async def test_runtime_recovery_rejects_same_revision_task_semantic_drift(
         reconcile=reconcile,
     )
     with pytest.raises(AIError) as removed_output_error:
-        async with Persistence.open('semantic-drift', storage=PersistenceStorage.filesystem(storage_root)) as persistence_5541, Runtime.attach(persistence=persistence_5541, features=model_features(_TaskTestModels(), output_removed)) as runtime, task_engine_scope(runtime, persistence_5541) as runtime_engine:
+        async with Persistence.open('semantic-drift', storage=PersistenceStorage.from_root(storage_root, exclusive_writer=True)) as persistence_5541, Runtime.attach(persistence=persistence_5541, features=model_features(_TaskTestModels(), output_removed)) as runtime, task_engine_scope(runtime, persistence_5541) as runtime_engine:
             await task_engine(runtime).recover_pending()
     assert removed_output_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     assert (
@@ -5549,7 +5553,7 @@ async def test_runtime_recovery_rejects_same_revision_task_semantic_drift(
         reconcile=reconcile,
     )
     with pytest.raises(AIError) as effect_error:
-        async with Persistence.open('semantic-drift', storage=PersistenceStorage.filesystem(storage_root)) as persistence_5561, Runtime.attach(persistence=persistence_5561, features=model_features(_TaskTestModels(), effect_changed)) as runtime, task_engine_scope(runtime, persistence_5561) as runtime_engine:
+        async with Persistence.open('semantic-drift', storage=PersistenceStorage.from_root(storage_root, exclusive_writer=True)) as persistence_5561, Runtime.attach(persistence=persistence_5561, features=model_features(_TaskTestModels(), effect_changed)) as runtime, task_engine_scope(runtime, persistence_5561) as runtime_engine:
             await task_engine(runtime).recover_pending()
     assert effect_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     assert effect_error.value.safe_details["reason"] == "task_effect_changed"
@@ -5585,7 +5589,7 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
         allow_skills=(),
         allow_subagents=(),
     )
-    state = PersistenceStorage.filesystem(storage_root)
+    state = PersistenceStorage.from_root(storage_root, exclusive_writer=True)
     graph = TaskGraph("shutdown-graph", (handler.node("node"),))
 
     async with Persistence.open('default', storage=state) as persistence_5604, Runtime.attach(persistence=persistence_5604, features=model_features(_TaskTestModels(), application)) as runtime, task_engine_scope(runtime, persistence_5604) as runtime_engine:
@@ -5601,7 +5605,7 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
         assert snapshot.node_states[0].status is TaskStatus.RUNNING
 
     assert cancelled.is_set()
-    probe = PersistenceStorage.filesystem(storage_root)
+    probe = PersistenceStorage.from_root(storage_root, exclusive_writer=True)
     probe = Persistence(probe)
     await probe.initialize(namespace="default", tenant_id="default")
     try:
@@ -5622,7 +5626,7 @@ async def test_any_succeeded_barrier_survives_runtime_restart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from linktools.ai.persistence import _filesystem
+    from linktools.ai.storage._dialects import SQLiteDialect
     from linktools.ai.task import _local
 
     storage_root = tmp_path / "state"
@@ -5680,7 +5684,7 @@ async def test_any_succeeded_barrier_survives_runtime_restart(
         ),
     )
 
-    async with Persistence.open('any-succeeded-restart', storage=PersistenceStorage.filesystem(storage_root)) as persistence_5700, Runtime.attach(persistence=persistence_5700, features=model_features(_TaskTestModels(), application)) as runtime, task_engine_scope(runtime, persistence_5700) as runtime_engine:
+    async with Persistence.open('any-succeeded-restart', storage=PersistenceStorage.from_root(storage_root, exclusive_writer=True)) as persistence_5700, Runtime.attach(persistence=persistence_5700, features=model_features(_TaskTestModels(), application)) as runtime, task_engine_scope(runtime, persistence_5700) as runtime_engine:
         first_run = await runtime_engine.with_definitions(success, held, joiner).start(
             graph,
             idempotency_key="any-succeeded-restart-0001",
@@ -5715,9 +5719,13 @@ async def test_any_succeeded_barrier_survives_runtime_restart(
 
     # Expire the abandoned lease without shortening the live commit window.
     monkeypatch.setattr(_local, "datetime", AfterLeaseExpiry)
-    monkeypatch.setattr(_filesystem, "datetime", AfterLeaseExpiry)
+    async def database_after_expiry(self, session) -> datetime:
+        return expired_at
 
-    async with Persistence.open('any-succeeded-restart', storage=PersistenceStorage.filesystem(storage_root)) as persistence_5741, Runtime.attach(persistence=persistence_5741, features=model_features(_TaskTestModels(), application)) as runtime, task_engine_scope(runtime, persistence_5741) as runtime_engine:
+    monkeypatch.setattr(SQLiteDialect, "database_now", database_after_expiry)
+    monkeypatch.setattr(SQLiteDialect, "database_current_time", database_after_expiry)
+
+    async with Persistence.open('any-succeeded-restart', storage=PersistenceStorage.from_root(storage_root, exclusive_writer=True)) as persistence_5741, Runtime.attach(persistence=persistence_5741, features=model_features(_TaskTestModels(), application)) as runtime, task_engine_scope(runtime, persistence_5741) as runtime_engine:
         bound_tasks = runtime_engine.with_definitions(success, held, joiner)
         await bound_tasks.recover_pending()
         recovered_run = await bound_tasks.get(graph.graph_id)

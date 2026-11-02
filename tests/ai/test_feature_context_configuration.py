@@ -182,10 +182,10 @@ async def test_restored_history_ignores_source_routes_and_cache(tmp_path, monkey
     from .test_public_persistence_configuration import _Cache
 
     source = tmp_path / 'source'
-    routes = {domain: StorageRoute.filesystem(source / 'modules' / domain.value, transaction_root=source)
+    routes = {domain: StorageRoute.sqlite(source / "runtime.db", exclusive_writer=True)
               for domain in (PersistenceDomain.CONVERSATION, PersistenceDomain.CHECKPOINT, PersistenceDomain.TRACE)}
     def source_storage() -> PersistenceStorage:
-        return PersistenceStorage(replace(PersistenceStorage.filesystem(source).plan, conversation=routes[PersistenceDomain.CONVERSATION], trace=routes[PersistenceDomain.TRACE], checkpoint=routes[PersistenceDomain.CHECKPOINT]))
+        return PersistenceStorage(replace(PersistenceStorage.from_root(source, exclusive_writer=True).plan, conversation=routes[PersistenceDomain.CONVERSATION], trace=routes[PersistenceDomain.TRACE], checkpoint=routes[PersistenceDomain.CHECKPOINT]))
 
     cache = _Cache()
     routes[PersistenceDomain.TRACE] = routes[PersistenceDomain.TRACE].with_cache(cache)

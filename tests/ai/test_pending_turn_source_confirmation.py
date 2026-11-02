@@ -27,7 +27,7 @@ from tests.ai.test_pending_turn_sessionless import _commit as _commit_standalone
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("standalone", (False, True))
 async def test_terminal_unknown_can_later_confirm_source_without_mutation(tmp_path, monkeypatch, backend, standalone):
     async with _turn_state(backend, tmp_path) as state:
@@ -73,7 +73,7 @@ async def test_terminal_unknown_can_later_confirm_source_without_mutation(tmp_pa
         assert await _snapshot(state) == before
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("standalone", (False, True))
 @pytest.mark.parametrize("prepared", (False, True))
 async def test_promotion_unknown_confirms_only_original_source_receipt(tmp_path, monkeypatch, backend, standalone, prepared):

@@ -22,7 +22,7 @@ async def test_storage_constructors_preserve_borrowed_hot_cache(tmp_path) -> Non
     stores = (
         PersistenceStorage(plan),
         PersistenceStorage.in_memory(cache=backend),
-        PersistenceStorage.filesystem(tmp_path / "files", cache=backend),
+        PersistenceStorage.from_root(tmp_path / "files", cache=backend, exclusive_writer=True),
         PersistenceStorage.sqlite(tmp_path / "state.db", cache=backend),
         PersistenceStorage.from_root(tmp_path / "root", cache=backend),
         PersistenceStorage.sql(engine, cache=backend),

@@ -59,7 +59,7 @@ async def task_objects(storage: Persistence) -> dict[str, str]:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["scorer", "case", "reservation"])
 async def test_failed_admission_does_not_persist_private_templates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
 
     async def target(context: TaskNodeContext[None]) -> JsonValue:
         return dict(context.input)
@@ -147,7 +147,7 @@ async def test_reserved_capture_is_owned_across_cancel_and_purge(tmp_path: Path,
         invocations.append(dict(context.input))
         return dict(context.input)
 
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with (
         Persistence.open('capture-owner', storage=storage, tenant_id=PRINCIPAL.tenant_id) as persistence_134,
     ):
@@ -211,7 +211,7 @@ async def test_unmaterialized_capture_reservation_survives_snapshot_and_reconcil
         return dict(context.input)
 
     root = tmp_path / "source"
-    storage = PersistenceStorage.filesystem(root)
+    storage = PersistenceStorage.from_root(root, exclusive_writer=True)
     task, scorer = Task("snapshot.target", target, effect_policy="none"), Task("snapshot.score", score, effect_policy="none")
     async with (
         Persistence.open('snapshot', storage=storage, tenant_id=PRINCIPAL.tenant_id) as persistence_194,
@@ -240,7 +240,7 @@ async def test_unmaterialized_capture_reservation_survives_snapshot_and_reconcil
             assert await persistence_194.object_store(PersistenceDomain.TASK).stat(key) is None
     snapshot = InMemoryObjectStore("snapshot-copy")
     limits = SnapshotLimits(max_entries=10000, max_bytes=20 * 1024 * 1024)
-    readonly = PersistenceStorage.filesystem(root)
+    readonly = PersistenceStorage.from_root(root, exclusive_writer=True)
     readonly = Persistence(readonly)
     await readonly.initialize(namespace="snapshot", tenant_id=PRINCIPAL.tenant_id, read_only=True)
     try:
@@ -272,7 +272,7 @@ async def test_content_purge_redacts_inline_template_and_keeps_admission_identit
     async def target(context: TaskNodeContext[None]) -> JsonValue:
         return dict(context.input)
 
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with (
         Persistence.open('redaction', storage=storage, tenant_id=PRINCIPAL.tenant_id) as persistence_245,
     ):
@@ -317,7 +317,7 @@ async def test_evaluation_purge_preserves_native_owners_of_derived_captures(tmp_
     async def target(context: TaskNodeContext[None]) -> JsonValue:
         return dict(context.input)
 
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with (
         Persistence.open('native-owner', storage=storage, tenant_id=PRINCIPAL.tenant_id) as persistence_284,
     ):
@@ -349,7 +349,7 @@ async def test_evaluation_purge_preserves_native_owners_of_derived_captures(tmp_
             retained = await engine.inputs.capture_input(trial.subject.execution_id, CaptureInputRequest(PRINCIPAL, "retained"))
             assert dict((await evaluations._captures.read_task(retained, principal=PRINCIPAL)).input) == {"kept": 1}
     snapshot = InMemoryObjectStore("native-snapshot")
-    readonly = PersistenceStorage.filesystem(tmp_path)
+    readonly = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     readonly = Persistence(readonly)
     await readonly.initialize(namespace="native-owner", tenant_id=PRINCIPAL.tenant_id, read_only=True)
     try:
@@ -477,7 +477,7 @@ async def test_graph_input_capture_has_one_owner(tmp_path: Path) -> None:
 
     target, judge = Task("capture.echo", echo, effect_policy="none"), Task("capture.score", score, effect_policy="none")
     async with (
-        Persistence.open('capture-owner', storage=PersistenceStorage.filesystem(tmp_path), tenant_id=PRINCIPAL.tenant_id) as persistence_427,
+        Persistence.open('capture-owner', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=PRINCIPAL.tenant_id) as persistence_427,
     ):
         async with (
             TaskEngine.open(target, judge, persistence=persistence_427, context=CONTEXT) as engine,
@@ -522,7 +522,7 @@ async def test_agent_graph_case_preserves_template_options_and_checks_prompt_own
     group = RuntimeFeatures("case-agent")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with (
-        Persistence.open('agent-case', storage=PersistenceStorage.filesystem(tmp_path), tenant_id=PRINCIPAL.tenant_id) as persistence_467,
+        Persistence.open('agent-case', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=PRINCIPAL.tenant_id) as persistence_467,
         Runtime.attach(persistence=persistence_467, context=CONTEXT, features=model_features(models, group)) as runtime,
     ):
         target = Task.from_agent("case.agent", runtime.agents.get(), build_input=project)

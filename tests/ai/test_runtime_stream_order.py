@@ -756,15 +756,22 @@ async def test_live_overflow_replays_all_durable_events_without_loss() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_batches_pending_audit_in_one_filesystem_mutation(tmp_path: Path) -> None:
-    state = Persistence(PersistenceStorage.filesystem(tmp_path / "runtime"))
+async def test_cancel_batches_pending_audit_in_one_sql_mutation(tmp_path: Path) -> None:
+    state = Persistence(PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True))
     await state.initialize(namespace="stream-order", tenant_id="tenant")
     try:
         now = datetime.now(timezone.utc)
         execution = _execution()
         await state.execution.executions.create(execution)
-        generation = next((tmp_path / "runtime" / "execution").rglob("generation"))
-        before = int(generation.read_text(encoding="utf-8"))
+        from sqlalchemy import event
+        engine = state.execution.executions.state_store.context.engine
+        transactions = set()
+
+        def written(connection, cursor, statement, parameters, context, many):
+            if statement.lstrip().split()[0].upper() in {"INSERT", "UPDATE", "DELETE"}:
+                transactions.add(connection.get_transaction())
+
+        event.listen(engine.sync_engine, "before_cursor_execute", written)
         pending = (
             ExecutionEventAppend(ExecutionEventType.ASSISTANT_PART_COMPLETED, {"part": "text"}),
             ExecutionEventAppend(
@@ -776,8 +783,8 @@ async def test_cancel_batches_pending_audit_in_one_filesystem_mutation(tmp_path:
             ExecutionCancelRequestCommit("execution", 0, 0, "cancel-op", now),
             pending_events=pending,
         )
-        after = int(generation.read_text(encoding="utf-8"))
-        assert after == before + 1
+        event.remove(engine.sync_engine, "before_cursor_execute", written)
+        assert len(transactions) == 1 and None not in transactions
         assert committed.status is ExecutionStatus.CANCELLING
         assert committed.revision == 3
         assert committed.event_seq == 3
@@ -894,6 +901,7 @@ async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
 
     commands = _Commands()
     backend = object.__new__(LocalExecutionBackend)
+    backend._execution_buffer = None
     backend._pending_turns = _PendingExecutionTurns()
     backend._tenant_id = "tenant"
     backend._namespace = "stream-order"
@@ -1007,6 +1015,7 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
 
     commands = _Commands()
     backend = object.__new__(LocalExecutionBackend)
+    backend._execution_buffer = None
     backend._tenant_id = "tenant"
     backend._pending_audit_events = {"execution": [pending]}
     backend._pending_audit_locks = {}

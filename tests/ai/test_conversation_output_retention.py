@@ -52,8 +52,8 @@ def _storage(
     path: Path, backend: str = "sqlite", *, objects: FilesystemObjectStore | None = None,
 ) -> PersistenceStorage:
     objects = objects or FilesystemObjectStore(path / "objects")
-    if backend == "filesystem":
-        return PersistenceStorage.filesystem(path / "state", object_store=objects)
+    if backend == "local_sqlite":
+        return PersistenceStorage.from_plan(PersistenceStorage.from_root(path / "state", exclusive_writer=True).plan, object_store=objects)
     return PersistenceStorage.sqlite(path / "state.db", object_store=objects)
 
 
@@ -84,7 +84,7 @@ def _canonical_output(monkeypatch: pytest.MonkeyPatch, output: object) -> None:
     monkeypatch.setattr(AgentExecutor, "execute", execute)
 
 
-@pytest.mark.parametrize("backend", ("sqlite", "filesystem"))
+@pytest.mark.parametrize("backend", ("sqlite", "local_sqlite"))
 @pytest.mark.parametrize("output", ({"answer": ["canonical", 42]}, None))
 async def test_completed_output_is_canonical_after_actual_prune_and_reopen(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, output: object,

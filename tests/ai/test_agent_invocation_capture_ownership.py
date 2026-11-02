@@ -61,7 +61,7 @@ async def test_invocation_capture_failure_cancels_the_bound_execution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     models = _ControlledModels()
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     principal = service_principal("default", "owner")
     async with Persistence.open('capture-ownership', storage=storage) as persistence_60, Runtime.attach(persistence=persistence_60, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_60, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         objects = runtime._state.object_store(PersistenceDomain.TASK)
@@ -100,7 +100,7 @@ async def test_invocation_capture_failure_cancels_the_bound_execution(
             assert models.requests == 1
         finally:
             models.release.set()
-    async with Persistence.open('capture-ownership', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_95, Runtime.attach(persistence=persistence_95, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_95, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('capture-ownership', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_95, Runtime.attach(persistence=persistence_95, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_95, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         with pytest.raises(AIError) as missing:
             await runtime_engine.inputs.capture_input(execution.execution_id, CaptureInputRequest(principal, "failed-input"))
         assert missing.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
@@ -113,91 +113,107 @@ async def test_terminal_capture_failure_quiescence_finishes_dependency_hold_rele
 ) -> None:
     models = _ControlledModels()
     principal = service_principal("default", "owner")
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     verified = False
-    with pytest.raises(AIError) if release_fails else nullcontext():
-        async with Runtime.open("capture-hold-release", storage=storage,
-                                features=model_features(models, _agents())) as runtime:
-            engine = await runtime.tasks.bind(Task.from_agent("capture.agent", runtime.agents.get()))
-            objects = engine.persistence.object_store(PersistenceDomain.TASK)
-            original_put = objects.put
-            release_entered, release_allowed = asyncio.Event(), asyncio.Event()
-            quiesce_entered, quiesce_allowed = asyncio.Event(), asyncio.Event()
-            cancel_requested, quiesced = asyncio.Event(), asyncio.Event()
-            launcher = engine._launcher
-            original_release = runtime._execution_service.release_dependency_hold
-            original_quiesce = launcher._quiesce_node_owned
+    source_group = None
+    launcher = None
+    try:
+        with pytest.raises(AIError) if release_fails else nullcontext():
+            async with Runtime.open("capture-hold-release", storage=storage,
+                                    features=model_features(models, _agents())) as runtime:
+                source_group = runtime._state.execution.executions.state_store.storage_group
+                engine = await runtime.tasks.bind(Task.from_agent("capture.agent", runtime.agents.get()))
+                objects = engine.persistence.object_store(PersistenceDomain.TASK)
+                original_put = objects.put
+                release_entered, release_allowed = asyncio.Event(), asyncio.Event()
+                quiesce_entered, quiesce_allowed = asyncio.Event(), asyncio.Event()
+                cancel_requested, quiesced = asyncio.Event(), asyncio.Event()
+                launcher = engine._launcher
+                original_release = runtime._execution_service.release_dependency_hold
+                original_quiesce = launcher._quiesce_node_owned
 
-            async def fail_invocation(key: str, *args: object, **kwargs: object) -> object:
-                if key.startswith("v1/input-capture/invocation/"):
-                    await models.entered.wait()
-                    raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
-                return await original_put(key, *args, **kwargs)
+                async def fail_invocation(key: str, *args: object, **kwargs: object) -> object:
+                    if key.startswith("v1/input-capture/invocation/"):
+                        await models.entered.wait()
+                        raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+                    return await original_put(key, *args, **kwargs)
 
-            async def pause_release(*args: object, **kwargs: object) -> None:
-                release_entered.set()
-                await release_allowed.wait()
-                if release_fails:
-                    raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
-                await original_release(*args, **kwargs)
+                async def pause_release(*args: object, **kwargs: object) -> None:
+                    release_entered.set()
+                    await release_allowed.wait()
+                    if release_fails:
+                        raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+                    await original_release(*args, **kwargs)
 
-            async def pause_quiesce(*args: object, **kwargs: object) -> None:
-                await release_entered.wait()
-                inflight = args[3]
-                original_cancel = inflight.task.cancel
+                async def pause_quiesce(*args: object, **kwargs: object) -> None:
+                    await release_entered.wait()
+                    inflight = args[3]
+                    original_cancel = inflight.task.cancel
 
-                def observe_cancel(msg: object = None) -> bool:
-                    result = original_cancel(msg)
-                    cancel_requested.set()
-                    return result
+                    def observe_cancel(msg: object = None) -> bool:
+                        result = original_cancel(msg)
+                        cancel_requested.set()
+                        return result
 
-                monkeypatch.setattr(inflight.task, "cancel", observe_cancel)
-                quiesce_entered.set()
-                await quiesce_allowed.wait()
+                    monkeypatch.setattr(inflight.task, "cancel", observe_cancel)
+                    quiesce_entered.set()
+                    await quiesce_allowed.wait()
+                    try:
+                        await original_quiesce(*args, **kwargs)
+                    finally:
+                        quiesced.set()
+
+                monkeypatch.setattr(objects, "put", fail_invocation)
+                # Fault the shared retention owner, including terminal-graph
+                # compensation, not just the launcher's first release attempt.
+                monkeypatch.setattr(runtime._execution_service, "release_dependency_hold", pause_release)
+                monkeypatch.setattr(launcher, "_quiesce_node_owned", pause_quiesce)
+                run = await engine.start(TaskGraph("source", (
+                    TaskNode("agent", task=engine.definitions[0], input=AgentTaskInput("question")),
+                )), principal=principal, idempotency_key="source")
                 try:
-                    await original_quiesce(*args, **kwargs)
-                finally:
-                    quiesced.set()
-
-            monkeypatch.setattr(objects, "put", fail_invocation)
-            # Fault the shared retention owner, including terminal-graph
-            # compensation, not just the launcher's first release attempt.
-            monkeypatch.setattr(runtime._execution_service, "release_dependency_hold", pause_release)
-            monkeypatch.setattr(launcher, "_quiesce_node_owned", pause_quiesce)
-            run = await engine.start(TaskGraph("source", (
-                TaskNode("agent", task=engine.definitions[0], input=AgentTaskInput("question")),
-            )), principal=principal, idempotency_key="source")
-            try:
-                await asyncio.wait_for(quiesce_entered.wait(), 5)
-                # Observe terminal metadata without triggering another cleanup
-                # consumer while all release attempts are held at the barrier.
-                assert (await run.state()).wait_status is TaskStatus.FAILED
-                quiesce_allowed.set()
-                await asyncio.wait_for(cancel_requested.wait(), 5)
-                release_allowed.set()
-                await asyncio.wait_for(quiesced.wait(), 5)
-                execution = await run.execution("agent")
-                record = await engine.persistence.execution.executions.get(
-                    execution.execution_id, tenant_id=principal.tenant_id,
-                )
-                assert record.status is ExecutionStatus.CANCELLED
-                assert record.dependency_hold_ids == (("task:source:agent",) if release_fails else ())
-                assert models.requests == 1
-                if release_fails:
-                    graph_run = launcher._graphs[(principal.tenant_id, "source")]
-                    await asyncio.gather(graph_run.task, return_exceptions=True)
-                    assert launcher.graph_failure("source", tenant_id=principal.tenant_id).code is ErrorCode.STORAGE_UNAVAILABLE
-                    with pytest.raises(AIError) as cleanup_error:
+                    await asyncio.wait_for(quiesce_entered.wait(), 5)
+                    # Observe terminal metadata without triggering another cleanup
+                    # consumer while all release attempts are held at the barrier.
+                    assert (await run.state()).wait_status is TaskStatus.FAILED
+                    quiesce_allowed.set()
+                    await asyncio.wait_for(cancel_requested.wait(), 5)
+                    release_allowed.set()
+                    await asyncio.wait_for(quiesced.wait(), 5)
+                    execution = await run.execution("agent")
+                    record = await engine.persistence.execution.executions.get(
+                        execution.execution_id, tenant_id=principal.tenant_id,
+                    )
+                    assert record.status is ExecutionStatus.CANCELLED
+                    assert record.dependency_hold_ids == (("task:source:agent",) if release_fails else ())
+                    assert models.requests == 1
+                    if release_fails:
+                        graph_run = launcher._graphs[(principal.tenant_id, "source")]
+                        await asyncio.gather(graph_run.task, return_exceptions=True)
+                        assert launcher.graph_failure("source", tenant_id=principal.tenant_id).code is ErrorCode.STORAGE_UNAVAILABLE
+                        with pytest.raises(AIError) as cleanup_error:
+                            await engine.close()
+                        assert cleanup_error.value.code is ErrorCode.STORAGE_UNAVAILABLE
+                        assert launcher.owns_graph("source", tenant_id=principal.tenant_id)
+                    else:
                         await engine.close()
-                    assert cleanup_error.value.code is ErrorCode.STORAGE_UNAVAILABLE
-                    assert launcher.owns_graph("source", tenant_id=principal.tenant_id)
-                else:
-                    await engine.close()
-                verified = True
-            finally:
-                quiesce_allowed.set()
-                release_allowed.set()
-                models.release.set()
+                    verified = True
+                finally:
+                    quiesce_allowed.set()
+                    release_allowed.set()
+                    models.release.set()
+    finally:
+        if release_fails and source_group is not None:
+            # A permanent hold-release fault intentionally keeps the Runtime
+            # close boundary failed; settle its workers before disposing the
+            # test-owned database, without erasing that failure or its holds.
+            if launcher is not None:
+                assert all(run.task is None or run.task.done()
+                           for run in tuple(launcher._graphs.values()))
+            await runtime._close_agent()
+            await source_group.close()
+            await source_group.context.close()
+            assert source_group.context.closed
     assert verified
 
 
@@ -260,7 +276,7 @@ async def test_capture_cleanup_failure_recovers_the_same_execution_and_capture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, release_before_recovery: bool,
 ) -> None:
     models = _ControlledModels()
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     principal = service_principal("default", "owner")
     async with Persistence.open('capture-recovery', storage=storage) as persistence_110, Runtime.attach(persistence=persistence_110, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_110, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         objects = runtime._state.object_store(PersistenceDomain.TASK)
@@ -332,7 +348,7 @@ async def test_graph_cancel_during_invocation_capture_cancels_the_owned_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     models = _ControlledModels()
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     principal = service_principal("default", "owner")
     async with Persistence.open('capture-cancel', storage=storage) as persistence_182, Runtime.attach(persistence=persistence_182, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_182, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         objects = runtime._state.object_store(PersistenceDomain.TASK)
@@ -376,7 +392,7 @@ async def test_terminal_agent_task_keeps_its_invocation_capture(
     models.fail = model_failure
     models.release.set()
     principal = service_principal("default", "owner")
-    async with Persistence.open('capture-terminal', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_224, Runtime.attach(persistence=persistence_224, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_224, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('capture-terminal', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_224, Runtime.attach(persistence=persistence_224, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_224, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         task = Task.from_agent("capture.agent", runtime.agents.get())
         run = await runtime_engine.with_definitions(task).start(TaskGraph("source", (
             TaskNode("agent", task=task, input=AgentTaskInput("question")),
@@ -394,7 +410,7 @@ async def test_graph_cancel_waits_for_capture_failure_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     models = _ControlledModels()
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     principal = service_principal("default", "owner")
     async with Persistence.open('capture-cleanup', storage=storage) as persistence_245, Runtime.attach(persistence=persistence_245, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_245, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         objects = runtime._state.object_store(PersistenceDomain.TASK)
@@ -459,7 +475,7 @@ async def test_invocation_capture_holds_terminal_execution_until_handoff_finishe
 ) -> None:
     models = _ControlledModels()
     models.release.set()
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     principal = service_principal("default", "owner")
     async with Persistence.open('capture-hold', storage=storage) as persistence_310, Runtime.attach(persistence=persistence_310, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_310, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         objects = runtime._state.object_store(PersistenceDomain.TASK)
@@ -504,7 +520,7 @@ async def test_pending_invocation_capture_preserves_complete_replay_input(
 
     models = _ControlledModels()
     models.release.set()
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     principal = service_principal("default", "owner")
     projections = []
     producer_ran = asyncio.Event()
@@ -582,7 +598,7 @@ async def test_pending_invocation_capture_preserves_complete_replay_input(
 async def test_standalone_agent_capture_accepts_unrelated_execution_holds(tmp_path: Path) -> None:
     models = _ControlledModels()
     principal = service_principal("default", "owner")
-    async with Persistence.open('standalone-capture', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_431, Runtime.attach(persistence=persistence_431, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_431, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('standalone-capture', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_431, Runtime.attach(persistence=persistence_431, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_431, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         execution = await runtime.agents.get().start("standalone input", principal=principal)
         await asyncio.wait_for(models.entered.wait(), 30)
         holds = ("task-ref:dependency", "input-capture:reader")
@@ -621,7 +637,7 @@ async def test_invocation_capture_requirement_is_durable_and_idempotent(
     principal = service_principal("default", "owner")
     execution_id = None
     for reopened in (False, True):
-        storage = PersistenceStorage.filesystem(tmp_path)
+        storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
         async with Persistence.open('capture-contract', storage=storage) as persistence_472, Runtime.attach(persistence=persistence_472, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_472, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
             agent = runtime.agents.get()
             binding = runtime._compiler.bind(runtime._compiled_agent(agent.id, agent.revision, agent.compiled))
@@ -678,7 +694,7 @@ async def test_agent_task_retry_and_fork_capture_their_independent_input(tmp_pat
     models = _ControlledModels()
     models.release.set()
     principal = service_principal("default", "owner")
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     features = _agents()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Persistence.open('capture-lineage', storage=storage) as persistence_531, Runtime.attach(persistence=persistence_531, features=model_features(models, features)) as runtime, TaskEngine.open(persistence=persistence_531, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:

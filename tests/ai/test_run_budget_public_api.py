@@ -87,7 +87,7 @@ async def test_graph_budget_is_read_only_during_description_and_shared_by_mixed_
     async def ordinary(context: TaskNodeContext[None]) -> JsonValue:
         return context.node_id
 
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open('budget-graph', storage=storage) as persistence_88, Runtime.attach(persistence=persistence_88, features=model_features(RuntimeUsageModels(), _capabilities())) as runtime, TaskEngine.open(persistence=persistence_88, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         agent_task = Task.from_agent("budget.agent", runtime.agents.get())
         callable_task = Task("budget.callable", ordinary, effect_policy="none")
@@ -190,13 +190,13 @@ async def test_budget_scope_survives_restart_and_missing_inherited_scope_fails_c
 
     features = _capabilities()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('budget-reopen', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_193, Runtime.attach(persistence=persistence_193, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('budget-reopen', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_193, Runtime.attach(persistence=persistence_193, features=model_features(RuntimeUsageModels(), features)) as runtime:
         root = await runtime.agents.get().start("first", budget=RunBudget(model_requests=2))
         assert (await root.wait()).result.status is ExecutionStatus.SUCCEEDED
         execution_id = root.execution_id
         before = await root.budget_usage()
 
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open('budget-reopen', storage=storage) as persistence_201, Runtime.attach(persistence=persistence_201, features=model_features(RuntimeUsageModels(), features)) as runtime:
         restored = await runtime.executions.get(execution_id)
         assert await restored.budget_usage() == before

@@ -57,7 +57,7 @@ async def test_captured_graph_keeps_node_output_contract_after_reopen(tmp_path: 
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     scorer = Task("graph.score", score, effect_policy="none")
     async with (
-        Persistence.open('structured-graph', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_53,
+        Persistence.open('structured-graph', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_53,
         Runtime.attach(persistence=persistence_53, context=CONTEXT, features=model_features(models, group)) as runtime,
     ):
         target = Task.from_agent("graph.target", runtime.agents.get())
@@ -70,7 +70,7 @@ async def test_captured_graph_keeps_node_output_contract_after_reopen(tmp_path: 
             source_contract = (await source.state(include_content=True)).nodes[0].output_contract
             capture = await engine.inputs.capture_graph(source.graph_id, CaptureGraphRequest(PRINCIPAL, "capture"))
     async with (
-        Persistence.open('structured-graph', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_63,
+        Persistence.open('structured-graph', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_63,
         Runtime.attach(persistence=persistence_63, context=CONTEXT, features=model_features(models, group)) as runtime,
     ):
         target = Task.from_agent("graph.target", runtime.agents.get())
@@ -104,7 +104,7 @@ async def test_resolved_output_contract_must_match_named_task_schema(tmp_path: P
     declared = Task("schema.answer", answer, output_type=Answer, effect_policy="none")
     different = Task("schema.different", answer, output_type=DifferentAnswer, effect_policy="none")
     async with (
-        Persistence.open('schema-contract', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_92,
+        Persistence.open('schema-contract', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_92,
         TaskEngine.open(declared, persistence=persistence_92, context=CONTEXT) as engine,
     ):
         for task in (declared, different):
