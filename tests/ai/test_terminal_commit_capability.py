@@ -217,7 +217,7 @@ async def test_current_execution_record_retains_conversation_through_recovery(
     group.capability(CheckpointCapability(), scope="runtime")
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     storage_path = tmp_path / "runtime"
-    storage = PersistenceStorage.filesystem(storage_path)
+    storage = PersistenceStorage.from_root(storage_path, exclusive_writer=True)
     encode = _repository_common._encode_persisted_domain
     written: list[JsonValue] = []
 
@@ -243,7 +243,7 @@ async def test_current_execution_record_retains_conversation_through_recovery(
         assert before is not None and before.status is ExecutionStatus.STARTED
         assert before.restart_checkpoints and before.conversation
 
-    reopened = PersistenceStorage.filesystem(storage_path)
+    reopened = PersistenceStorage.from_root(storage_path, exclusive_writer=True)
     async with Persistence.open('conversation-feature', storage=reopened) as persistence_260, Runtime.attach(persistence=persistence_260, features=model_features(RuntimeUsageModels(), group)) as runtime:
         recovered = await runtime.executions.get(execution.execution_id)
         assert (await recovered.wait(timeout_seconds=10)).result.output == {"text": "done"}

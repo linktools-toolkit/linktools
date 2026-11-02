@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from inspect import iscoroutine
 from types import MappingProxyType
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, cast
 
 from pydantic import BaseModel
 
@@ -14,6 +14,8 @@ from ..capability import (
     CapabilityContribution,
     SkillDefinition,
     tool_class_from_metadata,
+    tool_effect_policy_from_metadata,
+    tool_metadata,
 )
 from ..core import ImmutableJsonMapping, JsonValue
 from ..errors import AIError, ErrorCode
@@ -344,6 +346,16 @@ class AgentCompiler:
                 ):
                     raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
                 candidate = current
+                if pin.kind == "tool":
+                    tool = current.materialize_tool()
+                    metadata = cast("Mapping[str, object]", pin.contract["metadata"])
+                    tool.metadata = tool_metadata(
+                        base=tool.metadata,
+                        effect_policy=tool_effect_policy_from_metadata(metadata, require=True),
+                    )
+                    candidate = CapabilityContribution.from_opaque(
+                        "tool", pin.id, tool, revision=pin.revision,
+                    )
             selected[pin.kind].append(candidate)
         return {
             kind: (

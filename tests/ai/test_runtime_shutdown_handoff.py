@@ -23,12 +23,12 @@ from ._runtime_test_helpers import _Models
 from .test_terminal_commit_shared_runtime import _group
 
 
-@pytest_asyncio.fixture(params=("sqlite", "filesystem", "postgresql", "mysql"))
+@pytest_asyncio.fixture(params=("sqlite", "local_sqlite", "postgresql", "mysql"))
 async def handoff_storage(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator[Callable[[], PersistenceStorage]]:
     backend = request.param
-    if backend in {"sqlite", "filesystem"}:
+    if backend in {"sqlite", "local_sqlite"}:
         yield (lambda: PersistenceStorage.sqlite(tmp_path / "runtime.db")) if backend == "sqlite" else (
-            lambda: PersistenceStorage.filesystem(tmp_path / "runtime"))
+            lambda: PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True))
         return
     from sqlalchemy.engine import URL
     from sqlalchemy.ext.asyncio import create_async_engine

@@ -354,7 +354,7 @@ async def test_runtime_web_session_and_durable_model_content(monkeypatch, tmp_pa
     features.agent("old", model="default", allow_tools=())
     features.capability(TraceCapability(), scope="runtime")
     features.capability(ExecutionCapability(), scope="runtime")
-    storage = PersistenceStorage.filesystem(tmp_path / "state")
+    storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
     async with Persistence.open('default', storage=storage) as persistence_341, Runtime.attach(persistence=persistence_341, features=features) as runtime:
         session = await runtime.agents.get("old").create_session("session")
         async with _client(create_app(runtime=runtime)) as http:

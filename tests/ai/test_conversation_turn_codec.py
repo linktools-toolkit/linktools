@@ -107,7 +107,7 @@ async def test_repository_and_snapshot_reject_same_corrupt_turn_metadata(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("sqlite", "filesystem"))
+@pytest.mark.parametrize("backend", ("sqlite", "local_sqlite"))
 async def test_snapshot_roundtrips_retained_turn_payloads_after_execution_prune(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:

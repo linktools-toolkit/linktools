@@ -34,7 +34,6 @@ from .codec import (
 from .contracts import (
     ApprovalRecord,
     ArtifactRecord,
-    ConversationHistoryRecord,
     EvaluationRecord,
     ExecutionRecord,
     ExternalCallRecord,
@@ -243,11 +242,10 @@ class _RepositoryBase:
     async def _refresh_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
         # Native stores can repair their ordinary cache after a source fallback.
         # Custom stores retain the existing mandatory StateStore contract.
-        from ._filesystem import FilesystemStateStore
         from ._memory import InMemoryStateStore
         from ._sql import SqlStateStore
 
-        if isinstance(self._store, (FilesystemStateStore, InMemoryStateStore, SqlStateStore)):
+        if isinstance(self._store, (InMemoryStateStore, SqlStateStore)):
             return await self._store.refresh_records(keys)
         return await self._store.read(lambda transaction: transaction.get_records(keys))
 

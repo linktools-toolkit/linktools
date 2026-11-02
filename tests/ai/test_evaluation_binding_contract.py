@@ -36,7 +36,7 @@ async def test_historical_agent_capture_restores_original_structured_output_bind
                 allow_tools=(), allow_skills=(), allow_subagents=())
     scorer = Task("consumer.historical-score", exact, effect_policy="none")
     async with (
-        Persistence.open('historical-consumers', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_32,
+        Persistence.open('historical-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_32,
         Runtime.attach(persistence=persistence_32, context=CONTEXT, features=model_features(models, group)) as runtime,
     ):
         source = await runtime.agents.get().start("the original question", output=ScoreBundle,
@@ -85,7 +85,7 @@ async def test_reconcile_rejects_same_revision_task_contract_drift_before_rerunn
     changed = Task("consumer.named", target, effect_policy="none", cancel=cancel)
     scorer = Task("consumer.named-score", exact, effect_policy="none")
     async with (
-        Persistence.open('drift-consumers', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_76,
+        Persistence.open('drift-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_76,
         TaskEngine.open(original, scorer, persistence=persistence_76, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -113,7 +113,7 @@ async def test_strict_comparison_cannot_mix_datasets_even_when_both_scores_pass(
     target = Task("consumer.dataset-target", echo, effect_policy="none")
     scorer = Task("consumer.dataset-score", exact, effect_policy="none")
     async with (
-        Persistence.open('different-dataset-consumers', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_97,
+        Persistence.open('different-dataset-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_97,
         TaskEngine.open(target, scorer, persistence=persistence_97, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -224,7 +224,7 @@ async def test_rerun_dependency_failure_never_falls_back_to_captured_success(tmp
     consumer = Task("consumer.rerun-observer", answer, effect_policy="none")
     scorer = Task("consumer.rerun-score", score, effect_policy="none")
     async with (
-        Persistence.open('rerun-failure-consumers', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_200,
+        Persistence.open('rerun-failure-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_200,
     ):
         async with (
             TaskEngine.open(producer, consumer, scorer, persistence=persistence_200, context=CONTEXT) as engine,

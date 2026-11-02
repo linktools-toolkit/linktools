@@ -82,7 +82,7 @@ async def test_parallel_native_tool_outputs_keep_ids_after_reverse_completion_an
     models = _Models(_UsageFunctionModel(respond))
     models.contract = {**models.contract, "input_mime_types": ["image/png"]}
     features = model_features(models, group)
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open('native-tool-ownership', storage=storage) as persistence_74, Runtime.attach(persistence=persistence_74, features=features) as runtime:
         execution = await runtime.agents.get().start("Read both independent files")
         result = (await execution.wait(timeout_seconds=10)).result

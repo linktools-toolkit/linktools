@@ -61,7 +61,7 @@ async def test_empty_context_batches_projection_and_head(
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("reader", ("owner", "session"))
 async def test_context_metadata_keeps_projection_precedence_and_releases_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, reader: str,
@@ -97,7 +97,7 @@ async def test_context_metadata_keeps_projection_precedence_and_releases_scope(
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("reader", ("owner", "session"))
 async def test_empty_context_requires_head_before_session_descriptor(
     tmp_path: Path, backend: str, reader: str,

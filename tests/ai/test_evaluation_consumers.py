@@ -98,7 +98,7 @@ async def test_dataset_task_report_and_idempotency_use_one_public_case_declarati
         CaseSpec.task(CaseRef("one-input", "text", 1), input={"answer": "yes"}, expected="yes"),
     ))
     async with (
-        Persistence.open('consumers', storage=PersistenceStorage.filesystem(tmp_path), tenant_id=TENANT) as persistence_93,
+        Persistence.open('consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=TENANT) as persistence_93,
         TaskEngine.open(target, scorer, persistence=persistence_93, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -170,7 +170,7 @@ async def test_native_graph_named_outputs_preserve_dependencies_and_successful_n
         TaskNode("empty", task=empty_task),
     ))
     async with (
-        Persistence.open('graph-consumers', storage=PersistenceStorage.filesystem(tmp_path), tenant_id=TENANT) as persistence_162,
+        Persistence.open('graph-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=TENANT) as persistence_162,
         TaskEngine.open(prepare_task, answer_task, empty_task, scorer, persistence=persistence_162, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -207,7 +207,7 @@ async def test_model_judge_receives_fixed_scoring_data_and_structured_output(tmp
 
     target = Task("consumer.judge-target", echo, effect_policy="none")
     async with (
-        Persistence.open('judge-consumers', storage=PersistenceStorage.filesystem(tmp_path), tenant_id=TENANT) as persistence_195,
+        Persistence.open('judge-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=TENANT) as persistence_195,
         Runtime.attach(persistence=persistence_195, context=CONTEXT, features=model_features(models, group)) as runtime,
     ):
         judge = Task.from_agent("consumer.judge", runtime.agents.get(), build_input=build_input if projected else None)
@@ -275,7 +275,7 @@ async def test_partial_rescore_preserves_targets_initial_scores_and_pair_denomin
     scorer = Task("consumer.first-score", exact, effect_policy="none")
     revised_task = Task("consumer.revised-score", revised, effect_policy="none")
     async with (
-        Persistence.open('rescore-consumers', storage=PersistenceStorage.filesystem(tmp_path), tenant_id=TENANT) as persistence_256,
+        Persistence.open('rescore-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=TENANT) as persistence_256,
         TaskEngine.open(old, new, scorer, persistence=persistence_256, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -341,7 +341,7 @@ async def test_target_failure_invalid_score_and_na_remain_in_the_report_denomina
     target_task = Task("consumer.failures", target, effect_policy="none")
     scorer_task = Task("consumer.score-failures", score, effect_policy="none")
     async with (
-        Persistence.open('failure-consumers', storage=PersistenceStorage.filesystem(tmp_path), tenant_id=TENANT) as persistence_316,
+        Persistence.open('failure-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=TENANT) as persistence_316,
         TaskEngine.open(target_task, scorer_task, persistence=persistence_316, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -367,7 +367,7 @@ async def test_new_evaluation_actions_default_deny_and_reject_other_tenants_and_
     target = Task("consumer.private", echo, effect_policy="none")
     scorer = Task("consumer.private-score", exact, effect_policy="none")
     async with (
-        Persistence.open('private-consumers', storage=PersistenceStorage.filesystem(tmp_path), tenant_id=TENANT) as persistence_339,
+        Persistence.open('private-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=TENANT) as persistence_339,
         Runtime.attach(persistence=persistence_339, features=model_features(FixtureModels()), context=CONTEXT) as runtime,
     ):
         async with (
@@ -399,7 +399,7 @@ async def test_new_evaluation_actions_default_deny_and_reject_other_tenants_and_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("local_sqlite", "sqlite"))
 async def test_cancel_fences_unstarted_trials_and_reconcile_after_reopen_is_idempotent(tmp_path: Path, backend: str) -> None:
     entered = asyncio.Event()
     released = asyncio.Event()
@@ -415,8 +415,8 @@ async def test_cancel_fences_unstarted_trials_and_reconcile_after_reopen_is_idem
     scorer = Task("consumer.hold-score", exact, effect_policy="none")
 
     def storage() -> PersistenceStorage:
-        if backend == "filesystem":
-            return PersistenceStorage.filesystem(tmp_path / "state")
+        if backend == "local_sqlite":
+            return PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
         return PersistenceStorage.sqlite(tmp_path / "state.sqlite", object_store=FilesystemObjectStore(tmp_path / "objects"))
 
     async with (
@@ -471,7 +471,7 @@ async def test_human_score_waits_for_one_decision_and_rescore_keeps_prior_result
     task = Task("consumer.human-target", target, effect_policy="none")
     scorer = ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,))
     async with (
-        Persistence.open('human-consumers', storage=PersistenceStorage.filesystem(tmp_path), tenant_id=TENANT) as persistence_430,
+        Persistence.open('human-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=TENANT) as persistence_430,
         TaskEngine.open(task, persistence=persistence_430, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -601,7 +601,7 @@ async def test_binary_agent_input_reaches_scorer_as_authorized_retained_evidence
     group = RuntimeFeatures[None]("attachment-consumer")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with (
-        Persistence.open('attachment-consumers', storage=PersistenceStorage.filesystem(tmp_path), tenant_id=TENANT) as persistence_550,
+        Persistence.open('attachment-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=TENANT) as persistence_550,
         Runtime.attach(persistence=persistence_550, context=CONTEXT, features=model_features(models, group)) as runtime,
     ):
         target = Task.from_agent("consumer.attachment-target", runtime.agents.get())

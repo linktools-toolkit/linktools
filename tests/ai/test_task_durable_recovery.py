@@ -293,18 +293,18 @@ async def test_corrupt_occupied_graph_without_its_admission_operation_fails_clos
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("exclusive_sqlite", "sqlite"))
 async def test_durable_admission_survives_reopen_and_remains_recoverable(
     tmp_path,
     backend: str,
 ) -> None:
-    path = tmp_path / ("runtime" if backend == "filesystem" else "runtime.db")
+    path = tmp_path / ("runtime" if backend == "exclusive_sqlite" else "runtime.db")
     request = _request(f"reopen-{backend}")
     admission = TaskGraphAdmission.from_request(request)
     engine = None
-    if backend == "filesystem":
+    if backend == "exclusive_sqlite":
         def create_state() -> PersistenceStorage:
-            return PersistenceStorage.filesystem(path)
+            return PersistenceStorage.from_root(path, exclusive_writer=True)
     else:
         engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
         await provision_database(engine)
@@ -396,7 +396,7 @@ async def test_empty_graph_is_terminal_and_excluded_from_recovery() -> None:
 
 
 def test_durable_pure_task_graph_does_not_require_durable_execution(tmp_path) -> None:
-    task = StorageRoute.filesystem(tmp_path / "task")
+    task = StorageRoute.sqlite(tmp_path / "task.db", exclusive_writer=True)
 
     state = PersistenceStorage.from_plan(
         PersistencePlan(

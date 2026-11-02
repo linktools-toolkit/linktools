@@ -10,7 +10,6 @@ from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.migrate import provision_database
-from linktools.ai.persistence._filesystem import FilesystemStateStore
 from linktools.ai.persistence._plan import PersistenceDomain
 from linktools.ai.persistence._schema import build_runtime_sql_metadata
 from linktools.ai.persistence._sql import SqlStateStore
@@ -53,90 +52,7 @@ async def _list_prefix(store, prefix: str | None, *, limit: int = 10):
     )
 
 
-async def test_filesystem_range_index_is_generic_and_does_not_enumerate_index(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "generic-range"
-    store = FilesystemStateStore(
-        root,
-        namespace="generic-range",
-        tenant_id="tenant",
-        runtime_domain=PersistenceDomain.EXECUTION.value,
-        _range_index=True,
-    )
-    await store.initialize()
-    await _seed(
-        store,
-        tuple(_record(value) for value in ("-first", "A-001", "A-002", "a-001")),
-    )
-    await store.close()
-
-    reopened = FilesystemStateStore(
-        root,
-        namespace="generic-range",
-        tenant_id="tenant",
-        runtime_domain=PersistenceDomain.EXECUTION.value,
-        _range_index=True,
-    )
-    await reopened.initialize()
-    original_iterdir = Path.iterdir
-
-    def guarded_iterdir(path: Path):
-        if "record-index" in path.parts:
-            raise AssertionError("bounded range queries must not enumerate the index")
-        return original_iterdir(path)
-
-    monkeypatch.setattr(Path, "iterdir", guarded_iterdir)
-    values = await _list_prefix(reopened, "A")
-    assert [value.sort_key for value in values] == ["A-001", "A-002"]
-    first = await _list_prefix(reopened, None, limit=1)
-    assert [value.sort_key for value in first] == ["-first"]
-    await reopened.close()
-
-
-async def test_filesystem_range_index_is_opt_in(tmp_path: Path) -> None:
-    root = tmp_path / "range-opt-in"
-    store = FilesystemStateStore(
-        root,
-        namespace="range-opt-in",
-        tenant_id="tenant",
-        runtime_domain=PersistenceDomain.EXECUTION.value,
-    )
-    await store.initialize()
-    await _seed(store, (_record("probe"),))
-    assert not (root / "record-index").exists()
-    await store.close()
-
-
-async def test_filesystem_range_index_does_not_write_one_node_per_character(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store = FilesystemStateStore(
-        tmp_path / "compressed-range",
-        namespace="compressed-range",
-        tenant_id="tenant",
-        runtime_domain=PersistenceDomain.EXECUTION.value,
-        _range_index=True,
-    )
-    await store.initialize()
-    commits: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
-    original_commit = store._commit_sync
-
-    def capture_commit(transaction, base, target):
-        commits.append((tuple(transaction.writes), tuple(transaction.deletes)))
-        return original_commit(transaction, base, target)
-
-    monkeypatch.setattr(store, "_commit_sync", capture_commit)
-    await _seed(store, (_record("x" * 128),))
-    assert len(commits) == 1
-    index_writes = [path for path in commits[0][0] if path.startswith("record-index/")]
-    assert len(index_writes) == 2
-    await store.close()
-
-
-async def test_sql_prefix_is_case_sensitive_and_matches_filesystem(
+async def test_sql_prefix_is_case_sensitive(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "range.db"

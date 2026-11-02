@@ -19,7 +19,6 @@ from ._domain import (
     AssetVersionRef,
     WritableAssetBackend,
 )
-from ._filesystem import FilesystemAssetBackend, filesystem_root
 from ._materialization import AssetMaterializer, MaterializedAssets, validate_materialized_path
 from ._object import AssetObjectKeyFactory
 from ._sql import SqlAssetBackend, build_asset_sql_metadata
@@ -39,7 +38,6 @@ __all__ = [
     "AssetVersionRef",
     "AssetStoreReader",
     "DirectoryAssetBackend",
-    "FilesystemAssetBackend",
     "InMemoryAssetBackend",
     "MaterializedAssets",
     "PrefixAssetPathAdapter",
@@ -48,7 +46,6 @@ __all__ = [
     "WritableAssetBackend",
     "build_asset_sql_metadata",
     "directory_root",
-    "filesystem_root",
     "resolved_name",
     "validate_materialized_path",
 ]

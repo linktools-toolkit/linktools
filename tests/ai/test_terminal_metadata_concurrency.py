@@ -47,20 +47,20 @@ def _storage(tmp_path: Path, backend: str, split_session: bool) -> PersistenceSt
         route = (
             StorageRoute.memory()
             if backend == "memory"
-            else StorageRoute.filesystem(tmp_path / "execution")
-            if backend == "filesystem"
+            else StorageRoute.sqlite(tmp_path / "execution" / "runtime.db", exclusive_writer=True)
+            if backend == "local_sqlite"
             else StorageRoute.sqlite(tmp_path / "execution.db")
         )
         return PersistenceStorage(
             PersistencePlan(
                 execution=route,
-                conversation=StorageRoute.filesystem(tmp_path / "conversation"),
+                conversation=StorageRoute.sqlite(tmp_path / "conversation" / "runtime.db", exclusive_writer=True),
             )
         )
     if backend == "memory":
         return PersistenceStorage.in_memory()
-    if backend == "filesystem":
-        return PersistenceStorage.filesystem(tmp_path / "runtime")
+    if backend == "local_sqlite":
+        return PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True)
     return PersistenceStorage.sqlite(tmp_path / "runtime.db")
 
 
@@ -69,9 +69,9 @@ def _storage(tmp_path: Path, backend: str, split_session: bool) -> PersistenceSt
     ("backend", "split_session"),
     (
         ("memory", False),
-        ("filesystem", False),
+        ("local_sqlite", False),
         ("sqlite", False),
-        ("filesystem", True),
+        ("local_sqlite", True),
         ("sqlite", True),
     ),
 )
@@ -175,7 +175,7 @@ async def test_terminal_preserves_concurrent_hold_metadata(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("backend", "split_session"),
-    (("memory", False), ("filesystem", False), ("sqlite", False), ("sqlite", True)),
+    (("memory", False), ("local_sqlite", False), ("sqlite", False), ("sqlite", True)),
 )
 @pytest.mark.parametrize(
     "post_commit_change",

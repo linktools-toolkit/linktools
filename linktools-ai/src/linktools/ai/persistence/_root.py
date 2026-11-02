@@ -2,11 +2,14 @@
 # -*- coding: utf-8 -*-
 """Physical persistence resources and typed route configuration."""
 
+import json
+from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..storage import CacheBackend, TurnCoordinationBackend, StreamBackend, StorageRoute, FilesystemObjectStore, ObjectStore
-from ._plan import PersistencePlan
+from ..errors import AIError, ErrorCode
+from ._plan import PersistenceDomain, PersistencePlan
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -57,20 +60,6 @@ class PersistenceStorage:
         route = StorageRoute.memory(cache=cache)
         return cls(PersistencePlan.from_default(route), coordination=coordination)
 
-    @classmethod
-    def filesystem(
-        cls,
-        path: "str | Path",
-        *,
-        object_store: "ObjectStore | None" = None,
-        cache: CacheBackend | None = None,
-        coordination: CacheBackend | TurnCoordinationBackend | StreamBackend | None = None,
-    ) -> "PersistenceStorage":
-        base = _normalize_path(path)
-        return cls(
-            PersistencePlan.filesystem(base, cache=cache),
-            object_store=object_store, coordination=coordination,
-        )
 
     @classmethod
     def sqlite(
@@ -90,13 +79,18 @@ class PersistenceStorage:
     @classmethod
     def from_root(
         cls, root: "str | Path", *, cache: CacheBackend | None = None,
+        exclusive_writer: bool = False,
         coordination: CacheBackend | TurnCoordinationBackend | StreamBackend | None = None,
     ) -> "PersistenceStorage":
+        if not isinstance(exclusive_writer, bool):
+            raise TypeError("exclusive_writer must be a bool")
         base = _normalize_path(root)
-        return cls.sqlite(
-            base / "runtime.db",
-            object_store=FilesystemObjectStore(base / "objects"),
-            cache=cache, coordination=coordination,
+        if not (base / "runtime.db").exists():
+            _reject_filesystem_state_root(base)
+        route = StorageRoute.sqlite(base / "runtime.db", cache=cache, exclusive_writer=exclusive_writer)
+        return cls(
+            PersistencePlan.from_default(route),
+            object_store=FilesystemObjectStore(base / "objects"), coordination=coordination,
         )
 
     @classmethod
@@ -127,6 +121,28 @@ class PersistenceStorage:
         )
 
 
+def _reject_filesystem_state_root(root: Path) -> None:
+    manifests = chain(
+        (root / "manifest.json",),
+        (root / ".state-groups").glob("*/manifest.json"),
+        *((root / domain.value).glob("*/*/manifest.json") for domain in PersistenceDomain),
+    )
+    for path in manifests:
+        if not path.is_file():
+            continue
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(manifest, dict) and manifest.get("format") in (
+            "linktools-ai-state", "linktools-ai-state-group",
+        ):
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                "Filesystem Runtime state requires explicit migration into a new SQLite root",
+            )
+
+
 def _validate_storage_configuration(plan: PersistencePlan, object_store: ObjectStore | None) -> None:
     if not isinstance(plan, PersistencePlan):
         raise TypeError("plan must be a PersistencePlan")
@@ -137,7 +153,6 @@ def _normalize_path(value: "str | Path") -> Path:
     if not isinstance(value, (str, Path)) or not str(value).strip():
         raise ValueError("PersistenceStorage path is required")
     return Path(value).expanduser().resolve(strict=False)
-
 
 
 __all__ = ["PersistenceStorage"]

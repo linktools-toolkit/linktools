@@ -10,6 +10,7 @@ import pytest
 from linktools.ai.persistence import Persistence
 from linktools.ai.agent import AgentBinding, AgentCompiler
 from linktools.ai.core import (
+    CommitPolicy,
     ExecutionStatus,
     Page,
     Principal,
@@ -164,6 +165,7 @@ def _service(
     *,
     backend: _Launcher | None = None,
     operation_ids: object | None = None,
+    commit: CommitPolicy = CommitPolicy.sync(),
 ) -> DefaultExecutionService:
     kwargs: dict[str, object] = {}
     if operation_ids is not None:
@@ -181,6 +183,7 @@ def _service(
         runtime_bridge=runtime_bridge,
         live_broker=LiveExecutionEventBroker(),
         history_reader=_History(),
+        commit=commit,
         **kwargs,
     )
 
@@ -306,8 +309,8 @@ async def test_sql_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None
 
 
 @pytest.mark.asyncio
-async def test_filesystem_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None:
-    state = Persistence(PersistenceStorage.filesystem(tmp_path / "runtime"))
+async def test_local_sqlite_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None:
+    state = Persistence(PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True))
     await state.initialize(namespace="filesystem-start", tenant_id="tenant")
     try:
         service = _service(state, backend=_Launcher(state.execution.executions))

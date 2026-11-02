@@ -36,7 +36,7 @@ class Offline:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite"))
 @pytest.mark.parametrize("boundary", ("before", "after"))
 async def test_cancelled_preparation_releases_payload_and_survives_reopen(
     backend: str, boundary: str, tmp_path: Path,
@@ -52,7 +52,7 @@ async def test_cancelled_preparation_releases_payload_and_survives_reopen(
 
     owner = service_principal("tenant", "owner")
     tasks = (Task("target", target, effect_policy="none"), Task("score", score, effect_policy="none"))
-    storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with (
         Persistence.open('preparation', storage=storage, tenant_id='tenant') as persistence_51,
         TaskEngine.open(*tasks, persistence=persistence_51, context=ExecutionContext(None)) as engine,
@@ -95,8 +95,8 @@ async def test_cancelled_preparation_releases_payload_and_survives_reopen(
         assert await persistence_51.task.admissions.submission_status(saved[0].ref) == "cancelled"
         assert calls == []
         assert not (await engine.start_prepared(saved[0])).admitted
-    if backend == "filesystem":
-        reopened = PersistenceStorage.filesystem(tmp_path)
+    if backend == "local_sqlite":
+        reopened = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
         async with (
             Persistence.open('preparation', storage=reopened, tenant_id='tenant') as persistence_93,
             Runtime.attach(persistence=persistence_93, context=ExecutionContext(None)) as reader,
@@ -118,7 +118,7 @@ async def test_purge_discovers_capture_written_before_offline_quiescence(tmp_pat
 
     owner = service_principal("tenant", "owner")
     tasks = (Task("target", target, effect_policy="none"), Task("score", score, effect_policy="none"))
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with (
         Persistence.open('preparation', storage=storage, tenant_id='tenant') as persistence_112,
         Runtime.attach(persistence=persistence_112, context=ExecutionContext(None)) as runtime,
@@ -185,7 +185,7 @@ async def test_interrupted_preparation_has_recoverable_owner(
 
     owner = service_principal("tenant", "owner")
     tasks = (Task("target", target, effect_policy="none"), Task("score", score, effect_policy="none"))
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with (
         Persistence.open('preparation', storage=storage, tenant_id='tenant') as persistence_174,
         TaskEngine.open(*tasks, persistence=persistence_174, context=ExecutionContext(None)) as engine,
@@ -217,7 +217,7 @@ async def test_interrupted_preparation_has_recoverable_owner(
         await evaluations.close()
         experiment_id = run.experiment_id
         assert calls == []
-    reopened = PersistenceStorage.filesystem(tmp_path)
+    reopened = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with (
         Persistence.open('preparation', storage=reopened, tenant_id='tenant') as persistence_204,
         TaskEngine.open(*tasks, persistence=persistence_204, context=ExecutionContext(None)) as engine,

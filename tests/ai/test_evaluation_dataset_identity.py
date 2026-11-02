@@ -32,7 +32,7 @@ async def test_dataset_capture_keys_preserve_structured_case_identity(tmp_path: 
         )
     )
     async with (
-        Persistence.open('dataset-identity', storage=PersistenceStorage.filesystem(tmp_path), tenant_id=principal.tenant_id) as persistence_30,
+        Persistence.open('dataset-identity', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=principal.tenant_id) as persistence_30,
         TaskEngine.open(persistence=persistence_30, context=ExecutionContext(None)) as task_engine,
         Evaluations.open(task_engine) as evaluations,
     ):

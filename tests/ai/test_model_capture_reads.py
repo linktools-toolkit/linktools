@@ -74,7 +74,7 @@ async def _seed(state):
     return await _publish(state)
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_capture_reads_fresh_metadata_in_one_post_authorization_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
@@ -231,7 +231,7 @@ async def test_capture_keeps_independent_storage_owners(
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_capture_releases_metadata_scope_after_observer_cancellation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
@@ -487,7 +487,7 @@ async def _metadata(service, *, principal=_PRINCIPAL, agent_run_seq=1, through=1
     )
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_metadata_rows_share_fresh_authorized_scope_without_body_io(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
@@ -705,7 +705,7 @@ async def test_metadata_preserves_independent_owner_reads(
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_metadata_cancellation_releases_shared_read_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
@@ -837,7 +837,7 @@ async def test_metadata_batches_run_and_interaction_records_without_skipping_hig
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("missing", ("run", "interaction"))
 async def test_metadata_batch_rejects_missing_durable_rows(tmp_path: Path, backend: str, missing: str) -> None:
     state = Persistence(_storage(backend, tmp_path))

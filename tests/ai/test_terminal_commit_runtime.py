@@ -99,8 +99,8 @@ async def test_pending_session_commits_once_and_retains_canonical_replay(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('effect_policy', ('none', 'replay_safe'))
-async def test_actual_effect_promotes_before_invocation_but_read_only_tool_stays_pending(
+@pytest.mark.parametrize('effect_policy', ('none', 'replay_safe', 'non_replay_safe'))
+async def test_strict_effect_promotes_but_idempotent_tool_stays_pending(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, effect_policy: str,
 ) -> None:
     from pydantic_ai.messages import ToolCallPart, ToolReturnPart
@@ -133,7 +133,7 @@ async def test_actual_effect_promotes_before_invocation_but_read_only_tool_stays
         owner.update(execution=execution.execution_id, tenant=runtime.tenant_id)
         assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
         assert len(calls) == 1
-        if effect_policy == 'none':
+        if effect_policy != 'non_replay_safe':
             assert calls == [None]
             assert len(commits) == 1
         else:
@@ -345,7 +345,10 @@ async def test_pending_confirmed_rollback_releases_session_without_fabricating_c
     async def model(messages, info):
         return ModelResponse(parts=[TextPart('answer')])
     state = PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    async with Persistence.open("rollback-pending", storage=state) as persistence:
+    persistence = Persistence(state)
+    await persistence.initialize(namespace="rollback-pending", tenant_id="default")
+    source_group = persistence.execution.executions.state_store.storage_group
+    try:
         context = Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), group))
         runtime = await context.__aenter__()
         try:
@@ -370,3 +373,14 @@ async def test_pending_confirmed_rollback_releases_session_without_fabricating_c
             with pytest.raises(AIError) as failure:
                 await context.__aexit__(None, None, None)
             assert failure.value.code is ErrorCode.STORAGE_CONFLICT
+    finally:
+        try:
+            with pytest.raises(AIError) as persistence_error:
+                await persistence.close()
+            assert persistence_error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+            assert persistence.ready and len(persistence._runtime_owners) == 1
+        finally:
+            # Keep the failed Runtime lifetime; dispose only this fixture's source.
+            await source_group.close()
+            await source_group.context.close()
+            assert source_group.context.closed

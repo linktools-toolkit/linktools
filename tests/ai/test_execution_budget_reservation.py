@@ -25,12 +25,12 @@ from ._runtime_test_helpers import RuntimeUsageModels
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("local_sqlite", "sqlite"))
 @pytest.mark.parametrize("budget", (None, RunBudget(model_requests=2)))
 async def test_cancelled_reservation_snapshot_restores_and_replays(
     backend: str, budget: RunBudget | None, tmp_path: Path, monkeypatch,
 ) -> None:
-    storage = (PersistenceStorage.filesystem(tmp_path / "source") if backend == "filesystem"
+    storage = (PersistenceStorage.from_root(tmp_path / "source", exclusive_writer=True) if backend == "local_sqlite"
                else PersistenceStorage.sqlite(tmp_path / "source.db"))
     namespace = "cancelled-budget-reservation"
     limits = SnapshotLimits(max_entries=1000, max_bytes=1024 * 1024)
@@ -91,7 +91,7 @@ async def test_cancelled_reservation_snapshot_restores_and_replays(
         scopes = await store.read(lambda transaction: transaction.list_records(RecordQuery(kind="budget_scope")))
         assert len(scopes) == (0 if budget is None else 1)
 
-    reader = (PersistenceStorage.filesystem(tmp_path / "source") if backend == "filesystem"
+    reader = (PersistenceStorage.from_root(tmp_path / "source", exclusive_writer=True) if backend == "local_sqlite"
               else PersistenceStorage.sqlite(tmp_path / "source.db"))
     reader = Persistence(reader)
     await reader.initialize(namespace=namespace, tenant_id="default", read_only=True)
@@ -116,12 +116,12 @@ async def test_cancelled_reservation_snapshot_restores_and_replays(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite"))
 async def test_failed_reservation_rolls_back_budget_scope(
     backend: str, tmp_path: Path, monkeypatch,
 ) -> None:
     storage = (PersistenceStorage.in_memory() if backend == "memory" else
-               PersistenceStorage.filesystem(tmp_path / "source") if backend == "filesystem" else
+               PersistenceStorage.from_root(tmp_path / "source", exclusive_writer=True) if backend == "local_sqlite" else
                PersistenceStorage.sqlite(tmp_path / "source.db"))
     async with Persistence.open('failed-budget-reservation', storage=storage) as persistence_124, Runtime.attach(persistence=persistence_124, features=model_features(RuntimeUsageModels())) as runtime:
         store = runtime._state.execution.budgets.state_store

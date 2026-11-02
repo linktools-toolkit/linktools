@@ -42,8 +42,8 @@ _NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 def _storage(backend: str, root: Path) -> PersistenceStorage:
     if backend == "memory":
         return PersistenceStorage.in_memory()
-    if backend == "filesystem":
-        return PersistenceStorage.filesystem(root / "state")
+    if backend == "exclusive_sqlite":
+        return PersistenceStorage.from_root(root / "state", exclusive_writer=True)
     return PersistenceStorage.sqlite(root / "state.db")
 
 
@@ -84,7 +84,7 @@ def _staged(requests: tuple[ModelClientRequest, ...] | None) -> StagedModelInter
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "exclusive_sqlite", "sqlite"))
 @pytest.mark.parametrize("large", (False, True))
 async def test_original_attempts_round_trip_and_relocate_without_sdk_context(
     tmp_path: Path, backend: str, large: bool,
@@ -203,7 +203,7 @@ async def test_original_body_decoded_integrity_fails_closed(corruption: str) -> 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("exclusive_sqlite", "sqlite"))
 async def test_native_objects_survive_snapshot_and_follow_owner_cleanup(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -296,7 +296,7 @@ async def test_sdk_projection_and_native_bytes_remain_separate(
     from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
     from linktools.ai.persistence._model_interaction import build_context_projection
 
-    storage = Persistence(PersistenceStorage.filesystem(tmp_path / "state"))
+    storage = Persistence(PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True))
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     await storage.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
     payloads: dict[str, bytes] = {}
@@ -368,7 +368,7 @@ async def test_cancelled_preparation_leaves_no_owner_and_body_is_reclaimable(
     prepared = PreparedArchive()
     import asyncio
 
-    storage = Persistence(PersistenceStorage.filesystem(tmp_path / "state"))
+    storage = Persistence(PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True))
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     await storage.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
     try:
@@ -423,7 +423,7 @@ async def test_recovery_preserves_existing_trace_bodies_without_reading_them(
     prepared = PreparedArchive()
     from linktools.ai.persistence._step_contracts import AgentRunCheckpoint
 
-    storage = Persistence(PersistenceStorage.filesystem(tmp_path / "state"))
+    storage = Persistence(PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True))
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     await storage.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
     try:

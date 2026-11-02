@@ -14,6 +14,7 @@ from ..errors import AIError, ErrorCode
 SqlValue: TypeAlias = str | int | bool | bytes | datetime | None
 _logger = environ.get_logger("ai.storage.dialects")
 _SQL_DELETE_RETURNING_BATCH_LIMIT = 64
+_SQLITE_BUSY_TIMEOUT_MS = 5000
 
 
 class _SqliteCursor(Protocol):
@@ -31,6 +32,8 @@ class _SqliteEventValue(Protocol):
 
 
 if TYPE_CHECKING:
+    import aiosqlite
+
     from collections.abc import Mapping, Sequence
 
     from sqlalchemy import (
@@ -887,11 +890,12 @@ def sql_query_index(
     table: "Table", *columns: str, mysql_length: int | None = None
 ) -> "Index":
     from sqlalchemy import Index
+    from sqlalchemy.schema import conv
 
     _validate_index_columns(columns)
     column_objects = tuple(table.c[column] for column in columns)
     portable = Index(
-        f"ix_{table.name}_{'_'.join(columns)}",
+        conv(f"ix_{table.name}_{'_'.join(columns)}"),
         *column_objects,
     )
     portable.info["ddl_dialect"] = "portable"
@@ -930,12 +934,31 @@ def configure_sqlite_connection(
     _connection_record: _SqliteEventValue,
     _connection_proxy: _SqliteEventValue,
 ) -> None:
+    from sqlalchemy.engine import AdaptedConnection
+
+    if isinstance(dbapi_connection, AdaptedConnection):
+        try:
+            dbapi_connection.run_async(_configure_async_sqlite_connection)
+        except ValueError as error:
+            if error.args == ("no active connection",):
+                from sqlite3 import OperationalError
+
+                raise OperationalError("no active connection") from error
+            raise
+        return
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
     finally:
         cursor.close()
+
+
+async def _configure_async_sqlite_connection(connection: "aiosqlite.Connection") -> None:
+    # Create the cursor with the first statement and reuse it for the second;
+    # the buffered adapter adds worker round trips per cursor and result set.
+    async with connection.execute("PRAGMA foreign_keys=ON") as cursor:
+        await cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
 
 
 def column_type_matches(

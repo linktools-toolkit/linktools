@@ -30,12 +30,12 @@ _NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 def _storage(backend: str, root: Path) -> PersistenceStorage:
     if backend == "memory":
         return PersistenceStorage.in_memory()
-    if backend == "filesystem":
-        return PersistenceStorage.filesystem(root)
+    if backend == "local_sqlite":
+        return PersistenceStorage.from_root(root, exclusive_writer=True)
     return PersistenceStorage.sqlite(root / "runtime.db")
 
 
-@pytest_asyncio.fixture(params=("memory", "filesystem", "sqlite"))
+@pytest_asyncio.fixture(params=("memory", "local_sqlite", "sqlite"))
 async def storage(
     request: pytest.FixtureRequest,
     tmp_path: Path,
@@ -216,7 +216,7 @@ async def test_operation_cas_competing_transitions_have_one_durable_winner(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("local_sqlite", "sqlite"))
 async def test_operation_cas_output_survives_snapshot_restore(
     backend: str,
     tmp_path: Path,

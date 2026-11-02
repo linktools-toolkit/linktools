@@ -49,14 +49,13 @@ class _HotOnly:
         self.items.pop(key, None)
 
 
-@pytest.mark.parametrize("kind", ["memory", "transient", "filesystem", "sqlite"])
+@pytest.mark.parametrize("kind", ["memory", "transient", "sqlite"])
 def test_storage_route_borrows_cache_without_changing_backend_identity(kind, tmp_path) -> None:
     factory = getattr(StorageRoute, kind)
     args = () if kind in {"memory", "transient"} else (tmp_path / "state",)
     cache = _HotOnly()
-    options = {"transaction_root": tmp_path} if kind == "filesystem" else {}
-    plain = factory(*args, **options)
-    cached = factory(*args, cache=cache, **options)
+    plain = factory(*args)
+    cached = factory(*args, cache=cache)
     assert cached.cache is cache
     assert plain.cache is None
     assert cached == plain
@@ -68,7 +67,7 @@ def test_storage_route_borrows_cache_without_changing_backend_identity(kind, tmp
     copied = cached.with_cache(replacement)
     assert copied is not cached
     assert copied == cached
-    assert copied.transaction_root == cached.transaction_root
+    assert copied.exclusive_writer == cached.exclusive_writer
     assert copied.cache is replacement
     assert cached.cache is cache
     assert copied.with_cache(None).cache is None
@@ -190,21 +189,20 @@ async def test_resource_scope_does_not_dispose_borrowed_engine(tmp_path: Path) -
 @pytest.mark.asyncio
 async def test_resource_scope_closes_owned_context_after_later_open_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from sqlalchemy import MetaData
-    from sqlalchemy.ext.asyncio import AsyncEngine
     from linktools.ai.persistence import _resource_scope as resources
 
     contexts: list[SqlStorageContext] = []
-    create_context = resources.create_sql_storage_context
+    create_context = resources.create_sqlite_storage_context
 
-    def track_context(engine: AsyncEngine, *, owns_engine: bool = False) -> SqlStorageContext:
-        context = create_context(engine, owns_engine=owns_engine)
+    def track_context(path: str | Path) -> SqlStorageContext:
+        context = create_context(path)
         contexts.append(context)
         return context
 
     def fail_schema(metadata: MetaData) -> None:
         raise RuntimeError("schema unavailable")
 
-    monkeypatch.setattr(resources, "create_sql_storage_context", track_context)
+    monkeypatch.setattr(resources, "create_sqlite_storage_context", track_context)
     with pytest.raises(RuntimeError, match="schema unavailable"):
         await resources.StorageResourceScope.open(
             (

@@ -50,7 +50,7 @@ async def test_runtime_states_share_metrics_without_lifecycle_coupling(
     metrics = Metrics.in_memory(namespace="multi-runtime")
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
 
-    filesystem_state = PersistenceStorage.filesystem(tmp_path / "filesystem-state")
+    local_sqlite_state = PersistenceStorage.from_root(tmp_path / "local-sqlite-state", exclusive_writer=True)
 
     sqlite_state_path = tmp_path / "sqlite-state.db"
     sqlite_provision_engine = create_async_engine(
@@ -69,7 +69,7 @@ async def test_runtime_states_share_metrics_without_lifecycle_coupling(
     sql_state = PersistenceStorage.sql(sql_engine)
 
     cases = (
-        (filesystem_state, "filesystem"),
+        (local_sqlite_state, "local_sqlite"),
         (sqlite_state, "sqlite"),
         (sql_state, "sql"),
     )

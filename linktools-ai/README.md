@@ -691,6 +691,11 @@ size and digest, so changed or missing content cannot satisfy a version read.
 Declaration format versions and named revisions are separate from Asset
 byte versions.
 
+Persistent versioned assets use SQL metadata, including local SQLite, with
+optional ObjectStore-backed content. See [Asset storage](docs/asset-storage.md)
+for provisioning, directory-reader semantics and the versioned filesystem
+backend replacement boundary.
+
 Repository rules use the `rule` Asset kind and Markdown keys such as
 `AssetKey("rule", "review.md")` or `AssetKey("rule", "python/strict.md")`.
 Rule Markdown is an instruction document at root scope; its content is not
@@ -1658,6 +1663,21 @@ request context projection; it never rewrites the raw transcript.
 ### Workspace relocation
 
 Workspace has no independent persistent identity. `Workspace.root`, Runtime storage paths, SQLite paths, SQL endpoints, ObjectStore locations, and storage topology are deployment details. The Runtime persistence identity remains the explicit `namespace` plus tenant supplied to `Persistence.open()`.
+
+`ObjectStore` describes object operations, not local filesystem discovery.
+`FilesystemObjectStore.root` exposes that concrete backend's normalized root.
+`Snapshot.create()` automatically excludes known Persistence state paths and
+built-in filesystem object roots, including the snapshot destination, from
+Workspace content. An opaque custom object store with local files must pass its
+source and destination roots through `workspace_exclude_paths=(source_root,
+snapshot_root)`. These additional physical paths are resolved like other local
+paths and affect only Workspace capture, not referenced persistence objects.
+Remote and in-memory custom stores need no exclusions.
+
+Custom providers migrating from `ObjectStore.local_paths()` must move those
+paths to the snapshot call; the method is no longer queried. Runtime/Persistence
+status keeps `object_store_paths` for known built-in filesystem roots and reports
+an empty tuple for opaque providers; it does not inspect custom deployment paths.
 
 Moving a Workspace therefore does not require preserving or regenerating a Workspace ID. Restore Workspace files and Runtime storage consistently, reopen the Runtime with the same logical namespace and tenant, and normal durable recovery continues to use the captured execution inputs and
 Asset-version-pinned Skill resources. A separate `Runtime.restore()` migration step is not required.

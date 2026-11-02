@@ -12,14 +12,14 @@ from linktools.ai.persistence import Persistence, PersistenceStorage
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["memory", "filesystem", "sqlite"])
+@pytest.mark.parametrize("backend", ["memory", "local_sqlite", "sqlite"])
 async def test_persistence_owner_binds_one_scope_and_closes_resources(
     tmp_path: Path, backend: str,
 ) -> None:
     if backend == "memory":
         storage = PersistenceStorage.in_memory()
-    elif backend == "filesystem":
-        storage = PersistenceStorage.filesystem(tmp_path / "state")
+    elif backend == "local_sqlite":
+        storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
     else:
         storage = PersistenceStorage.sqlite(tmp_path / "state.sqlite")
     async with Persistence.open("audit", storage=storage, tenant_id="tenant") as persistence:

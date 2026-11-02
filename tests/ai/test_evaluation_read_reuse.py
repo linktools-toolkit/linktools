@@ -63,7 +63,7 @@ def test_immutable_mapping_canonical_fast_path_excludes_subclasses():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite"))
 async def test_evaluation_unchanged_fresh_storage_records_decode_once(tmp_path, monkeypatch, backend):
     state, repository = await _repository(tmp_path, backend)
     original_read, original_decode = repository._record, repository._decode

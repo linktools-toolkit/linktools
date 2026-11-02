@@ -18,6 +18,7 @@ from linktools.ai.observe.journal import MESSAGE_SEQ_METADATA_KEY, MODEL_REQUEST
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._memory_transaction import _MemoryOverlay, _MemoryTransaction
+from linktools.ai.persistence._sql import _SqlTransaction
 from linktools.ai.persistence._step_contracts import AgentRunRecord, StepEvent
 from linktools.ai.persistence.state import FactQuery, StoredFact, StoredRecord
 
@@ -247,6 +248,38 @@ async def test_sql_trace_query_count_is_independent_of_examined_events(tmp_path:
     assert max(counts) <= 12
     assert counts[1] <= counts[0] + 2
     assert counts[2] <= counts[0] + 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("page_size", (64, 129))
+async def test_trace_pages_batch_fact_reads_without_overfetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, page_size: int,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'page.db'}")
+    await provision_database(engine)
+    storage = Persistence(PersistenceStorage.sql(engine))
+    try:
+        archive, run_id = await _seed_trace(storage, page_size * 2)
+        batches: list[int] = []
+        original = _SqlTransaction.list_facts
+
+        async def capture(self, query):
+            rows = await original(self, query)
+            batches.append(len(rows))
+            return rows
+
+        monkeypatch.setattr(_SqlTransaction, "list_facts", capture)
+        rows = await archive.list_trace_events(
+            agent_run_id=run_id, event_high_water=page_size * 2,
+            after_timestamp=None, after_sequence=0, limit=page_size,
+        )
+        assert [sequence for sequence, _ in rows] == list(range(1, page_size + 1))
+        assert sum(batches) == page_size, "normal pages must not read unselected event facts"
+        assert 1 < len(batches) < page_size // 4, "batch reads must avoid both per-event I/O and whole-page raw facts"
+        assert max(batches) <= 64, "raw fact batches must stay bounded as page size grows"
+    finally:
+        await storage.close()
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

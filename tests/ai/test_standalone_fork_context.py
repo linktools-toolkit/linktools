@@ -37,7 +37,7 @@ from .test_pending_turn_sessionless import _commit, _standalone
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("local_sqlite", "sqlite"))
 @pytest.mark.parametrize("cached", (False, True), ids=("no-cache", "cache"))
 async def test_standalone_fork_preserves_actual_tools_and_imported_context_after_reopen(
     tmp_path: Path, backend: str, cached: bool,
@@ -72,7 +72,7 @@ async def test_standalone_fork_preserves_actual_tools_and_imported_context_after
     def storage():
         cache = InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None
         return (PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache) if backend == "sqlite"
-                else PersistenceStorage.filesystem(tmp_path, cache=cache))
+                else PersistenceStorage.from_root(tmp_path, cache=cache, exclusive_writer=True))
 
     state = storage()
     async with Persistence.open('standalone-fork', storage=state) as persistence_74, Runtime.attach(persistence=persistence_74, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
@@ -200,11 +200,36 @@ async def test_reopened_standalone_fork_rejects_mismatched_checkpoint_binding(
         assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
         source_id = source.execution_id
         await _damage_fork_context(runtime._run_store.read_store(PersistenceDomain.CHECKPOINT).state_store, damage)
-    with pytest.raises(AIError) as raised:
-        async with Persistence.open('corrupt-fork', storage=PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None)) as persistence_200, Runtime.attach(persistence=persistence_200, features=model_features(models, group)) as runtime:
-            source = await runtime.executions.get(source_id)
-            fork = await source.fork("fork")
-            await fork.wait(timeout_seconds=5)
+    reopened_group = None
+    try:
+        with pytest.raises(AIError) as raised:
+            async with Persistence.open('corrupt-fork', storage=PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None)) as persistence_200, Runtime.attach(persistence=persistence_200, features=model_features(models, group)) as runtime:
+                reopened_group = persistence_200.execution.executions.state_store.storage_group
+                source = await runtime.executions.get(source_id)
+                fork = await source.fork("fork")
+                await fork.wait(timeout_seconds=5)
+    finally:
+        if reopened_group is not None:
+            # Integrity rejection can prevent owner cleanup after work has settled.
+            backend = runtime._agent_lifecycle.backend
+            assert all(task.done() for task in backend._tasks.values())
+            assert all(task.done() for task in backend._checkpoint_tasks)
+            assert all(task.done() for tasks in backend._execution_task_map().values() for task in tasks)
+            assert not backend._pending_renewals
+            assert not backend._recovery_reconcile_tasks
+            assert not backend._subagent_dispatcher.pending_background_tasks
+            run_store = runtime._run_store
+            assert all(task.done() for task in run_store._background_tasks)
+            assert all(flight.completion.done() for flight in run_store._durability_flights.values())
+            trace = run_store.trace_persistence
+            assert trace._timer is None or trace._timer.cancelled()
+            writes = run_store.capability_writes
+            if writes is not None:
+                assert all(task.done() for task in writes._tasks)
+                assert all(scope.timer is None or scope.timer.cancelled() for scope in writes._scopes.values())
+            await reopened_group.close()
+            await reopened_group.context.close()
+            assert reopened_group.context.closed
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     assert len(calls) == 1
 
@@ -255,25 +280,38 @@ async def test_unfinished_standalone_run_never_publishes_a_complete_fork_seed(tm
     group.agent("default", model="default", allow_tools=())
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    with pytest.raises(AIError) as raised:
-        async with Persistence.open('incomplete-fork', storage=storage) as persistence_255, Runtime.attach(persistence=persistence_255, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
-            source = await runtime.agents.get().start("source")
-            await asyncio.wait_for(entered.wait(), 5)
-            if state == "failed":
-                assert (await source.wait()).result.status is ExecutionStatus.FAILED
-            elif state == "cancelled":
-                await source.cancel()
-                assert (await source.wait()).result.status is ExecutionStatus.CANCELLED
-            try:
-                fork = await source.fork("fork")
-                await fork.wait(timeout_seconds=5)
-            finally:
-                run_id = agent_run_id(namespace=runtime.namespace, tenant_id=runtime.tenant_id,
-                                      execution_id=source.execution_id, agent_run_seq=1)
-                archive = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)
-                assert await archive.latest_checkpoint(agent_run_id=run_id) is None
-                if state == "running":
+    source_group = None
+    try:
+        with pytest.raises(AIError) as raised:
+            async with Persistence.open('incomplete-fork', storage=storage) as persistence_255, Runtime.attach(persistence=persistence_255, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+                source_group = persistence_255.execution.executions.state_store.storage_group
+                source = await runtime.agents.get().start("source")
+                await asyncio.wait_for(entered.wait(), 5)
+                if state == "failed":
+                    assert (await source.wait()).result.status is ExecutionStatus.FAILED
+                elif state == "cancelled":
                     await source.cancel()
+                    assert (await source.wait()).result.status is ExecutionStatus.CANCELLED
+                try:
+                    fork = await source.fork("fork")
+                    await fork.wait(timeout_seconds=5)
+                finally:
+                    run_id = agent_run_id(namespace=runtime.namespace, tenant_id=runtime.tenant_id,
+                                          execution_id=source.execution_id, agent_run_seq=1)
+                    archive = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)
+                    assert await archive.latest_checkpoint(agent_run_id=run_id) is None
+                    if state == "running":
+                        await source.cancel()
+    finally:
+        if source_group is not None:
+            # Fork rejection can also fail Runtime.close. Preserve the primary
+            # error, but do not leave its quiescent SQL pool to a later GC.
+            backend = runtime._agent_lifecycle.backend
+            assert all(task.done() for task in backend._tasks.values())
+            assert all(task.done() for task in backend._checkpoint_tasks)
+            await source_group.close()
+            await source_group.context.close()
+            assert source_group.context.closed
     assert raised.value.code is ErrorCode.EXECUTION_HISTORY_UNAVAILABLE
 
 

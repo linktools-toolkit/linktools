@@ -94,7 +94,7 @@ def test_scope_compatibility_rejects_malformed_explicit_scope_memory(scopes: obj
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_session_repository_reads_scope_compatible_record_without_rewriting(
     tmp_path: Path, backend: str,
 ) -> None:

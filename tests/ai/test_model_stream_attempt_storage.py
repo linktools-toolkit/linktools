@@ -45,8 +45,6 @@ def _run() -> AgentRunRecord:
 def _storage(backend: str, root: Path) -> PersistenceStorage:
     if backend == "memory":
         return PersistenceStorage.in_memory()
-    if backend == "filesystem":
-        return PersistenceStorage.filesystem(root / "state")
     return PersistenceStorage.sqlite(root / "state.db")
 
 
@@ -115,7 +113,7 @@ def _interrupted(status: str, *, large: bool = False):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 @pytest.mark.parametrize("status", ("FAILED", "CANCELLED"))
 async def test_interrupted_stream_aggregate_stays_trace_only(
     tmp_path: Path, backend: str, status: str,
@@ -163,7 +161,7 @@ async def test_interrupted_stream_aggregate_stays_trace_only(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 async def test_stream_attempts_round_trip_relocate_and_omit_content(tmp_path: Path, backend: str) -> None:
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="stream-observation", tenant_id="tenant")
@@ -255,7 +253,7 @@ async def test_old_missing_attempts_and_observed_empty_remain_distinct(observed:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("sqlite",))
 @pytest.mark.parametrize("interrupted", (None, "FAILED", "CANCELLED"))
 async def test_failed_partial_survives_snapshot_and_owned_cleanup(
     tmp_path: Path, backend: str, interrupted: str | None,

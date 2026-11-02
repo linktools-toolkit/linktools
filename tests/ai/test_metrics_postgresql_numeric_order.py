@@ -52,7 +52,7 @@ def _query(
     for index, value in enumerate(values):
         payload = {"observation": {"measurements": [{"name": "value", "revision": 1, "value": value}]}}
         row = text(
-            "INSERT INTO ai_metric_observations VALUES ('ns', 'business.numeric', :occurred, :identity, CAST(:payload AS JSON));"
+            "INSERT INTO ai_metric_observations VALUES ('ns', 'business.numeric', :occurred, :identity, CAST(:payload AS JSON), NULL, :occurred);"
         ).bindparams(
             occurred=plan.start + timedelta(microseconds=index), identity=f"{index:064x}", payload=json.dumps(payload),
         )
@@ -60,7 +60,7 @@ def _query(
     script = """BEGIN;
 CREATE TEMP TABLE ai_metric_observations (
     namespace_digest TEXT, kind TEXT, occurred_at TIMESTAMPTZ,
-    observation_digest TEXT, payload_json JSON
+    observation_digest TEXT, payload_json JSON, pruned_at TIMESTAMPTZ, active_occurred_at TIMESTAMPTZ
 );
 """ + "\n".join(inserts) + "\nSELECT COALESCE(json_agg(q), '[]') FROM (" + sql + ") AS q;\nROLLBACK;"
     result = subprocess.run(

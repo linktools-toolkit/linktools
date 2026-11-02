@@ -73,8 +73,6 @@ def _terminal(value: ModelInteractionRecord, status: str = "SUCCEEDED") -> Model
 def _storage(backend: str, path: Path) -> PersistenceStorage:
     if backend == "memory":
         return PersistenceStorage.in_memory()
-    if backend == "filesystem":
-        return PersistenceStorage.filesystem(path / "state")
     return PersistenceStorage.sqlite(path / "state.db")
 
 
@@ -121,7 +119,7 @@ def test_metadata_can_be_prepared_until_request_content_is_published() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 async def test_interaction_identity_survives_preparation_and_completion(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -161,7 +159,7 @@ async def test_interaction_identity_survives_preparation_and_completion(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 async def test_prepared_request_is_immutable_and_failed_preparation_is_visible(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -197,7 +195,7 @@ async def test_prepared_request_is_immutable_and_failed_preparation_is_visible(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 async def test_concurrent_completion_keeps_exactly_one_terminal_result(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -223,7 +221,7 @@ async def test_concurrent_completion_keeps_exactly_one_terminal_result(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("sqlite",))
 async def test_canonical_interaction_pages_and_snapshot_sequences_include_running(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -257,7 +255,7 @@ async def test_canonical_interaction_pages_and_snapshot_sequences_include_runnin
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("sqlite",))
 async def test_recovered_producer_interrupts_unknown_requests_and_fences_old_writes(
     tmp_path: Path, backend: str,
 ) -> None:

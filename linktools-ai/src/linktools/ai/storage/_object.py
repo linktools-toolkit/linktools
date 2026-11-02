@@ -58,8 +58,6 @@ class ObjectStore(Protocol):
 
     def open(self, key: str) -> AsyncIterator[bytes]: ...
 
-    def local_paths(self) -> tuple[Path, ...]: ...
-
 
 @runtime_checkable
 class ObjectStoreInspection(Protocol):

@@ -209,7 +209,7 @@ def _pending_reference_process(connection: Connection, path: str, multiple_sourc
             assert context.principal == _ADMITTED and content == _text_content()
             return _TEXT_BODY
 
-        async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.filesystem(Path(path))) as persistence_212, Runtime.attach(persistence=persistence_212, authorization=_RecoveryAuthorization(), features=_recovery_features(pending_load, load_text if multiple_sources else None)) as runtime:
+        async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.from_root(Path(path), exclusive_writer=True)) as persistence_212, Runtime.attach(persistence=persistence_212, authorization=_RecoveryAuthorization(), features=_recovery_features(pending_load, load_text if multiple_sources else None)) as runtime:
             prompt = ["Inspect text and file", _text_content(), _content()] if multiple_sources else ["Inspect", _content()]
             await runtime.agents.get().start(prompt, principal=_ADMITTED)
             await asyncio.Event().wait()
@@ -254,7 +254,7 @@ async def test_pending_reference_reopens_from_checkpoint_with_original_principal
         loaded.append((agent_context.principal, content))
         return _TEXT_BODY
 
-    async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.filesystem(path)) as persistence_260, Runtime.attach(persistence=persistence_260, authorization=_RecoveryAuthorization(), features=_recovery_features(authorized_load, authorized_text if multiple_sources else None), auto_recover=False) as runtime:
+    async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.from_root(path, exclusive_writer=True)) as persistence_260, Runtime.attach(persistence=persistence_260, authorization=_RecoveryAuthorization(), features=_recovery_features(authorized_load, authorized_text if multiple_sources else None), auto_recover=False) as runtime:
         checkpoint = await runtime._state.recovery.checkpoints.get(
             execution_id, tenant_id=_ADMITTED.tenant_id,
         )
@@ -268,7 +268,7 @@ async def test_pending_reference_reopens_from_checkpoint_with_original_principal
         )).result
         assert result.status is ExecutionStatus.SUCCEEDED, result.error_diagnostics
         assert result.output == {"text": "recovered reference"}
-    async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.filesystem(path)) as persistence_277, Runtime.attach(persistence=persistence_277, authorization=_RecoveryAuthorization(), features=_recovery_features(authorized_load, authorized_text if multiple_sources else None), auto_recover=False) as reopened:
+    async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.from_root(path, exclusive_writer=True)) as persistence_277, Runtime.attach(persistence=persistence_277, authorization=_RecoveryAuthorization(), features=_recovery_features(authorized_load, authorized_text if multiple_sources else None), auto_recover=False) as reopened:
         history = await reopened.executions.history(
             execution_id, principal=_ADMITTED, include_content=True,
         )

@@ -19,7 +19,7 @@ def test_trace_accepts_terminal_policy() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_terminal_trace_retains_staging_until_explicit_flush(tmp_path: Path, backend: str) -> None:
     state = await _setup(tmp_path, backend)
     try:
@@ -43,7 +43,7 @@ async def test_terminal_trace_retains_staging_until_explicit_flush(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_terminal_trace_known_rollback_preserves_pending_facts(tmp_path: Path, backend: str, monkeypatch: pytest.MonkeyPatch) -> None:
     state = await _setup(tmp_path, backend)
     try:
@@ -71,7 +71,7 @@ async def test_terminal_trace_known_rollback_preserves_pending_facts(tmp_path: P
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_terminal_trace_ignores_batch_pressure_but_close_drains(tmp_path: Path, backend: str) -> None:
     state = await _setup(tmp_path, backend)
     try:
@@ -91,7 +91,7 @@ async def test_terminal_trace_ignores_batch_pressure_but_close_drains(tmp_path: 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("interruption", ("lost_ack", "cancel"))
 async def test_terminal_trace_settles_confirmed_commit_before_interruption(
     tmp_path: Path, backend: str, interruption: str, monkeypatch: pytest.MonkeyPatch,

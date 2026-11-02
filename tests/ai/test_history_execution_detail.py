@@ -54,7 +54,7 @@ async def _seed(state, status=ExecutionStatus.SUCCEEDED, *, admitted=True, commi
     return record
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("status", (
     ExecutionStatus.STARTED, ExecutionStatus.RECOVERY_REQUIRED,
     ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,

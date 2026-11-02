@@ -34,7 +34,7 @@ async def test_closed_evaluations_reject_control_without_persisting(
 ) -> None:
     target = Task("lifecycle.target", echo, effect_policy="none")
     scorer = ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,))
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with (
         Persistence.open('evaluation-lifecycle', storage=storage, tenant_id='evaluation-consumers') as persistence_34,
         TaskEngine.open(target, persistence=persistence_34, context=CONTEXT) as engine,

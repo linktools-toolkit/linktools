@@ -202,7 +202,7 @@ async def _assert_committed(state: _TurnState, turn: _PendingTurn, result: Execu
         assert sum(item.event_type == expected.event_type and item.payload == expected.payload for item in events) == 1
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_pending_turn_has_one_atomic_write_and_replay_has_no_durable_growth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
@@ -258,7 +258,7 @@ async def test_pending_turn_has_one_atomic_write_and_replay_has_no_durable_growt
         assert await _snapshot(state) == before
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_pending_turn_same_request_returns_first_execution_and_result(tmp_path: Path, backend: str) -> None:
     async with _turn_state(backend, tmp_path) as state:
         winner = _pending_turn(state)
@@ -270,7 +270,7 @@ async def test_pending_turn_same_request_returns_first_execution_and_result(tmp_
         assert await _snapshot(state) == before
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_pending_turn_different_request_cannot_replace_advanced_session(tmp_path: Path, backend: str) -> None:
     async with _turn_state(backend, tmp_path) as state:
         await _commit(state, _pending_turn(state))
@@ -282,7 +282,7 @@ async def test_pending_turn_different_request_cannot_replace_advanced_session(tm
         assert await _snapshot(state) == before
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize(("field", "value"), (
     ("durable_trace", True),
     ("restart_checkpoints", True),
@@ -300,7 +300,7 @@ async def test_pending_turn_rejects_admitted_requirements_removed_from_terminal(
         await _assert_rejected_without_writes(state, turn)
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize(("target", "field", "value"), (
     ("run", "metadata", {"history_id": "wrong-history"}),
     ("checkpoint", "state", "interrupted"),
@@ -321,7 +321,7 @@ async def test_pending_turn_rejects_inconsistent_conversation_checkpoint(
         await _assert_rejected_without_writes(state, replace(turn, **{target: changed}))
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("invalid_event", ("terminal_failure", "control_audit"))
 async def test_pending_turn_rejects_events_incompatible_with_effect_free_success(
     tmp_path: Path, backend: str, invalid_event: str,
@@ -337,7 +337,7 @@ async def test_pending_turn_rejects_events_incompatible_with_effect_free_success
         await _assert_rejected_without_writes(state, turn)
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_pending_turn_failure_after_staged_writes_rolls_back_every_domain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
@@ -366,7 +366,7 @@ async def test_pending_turn_failure_after_staged_writes_rolls_back_every_domain(
         await _assert_committed(state, turn, await _commit(state, turn))
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("readback_available", (False, True))
 async def test_pending_turn_lost_ack_needs_committed_readback_before_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, readback_available: bool,
@@ -470,7 +470,7 @@ async def test_pending_turn_independent_connections_choose_one_session_winner(
             await second_storage.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("disabled", ("reservation", "terminal", "both"))
 async def test_pending_turn_requires_opt_in_on_both_records(
     tmp_path: Path, backend: str, disabled: str,
@@ -488,7 +488,7 @@ async def test_pending_turn_requires_opt_in_on_both_records(
         await _assert_rejected_without_writes(state, turn)
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_pending_turn_persists_readonly_tool_audit_in_order(
     tmp_path: Path, backend: str,
 ) -> None:

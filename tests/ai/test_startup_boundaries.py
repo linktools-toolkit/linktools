@@ -64,7 +64,7 @@ async def test_first_provider_has_three_metadata_commits_and_original_authority(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('backend', ('memory', 'filesystem', 'sqlite'))
+@pytest.mark.parametrize('backend', ('memory', 'local_sqlite', 'sqlite'))
 @pytest.mark.parametrize('phase', ('before', 'after'))
 async def test_startup_unknown_commit_never_repeats_provider(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, phase: str,
@@ -83,7 +83,7 @@ async def test_startup_unknown_commit_never_repeats_provider(
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     state = (PersistenceStorage.in_memory() if backend == 'memory' else
-             PersistenceStorage.filesystem(tmp_path / 'state') if backend == 'filesystem' else
+             PersistenceStorage.from_root(tmp_path / 'state', exclusive_writer=True) if backend == 'local_sqlite' else
              PersistenceStorage.sqlite(tmp_path / 'state.db'))
     async with Persistence.open('startup-ack', storage=state) as persistence_85, Runtime.attach(persistence=persistence_85, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')

@@ -13,7 +13,7 @@ from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.storage import InMemoryCacheBackend
@@ -112,9 +112,9 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                 worker = backend._tasks[execution.execution_id]
                 run_stores = (owner._run_store, remote._run_store)
                 observation_tasks = {
-                    buffer.scope._writer
+                    buffer.task
                     for store in run_stores for buffer in store.trace_persistence._buffers.values()
-                    if buffer.scope is not None and buffer.scope._writer is not None
+                    if buffer.task is not None
                 }
                 release.set()
                 worker_outcomes = await asyncio.wait_for(
@@ -152,8 +152,8 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                         for store in run_stores:
                             tasks.update(store._background_tasks)
                             tasks.update(
-                                buffer.scope._writer for buffer in store.trace_persistence._buffers.values()
-                                if buffer.scope is not None and buffer.scope._writer is not None
+                                buffer.task for buffer in store.trace_persistence._buffers.values()
+                                if buffer.task is not None
                             )
                         tasks.difference_update(joined)
                         if not tasks:
@@ -191,8 +191,9 @@ async def test_remote_cancel_releases_revoked_producer_staging(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sibling_settles", (True, False))
+@pytest.mark.parametrize("checkpoint", (False, True))
 async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
-    tmp_path: Path, sibling_settles: bool,
+    tmp_path: Path, sibling_settles: bool, checkpoint: bool,
 ) -> None:
     from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 
@@ -237,6 +238,8 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
         ])
 
     group = RuntimeFeatures("individual-tool-cancel")
+    if checkpoint:
+        group.capability(CheckpointCapability(), scope="runtime")
     group.capability(TraceCapability(), scope="runtime")
     group.tool(fast, effect_policy="replay_safe")
     group.tool(slow, effect_policy="replay_safe")
@@ -256,7 +259,7 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
             assert not outcome.cancelled
             assert not slow_stopped.is_set()
             finish_fast.set()
-            if sibling_settles:
+            if sibling_settles or not checkpoint:
                 result = (await execution.wait(timeout_seconds=15)).result
                 assert result.status is ExecutionStatus.CANCELLED
                 assert result.output is None
@@ -271,23 +274,35 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
             operations = await owner._state.recovery.tools.list_by_execution(
                 execution.execution_id, tenant_id=owner.default_principal.tenant_id,
             )
-            assert next(item for item in operations if item.tool_call_id == "fast-call").status is ToolOperationStatus.COMPLETED
-            if not sibling_settles:
-                assert next(item for item in operations if item.tool_call_id == "slow-call").status is ToolOperationStatus.EFFECT_UNKNOWN
+            if checkpoint:
+                assert next(item for item in operations if item.tool_call_id == "fast-call").status is ToolOperationStatus.COMPLETED
+                if not sibling_settles:
+                    assert next(item for item in operations if item.tool_call_id == "slow-call").status is ToolOperationStatus.EFFECT_UNKNOWN
+            else:
+                assert operations == ()
             history = (await execution.history(tool_call_id="fast-call", include_content=True)).items
-            assert [item.item_kind for item in history] == ["tool_call", "tool_result"]
-            assert history[-1].content == "completed effect"
+            if checkpoint:
+                assert [item.item_kind for item in history] == ["tool_call", "tool_result"]
+                assert history[-1].content == "completed effect"
+            else:
+                # Cancellation prevents the native caller from observing the returned value.
+                assert [item.item_kind for item in history] == ["tool_call"]
         finally:
             finish_fast.set()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cas_conflict", (True, False))
 async def test_history_projection_cancel_conflict_preserves_explicit_retry_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cas_conflict: bool,
 ) -> None:
+    import sqlite3
+    from contextlib import closing
+
     from pydantic_ai.messages import ModelResponse, ToolCallPart
 
     from linktools.ai.capability import AgentContext
+    from linktools.ai.core import OperationStatus, idempotency_key_digest
     from linktools.ai.errors import AIError, ErrorCode
     from linktools.ai.persistence._sql import _SqlTransaction
 
@@ -313,18 +328,30 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
     group.tool(tool, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("tool",))
     original_replace = _SqlTransaction.replace_record
+    cancel_updates = 0
 
     async def project_before_cancel_replace(transaction, record, *, expected_storage_revision):
+        nonlocal cancel_updates
+        if record.kind == "execution" and record.state == "CANCELLING":
+            cancel_updates += 1
         if record.kind == "execution" and record.state == "CANCELLING" and not cancel_read.is_set():
             cancel_read.set()
             assert projection is not None
             await asyncio.wait_for(asyncio.shield(projection), 10)
+            if cas_conflict:
+                # A nullable CAS conflict is distinct from SQLite's retryable
+                # snapshot-upgrade failure on the native UPDATE path.
+                return None
         return await original_replace(
             transaction, record, expected_storage_revision=expected_storage_revision,
         )
 
     monkeypatch.setattr(_SqlTransaction, "replace_record", project_before_cancel_replace)
     async with Persistence.open('projection-cancel-conflict', storage=owner_storage) as persistence_336, Runtime.attach(persistence=persistence_336, features=model_features(_Models(_UsageFunctionModel(model)), group)) as owner, Persistence.open('projection-cancel-conflict', storage=PersistenceStorage.sqlite(tmp_path / 'runtime.db')) as persistence_339, Runtime.attach(persistence=persistence_339, features=model_features(_Models(_UsageFunctionModel(model)), group)) as remote:
+        # The paused cancellation snapshot must coexist with the projection commit.
+        with closing(sqlite3.connect(tmp_path / "runtime.db")) as connection:
+            assert connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+
         execution = await owner.agents.get("default").start("run tool")
         try:
             await asyncio.wait_for(entered.wait(), 10)
@@ -342,25 +369,29 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
                 )
 
             projection = asyncio.create_task(project_after_cancel_read())
-            with pytest.raises(AIError) as conflict:
-                await remote.executions.cancel(execution.execution_id, request)
-            assert conflict.value.code is ErrorCode.STORAGE_CONFLICT
-            assert cancel_read.is_set()
-            after = await repository.get(execution.execution_id, tenant_id=tenant)
-            after_stored = await repository.state_store.read(lambda tx: tx.get_record(key))
-            assert before_stored is not None and after_stored is not None
-            assert after_stored.storage_revision > before_stored.storage_revision
-            assert after_stored.data == before_stored.data
-            assert before is not None and after is not None
-            assert after.status is before.status is ExecutionStatus.STARTED
-            assert (after.revision, after.event_seq) == (before.revision, before.event_seq)
-            events = await owner._state.execution.events.list(
-                execution.execution_id, tenant_id=tenant, after_event_seq=0, limit=100,
-            )
-            assert not any(item.event_type == "CANCEL_REQUESTED" for item in events.items)
+            if cas_conflict:
+                with pytest.raises(AIError) as conflict:
+                    await remote.executions.cancel(execution.execution_id, request)
+                assert conflict.value.code is ErrorCode.STORAGE_CONFLICT
+                assert cancel_read.is_set()
+                after = await repository.get(execution.execution_id, tenant_id=tenant)
+                after_stored = await repository.state_store.read(lambda tx: tx.get_record(key))
+                assert before_stored is not None and after_stored is not None
+                assert after_stored.storage_revision > before_stored.storage_revision
+                assert after_stored.data == before_stored.data
+                assert before is not None and after is not None
+                assert after.status is before.status is ExecutionStatus.STARTED
+                assert (after.revision, after.event_seq) == (before.revision, before.event_seq)
+                events = await owner._state.execution.events.list(
+                    execution.execution_id, tenant_id=tenant, after_event_seq=0, limit=100,
+                )
+                assert not any(item.event_type == "CANCEL_REQUESTED" for item in events.items)
 
-            outcome = await remote.executions.cancel(execution.execution_id, request)
-            assert not outcome.cancelled
+                outcome = await remote.executions.cancel(execution.execution_id, request)
+            else:
+                outcome = await remote.executions.cancel(execution.execution_id, request)
+                assert cancel_read.is_set()
+            assert not outcome.cancelled and cancel_updates == 2
             release.set()
             result = (await execution.wait(timeout_seconds=10)).result
             assert result.status is ExecutionStatus.CANCELLED
@@ -368,8 +399,82 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
                 execution.execution_id, tenant_id=tenant, after_event_seq=0, limit=100,
             )
             assert sum(item.event_type == "CANCEL_REQUESTED" for item in events.items) == 1
+            operation = await owner._state.execution.operations.get(
+                idempotency_key_digest(request.idempotency_key), tenant_id=tenant,
+            )
+            assert operation is not None and operation.status is OperationStatus.EFFECT_UNKNOWN
+            assert operation.resource_id == execution.execution_id
+            repeated = await remote.executions.cancel(execution.execution_id, request)
+            assert repeated.cancelled
+            reconciled = await owner._state.execution.operations.get(operation.operation_id, tenant_id=tenant)
+            assert reconciled is not None and reconciled.status is OperationStatus.SUCCEEDED
+            repeated_events = await owner._state.execution.events.list(
+                execution.execution_id, tenant_id=tenant, after_event_seq=0, limit=100,
+            )
+            assert repeated_events == events
         finally:
             release.set()
             if projection is not None:
                 projection.cancel()
                 await asyncio.gather(projection, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_remote_cancel_during_tool_budget_admission_never_dispatches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+
+    from linktools.ai.capability import AgentContext
+    from linktools.ai.core import RunBudget
+    from linktools.ai.persistence._budget import BudgetRepositoryImpl
+
+    from ._runtime_test_helpers import _UsageFunctionModel
+
+    admitted, release = asyncio.Event(), asyncio.Event()
+    effects = []
+    requests = []
+    original_admit = BudgetRepositoryImpl.admit_tool
+
+    async def hold_after_admission(repository, scope_id, call_id):
+        result = await original_admit(repository, scope_id, call_id)
+        admitted.set()
+        await release.wait()
+        return result
+
+    monkeypatch.setattr(BudgetRepositoryImpl, "admit_tool", hold_after_admission)
+
+    async def work(_context: AgentContext[None]) -> str:
+        effects.append("effect")
+        return "done"
+
+    async def model(messages, info):
+        del messages, info
+        requests.append(1)
+        return ModelResponse(parts=[ToolCallPart("work", {}, tool_call_id="call")])
+
+    features = RuntimeFeatures("budget-cancel")
+    features.tool(work, effect_policy="replay_safe")
+    features.agent("default", model="default", allow_tools=("work",))
+    database = tmp_path / "budget-cancel.db"
+    async with Persistence.open("budget-cancel", storage=PersistenceStorage.sqlite(database)) as storage, Runtime.attach(
+        persistence=storage, features=model_features(_Models(_UsageFunctionModel(model)), features),
+    ) as owner, Persistence.open("budget-cancel", storage=PersistenceStorage.sqlite(database)) as other_storage, Runtime.attach(
+        persistence=other_storage, features=model_features(_Models(_UsageFunctionModel(model)), features),
+    ) as remote:
+        execution = await owner.agents.get().start("work", budget=RunBudget(tool_calls=1))
+        try:
+            await asyncio.wait_for(admitted.wait(), 5)
+            await remote.executions.cancel(
+                execution.execution_id, CancelExecutionRequest(owner.default_principal, "budget-remote-cancel"),
+            )
+            release.set()
+            result = (await execution.wait(timeout_seconds=5)).result
+            assert result.status is ExecutionStatus.CANCELLED
+            assert effects == []
+            assert requests == [1]
+            assert await owner._state.recovery.tools.list_by_execution(
+                execution.execution_id, tenant_id=owner.tenant_id,
+            ) == ()
+        finally:
+            release.set()

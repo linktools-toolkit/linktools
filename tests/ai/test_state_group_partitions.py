@@ -25,8 +25,6 @@ def _record(value: str) -> StoredRecord:
 def _storage(root: Path, backend: str) -> PersistenceStorage:
     if backend == "memory":
         return PersistenceStorage.in_memory()
-    if backend == "filesystem":
-        return PersistenceStorage.filesystem(root / "state")
     return PersistenceStorage.sqlite(root / "state.db")
 
 
@@ -71,14 +69,14 @@ async def _partition_contract(owner: StateStore) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["memory", "filesystem", "sqlite"])
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
 async def test_state_group_partition_keys_and_atomic_writes(tmp_path: Path, backend: str) -> None:
     async with Persistence.open("scope", storage=_storage(tmp_path, backend)) as persistence:
         await _partition_contract(persistence.execution.executions.state_store)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["filesystem", "sqlite"])
+@pytest.mark.parametrize("backend", ["sqlite"])
 async def test_state_group_partitions_reopen_readonly_without_creating_data(tmp_path: Path, backend: str) -> None:
     storage = _storage(tmp_path, backend)
     async with Persistence.open("scope", storage=storage) as persistence:
@@ -100,101 +98,40 @@ async def test_state_group_partitions_reopen_readonly_without_creating_data(tmp_
 
 
 @pytest.mark.asyncio
-async def test_state_group_partition_filesystem_publication_readback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    async with Persistence.open("scope", storage=_storage(tmp_path, "filesystem")) as persistence:
+@pytest.mark.parametrize("committed", (False, True))
+async def test_state_group_partition_unknown_write_preserves_source_truth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, committed: bool,
+) -> None:
+    storage = _storage(tmp_path, "sqlite")
+    async with Persistence.open("scope", storage=storage) as persistence:
         group = persistence.execution.executions.state_store.storage_group
-        original = group._provision_group_sync
+        store = await group.open_partition(_key("unknown"), create=True)
+        original = type(group.context).run_mutation
 
-        def published_then_failed() -> None:
-            original()
-            raise OSError("publication acknowledgement lost")
+        async def unknown(context, callback, **kwargs):
+            if context is group.context:
+                if committed:
+                    await original(context, callback, **kwargs)
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+            return await original(context, callback, **kwargs)
 
-        monkeypatch.setattr(group, "_provision_group_sync", published_then_failed)
-        store = await group.open_partition(_key("published"), create=True)
-        assert store is not None
-        assert await group.open_partition(_key("published")) is store
-        await store.mutate(lambda tx: tx.insert_record(_record("saved")))
-    async with Persistence.open("scope", storage=_storage(tmp_path, "filesystem")) as persistence:
-        store = await persistence.execution.executions.state_store.storage_group.open_partition(_key("published"))
-        assert store is not None
-        assert await store.read(lambda tx: tx.get_record(_key("record"))) == _record("saved")
-
-
-@pytest.mark.asyncio
-async def test_state_group_partition_filesystem_cancelled_open_finishes_owned_publication(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    async with Persistence.open("scope", storage=_storage(tmp_path, "filesystem")) as persistence:
-        group = persistence.execution.executions.state_store.storage_group
-        original = group._publication_call
-        entered, release = asyncio.Event(), asyncio.Event()
-
-        async def paused(callback):
-            if getattr(callback, "__name__", "") == "_provision_group_sync":
-                entered.set()
-                await release.wait()
-            return await original(callback)
-
-        monkeypatch.setattr(group, "_publication_call", paused)
-        opening = asyncio.create_task(group.open_partition(_key("cancelled"), create=True))
-        await entered.wait()
-        opening.cancel()
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await opening
-        assert await group.open_partition(_key("cancelled")) is not None
+        with monkeypatch.context() as patch:
+            patch.setattr(type(group.context), "run_mutation", unknown)
+            with pytest.raises(AIError) as caught:
+                await store.mutate(lambda tx: tx.insert_record(_record("saved")))
+            assert caught.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+        assert await store.read_record(_key("record")) == (_record("saved") if committed else None)
+    async with Persistence.open("scope", storage=storage, read_only=True) as persistence:
+        store = await persistence.execution.executions.state_store.storage_group.open_partition(_key("unknown"))
+        if committed:
+            assert store is not None
+            assert await store.read_record(_key("record")) == _record("saved")
+        else:
+            assert store is None
 
 
 @pytest.mark.asyncio
-async def test_state_group_partition_standalone_filesystem_reopens(tmp_path: Path) -> None:
-    from .test_state_group_archive import _filesystem
-
-    owner = _filesystem(tmp_path / "standalone", standalone=True)
-    await owner.initialize()
-    try:
-        await _partition_contract(owner)
-    finally:
-        await owner.close()
-    reopened = _filesystem(tmp_path / "standalone", standalone=True, read_only=True)
-    await reopened.initialize()
-    try:
-        store = await reopened.storage_group.open_partition(_key("first"))
-        assert store is not None
-        assert await store.read(lambda tx: tx.get_record(_key("record"))) == _record("0")
-    finally:
-        await reopened.close()
-
-
-@pytest.mark.asyncio
-async def test_state_group_partition_unknown_publication_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from linktools.ai.persistence import _filesystem
-
-    async with Persistence.open("scope", storage=_storage(tmp_path, "filesystem")) as persistence:
-        group = persistence.execution.executions.state_store.storage_group
-        original_publish = group._provision_group_sync
-        original_read = _filesystem._read_json
-        published = False
-
-        def fail_after_publish() -> None:
-            nonlocal published
-            original_publish()
-            published = True
-            raise OSError("acknowledgement lost")
-
-        def fail_readback(path):
-            if published and path == group._metadata_root / "manifest.json":
-                raise OSError("readback unavailable")
-            return original_read(path)
-
-        monkeypatch.setattr(group, "_provision_group_sync", fail_after_publish)
-        monkeypatch.setattr(_filesystem, "_read_json", fail_readback)
-        with pytest.raises(AIError) as caught:
-            await group.open_partition(_key("unknown"), create=True)
-        assert caught.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
-        with pytest.raises(AIError):
-            await group.open_partition(_key("other"), create=True)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["memory", "filesystem", "sqlite"])
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
 async def test_state_group_partition_closing_one_handle_does_not_close_peers(tmp_path: Path, backend: str) -> None:
     async with Persistence.open("scope", storage=_storage(tmp_path, backend)) as persistence:
         owner = persistence.execution.executions.state_store

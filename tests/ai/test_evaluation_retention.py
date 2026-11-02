@@ -71,20 +71,20 @@ async def put(objects: InMemoryObjectStore, key: str, value: JsonValue) -> Objec
 def storage_for(kind: str, path: Path, objects: InMemoryObjectStore) -> PersistenceStorage:
     if kind == "memory":
         return PersistenceStorage.in_memory()
-    if kind == "filesystem":
-        return PersistenceStorage.filesystem(path, object_store=objects)
+    if kind == "local_sqlite":
+        return PersistenceStorage.from_plan(PersistenceStorage.from_root(path, exclusive_writer=True).plan, object_store=objects)
     if kind == "sqlite":
         return PersistenceStorage.sqlite(path / "state.sqlite", object_store=objects)
     return PersistenceStorage.from_plan(PersistencePlan(
         execution=StorageRoute.sqlite(path / "execution.sqlite"),
-        task=StorageRoute.filesystem(path / "task"),
+        task=StorageRoute.sqlite((path / "task") / "state.db"),
         evaluation=StorageRoute.sqlite(path / "evaluation.sqlite"),
-        artifact=StorageRoute.filesystem(path / "artifact"),
+        artifact=StorageRoute.sqlite((path / "artifact") / "state.db"),
     ), object_store=objects)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "mixed"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite", "mixed"))
 async def test_object_cleanup_scans_all_domains_and_independent_capture_closures(backend: str, tmp_path: Path) -> None:
     guard = Offline()
     objects = CheckedObjects(guard)
@@ -148,7 +148,7 @@ async def test_object_cleanup_bounds_deletions_and_rejects_changed_bytes(tmp_pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "mixed"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite", "mixed"))
 async def test_public_expiry_purge_and_reopen_do_not_revive_private_evidence(backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from dataclasses import replace
     from datetime import timedelta
@@ -175,7 +175,7 @@ async def test_public_expiry_purge_and_reopen_do_not_revive_private_evidence(bac
         return {"dimensions": {"quality": value}, "rationale": "private score rationale"}
 
     tasks = (Task("retention.target", target, effect_policy="none"), Task("retention.score", score, effect_policy="none"))
-    dataset_deadline = datetime.now(timezone.utc) + timedelta(seconds=60) if backend == "filesystem" else None
+    dataset_deadline = datetime.now(timezone.utc) + timedelta(seconds=60) if backend == "local_sqlite" else None
     policy = EvaluationPolicy(allow_volatile=backend == "memory",
         content_retention_seconds=None if dataset_deadline is not None else 60, metadata_retention_seconds=120)
     storage = storage_for(backend, tmp_path, objects)
@@ -296,7 +296,7 @@ async def test_expired_prepared_payload_is_fenced_before_deletion_and_cannot_res
         return {"dimensions": {"quality": 1.0}}
 
     principal = service_principal("tenant", "owner")
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     monkeypatch.setattr(Evaluations, "_watch", lambda *args, **kwargs: None)
     async with (
         Persistence.open('evaluation-retention', storage=storage, tenant_id='tenant') as persistence_291,
@@ -349,7 +349,7 @@ async def test_literal_capture_deadline_deletes_owned_copy_without_deleting_borr
 
     principal = service_principal("tenant", "owner")
     deadline = datetime.now(timezone.utc) + timedelta(seconds=60)
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with (
         Persistence.open('evaluation-retention', storage=storage, tenant_id='tenant') as persistence_341,
         TaskEngine.open(persistence=persistence_341, context=ExecutionContext(None)) as engine,
@@ -404,7 +404,7 @@ async def test_literal_capture_deadline_deletes_owned_copy_without_deleting_borr
             await evaluations._compiler.case(spec.cases[0], principal=principal)
         assert unavailable.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
     async with (
-        Persistence.open('evaluation-retention', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='tenant') as persistence_391,
+        Persistence.open('evaluation-retention', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='tenant') as persistence_391,
         TaskEngine.open(persistence=persistence_391, context=ExecutionContext(None)) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -414,7 +414,7 @@ async def test_literal_capture_deadline_deletes_owned_copy_without_deleting_borr
         assert (await evaluations._captures.read_agent(borrowed, principal=principal)).prompt == "independently retained source"
     snapshot = InMemoryObjectStore("snapshot")
     limits = SnapshotLimits(max_entries=10000, max_bytes=10 * 1024 * 1024)
-    readonly = PersistenceStorage.filesystem(tmp_path)
+    readonly = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     readonly = Persistence(readonly)
     await readonly.initialize(namespace="evaluation-retention", tenant_id="tenant", read_only=True)
     try:
@@ -462,7 +462,7 @@ async def test_cleanup_receipt_survives_failed_physical_delete_and_retry(tmp_pat
 
     guard = Offline()
     objects = CheckedObjects(guard)
-    storage = PersistenceStorage.filesystem(tmp_path, object_store=objects)
+    storage = PersistenceStorage.from_plan(PersistenceStorage.from_root(tmp_path, exclusive_writer=True).plan, object_store=objects)
     storage = Persistence(storage)
     await storage.initialize(namespace="evaluation", tenant_id="tenant")
     now = datetime.now(timezone.utc)
@@ -496,7 +496,7 @@ async def test_cleanup_receipt_survives_failed_physical_delete_and_retry(tmp_pat
         monkeypatch.setattr(objects, "delete_object", original_delete)
     finally:
         await storage.close()
-    reopened = PersistenceStorage.filesystem(tmp_path, object_store=objects)
+    reopened = PersistenceStorage.from_plan(PersistenceStorage.from_root(tmp_path, exclusive_writer=True).plan, object_store=objects)
     reopened = Persistence(reopened)
     await reopened.initialize(namespace="evaluation", tenant_id="tenant")
     try:

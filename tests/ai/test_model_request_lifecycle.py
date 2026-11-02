@@ -1183,7 +1183,7 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
         group.agent("default", model="default", allow_tools=())
         storage_path = tmp_path / "runtime-storage"
         storage = (
-            PersistenceStorage.filesystem(storage_path)
+            PersistenceStorage.from_root(storage_path, exclusive_writer=True)
             if persistent
             else PersistenceStorage.in_memory()
         )
@@ -1238,7 +1238,7 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
             assert finished.usage is not None
 
         if persistent:
-            async with Persistence.open('default', storage=PersistenceStorage.filesystem(storage_path)) as persistence_1242, Runtime.attach(persistence=persistence_1242, features=model_features(models, group)) as reopened:
+            async with Persistence.open('default', storage=PersistenceStorage.from_root(storage_path, exclusive_writer=True)) as persistence_1242, Runtime.attach(persistence=persistence_1242, features=model_features(models, group)) as reopened:
                 assert reopened.history is not None
                 page = await reopened.history.model_interactions(
                     execution.execution_id,
@@ -1268,7 +1268,7 @@ def test_history_cursor_keeps_captured_identity_during_durable_completion(
 
         group.tool(complete, effect_policy="none")
         group.agent("default", model="default", allow_tools=("complete",))
-        storage = PersistenceStorage.filesystem(tmp_path / "handoff-storage")
+        storage = PersistenceStorage.from_root(tmp_path / "handoff-storage", exclusive_writer=True)
 
         async with Persistence.open('default', storage=storage) as persistence_1278, Runtime.attach(persistence=persistence_1278, features=model_features(models, group)) as runtime:
             execution = await runtime.agents.get("default").start("continue")
@@ -1361,7 +1361,7 @@ def test_public_content_mutation_does_not_change_live_or_archived_history(
         group = RuntimeFeatures[object]("application")
         group.capability(TraceCapability(), scope="runtime")
         group.agent("default", model="default", allow_tools=())
-        storage = PersistenceStorage.filesystem(tmp_path / "content-storage")
+        storage = PersistenceStorage.from_root(tmp_path / "content-storage", exclusive_writer=True)
 
         async with Persistence.open('default', storage=storage) as persistence_1375, Runtime.attach(persistence=persistence_1375, features=model_features(models, group)) as runtime:
             execution = await runtime.agents.get("default").start("preserve content")

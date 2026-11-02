@@ -572,7 +572,7 @@ async def test_producer_guard_batches_known_keys_and_reuses_transaction_records(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 @pytest.mark.parametrize("failure,expected", (
     ("missing_head", ErrorCode.STORAGE_INTEGRITY_ERROR),
     ("missing_execution", ErrorCode.STORAGE_INTEGRITY_ERROR),
@@ -625,7 +625,7 @@ async def test_producer_guard_batch_preserves_fail_closed_checks(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 @pytest.mark.parametrize("command", ("cancel_intent", "tool_resolution"))
 async def test_recovery_write_failure_rolls_back_its_operation_receipt(
     tmp_path: "Path", monkeypatch: pytest.MonkeyPatch, backend: str, command: str,
@@ -703,7 +703,7 @@ async def test_recovery_write_failure_rolls_back_its_operation_receipt(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 @pytest.mark.parametrize("command", ("cancel_intent", "tool_resolution"))
 async def test_recovery_repository_rejects_stale_state_before_receipt_admission(
     tmp_path: "Path", backend: str, command: str,

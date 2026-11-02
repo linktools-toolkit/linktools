@@ -32,13 +32,13 @@ async def exact(context: TaskNodeContext[None]) -> JsonValue:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend,isolated", [("memory", False), ("filesystem", False), ("sqlite", False),
-                                                ("filesystem", True), ("sqlite", True)])
+@pytest.mark.parametrize("backend,isolated", [("memory", False), ("local_sqlite", False), ("sqlite", False),
+                                                ("local_sqlite", True), ("sqlite", True)])
 async def test_evaluation_borrows_engine_and_persistence_for_complete_task_report(
     tmp_path: Path, backend: str, isolated: bool,
 ) -> None:
     storage = (PersistenceStorage.in_memory() if backend == "memory" else
-               PersistenceStorage.filesystem(tmp_path / "state") if backend == "filesystem" else
+               PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True) if backend == "local_sqlite" else
                PersistenceStorage.sqlite(tmp_path / "state.sqlite"))
     principal = service_principal("tenant", "evaluator")
     target = Task("owner.echo", echo, effect_policy="none")
@@ -101,7 +101,7 @@ async def test_evaluation_reads_pinned_assets_without_owning_the_asset_store(tmp
         target = Task("asset.echo", echo, effect_policy="none")
         judge = Task("asset.exact", exact, effect_policy="none")
         scorer = ScorerSpec("exact", judge.ref, (DimensionContract("exact", "boolean", "higher", 0, 1),))
-        async with Persistence.open("asset-evaluation", storage=PersistenceStorage.filesystem(tmp_path), tenant_id="tenant") as persistence:
+        async with Persistence.open("asset-evaluation", storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id="tenant") as persistence:
             async with TaskEngine.open(target, judge, persistence=persistence) as engine:
                 async with Evaluations.open(engine, assets=(assets,)) as evaluations:
                     dataset = await evaluations.publish_dataset(

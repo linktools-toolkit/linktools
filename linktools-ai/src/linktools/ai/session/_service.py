@@ -385,6 +385,12 @@ class SessionManager(Generic[HandleT]):
             budget_scope_id=budget_scope_id,
         )
 
+    async def _prepare_resume_session(
+        self, agent_id: str, session_id: str, principal: Principal,
+    ) -> SessionRecord:
+        """Read one authorized snapshot for this resume, never for a later call."""
+        return await self.read_authorized(session_id, principal, AuthorizationAction.SESSION_READ)
+
     async def _resume(
         self,
         agent_id: str,
@@ -399,9 +405,7 @@ class SessionManager(Generic[HandleT]):
         budget_scope_id: str | None = None,
     ) -> HandleT:
         async with self.consume_session(session_id, request.principal.tenant_id):
-            record = await self.read_authorized(
-                session_id, request.principal, AuthorizationAction.SESSION_READ
-            )
+            record = await self._prepare_resume_session(agent_id, session_id, request.principal)
             record = await self.reconcile_admission(record)
             if record.cwd is not None and self._canonicalize_path is None:
                 raise AIError(

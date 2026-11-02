@@ -63,7 +63,7 @@ async def test_evaluation_score_dimensions_survive_snapshot_export_and_restore(t
     scorer = Task("score-snapshot.score", reference_named_dimensions, effect_policy="none")
     expected = ScoreBundle(dimensions={"kind": 1.0, "digest": 1.0, "size": 1.0})
     async with (
-        Persistence.open('score-snapshot', storage=PersistenceStorage.filesystem(root), tenant_id='evaluation-consumers') as persistence_62,
+        Persistence.open('score-snapshot', storage=PersistenceStorage.from_root(root, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_62,
         TaskEngine.open(target, scorer, persistence=persistence_62, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -85,7 +85,7 @@ async def test_evaluation_score_dimensions_survive_snapshot_export_and_restore(t
         assert {item.dimension for item in report.scores} == set(expected.dimensions)
         experiment_id = run.experiment_id
 
-    storage = Persistence(PersistenceStorage.filesystem(root))
+    storage = Persistence(PersistenceStorage.from_root(root, exclusive_writer=True))
     await storage.initialize(namespace="score-snapshot", tenant_id=PRINCIPAL.tenant_id, read_only=True)
     archive = InMemoryObjectStore("score-snapshot-archive")
     limits = SnapshotLimits(max_entries=4096, max_bytes=16 * 1024 * 1024)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Common persistence configuration stays separate from advanced contracts."""
+"""Public persistence owners and configuration stay separate from advanced contracts."""
 
 import os
 from pathlib import Path
@@ -11,10 +11,10 @@ from linktools.ai import persistence
 from linktools.ai.persistence import PersistenceDomain
 
 
-def test_persistence_root_contains_only_common_configuration() -> None:
+def test_persistence_root_contains_configuration_and_offline_snapshot_reader() -> None:
     assert set(persistence.__all__) == {
         'Persistence', 'PersistenceStorage', 'PersistencePlan',
-        'PersistenceStatus', 'PersistenceDomain',
+        'PersistenceStatus', 'PersistenceDomain', 'FilesystemSnapshotReader',
     }
     assert not hasattr(persistence, 'RuntimeDomain')
     assert not hasattr(persistence, 'RuntimeStateCommands')

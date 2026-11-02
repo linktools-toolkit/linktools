@@ -234,7 +234,7 @@ async def test_projection_verification_reads_each_context_projection_once(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_projection_admission_advances_history_once_and_rolls_back_invalid_requests(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -297,7 +297,7 @@ async def test_projection_uses_batched_owner_admission_without_existence_preread
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_concurrent_empty_projection_admissions_advance_history_once(tmp_path: Path, backend: str) -> None:
     import asyncio
 
@@ -342,7 +342,7 @@ async def test_projection_keeps_custom_private_override_and_public_none_result(t
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_checkpoint_null_boundary_rejects_reads_instead_of_using_current_head(
     tmp_path: Path, backend: str,
 ) -> None:

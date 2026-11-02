@@ -140,7 +140,7 @@ async def _assert_sql_publication(engine: AsyncEngine) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite"))
 async def test_publication_batches_preserve_backend_atomicity(tmp_path: Path, backend: str) -> None:
     if backend == "sqlite":
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'state.db'}")
@@ -150,7 +150,7 @@ async def test_publication_batches_preserve_backend_atomicity(tmp_path: Path, ba
             await engine.dispose()
         return
     state = (PersistenceStorage.in_memory() if backend == "memory"
-             else PersistenceStorage.filesystem(tmp_path))
+             else PersistenceStorage.from_root(tmp_path, exclusive_writer=True))
     context = ExecutionContext(None)
     async with (
         Persistence.open('evaluation-io', storage=state, tenant_id=_PRINCIPAL.tenant_id) as persistence_145,
@@ -158,9 +158,9 @@ async def test_publication_batches_preserve_backend_atomicity(tmp_path: Path, ba
         Evaluations.open(task_engine) as evaluations,
     ):
         await _assert_publication(evaluations, evaluations, persistence_145)
-    if backend == "filesystem":
+    if backend == "local_sqlite":
         async with (
-            Persistence.open('evaluation-io', storage=PersistenceStorage.filesystem(tmp_path), tenant_id=_PRINCIPAL.tenant_id) as persistence_148,
+            Persistence.open('evaluation-io', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=_PRINCIPAL.tenant_id) as persistence_148,
             TaskEngine.open(persistence=persistence_148, context=context) as reopened_engine,
             Evaluations.open(reopened_engine) as reopened,
         ):

@@ -42,7 +42,7 @@ async def test_captured_session_context_ignores_later_turns_and_metadata(tmp_pat
     group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", system_prompt="original-only behavior", allow_tools=(), allow_skills=(), allow_subagents=())
     group.agent("candidate", model="default", system_prompt="candidate-only behavior", allow_tools=(), allow_skills=(), allow_subagents=())
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open('captured-session', storage=storage) as persistence_42, Runtime.attach(persistence=persistence_42, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_42, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
         agent = runtime.agents.get()
@@ -79,7 +79,7 @@ async def test_captured_memory_preserves_versions_in_new_execution_scope(tmp_pat
     group = RuntimeFeatures("context-memory")
     group.capability(MemoryCapability(scope="production"))
     group.agent("default", model="default", allow_tools=("*",), allow_skills=(), allow_subagents=())
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open('captured-memory', storage=storage) as persistence_78, Runtime.attach(persistence=persistence_78, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_78, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
         memory = RuntimeMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(PersistenceDomain.MEMORY),
@@ -111,7 +111,7 @@ async def test_captured_agent_task_and_graph_restore_context_after_restart(tmp_p
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     principal = Principal("owner", "default")
-    async with Persistence.open('captured-graph-context', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_109, Runtime.attach(persistence=persistence_109, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_109, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('captured-graph-context', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_109, Runtime.attach(persistence=persistence_109, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_109, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         agent = runtime.agents.get()
         session = await agent.create_session("graph-session", principal=principal)
         previous = await session.start("remember the earlier turn")
@@ -126,7 +126,7 @@ async def test_captured_agent_task_and_graph_restore_context_after_restart(tmp_p
         assert template.nodes[0].input["capture_context"]["history"]
         latest = await session.start("this later turn must not leak")
         await latest.wait()
-    async with Persistence.open('captured-graph-context', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_124, Runtime.attach(persistence=persistence_124, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_124, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('captured-graph-context', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_124, Runtime.attach(persistence=persistence_124, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_124, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         task = Task.from_agent("context.agent", runtime.agents.get())
         template = await runtime_engine.inputs.read_graph(graph_capture, principal=principal)
         rerun = await runtime_engine.with_definitions(task).start(TaskGraph("context-replay", template.nodes), principal=principal, idempotency_key="context-graph-replay")
@@ -150,7 +150,7 @@ async def test_captured_repository_instructions_never_refresh_from_workspace(tmp
     group = workspace_features("context-instructions", workspace=Workspace.load(work))
     group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    storage = PersistenceStorage.filesystem(tmp_path / "state")
+    storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
     async with Persistence.open('captured-instructions', storage=storage) as persistence_149, Runtime.attach(persistence=persistence_149, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_149, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
         source = await runtime.agents.get().start("question", principal=principal)
@@ -179,7 +179,7 @@ async def test_large_captured_context_survives_portable_storage_snapshot(tmp_pat
         "second.txt": {"content": "b" * 40000, "version": "m1:" + "2" * 64},
     })
     source_root = tmp_path / "source"
-    storage = PersistenceStorage.filesystem(source_root)
+    storage = PersistenceStorage.from_root(source_root, exclusive_writer=True)
     async with Persistence.open('portable-context', storage=storage) as persistence_178, Runtime.attach(persistence=persistence_178, features=model_features(_NoToolsModels(), group)) as runtime:
         execution = await runtime.agents.get().start("question", input_context=baseline, principal=principal)
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -203,7 +203,7 @@ async def test_large_captured_context_survives_portable_storage_snapshot(tmp_pat
         assert all(content.payload.kind == "object" for content in memory_contents)
         assert sum(content.raw_size for content in memory_contents) >= 80000
     archive = InMemoryObjectStore("context-snapshot")
-    storage = PersistenceStorage.filesystem(source_root)
+    storage = PersistenceStorage.from_root(source_root, exclusive_writer=True)
     storage = Persistence(storage)
     await storage.initialize(namespace="portable-context", tenant_id=principal.tenant_id, read_only=True)
     limits = SnapshotLimits(max_entries=4096, max_bytes=16 * 1024 * 1024)
@@ -236,7 +236,7 @@ async def test_reprojection_uses_captured_history_without_reopening_source_sessi
     async def replacement_builder(context: AgentTaskInputContext) -> str:
         return "replacement projected question"
 
-    async with Persistence.open('reproject-context', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_234, Runtime.attach(persistence=persistence_234, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_234, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('reproject-context', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_234, Runtime.attach(persistence=persistence_234, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_234, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
         session = await runtime.agents.get().create_session("context-session", principal=principal)
         first = await session.start("immutable earlier history")
@@ -269,7 +269,7 @@ async def test_custom_memory_without_consistent_read_view_reports_precise_unavai
     group = RuntimeFeatures("unsupported-context")
     group.capability(MemoryCapability(scope="custom"))
     group.agent("default", model="default", allow_tools=("*",), allow_skills=(), allow_subagents=())
-    async with Persistence.open('unsupported-context', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_266, Runtime.attach(persistence=persistence_266, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_266, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('unsupported-context', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_266, Runtime.attach(persistence=persistence_266, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_266, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
         backend = runtime._execution_service.runtime_backend()
         backend._memory_store_factory = lambda *_args: InMemoryStore()
@@ -300,7 +300,7 @@ async def test_reprojected_files_use_accepted_bytes_after_workspace_file_changes
     async def builder(context: AgentTaskInputContext) -> str:
         return "projected prompt"
 
-    async with Persistence.open('file-context', storage=PersistenceStorage.filesystem(tmp_path / 'state')) as persistence_297, Runtime.attach(persistence=persistence_297, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_297, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('file-context', storage=PersistenceStorage.from_root(tmp_path / 'state', exclusive_writer=True)) as persistence_297, Runtime.attach(persistence=persistence_297, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_297, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
         task = Task.from_agent("files.projected", runtime.agents.get(), build_input=builder)
         engine = runtime_engine.with_definitions(task)
@@ -354,7 +354,7 @@ async def test_model_memory_tool_reads_captured_content_after_production_changes
     group = RuntimeFeatures("model-memory-context")
     group.capability(MemoryCapability(scope="production"))
     group.agent("default", model="default", allow_tools=("*",), allow_skills=(), allow_subagents=())
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open('model-memory-context', storage=storage) as persistence_343, Runtime.attach(persistence=persistence_343, features=model_features(Models(), group)) as runtime, TaskEngine.open(persistence=persistence_343, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
         memory = RuntimeMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(PersistenceDomain.MEMORY),
@@ -387,7 +387,7 @@ async def test_execution_capture_preserves_detached_accepted_provenance(
         TextContent("hello", metadata=metadata),
         BinaryContent(b"original bytes", media_type="text/plain", identifier="evidence"),
     ) if rich_input else "hello"
-    storage = PersistenceStorage.filesystem(tmp_path / "state")
+    storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
     expected_view = None
     async with Persistence.open('capture-provenance', storage=storage) as persistence_377, Runtime.attach(persistence=persistence_377, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_377, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         execution = await runtime.agents.get().start(prompt, principal=principal)

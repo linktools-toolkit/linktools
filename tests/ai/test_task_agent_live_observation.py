@@ -18,11 +18,13 @@ from linktools.ai.task import Task, TaskGraph, TaskNode
 from linktools.ai.task.engine import TaskEngine
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
+from ._sqlite_failure_timeline import sqlite_failure_phase, sqlite_failure_timeline
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("producer_count", [1, 2])
-async def test_graph_observes_tools_before_models_finish_and_replays_after_reopen(tmp_path, producer_count):
+@pytest.mark.parametrize(("backend", "producer_count"), [("local_sqlite", 1), ("sqlite", 1), ("sqlite", 2)])
+@sqlite_failure_timeline
+async def test_graph_observes_tools_before_models_finish_and_replays_after_reopen(tmp_path, backend, producer_count):
     release = asyncio.Event()
     entered = [asyncio.Event() for _ in range(producer_count)]
     observed = [asyncio.Event() for _ in range(producer_count)]
@@ -30,12 +32,15 @@ async def test_graph_observes_tools_before_models_finish_and_replays_after_reope
 
     def features(index):
         async def evidence(context: AgentContext[None]) -> str:
+            sqlite_failure_phase("tool.return", producer=index)
             return "synthetic evidence"
 
         async def model(messages, info):
             requests.append(index)
             if not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
+                sqlite_failure_phase("model.first", producer=index)
                 return ModelResponse(parts=[ToolCallPart("evidence", {}, tool_call_id=f"tool-{index}")])
+            sqlite_failure_phase("model.entered", producer=index)
             entered[index].set()
             await release.wait()
             return ModelResponse(parts=[TextPart("done")])
@@ -47,9 +52,14 @@ async def test_graph_observes_tools_before_models_finish_and_replays_after_reope
         return group
 
     storage_path = tmp_path / "state"
+
+    def storage():
+        if backend == "local_sqlite":
+            return PersistenceStorage.from_root(storage_path, exclusive_writer=True)
+        return PersistenceStorage.sqlite(storage_path / "runtime.db")
     async with AsyncExitStack() as stack:
         persistence = await stack.enter_async_context(Persistence.open(
-            "graph-live", storage=PersistenceStorage.filesystem(storage_path),
+            "graph-live", storage=storage(),
         ))
         runtimes = [await stack.enter_async_context(Runtime.attach(persistence=persistence, features=features(i)))
                     for i in range(producer_count)]
@@ -59,6 +69,7 @@ async def test_graph_observes_tools_before_models_finish_and_replays_after_reope
         graph = TaskGraph("live-tools", tuple(TaskNode(f"node-{i}", task=task, input=AgentTaskInput("inspect"))
                                               for i, task in enumerate(tasks)))
         run = await engine.start(graph, idempotency_key="live-tools")
+        sqlite_failure_phase("graph.started")
         events = []
 
         async def observe(event):
@@ -68,12 +79,21 @@ async def test_graph_observes_tools_before_models_finish_and_replays_after_reope
                     observed[int(event.node_id.removeprefix("node-"))].set()
 
         waiting = asyncio.create_task(run.wait(on_event=observe, include_event_content=True, timeout_seconds=10))
+        ready = asyncio.gather(*(event.wait() for event in (*entered, *observed)))
         try:
-            await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered)), 3)
-            await asyncio.wait_for(asyncio.gather(*(event.wait() for event in observed)), 3)
+            sqlite_failure_phase("live.ready.wait.begin")
+            # The graph's bounded wait guards progress; delivery must precede model release.
+            done, _ = await asyncio.wait((ready, waiting), return_when=asyncio.FIRST_COMPLETED)
+            if waiting in done:
+                await waiting
+            assert ready in done, "Every producer must expose its tool result before model completion"
             assert not release.is_set() and not waiting.done()
+            sqlite_failure_phase("live.ready.wait.done")
         finally:
+            sqlite_failure_phase("models.release")
             release.set()
+            ready.cancel()
+            await asyncio.gather(ready, return_exceptions=True)
             outcome = await waiting
         assert outcome.result.status is TaskStatus.SUCCEEDED
         assert outcome.observation_error is None
@@ -85,7 +105,7 @@ async def test_graph_observes_tools_before_models_finish_and_replays_after_reope
     request_count = len(requests)
     async with AsyncExitStack() as stack:
         persistence = await stack.enter_async_context(Persistence.open(
-            "graph-live", storage=PersistenceStorage.filesystem(storage_path),
+            "graph-live", storage=storage(),
         ))
         runtimes = [await stack.enter_async_context(Runtime.attach(persistence=persistence, features=features(i)))
                     for i in range(producer_count)]

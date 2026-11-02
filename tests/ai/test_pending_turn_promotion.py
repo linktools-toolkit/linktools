@@ -94,7 +94,7 @@ async def _assert_promoted(
     assert [item async for item in archive.iter_session_messages("history", tenant_id="tenant")] == []
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("prepared", (False, True))
 async def test_pending_turn_promotion_commits_one_boundary_and_can_prepare_after_admission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, prepared: bool,
@@ -140,7 +140,7 @@ async def test_pending_turn_promotion_commits_one_boundary_and_can_prepare_after
             await _assert_promoted(state, turn, context, activated)
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("conflict", ("existing_request", "stale_session"))
 async def test_pending_turn_promotion_rejects_existing_request_or_changed_session_without_writes(
     tmp_path: Path, backend: str, conflict: str,
@@ -163,7 +163,7 @@ async def test_pending_turn_promotion_rejects_existing_request_or_changed_sessio
         assert await _snapshot(state) == before
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("prepared", (False, True))
 async def test_pending_turn_promotion_last_stage_failure_rolls_back_all_domains(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, prepared: bool,
@@ -197,7 +197,7 @@ async def test_pending_turn_promotion_last_stage_failure_rolls_back_all_domains(
         await _assert_promoted(state, turn, context, await _promote(state, turn, context))
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("prepared", (False, True))
 @pytest.mark.parametrize("readback_available", (False, True))
 async def test_pending_turn_promotion_lost_ack_requires_committed_readback_for_authority(

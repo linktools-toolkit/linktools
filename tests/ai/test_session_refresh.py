@@ -58,7 +58,7 @@ async def _release(state, execution_id):
     )
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("status", (ExecutionStatus.PENDING_START, ExecutionStatus.FAILED))
 async def test_refresh_reconciles_once_outside_metadata_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, status: ExecutionStatus,

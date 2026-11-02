@@ -34,13 +34,13 @@ from .test_task_sqlite_cas_convergence import _provision_sqlite
 
 
 @asynccontextmanager
-async def _runtime(tmp_path: Path, *, backend: str = "filesystem", models=None) -> AsyncIterator[tuple[Runtime, TaskEngine]]:
+async def _runtime(tmp_path: Path, *, backend: str = "local_sqlite", models=None) -> AsyncIterator[tuple[Runtime, TaskEngine]]:
     if backend == "sqlite":
         database = tmp_path / "state.sqlite"
         await _provision_sqlite(database)
         storage = PersistenceStorage.sqlite(database, object_store=FilesystemObjectStore(tmp_path / "objects"))
     else:
-        storage = PersistenceStorage.filesystem(tmp_path)
+        storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     group = RuntimeFeatures("metadata")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with Persistence.open('metadata-projection', storage=storage) as persistence_43, Runtime.attach(persistence=persistence_43, features=model_features(FixtureModels() if models is None else models, group)) as runtime, TaskEngine.open(persistence=persistence_43, context=runtime.context) as runtime_engine:
@@ -55,7 +55,7 @@ async def _collect(stream: AsyncIterator[TaskGraphRunEvent]) -> list[TaskGraphRu
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend, include_content", [("filesystem", False), ("filesystem", True), ("sqlite", False)])
+@pytest.mark.parametrize("backend, include_content", [("local_sqlite", False), ("local_sqlite", True), ("sqlite", False)])
 async def test_terminal_graph_reconnect_repeats_safe_metadata_without_replaying_acknowledged_events(
     tmp_path: Path, backend: str, include_content: bool,
 ) -> None:

@@ -27,7 +27,7 @@ from .test_step_projection import _execution
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_updates_read_bounded_fresh_suffix_without_content(tmp_path: Path, backend: str) -> None:
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
@@ -70,7 +70,7 @@ async def test_updates_read_bounded_fresh_suffix_without_content(tmp_path: Path,
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_update_boundary_observes_run_admitted_during_authorization(tmp_path: Path, backend: str) -> None:
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
@@ -186,7 +186,7 @@ async def test_updates_preserve_custom_public_read_dispatch(tmp_path: Path, kind
 
 
 @pytest.mark.parametrize("phase", ("authorization", "metadata"))
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_update_cancellation_releases_owner_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, phase: str,
 ) -> None:

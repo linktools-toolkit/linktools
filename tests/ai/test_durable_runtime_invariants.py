@@ -31,6 +31,7 @@ from linktools.ai.runtime._execution import (
     _ExecutionRuntimeBridge,
 )
 from linktools.ai.runtime._local import LocalExecutionBackend
+from linktools.ai.runtime._execution_buffer import _ExecutionPayloadBuffer
 from linktools.ai.runtime._pending_turn import _PendingExecutionTurns
 from linktools.ai.execution.events import LiveExecutionEventBroker
 from linktools.ai.persistence.durability import (
@@ -44,7 +45,7 @@ from linktools.ai.persistence._step_archive import InMemoryStepArchive, StagingA
 from linktools.ai.persistence._retention import RuntimeRetentionController
 from linktools.ai.persistence.runs import RuntimeAgentRunStore
 from linktools.ai.spec import AgentSpec
-from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore, StoredPayload
+from linktools.ai.storage import FilesystemObjectStore, InMemoryCacheBackend, SqlObjectStore, StoredPayload
 from linktools.ai.task import (
     DefaultTaskGraphService,
     TaskEvent,
@@ -334,16 +335,25 @@ async def test_execution_retention_releases_objects_after_execution_lookup() -> 
 
     async def execution_get(execution_id: str, *, tenant_id: str) -> object:
         calls.append(f"execution:{execution_id}:{tenant_id}")
-        return SimpleNamespace(session_id=None, agent_run_seq=0, retention_closed=True)
+        return SimpleNamespace(session_id=None, agent_run_seq=0, retention_closed=True,
+                               status=ExecutionStatus.SUCCEEDED)
 
     async def release_object_scope(domain, *, owner_scope: str) -> None:
         calls.append(f"objects:{owner_scope}")
+
+    async def read_source(callback):
+        return await callback(None)
+
+    async def execution_get_in_transaction(transaction, execution_id, *, tenant_id):
+        return await execution_get(execution_id, tenant_id=tenant_id)
 
     controller = object.__new__(RuntimeRetentionController)
     controller._execution = SimpleNamespace(
         executions=SimpleNamespace(
             close_retention=close_retention,
             get=execution_get,
+            get_in_transaction=execution_get_in_transaction,
+            state_store=SimpleNamespace(read=read_source),
         ),
     )
     controller._conversation = SimpleNamespace()
@@ -413,6 +423,8 @@ async def test_runtime_close_coordinator_does_not_close_lower_resources_after_pr
 @pytest.mark.asyncio
 async def test_local_execution_close_rejects_pending_command_owned_work() -> None:
     backend = object.__new__(LocalExecutionBackend)
+    backend._execution_buffer = None
+    backend._run_store = None
     backend._live_broker = LiveExecutionEventBroker()
     backend._pending_turns = _PendingExecutionTurns()
     backend._pending_renewals = {}
@@ -451,8 +463,13 @@ async def test_local_execution_close_rejects_pending_command_owned_work() -> Non
 
 
 @pytest.mark.asyncio
-async def test_runtime_release_waits_for_execution_scoped_durable_task() -> None:
+@pytest.mark.parametrize("buffered", (False, True))
+async def test_runtime_release_waits_for_execution_scoped_durable_task(buffered: bool) -> None:
     backend = object.__new__(LocalExecutionBackend)
+    backend._execution_buffer = _ExecutionPayloadBuffer(InMemoryCacheBackend(max_bytes=1024)) if buffered else None
+    if backend._execution_buffer is not None:
+        backend._execution_buffer.bind_producer("execution", 2)
+        await backend._execution_buffer.release("execution")
     backend._tenant_id = "tenant"
     backend._tasks = {}
     backend._terminal_events = {}
@@ -474,10 +491,15 @@ async def test_runtime_release_waits_for_execution_scoped_durable_task() -> None
         await backend.release_runtime_execution("execution", tenant_id="tenant")
     assert error.value.code is ErrorCode.STORAGE_CONFLICT
 
+    if backend._execution_buffer is not None:
+        assert backend._execution_buffer.has_scope("execution")
+
     release.set()
     await task
     await backend.release_runtime_execution("execution", tenant_id="tenant")
     assert backend._execution_durable_tasks == {}
+    if backend._execution_buffer is not None:
+        assert not backend._execution_buffer.has_scope("execution")
 
 
 @pytest.mark.asyncio

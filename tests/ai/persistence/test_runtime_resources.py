@@ -94,7 +94,7 @@ async def test_runtime_storage_close_cursor_retries_failed_action_and_survives_c
 
 def test_mixed_runtime_plan_has_explicit_routes(tmp_path) -> None:
     plan = PersistencePlan(
-        conversation=StorageRoute.filesystem(tmp_path / "conversation"),
+        conversation=StorageRoute.sqlite(tmp_path / "conversation.db", exclusive_writer=True),
         execution=StorageRoute.transient(),
         memory=StorageRoute.memory(),
     )

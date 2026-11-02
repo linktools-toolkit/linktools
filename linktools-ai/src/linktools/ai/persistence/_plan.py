@@ -5,9 +5,8 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from pathlib import Path
 
-from ..storage import CacheBackend, ObjectStore, StorageRoute, StorageRetentionMode
+from ..storage import ObjectStore, StorageRoute, StorageRetentionMode
 
 
 from ..core import PersistenceDomain
@@ -53,17 +52,6 @@ class PersistencePlan:
         return cls(**{domain.value: route for domain in PersistenceDomain
                       if domain not in {PersistenceDomain.RECOVERY, PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}})
 
-    @classmethod
-    def filesystem(cls, root: Path, *, cache: CacheBackend | None = None) -> "PersistencePlan":
-        """Keep domain members distinct within one filesystem transaction group."""
-        return cls(**{
-            domain.value: StorageRoute.filesystem(
-                root if domain is PersistenceDomain.EXECUTION else root / domain.value,
-                transaction_root=root, cache=cache,
-            )
-            for domain in PersistenceDomain
-            if domain not in {PersistenceDomain.RECOVERY, PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}
-        })
 
     def __post_init__(self) -> None:
         if any(not isinstance(identity, str) or not identity or not isinstance(route, StorageRoute)
@@ -73,29 +61,6 @@ class PersistencePlan:
         routes = tuple(self.route(domain) for domain in PersistenceDomain)
         if any(not isinstance(route, StorageRoute) for route in routes):
             raise ValueError("PersistencePlan contains an invalid route")
-        grouped: dict[Path, list[Path]] = {}
-        for domain, route in zip(PersistenceDomain, routes):
-            if (
-                route.kind != "filesystem"
-                or route.transaction_root is None
-            ):
-                continue
-            member_path = self.filesystem_path(domain)
-            try:
-                relative = member_path.relative_to(route.transaction_root)
-            except ValueError as error:
-                raise ValueError("filesystem route must be under transaction_root") from error
-            if relative.parts and (
-                relative.parts[0] in {".state-groups", ".state-partitions"}
-                or relative.parts[0].startswith(".txn-")
-            ):
-                raise ValueError("filesystem route points at a reserved transaction path")
-            grouped.setdefault(route.transaction_root, []).append(member_path)
-        for paths in grouped.values():
-            for index, left in enumerate(sorted(paths)):
-                for right in sorted(paths)[index + 1 :]:
-                    if left in right.parents or right in left.parents:
-                        raise ValueError("filesystem group member paths must be disjoint")
 
     @property
     def resolved_routes(self) -> Mapping[PersistenceDomain, StorageRoute]:
@@ -146,15 +111,6 @@ class PersistencePlan:
             PersistenceDomain.TRACE: self.trace or self.execution,
             PersistenceDomain.CHECKPOINT: self.checkpoint or self.execution,
         }[domain]
-
-    def filesystem_path(self, domain: PersistenceDomain) -> Path:
-        """Return the physical member root for one filesystem domain."""
-        route = self.route(domain)
-        if route.path is None:
-            raise ValueError("filesystem route path is required")
-        if domain in {PersistenceDomain.EXECUTION, PersistenceDomain.RECOVERY, PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}:
-            return route.path / domain.value
-        return route.path
 
     @property
     def durable_domains(self) -> frozenset[PersistenceDomain]:

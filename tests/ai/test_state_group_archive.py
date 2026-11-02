@@ -4,7 +4,6 @@
 
 import asyncio
 import hashlib
-import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -13,7 +12,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.persistence._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
 from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._sql import SqlStateStorageGroup, SqlStateStore
 from linktools.ai.persistence._schema import build_runtime_sql_metadata
@@ -31,26 +29,12 @@ def _record(label: str) -> StoredRecord:
     )
 
 
-def _filesystem(root: Path, *, read_only: bool = False, standalone: bool = False) -> FilesystemStateStore:
-    group = FilesystemStateStorageGroup(
-        root, namespace="namespace", tenant_id="tenant", scope_digest="group",
-        standalone=standalone, read_only=read_only,
-    )
-    return FilesystemStateStore(
-        root if standalone else root / "owner", namespace="namespace", tenant_id="tenant",
-        runtime_domain="owner", group=group,
-    )
-
-
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "standalone", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sql"))
 async def test_group_archive_isolated_identity_and_atomic_publication(backend: str, tmp_path: Path) -> None:
     engine = None
     if backend == "memory":
         store = InMemoryStateStore()
         other = InMemoryStateStore()
-    elif backend in {"filesystem", "standalone"}:
-        store = _filesystem(tmp_path / "first", standalone=backend == "standalone")
-        other = _filesystem(tmp_path / "second", standalone=backend == "standalone")
     else:
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'first.db'}")
         await provision_database(engine)
@@ -93,45 +77,40 @@ async def test_group_archive_isolated_identity_and_atomic_publication(backend: s
             await engine.dispose()
 
 
-@pytest.mark.parametrize("standalone", (False, True))
-async def test_group_archive_filesystem_restore_readonly_and_unopened_partitions(tmp_path: Path, standalone: bool) -> None:
-    root = tmp_path / "state"
-    store = _filesystem(root, standalone=standalone)
-    hidden = None
-    if not standalone:
-        hidden = FilesystemStateStore(
-            root / "hidden", namespace="namespace", tenant_id="tenant",
-            runtime_domain="hidden", group=store._storage_group,
-        )
-    await store.initialize()
-    if hidden is not None:
-        await hidden.initialize()
-        await hidden.mutate(lambda tx: tx.insert_record(_record("hidden")))
-    scope, archive = await store.storage_group.open_archive(create=True)
+async def test_group_archive_sql_reopen_readonly_and_unopened_partitions(tmp_path: Path) -> None:
+    path = tmp_path / "state.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    await provision_database(engine)
+    owner = SqlStateStore(engine)
+    await owner.initialize()
+    hidden = await owner.storage_group.open_partition(hashlib.sha256(b"hidden").digest(), create=True)
+    await hidden.mutate(lambda tx: tx.insert_record(_record("hidden")))
+    scope, archive = await owner.storage_group.open_archive(create=True)
     await archive.mutate(lambda tx: tx.insert_record(_record("archived")))
-    if hidden is not None:
-        await hidden.close()
-    await store.close()
-    restored = tmp_path / "restored"
-    shutil.copytree(root, restored)
-    root = restored
-    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
-    reopened = _filesystem(root, read_only=True, standalone=standalone)
+    await owner.close()
+    await owner.storage_group.close()
+    await engine.dispose()
+    before = path.read_bytes()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION}))
+    context = create_sql_storage_context(engine)
+    group = SqlStateStorageGroup(context, metadata, read_only=True)
+    reopened = SqlStateStore(engine, context=context, metadata=metadata, group=group)
     await reopened.initialize()
     try:
-        reopened_scope, archive = await reopened.storage_group.open_archive()
-        assert reopened_scope == scope
+        assert (await group.open_archive())[0] == scope
         with pytest.raises(AIError) as error:
-            await reopened.storage_group.open_archive(create=True)
+            await group.open_archive(create=True)
         assert error.value.code is ErrorCode.STORAGE_READ_ONLY
         records = []
-        for partition in await reopened.storage_group.scan_stores():
+        for partition in await group.scan_stores():
             records.extend(await partition.read(lambda tx: tx.scan_records()))
-        assert {record.data["label"] for record in records} == ({"archived"} if standalone else {"archived", "hidden"})
+        assert {record.data["label"] for record in records if "label" in record.data} == {"archived", "hidden"}
     finally:
         await reopened.close()
-    after = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
-    assert before == after
+        await group.close()
+        await engine.dispose()
+    assert path.read_bytes() == before
 
 
 async def test_group_archive_sql_shared_identity_and_unopened_partition_scan(tmp_path: Path) -> None:
@@ -168,17 +147,19 @@ async def test_group_archive_sql_shared_identity_and_unopened_partition_scan(tmp
         await engine.dispose()
 
 
-async def test_group_archive_filesystem_resource_scope_survives_reduced_routes(tmp_path: Path) -> None:
+async def test_group_archive_resource_scope_survives_reduced_routes(tmp_path: Path) -> None:
     from linktools.ai.persistence._resource_scope import StorageResourceRequest, StorageResourceScope
     from linktools.ai.storage import StorageRoute
 
-    root = tmp_path / "state"
-    route = StorageRoute.filesystem(root)
-    requests = tuple(StorageResourceRequest(domain, route, root / domain) for domain in ("owner", "hidden"))
+    route = StorageRoute.sqlite(tmp_path / "state.db")
+    def configure(metadata):
+        build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION}), metadata=metadata)
+
+    requests = tuple(StorageResourceRequest(domain, route, configure_schema=configure) for domain in ("owner", "hidden"))
     first = await StorageResourceScope.open(requests, namespace="namespace", tenant_id="tenant")
-    stores = tuple(FilesystemStateStore(
-        resource.member_path, namespace="namespace", tenant_id="tenant",
-        runtime_domain=request.name, group=resource.group,
+    stores = tuple(SqlStateStore(
+        resource.context.engine, context=resource.context, metadata=resource.metadata,
+        group=resource.group, store_digest=hashlib.sha256(request.name.encode()).digest(),
     ) for request, resource in zip(requests, first.resources))
     for store in stores:
         await store.initialize()
@@ -190,14 +171,15 @@ async def test_group_archive_filesystem_resource_scope_survives_reduced_routes(t
     await first.close()
     second = await StorageResourceScope.open(requests[:1], namespace="namespace", tenant_id="tenant", read_only=True)
     resource = second.resources[0]
-    store = FilesystemStateStore(resource.member_path, namespace="namespace", tenant_id="tenant", runtime_domain="owner", group=resource.group)
+    store = SqlStateStore(resource.context.engine, context=resource.context, metadata=resource.metadata,
+                          group=resource.group, store_digest=hashlib.sha256(b"owner").digest())
     await store.initialize()
     try:
         assert (await store.storage_group.open_archive())[0] == scope
         records = []
         for partition in await store.storage_group.scan_stores():
             records.extend(await partition.read(lambda tx: tx.scan_records()))
-        assert {record.data["label"] for record in records} == {"archived", "hidden"}
+        assert {record.data["label"] for record in records if "label" in record.data} == {"archived", "hidden"}
     finally:
         await store.close()
         await second.close()
@@ -208,13 +190,17 @@ async def test_group_archive_object_resource_survives_route_reduction(tmp_path: 
     from linktools.ai.persistence._plan import PersistencePlan
     from linktools.ai.storage import StorageRoute, read_object
 
-    root = tmp_path / "physical"
-    first = _filesystem(root)
-    hidden = FilesystemStateStore(root / "hidden", namespace="namespace", tenant_id="tenant",
-                                  runtime_domain="hidden", group=first.storage_group)
-    plan = PersistencePlan(conversation=StorageRoute.filesystem(root / "conversation", transaction_root=root),
-                              execution=StorageRoute.filesystem(root / "execution", transaction_root=root))
-    router = build_runtime_object_router(plan, None, {PersistenceDomain.CONVERSATION: first, PersistenceDomain.EXECUTION: hidden}, {})
+    path = tmp_path / "state.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    await provision_database(engine)
+    context = create_sql_storage_context(engine)
+    first = SqlStateStore(engine, context=context)
+    hidden = SqlStateStore(engine, context=context, group=first.storage_group,
+                           store_digest=hashlib.sha256(b"hidden").digest())
+    route = StorageRoute.sqlite(path)
+    plan = PersistencePlan(conversation=route, execution=route)
+    domains = (PersistenceDomain.CONVERSATION, PersistenceDomain.EXECUTION)
+    router = build_runtime_object_router(plan, None, dict(zip(domains, (first, hidden))), dict.fromkeys(PersistenceDomain, context))
     source = router.archive_object_store(PersistenceDomain.CONVERSATION)
     assert source is router.archive_object_store(PersistenceDomain.EXECUTION)
     assert source is not router.object_store(PersistenceDomain.CONVERSATION)
@@ -222,10 +208,23 @@ async def test_group_archive_object_resource_survives_route_reduction(tmp_path: 
     async def chunks() -> AsyncIterator[bytes]:
         yield b"archive"
 
-    await source.put("probe", chunks(), expected_size=7, expected_digest=hashlib.sha256(b"archive").hexdigest())
-    reopened = _filesystem(root, read_only=True)
-    reduced = build_runtime_object_router(plan, None, {PersistenceDomain.EXECUTION: reopened}, {})
-    assert await read_object(reduced.archive_object_store(PersistenceDomain.EXECUTION), "probe", expected_size=7, expected_digest=hashlib.sha256(b"archive").hexdigest()) == b"archive"
+    try:
+        await source.put("probe", chunks(), expected_size=7, expected_digest=hashlib.sha256(b"archive").hexdigest())
+    finally:
+        await first.close()
+        await hidden.close()
+        await first.storage_group.close()
+        await engine.dispose()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    context = create_sql_storage_context(engine)
+    reopened = SqlStateStore(engine, context=context)
+    reduced = build_runtime_object_router(plan, None, {PersistenceDomain.EXECUTION: reopened}, dict.fromkeys(PersistenceDomain, context))
+    try:
+        assert await read_object(reduced.archive_object_store(PersistenceDomain.EXECUTION), "probe", expected_size=7, expected_digest=hashlib.sha256(b"archive").hexdigest()) == b"archive"
+    finally:
+        await reopened.close()
+        await reopened.storage_group.close()
+        await engine.dispose()
     memory = InMemoryStateStore()
     one = build_runtime_object_router(PersistencePlan(), None, {PersistenceDomain.EXECUTION: memory}, {})
     two = build_runtime_object_router(PersistencePlan(), None, {PersistenceDomain.EXECUTION: memory}, {})
@@ -254,17 +253,6 @@ async def test_sql_archive_rejects_missing_identity_with_existing_content(tmp_pa
     finally:
         await owner.close()
         await engine.dispose()
-
-
-@pytest.mark.parametrize("suffix", (".state-archive-objects", ".state-archive-objects/nested"))
-async def test_group_rejects_archive_object_directory_as_state_partition(tmp_path: Path, suffix: str) -> None:
-    from linktools.ai.persistence._resource_scope import StorageResourceRequest, StorageResourceScope
-    from linktools.ai.storage import StorageRoute
-
-    route = StorageRoute.filesystem(tmp_path, transaction_root=tmp_path)
-    with pytest.raises(ValueError):
-        await StorageResourceScope.open((StorageResourceRequest("owner", route, tmp_path / suffix),),
-                                        namespace="namespace", tenant_id="tenant")
 
 
 async def test_memory_group_owns_archive_without_borrowed_member_close_cascade() -> None:

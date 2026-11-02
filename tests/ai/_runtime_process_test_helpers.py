@@ -8,6 +8,7 @@ from ._runtime_test_helpers import model_features
 import asyncio
 import multiprocessing
 import signal
+from dataclasses import replace
 from multiprocessing.connection import Connection
 from pathlib import Path
 import traceback
@@ -42,11 +43,13 @@ def _capabilities(*, conversation: bool = False) -> RuntimeFeatures:
 def _storage(database: Path, phase: str) -> PersistenceStorage:
     if phase in {"pending", "handoff", "finalizing"}:
         return _split_sqlite_storage(database)
-    if phase == "filesystem":
-        return PersistenceStorage(PersistencePlan(
+    if phase == "local_sqlite":
+        execution = StorageRoute.sqlite(database.with_suffix(".execution.db"), exclusive_writer=True)
+        plan = PersistencePlan(
             conversation=StorageRoute.sqlite(database.with_suffix(".conversation.db")),
-            execution=StorageRoute.filesystem(database.with_suffix(".execution")),
-        ))
+            execution=execution,
+        )
+        return PersistenceStorage.from_plan(replace(plan, execution=execution.with_cache(None)))
     return PersistenceStorage.sqlite(database)
 
 
@@ -212,7 +215,7 @@ def _runtime_process(
                     return await agent.start("Wait", idempotency_key="start")
 
                 start_task = asyncio.create_task(start())
-                if phase in {"active", "filesystem", "graceful"}:
+                if phase in {"active", "local_sqlite", "graceful"}:
                     execution = await start_task
                     execution_id = execution.execution_id
                     await asyncio.wait_for(entered.wait(), 10)
@@ -350,7 +353,8 @@ def _runtime_process(
         asyncio.run(run())
         connection.send({"closed": True})
     except BaseException as error:
-        connection.send({"error": type(error).__name__, "traceback": traceback.format_exc()})
+        connection.send({"error": type(error).__name__, "code": error.code.value if isinstance(error, AIError) else None,
+                         "traceback": traceback.format_exc()})
     finally:
         connection.close()
 

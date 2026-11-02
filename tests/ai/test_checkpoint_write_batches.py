@@ -55,7 +55,7 @@ async def _snapshot(store, *, scope_mapping=None):
     )
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_checkpoint_batch_preserves_records_facts_sequences_and_revisions(tmp_path: Path, backend: str) -> None:
     calls = []
 
@@ -174,7 +174,7 @@ async def test_checkpoint_lost_member_cas_rolls_back_entire_write_set(
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("trace", (False, True))
 async def test_terminal_batch_preserves_custom_repository_path_and_durable_values(tmp_path: Path, backend: str, trace: bool) -> None:
     calls = []

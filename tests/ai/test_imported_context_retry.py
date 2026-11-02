@@ -38,7 +38,7 @@ async def test_retry_preserves_imported_history_and_metadata(tmp_path: Path, met
         session_metadata={"note": "x" * metadata_size},
         replace_history_system_prompt=True,
     )
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     if trace:
         group.capability(TraceCapability(), scope="runtime")
     async with Persistence.open('retry-context', storage=storage) as persistence_39, Runtime.attach(persistence=persistence_39, features=model_features(_NoToolsModels(), group)) as runtime:
@@ -85,7 +85,7 @@ async def test_retry_imported_context_matches_native_fork_history(tmp_path: Path
     if trace:
         group.capability(TraceCapability(), scope="runtime")
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('retry-parity', storage=PersistenceStorage.filesystem(tmp_path)) as persistence_83, Runtime.attach(persistence=persistence_83, features=model_features(_NoToolsModels(), group)) as runtime:
+    async with Persistence.open('retry-parity', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_83, Runtime.attach(persistence=persistence_83, features=model_features(_NoToolsModels(), group)) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         agent = runtime.agents.get()
         first = await agent.start("historical question", principal=principal)
@@ -117,7 +117,7 @@ async def test_retry_imported_memory_uses_fresh_isolated_scope(tmp_path: Path) -
     group = RuntimeFeatures("retry-memory")
     group.capability(MemoryCapability(scope="production"))
     group.agent("default", model="default", allow_tools=("*",), allow_skills=(), allow_subagents=())
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     context = ExecutionInputContext.from_messages((), memory={
         "facts.txt": {"content": "accepted memory", "version": "m1:" + "1" * 64},
     })

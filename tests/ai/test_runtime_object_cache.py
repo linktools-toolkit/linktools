@@ -229,12 +229,17 @@ async def test_shared_cache_keeps_domain_tenant_namespace_and_reference_scopes(s
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cache_enabled", (False, True))
-async def test_invalid_reference_metadata_still_fails_integrity(cache_enabled: bool) -> None:
+@pytest.mark.parametrize("damage", ("digest", "size"))
+async def test_invalid_reference_metadata_still_fails_integrity(cache_enabled: bool, damage: str) -> None:
     store, cache = RecordingStore(), RecordingCache()
     ref = await put(store)
     objects = router(store, cache if cache_enabled else None)
     await objects.read_object(PersistenceDomain.ARTIFACT, ref)
-    invalid = ObjectRef(ref.store_id, ref.key, ref.digest, ref.size + 1)
+    invalid = ObjectRef(
+        ref.store_id, ref.key,
+        hashlib.sha256(b"changed").hexdigest() if damage == "digest" else ref.digest,
+        ref.size + 1 if damage == "size" else ref.size,
+    )
     with pytest.raises(AIError) as raised:
         await objects.read_object(PersistenceDomain.ARTIFACT, invalid)
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -245,7 +250,7 @@ async def test_invalid_reference_metadata_still_fails_integrity(cache_enabled: b
 async def test_only_durable_routes_use_cache_backend(tmp_path: Path) -> None:
     store, cache = RecordingStore(), RecordingCache()
     plan = PersistencePlan(
-        conversation=StorageRoute.filesystem(tmp_path / "durable", cache=cache),
+        conversation=StorageRoute.sqlite(tmp_path / "durable.db", cache=cache, exclusive_writer=True),
         artifact=StorageRoute.transient(cache=cache),
         memory=StorageRoute.memory(cache=cache),
     )

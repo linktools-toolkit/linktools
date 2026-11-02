@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.persistence._filesystem import FilesystemStateStore
 from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._sql import SqlStateStore
 from linktools.ai.persistence.state import StateTransactionNestingError, StoredRecord
@@ -35,9 +34,6 @@ async def _store(backend: str, root: Path, cache):
     engine = None
     if backend == "memory":
         store = InMemoryStateStore(cache=cache)
-    elif backend == "filesystem":
-        store = FilesystemStateStore(root, namespace="cache", tenant_id="tenant",
-                                     runtime_domain="conversation", cache=cache)
     else:
         root.mkdir(parents=True, exist_ok=True)
         engine = create_async_engine(f"sqlite+aiosqlite:///{root / 'state.db'}")
@@ -52,7 +48,7 @@ async def _store(backend: str, root: Path, cache):
             await engine.dispose()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sql"))
 async def test_record_hot_reads_skip_source_but_control_scope_and_mutation_do_not(
     backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -91,7 +87,7 @@ async def test_record_hot_reads_skip_source_but_control_scope_and_mutation_do_no
         assert raised.value.code is ErrorCode.STORAGE_CLOSED
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sql"))
 async def test_record_cache_without_backend_preserves_direct_source(
     backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -139,16 +135,6 @@ async def test_sql_shared_record_cache_expires_without_backend_ttl(
             assert reads == 1
 
 
-async def test_record_cache_does_not_hide_poisoned_filesystem_owner(tmp_path: Path) -> None:
-    async with _store("filesystem", tmp_path, InMemoryCacheBackend(max_bytes=100000)) as store:
-        record = _record(1)
-        await store.mutate(lambda tx: tx.insert_record(record))
-        assert await store.read_record(record.key_digest) == record
-        store._poisoned = True
-        with pytest.raises(AIError) as raised:
-            await store.read_record(record.key_digest)
-        assert raised.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
-        store._poisoned = False
 
 
 async def test_distinct_memory_sources_do_not_share_equal_physical_record_keys() -> None:
@@ -262,7 +248,7 @@ async def test_batch_cache_uses_original_capture_time(monkeypatch: pytest.Monkey
         await store.close()
 
 
-@pytest.mark.parametrize("backend", ("filesystem", "sql"))
+@pytest.mark.parametrize("backend", ("sql",))
 async def test_record_cache_checks_storage_group_lifetime(backend: str, tmp_path: Path) -> None:
     async with _store(backend, tmp_path / backend, InMemoryCacheBackend(max_bytes=100000)) as store:
         record = _record(1)
@@ -329,7 +315,7 @@ async def test_sql_close_can_retry_after_cache_waiter_cancellation(tmp_path: Pat
         assert store._closed and store.storage_group._closed
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sql"))
 async def test_native_refresh_repairs_negative_batch_and_keeps_authoritative_absence(
     backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -361,7 +347,7 @@ async def test_native_refresh_repairs_negative_batch_and_keeps_authoritative_abs
         assert calls == 2
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sql"))
 async def test_native_refresh_cannot_publish_before_local_mutation_snapshot(
     backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -445,7 +431,7 @@ async def test_repository_refresh_keeps_custom_store_source_contract() -> None:
         await store.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sql"))
+@pytest.mark.parametrize("backend", ("memory", "sql"))
 async def test_native_refresh_older_source_completion_cannot_replace_newer_refresh(
     backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -475,3 +461,37 @@ async def test_native_refresh_older_source_completion_cannot_replace_newer_refre
         finally:
             release.set()
             await older
+
+
+@pytest.mark.parametrize("committed", (False, True))
+async def test_unknown_sql_write_invalidates_hot_snapshot_without_replaying_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, committed: bool,
+) -> None:
+    async with _store("sql", tmp_path, InMemoryCacheBackend(max_bytes=100000)) as store:
+        old, new = _record(1), _record(2)
+        await store.mutate(lambda tx: tx.insert_record(old))
+        assert await store.read_record(old.key_digest) == old
+        context = store.context
+        original = type(context).run_mutation
+        callbacks = 0
+        uncertain = AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+
+        async def change(tx):
+            nonlocal callbacks
+            callbacks += 1
+            assert await tx.replace_record(new, expected_storage_revision=0)
+
+        async def lose_reply(owner, callback, **kwargs):
+            if owner is context:
+                if committed:
+                    await original(owner, callback, **kwargs)
+                raise uncertain
+            return await original(owner, callback, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(type(context), "run_mutation", lose_reply)
+            with pytest.raises(AIError) as raised:
+                await store.mutate(change)
+            assert raised.value is uncertain
+        assert await store.read_record(old.key_digest) == (new if committed else old)
+        assert callbacks == int(committed)

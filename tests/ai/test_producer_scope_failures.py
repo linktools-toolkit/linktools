@@ -23,8 +23,9 @@ async def test_graph_recovery_denied_actor_never_reaches_producer() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_cleanup", [False, True])
 async def test_constructor_failure_waits_for_cleanup_and_preserves_original(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, cancel_cleanup: bool,
 ) -> None:
     import asyncio
     from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -33,6 +34,9 @@ async def test_constructor_failure_waits_for_cleanup_and_preserves_original(
 
     entered, release = asyncio.Event(), asyncio.Event()
     holders: list[Persistence] = []
+    runtimes: list[Runtime] = []
+    primary = ValueError("original constructor failure")
+    secondary = RuntimeError("secondary cleanup error")
     ready: list[bool] = []
     original_close = _factory._AgentLifecycle.close
 
@@ -41,32 +45,51 @@ async def test_constructor_failure_waits_for_cleanup_and_preserves_original(
         await release.wait()
         ready.append(holders[0].ready)
         await original_close(lifecycle)
-        raise RuntimeError("secondary cleanup error")
+        raise secondary
 
     def fail(*args: object, **kwargs: object) -> None:
-        raise ValueError("original constructor failure")
+        raise primary
 
     monkeypatch.setattr(_factory._AgentLifecycle, "close", close)
     monkeypatch.setattr(Runtime, "_bind_agent_components", fail)
 
     async def run() -> None:
-        async with Persistence.open("constructor-failure", storage=PersistenceStorage.in_memory()) as p:
-            holders.append(p)
-            async with Runtime.attach(features=RuntimeFeatures(), persistence=p, auto_recover=False):
-                pytest.fail("constructor unexpectedly succeeded")
+        persistence = Persistence(PersistenceStorage.in_memory())
+        await persistence.initialize(namespace="constructor-failure", tenant_id="default")
+        holders.append(persistence)
+        runtime = Runtime.attach(features=RuntimeFeatures(), persistence=persistence, auto_recover=False)
+        runtimes.append(runtime)
+        async with runtime:
+            pytest.fail("constructor unexpectedly succeeded")
 
     task = asyncio.create_task(run())
     await asyncio.wait_for(entered.wait(), 5)
     try:
-        task.cancel()
-        await asyncio.sleep(0)
-        task.cancel()
-        await asyncio.sleep(0)
+        if cancel_cleanup:
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.sleep(0)
         assert not task.done()
         assert holders[0].ready
     finally:
         release.set()
-    with pytest.raises(ValueError, match="original constructor failure"):
+    with pytest.raises(ValueError, match="original constructor failure") as failed:
         await asyncio.wait_for(task, 5)
+    assert failed.value is primary
+    if cancel_cleanup:
+        assert isinstance(failed.value.__cause__, asyncio.CancelledError)
+    else:
+        assert failed.value.__cause__ is secondary
     assert ready == [True]
+    owners = tuple(holders[0]._runtime_owners)
+    assert len(owners) == 1 and holders[0].ready
+    with pytest.raises(AIError) as blocked:
+        await holders[0].close()
+    assert blocked.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+    assert holders[0].ready and tuple(holders[0]._runtime_owners) == owners
+    monkeypatch.setattr(_factory._AgentLifecycle, "close", original_close)
+    await asyncio.wait_for(runtimes[0].close(), 5)
+    assert holders[0].ready and not holders[0]._runtime_owners
+    await holders[0].close()
     assert not holders[0].ready

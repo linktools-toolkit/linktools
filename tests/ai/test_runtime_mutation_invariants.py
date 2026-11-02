@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Filesystem Runtime mutation transaction evidence."""
+"""Runtime mutation transaction and restart evidence."""
 
 import asyncio
 import hashlib
@@ -74,7 +74,7 @@ async def test_configured_runtime_mutation_requires_active_transaction() -> None
 @pytest.mark.asyncio
 async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path: Path) -> None:
     root = tmp_path / "runtime"
-    state = Persistence(PersistenceStorage.filesystem(root))
+    state = Persistence(PersistenceStorage.from_root(root, exclusive_writer=True))
     await state.initialize(namespace="effect-unknown", tenant_id="tenant")
     try:
         await state.recovery.tools.reserve(_tool_record())
@@ -96,7 +96,7 @@ async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path:
     finally:
         await state.close()
 
-    reopened = Persistence(PersistenceStorage.filesystem(root))
+    reopened = Persistence(PersistenceStorage.from_root(root, exclusive_writer=True))
     await reopened.initialize(namespace="effect-unknown", tenant_id="tenant")
     try:
         record = await reopened.recovery.tools.get_operation(
@@ -111,7 +111,7 @@ async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path:
 @pytest.mark.asyncio
 async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> None:
     root = tmp_path / "runtime"
-    state = Persistence(PersistenceStorage.filesystem(root))
+    state = Persistence(PersistenceStorage.from_root(root, exclusive_writer=True))
     await state.initialize(namespace="nested-event", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = ExecutionRecord(
@@ -149,7 +149,7 @@ async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> N
     finally:
         await state.close()
 
-    reopened = Persistence(PersistenceStorage.filesystem(root))
+    reopened = Persistence(PersistenceStorage.from_root(root, exclusive_writer=True))
     await reopened.initialize(namespace="nested-event", tenant_id="tenant")
     try:
         events = await reopened.execution.events.list(

@@ -18,7 +18,7 @@ from .test_incremental_projection_boundaries import _storage
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("transition", ("complete", "clear_pending", "same_shell"))
 async def test_observation_append_preserves_pending_facts_and_stale_fence(
     tmp_path: Path, backend: str, transition: str,
@@ -77,7 +77,7 @@ async def test_observation_append_preserves_pending_facts_and_stale_fence(
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("failure", ("cas", "body"))
 async def test_observation_append_rollback_keeps_original_head_and_retry(
     tmp_path: Path, backend: str, failure: str,
@@ -113,7 +113,7 @@ async def test_observation_append_rollback_keeps_original_head_and_retry(
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_empty_unchanged_observation_still_requires_head_guard(
     tmp_path: Path, backend: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -215,7 +215,10 @@ async def test_lost_pending_lease_never_executes_effect(tmp_path: Path) -> None:
     group.tool(effect, effect_policy='replay_safe')
     group.agent('default', model='default', allow_tools=('effect',))
     storage = PersistenceStorage.sqlite(tmp_path / 'state.db', cache=cache, coordination=cache)
-    async with Persistence.open("lost-pending", storage=storage) as persistence:
+    persistence = Persistence(storage)
+    await persistence.initialize(namespace="lost-pending", tenant_id="default")
+    source_group = persistence.execution.executions.state_store.storage_group
+    try:
         opened = Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), group))
         runtime = await opened.__aenter__()
         try:
@@ -229,9 +232,23 @@ async def test_lost_pending_lease_never_executes_effect(tmp_path: Path) -> None:
             assert effects == []
             assert await runtime._state.execution.executions.state_store.read(lambda _: runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)) is None
         finally:
-            with pytest.raises(AIError) as close_error:
-                await opened.__aexit__(None, None, None)
-            assert close_error.value.code is ErrorCode.STORAGE_CONFLICT
+            await opened.__aexit__(None, None, None)
+        assert effects == []
+        assert not persistence._runtime_owners
+        assert await persistence.execution.executions.get(
+            execution.execution_id, tenant_id=runtime.tenant_id,
+        ) is None
+        assert await persistence.execution.executions.get_history_head(
+            execution.execution_id, tenant_id=runtime.tenant_id,
+        ) is None
+        assert not cache._turns
+    finally:
+        try:
+            await persistence.close()
+        finally:
+            await source_group.close()
+            await source_group.context.close()
+            assert source_group.context.closed
 
 
 @pytest.mark.asyncio

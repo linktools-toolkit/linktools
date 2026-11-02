@@ -18,23 +18,20 @@ from linktools.ai.asset import (
     AssetStore,
     AssetVersionRef,
     DirectoryAssetBackend,
-    FilesystemAssetBackend,
     InMemoryAssetBackend,
+    SqlAssetBackend,
     validate_materialized_path,
 )
 from linktools.ai.asset import _materialization
 from linktools.ai.capability import AssetCapability, SkillResource, validate_resource_path
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.storage import StorageEntryRevision, StorageOverlay
+from linktools.ai.migrate import provision_asset_database
+from linktools.ai.storage import FilesystemObjectStore, PayloadPolicy, StorageEntryRevision, StorageOverlay
 
 
-async def _store(root: Path, backend_name: str = "memory") -> AssetStore:
-    backend = (
-        InMemoryAssetBackend()
-        if backend_name == "memory"
-        else FilesystemAssetBackend(str(root))
-    )
+async def _store() -> AssetStore:
+    backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
     return store
@@ -57,11 +54,24 @@ def _temporary_parent(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend_name", ("memory", "filesystem"))
+@pytest.mark.parametrize("backend_name", ("memory", "sqlite-filesystem"))
 async def test_materialization_reads_pinned_history_and_owns_files(
     tmp_path: Path, backend_name: str,
 ) -> None:
-    store = await _store(tmp_path / "backend", backend_name)
+    engine = None
+    if backend_name == "memory":
+        store = await _store()
+    else:
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'assets.db'}")
+        await provision_asset_database(engine)
+        backend = SqlAssetBackend(
+            engine, namespace="materialization", object_store=FilesystemObjectStore(tmp_path / "objects"),
+            payload_policy=PayloadPolicy(0),
+        )
+        store = AssetStore(StorageOverlay(backend, writer=backend))
+        await store.initialize()
     try:
         ref = await _file(store)
         await store.put(ref.key, b"changed")
@@ -87,11 +97,13 @@ async def test_materialization_reads_pinned_history_and_owns_files(
         assert error.value.code is ErrorCode.STORAGE_CLOSED
     finally:
         await store.close()
+        if engine is not None:
+            await engine.dispose()
 
 
 @pytest.mark.asyncio
 async def test_empty_package_and_independent_owners_have_usable_roots(tmp_path: Path) -> None:
-    store = await _store(tmp_path)
+    store = await _store()
     first = AssetMaterializer()
     second = AssetMaterializer()
     try:
@@ -126,7 +138,7 @@ async def test_materialization_rejects_unsafe_paths_before_creating_files(
 ) -> None:
     parent = tmp_path / "projections"
     _temporary_parent(monkeypatch, parent)
-    store = await _store(tmp_path)
+    store = await _store()
     try:
         ref = await _file(store)
         with pytest.raises(AIError) as declaration_error:
@@ -150,7 +162,7 @@ async def test_materialization_rejects_unsafe_paths_before_creating_files(
 async def test_materialization_rejects_modes_outside_the_captured_file_set(
     tmp_path: Path, modes: dict[str, int],
 ) -> None:
-    store = await _store(tmp_path)
+    store = await _store()
     try:
         ref = await _file(store)
         async with AssetMaterializer() as materializer:
@@ -162,7 +174,7 @@ async def test_materialization_rejects_modes_outside_the_captured_file_set(
 
 @pytest.mark.asyncio
 async def test_materialization_rejects_overlapping_file_and_directory_paths(tmp_path: Path) -> None:
-    store = await _store(tmp_path)
+    store = await _store()
     try:
         ref = await _file(store)
         async with AssetMaterializer() as materializer:
@@ -179,7 +191,7 @@ async def test_invalid_version_references_leave_no_projection(
 ) -> None:
     parent = tmp_path / "projections"
     _temporary_parent(monkeypatch, parent)
-    store = await _store(tmp_path)
+    store = await _store()
     try:
         ref = await _file(store)
         if invalid == "integrity":
@@ -206,7 +218,7 @@ async def test_partial_write_failure_removes_unpublished_files(
 ) -> None:
     parent = tmp_path / "projections"
     _temporary_parent(monkeypatch, parent)
-    store = await _store(tmp_path)
+    store = await _store()
     open_file = Path.open
 
     def failing_open(path: Path, *args: object, **kwargs: object) -> IO[bytes] | IO[str]:
@@ -232,7 +244,7 @@ async def test_cancelled_materialization_waits_for_writer_before_removal(
 ) -> None:
     parent = tmp_path / "projections"
     _temporary_parent(monkeypatch, parent)
-    store = await _store(tmp_path)
+    store = await _store()
     started = threading.Event()
     release = threading.Event()
     write_files = _materialization._write_files
@@ -273,7 +285,7 @@ async def test_close_waits_for_pending_writes_without_publishing_expired_paths(
 ) -> None:
     parent = tmp_path / "projections"
     _temporary_parent(monkeypatch, parent)
-    store = await _store(tmp_path)
+    store = await _store()
     started = threading.Event()
     release = threading.Event()
     write_files = _materialization._write_files
@@ -312,7 +324,7 @@ async def test_close_waits_for_pending_writes_without_publishing_expired_paths(
 async def test_cancelled_close_finishes_removal_and_is_repeatable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = await _store(tmp_path)
+    store = await _store()
     started = threading.Event()
     release = threading.Event()
     remove_tree = _materialization._remove_tree
@@ -347,7 +359,7 @@ async def test_cancelled_close_finishes_removal_and_is_repeatable(
 async def test_failed_cleanup_preserves_primary_and_can_be_retried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = await _store(tmp_path)
+    store = await _store()
     materializer = AssetMaterializer()
     remove_tree = _materialization.shutil.rmtree
 

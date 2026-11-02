@@ -57,7 +57,7 @@ async def _timeline(state: Persistence, owner: str = "owner"):
     )
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_timeline_read_scope_preserves_turns_and_authority(
     tmp_path: Path, backend: str,
 ) -> None:

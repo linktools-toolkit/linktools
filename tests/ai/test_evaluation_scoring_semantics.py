@@ -69,7 +69,7 @@ async def test_rescore_reuses_targets_in_each_reopened_runtime_environment(
     scorer = Task("semantics.environment-score", score, effect_policy="none")
     state = tmp_path / "state"
     async with (
-        Persistence.open('rescore-environment', storage=PersistenceStorage.filesystem(state), tenant_id='evaluation-consumers') as persistence_64,
+        Persistence.open('rescore-environment', storage=PersistenceStorage.from_root(state, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_64,
         TaskEngine.open(target, scorer, persistence=persistence_64, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -89,7 +89,7 @@ async def test_rescore_reuses_targets_in_each_reopened_runtime_environment(
         work = tmp_path / "workspace"
         work.mkdir()
         features = workspace_features("workspace", workspace=Workspace.load(work))
-    storage = PersistenceStorage.filesystem(state)
+    storage = PersistenceStorage.from_root(state, exclusive_writer=True)
     context = replace(CONTEXT, app=object()) if environment in {"app", "both"} else CONTEXT
     async with (
         Persistence.open('rescore-environment', storage=storage, tenant_id=PRINCIPAL.tenant_id) as persistence_85,
@@ -119,7 +119,7 @@ async def test_agent_input_evidence_reaches_rule_and_model_scorers_without_label
     body = b"Do not expose binary bodies through input evidence"
     received: list[ScoringInput] = []
     async with (
-        Persistence.open('scoring-input', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_110,
+        Persistence.open('scoring-input', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_110,
         Runtime.attach(persistence=persistence_110, context=CONTEXT, features=model_features(models, capabilities())) as runtime,
     ):
         async def score(context: TaskNodeContext[None]) -> JsonValue:
@@ -181,7 +181,7 @@ async def test_agent_evidence_uses_the_accepted_projected_prompt(tmp_path: Path)
 
     scorer = Task("semantics.projected-score", score, effect_policy="none")
     async with (
-        Persistence.open('projected-input', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_168,
+        Persistence.open('projected-input', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_168,
         Runtime.attach(persistence=persistence_168, context=CONTEXT, features=model_features(models, capabilities())) as runtime,
     ):
         target = Task.from_agent("semantics.projected-target", runtime.agents.get(), build_input=project)
@@ -221,7 +221,7 @@ async def test_graph_evidence_retains_merged_task_inputs_and_dependency_values(t
     template = TaskGraphTemplate((TaskNode("prepare", task=first, input={"fixed": "template data"}),
         TaskNode("finish", ("prepare",), task=second, input_refs={"prepared": TaskNodeResultRef("prepare")})))
     async with (
-        Persistence.open('graph-input', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_203,
+        Persistence.open('graph-input', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_203,
         TaskEngine.open(first, second, scorer, persistence=persistence_203, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -254,7 +254,7 @@ async def test_accepted_human_decision_is_consumed_after_deferred_input_becomes_
     context = replace(CONTEXT, app=object()) if live else CONTEXT
     features = workspace_features("workspace", workspace=Workspace.load(tmp_path)) if live else None
     async with (
-        Persistence.open('early-human', storage=PersistenceStorage.filesystem(tmp_path), tenant_id=PRINCIPAL.tenant_id) as persistence_233,
+        Persistence.open('early-human', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=PRINCIPAL.tenant_id) as persistence_233,
         Runtime.attach(persistence=persistence_233, context=context, features=model_features(FixtureModels(), features)),
         TaskEngine.open(target, persistence=persistence_233, context=context) as engine,
     ):
@@ -326,7 +326,7 @@ async def test_same_human_decision_handles_concurrent_native_resume(
     target = Task("semantics.concurrent-human-target", echo, effect_policy="none")
     scorer = ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,))
     async with (
-        Persistence.open('concurrent-human', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_302,
+        Persistence.open('concurrent-human', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_302,
     ):
         async with (
             TaskEngine.open(target, persistence=persistence_302, context=CONTEXT) as engine,
@@ -408,7 +408,7 @@ async def test_concurrent_deferred_inputs_do_not_accept_a_conflicting_value(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with (
-        Persistence.open('conflicting-input', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_380,
+        Persistence.open('conflicting-input', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_380,
         TaskEngine.open(persistence=persistence_380, context=CONTEXT) as engine,
         History.open(persistence=persistence_380, authorization=None) as history,
     ):
@@ -462,7 +462,7 @@ async def test_new_human_decision_rejects_native_cancellation_before_reconciliat
     target = Task("semantics.cancelled-human-target", echo, effect_policy="none")
     scorer = ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,))
     async with (
-        Persistence.open('cancelled-human', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_431,
+        Persistence.open('cancelled-human', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_431,
         TaskEngine.open(target, persistence=persistence_431, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -485,7 +485,7 @@ async def test_new_human_decision_rejects_native_cancellation_before_reconciliat
         pending = await asyncio.wait_for(waiting_score(), 10)
         experiment_id = run.experiment_id
 
-    storage = PersistenceStorage.filesystem(tmp_path)
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with (
         Persistence.open('cancelled-human', storage=storage, tenant_id='evaluation-consumers') as persistence_454,
     ):
@@ -509,7 +509,7 @@ async def test_new_human_decision_is_rejected_after_its_slot_times_out(tmp_path:
     target = Task("semantics.expired-human-target", echo, effect_policy="none")
     scorer = ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,))
     async with (
-        Persistence.open('expired-human', storage=PersistenceStorage.filesystem(tmp_path), tenant_id='evaluation-consumers') as persistence_470,
+        Persistence.open('expired-human', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_470,
         TaskEngine.open(target, persistence=persistence_470, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):

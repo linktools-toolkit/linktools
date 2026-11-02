@@ -20,7 +20,7 @@ from .test_shared_content_archive import _archive, _publish
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_loaded_frontier_appends_without_metadata_reads_and_preserves_old_roots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:

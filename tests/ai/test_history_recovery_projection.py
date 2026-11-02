@@ -44,7 +44,7 @@ from .test_step_projection import _execution
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_public_response_ahead_then_distinct_sdk_response(
     tmp_path: Path, backend: str
 ) -> None:
@@ -336,7 +336,7 @@ async def test_public_response_ahead_then_distinct_sdk_response(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("published_state", (None, "RUNNING", "INTERRUPTED"))
 async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associations(
     tmp_path: Path,
@@ -565,7 +565,7 @@ async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associati
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_restored_completed_tool_group_consumes_published_pending_results(
     tmp_path: Path,
     backend: str,
@@ -651,7 +651,7 @@ async def test_restored_completed_tool_group_consumes_published_pending_results(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_required_checkpoint_rejects_replaced_producer_before_recovery_write(
     tmp_path: Path,
     backend: str,

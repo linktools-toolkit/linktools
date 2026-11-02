@@ -51,6 +51,8 @@ class _Executor:
 
 def _local_backend(current: object) -> LocalExecutionBackend:
     backend = object.__new__(LocalExecutionBackend)
+    backend._execution_buffer = None
+    backend._run_store = None
     backend._execution = SimpleNamespace(executions=_ExecutionRecords(current))
     backend._tenant_id = "tenant"
     backend._pending_turns = _PendingExecutionTurns()

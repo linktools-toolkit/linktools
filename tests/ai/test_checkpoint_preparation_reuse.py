@@ -115,7 +115,7 @@ async def test_run_preparation_preserves_custom_relocation_and_preparation(
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("fault", ("append", "cancel", "failure"))
 async def test_run_preparation_body_io_keeps_fresh_commit_and_releases_cancelled_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, fault: str,
@@ -169,7 +169,7 @@ async def test_run_preparation_body_io_keeps_fresh_commit_and_releases_cancelled
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_run_preparation_rejects_corrupt_head_without_run(
     tmp_path: Path, backend: str,
 ) -> None:

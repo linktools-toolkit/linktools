@@ -7,6 +7,8 @@ from ._runtime_test_helpers import model_features
 
 from ._runtime_test_helpers import workspace_features
 
+from contextlib import nullcontext
+
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 
@@ -15,7 +17,7 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.capability import TraceCapability
+from linktools.ai.capability import CheckpointCapability, TraceCapability
 
 from ._runtime_test_helpers import _UsageFunctionModel
 from .test_live_history_readback_integration import _Models
@@ -23,7 +25,8 @@ from .test_live_history_readback_integration import _Models
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ("fatal", "retry", "failed"))
-async def test_tool_failure_trace_is_durable_and_does_not_fabricate_a_return(failure: str) -> None:
+@pytest.mark.parametrize("checkpoint", (False, True))
+async def test_tool_failure_trace_is_durable_and_does_not_fabricate_a_return(failure: str, checkpoint: bool) -> None:
     requests = 0
 
     async def broken(_context: AgentContext[None]) -> str:
@@ -41,35 +44,42 @@ async def test_tool_failure_trace_is_durable_and_does_not_fabricate_a_return(fai
         return ModelResponse(parts=[TextPart("Recovered")])
 
     group = RuntimeFeatures("tool-failure-trace")
+    if checkpoint:
+        group.capability(CheckpointCapability(), scope="runtime")
     group.capability(TraceCapability(), scope="runtime")
     group.tool(broken, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("broken",))
-    async with Persistence.open('tool-failure-trace', storage=PersistenceStorage.in_memory()) as persistence_44, Runtime.attach(persistence=persistence_44, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
-        execution = await runtime.agents.get("default").start("Call the tool")
-        if failure == "fatal":
-            with pytest.raises(AIError) as caught:
-                await execution.wait(timeout_seconds=10)
-            assert caught.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
-        else:
-            result = (await execution.wait(timeout_seconds=10)).result
-            assert result.output == {"text": "Recovered"}
-        trace = (await execution.trace(tool_call_id="broken-call")).items
-        errors = [item for item in trace if item.payload["kind"] == "TOOL_ERROR"]
-        assert len(errors) == 1
-        assert errors[0].payload["status"] == ("EFFECT_UNKNOWN" if failure == "fatal" else "FAILED")
-        if failure == "fatal":
-            assert errors[0].payload["error_code"] == ErrorCode.TOOL_EFFECT_UNKNOWN.value
-        assert errors[0].payload["duration_ns"] >= 0
-        assert errors[0].payload["model_request_seq"] == 1
-        history = (await execution.history(tool_call_id="broken-call", include_content=True)).items
-        if failure == "fatal":
-            assert [item.item_kind for item in history] == ["tool_call"]
-            assert requests == 1
-        else:
-            assert len(history) == 2
-            assert history[0].item_kind == "tool_call"
-            assert history[1].content is not None
-            assert requests == 2
+    close_expectation = pytest.raises(AIError) if failure == "fatal" and not checkpoint else nullcontext()
+    with close_expectation as close_error:
+        async with Persistence.open('tool-failure-trace', storage=PersistenceStorage.in_memory()) as persistence_44, Runtime.attach(persistence=persistence_44, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
+            execution = await runtime.agents.get("default").start("Call the tool")
+            if failure == "fatal":
+                with pytest.raises(AIError) as caught:
+                    await execution.wait(timeout_seconds=10)
+                assert caught.value.code is (ErrorCode.TOOL_EFFECT_UNKNOWN if checkpoint else ErrorCode.STORAGE_UNAVAILABLE)
+            else:
+                result = (await execution.wait(timeout_seconds=10)).result
+                assert result.output == {"text": "Recovered"}
+            trace = (await execution.trace(tool_call_id="broken-call")).items
+            errors = [item for item in trace if item.payload["kind"] == "TOOL_ERROR"]
+            assert len(errors) == 1
+            assert errors[0].payload["status"] == ("EFFECT_UNKNOWN" if failure == "fatal" and checkpoint else "FAILED")
+            if failure == "fatal":
+                assert errors[0].payload["error_code"] == (ErrorCode.TOOL_EFFECT_UNKNOWN if checkpoint else ErrorCode.STORAGE_UNAVAILABLE).value
+            assert errors[0].payload["duration_ns"] >= 0
+            assert errors[0].payload["model_request_seq"] == 1
+            history = (await execution.history(tool_call_id="broken-call", include_content=True)).items
+            if failure == "fatal":
+                assert [item.item_kind for item in history] == ["tool_call"]
+                assert requests == 1
+            else:
+                assert len(history) == 2
+                assert history[0].item_kind == "tool_call"
+                assert history[1].content is not None
+                assert requests == 2
+
+    if failure == "fatal" and not checkpoint:
+        assert close_error.value.code is ErrorCode.STORAGE_UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -164,6 +174,8 @@ async def test_pause_handoff_drains_only_its_execution_while_another_run_is_live
         (ToolPermissionRule("ask", tool_name="read_file"),), default="allow",
     )))
     group = workspace_features("parallel-handoff", workspace=workspace)
+    if handoff == "recovery_required":
+        group.capability(CheckpointCapability(), scope="runtime")
     group.capability(TraceCapability(), scope="runtime")
     group.tool(broken, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("read_file", "broken"))

@@ -2,14 +2,16 @@
 # -*- coding: utf-8 -*-
 """Immutable content ranges retain occurrences without copying prior bodies."""
 
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import pytest
 
-from linktools.ai.errors import AIError
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence
 from linktools.ai.persistence._archive import ArchiveRoot, ContentArchive, PreparedArchive
 from linktools.ai.persistence._plan import PersistenceDomain
+from linktools.ai.storage import StoredPayload
 from .test_incremental_projection_boundaries import _storage
 
 pytestmark = pytest.mark.asyncio
@@ -25,7 +27,7 @@ async def _publish(archive: ContentArchive, prepared: PreparedArchive) -> None:
     await archive.store.mutate(lambda tx: archive.publish(tx, prepared))
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_shared_content_preserves_occurrences_exact_slices_and_old_roots(tmp_path: Path, backend: str) -> None:
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
@@ -126,8 +128,6 @@ async def test_prepared_content_reuses_verified_metadata_with_batch_local_body_r
 
 
 async def test_combined_preparation_rejects_foreign_scope_and_conflicting_records(tmp_path: Path) -> None:
-    from dataclasses import replace
-
     state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
     try:
@@ -153,7 +153,47 @@ async def test_combined_preparation_rejects_foreign_scope_and_conflicting_record
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+async def test_verified_content_detaches_views_and_rejects_replaced_body(tmp_path: Path) -> None:
+    state = Persistence(_storage("memory", tmp_path))
+    await state.initialize(namespace="archive", tenant_id="tenant")
+    try:
+        archive = await _archive(state)
+        values = (("bytes", b"body"),)
+        prepared = PreparedArchive()
+        identities = await archive.prepare_content(values, prepared)
+        key, original = next(iter(prepared.records.items()))
+        source = dict(original.data)
+        record = replace(original, data=source)
+        prepared.records[key] = record
+        await archive.prepare_content(values, prepared)
+        expected = dict(record.data)
+
+        source["payload"]["value"] = "caller edit"
+        view = record.data["payload"]
+        view["value"] = "consumer edit"
+        assert dict(record.data) == expected
+        with pytest.raises(FrozenInstanceError):
+            record.kind = "changed"
+        assert await archive.prepare_content(values, prepared) == identities
+
+        changed = replace(record, data={
+            **record.data, "payload": StoredPayload.inline_bytes(b"evil").to_json(),
+        })
+        prepared.records[key] = changed
+        with pytest.raises(AIError) as caught:
+            await archive.prepare_content(values, prepared)
+        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert not prepared.content_verified(changed)
+
+        prepared.records[key] = record
+        await _publish(archive, prepared)
+        assert not prepared.content_verified(record)
+        assert await archive.read_contents(identities, codec="bytes") == (b"body",)
+    finally:
+        await state.close()
+
+
+@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_range_metadata_uses_one_snapshot_and_body_reads_leave_it(tmp_path, monkeypatch, backend):
     from linktools.ai.persistence.state import active_state_scope
 

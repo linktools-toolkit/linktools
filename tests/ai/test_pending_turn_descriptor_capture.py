@@ -164,7 +164,7 @@ async def test_late_winner_after_capture_remains_authoritative(
         assert active_state_scope() is None
 
 
-@pytest.mark.parametrize("backend", ("memory", "filesystem"))
+@pytest.mark.parametrize("backend", ("memory",))
 async def test_unsupported_group_keeps_descriptor_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
