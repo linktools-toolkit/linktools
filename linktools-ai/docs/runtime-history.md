@@ -117,7 +117,10 @@ that entry selection. With `include_content=False`, both bodies remain omitted.
 
 The durable owner uses the same request-context/envelope pair; it does not store
 an additional classification. One absent half is invalid, success requires a
-response, and attachments cannot claim inclusion without request preparation.
+response. A retained response without request preparation cannot claim attachment
+inclusion. Running trace metadata can omit prepared request bodies while retaining
+already observed attachment facts; absence of those bodies is not proof that
+preparation never occurred.
 Prepared running records cannot lose that preparation in a successor. Integrity
 checks still verify stored bytes; two deliberately rewritten absent request
 fields have the same shape as a legitimately unprepared response and cannot be

@@ -731,7 +731,7 @@ class ModelInteractionRecord:
             tuple(_normalize_model_attachment_fact(value) for value in self.attachments),
         )
 
-        if self.request_context is None and any(value["fact"] == "included_in_request" for value in self.attachments):
+        if self.response_context is not None and self.request_context is None and any(value["fact"] == "included_in_request" for value in self.attachments):
             raise ValueError("direct result cannot claim prepared request attachments")
 
     def validate_storage_domain(self, domain: PersistenceDomain) -> None:

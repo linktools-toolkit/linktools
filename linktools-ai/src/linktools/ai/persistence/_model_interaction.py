@@ -247,7 +247,7 @@ class StagedModelInteraction:
             if not isinstance(normalized, dict):
                 raise ValueError("staged model attachment fact is invalid")
             normalized_attachments.append(normalized)
-        if self.request_context is None and any(value.get("fact") == "included_in_request" for value in normalized_attachments):
+        if self.response_context is not None and self.request_context is None and any(value.get("fact") == "included_in_request" for value in normalized_attachments):
             raise ValueError("direct result cannot claim prepared request attachments")
         object.__setattr__(self, "attachments", tuple(normalized_attachments))
 

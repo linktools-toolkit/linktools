@@ -91,6 +91,12 @@ def test_direct_result_contract_rejects_fabricated_preparation(staged: bool) -> 
         "content_key": "c" * 64, "position": 0, "call_id": None, "input_identifier": None,
     }
     assert replace(direct, attachments=(accepted,)).attachments == (accepted,)
+    included = {**accepted, "fact": "included_in_request"}
+    running_metadata = replace(direct, status="RUNNING", response_context=None,
+                               duration_ns=None, finished_at=None, attachments=(included,))
+    assert running_metadata.attachments == (included,)
+    if not staged:
+        assert _decode_step_envelope(_encode_step_envelope(running_metadata)) == running_metadata
     with pytest.raises(ValueError):
         replace(direct, attachments=({**accepted, "fact": "included_in_request"},))
 
