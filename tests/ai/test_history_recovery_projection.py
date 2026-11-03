@@ -74,7 +74,7 @@ async def test_public_response_ahead_then_distinct_sdk_response(
             StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant",
             conversation_archive=restored.read_store(PersistenceDomain.CONVERSATION),
             execution_archive=public,
-            recovery_archive=recovery,
+            checkpoint_archive=recovery,
         )
         await old.initialize()
 
@@ -365,7 +365,7 @@ async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associati
             StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant",
             conversation_archive=root_store.read_store(PersistenceDomain.CONVERSATION),
             execution_archive=root_store.read_store(PersistenceDomain.TRACE),
-            recovery_archive=root_store.read_store(PersistenceDomain.CHECKPOINT),
+            checkpoint_archive=root_store.read_store(PersistenceDomain.CHECKPOINT),
         )
         await store.initialize()
         public = store.read_store(PersistenceDomain.TRACE)
@@ -403,7 +403,7 @@ async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associati
             StagingAgentRunStore(),
             conversation_archive=store.read_store(PersistenceDomain.CONVERSATION),
             execution_archive=None,
-            recovery_archive=recovery,
+            checkpoint_archive=recovery,
         )
         await recovery_only.initialize()
         recorder = AgentRunRecorder(
@@ -670,7 +670,7 @@ async def test_required_checkpoint_rejects_replaced_producer_before_recovery_wri
             StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant",
             conversation_archive=root.read_store(PersistenceDomain.CONVERSATION),
             execution_archive=root.read_store(PersistenceDomain.TRACE),
-            recovery_archive=root.read_store(PersistenceDomain.CHECKPOINT),
+            checkpoint_archive=root.read_store(PersistenceDomain.CHECKPOINT),
         )
         await old.initialize()
         old.bind_execution_producer(

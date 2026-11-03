@@ -30,7 +30,6 @@ from .contracts import (
 from ._memory import InMemoryStateStore
 from ._object_router import _RuntimeObjectRouter, build_runtime_object_router
 from ._plan import PersistenceDomain, PersistencePlan, runtime_domain_uses_object_store
-from ._checkpoint_repositories import build_checkpoint_repository_bundle
 from .repositories import (
     OperationLedgerRepositoryImpl,
     RepositoryBase,
@@ -63,7 +62,7 @@ if TYPE_CHECKING:
         IdempotencyRepository,
         MemoryRepository,
         OperationLedgerRepository,
-        RecoveryCheckpointRepository,
+        ExecutionCheckpointRepository,
         SessionRepository,
         TaskAdmissionRepository,
         TaskRepository,
@@ -187,11 +186,11 @@ async def materialize_runtime_storage(
         await store.initialize()
 
     execution_store = stores[PersistenceDomain.EXECUTION]
-    recovery_store = stores[PersistenceDomain.CHECKPOINT_CONTROL]
-    if execution_store.storage_group is not recovery_store.storage_group:
+    checkpoint_store = stores[PersistenceDomain.CHECKPOINT_CONTROL]
+    if execution_store.storage_group is not checkpoint_store.storage_group:
         raise AIError(
             ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
-            "execution and recovery must share a StateStorageGroup",
+            "execution and checkpoint control must share a StateStorageGroup",
         )
 
     atomic_domains = {PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}
@@ -207,13 +206,8 @@ async def materialize_runtime_storage(
             stores[domain], namespace=namespace, tenant_id=tenant_id, domain=domain
         )
         for domain in PersistenceDomain
-        if domain not in {PersistenceDomain.CHECKPOINT_CONTROL, PersistenceDomain.TASK, PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}
+        if domain not in {PersistenceDomain.TASK, PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}
     }
-    bundles[PersistenceDomain.CHECKPOINT_CONTROL] = build_checkpoint_repository_bundle(
-        recovery_store,
-        namespace=namespace,
-        tenant_id=tenant_id,
-    )
     task_store = stores[PersistenceDomain.TASK]
     bundles[PersistenceDomain.TASK] = {
         "operations": OperationLedgerRepositoryImpl(
@@ -339,7 +333,7 @@ def _repositories(
             checkpoint=CheckpointRepositories(
                 cast("ApprovalRepository", bundles[PersistenceDomain.CHECKPOINT_CONTROL]["approvals"]),
                 cast("ExternalCallRepository", bundles[PersistenceDomain.CHECKPOINT_CONTROL]["external_calls"]),
-                cast("RecoveryCheckpointRepository", bundles[PersistenceDomain.CHECKPOINT_CONTROL]["checkpoints"]),
+                cast("ExecutionCheckpointRepository", bundles[PersistenceDomain.CHECKPOINT_CONTROL]["checkpoints"]),
                 cast("OperationLedgerRepository", bundles[PersistenceDomain.CHECKPOINT_CONTROL]["operations"]),
                 cast("ToolStateRepository", bundles[PersistenceDomain.CHECKPOINT_CONTROL]["tools"]),
             ),

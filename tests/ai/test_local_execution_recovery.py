@@ -160,7 +160,7 @@ def _backend() -> LocalExecutionBackend:
         return ()
 
     backend._execution = _ExecutionState(record)
-    backend._recovery = SimpleNamespace(
+    backend._checkpoint = SimpleNamespace(
         operations=SimpleNamespace(list_pending=no_resolution_operations)
     )
     binding = _binding()
@@ -742,7 +742,7 @@ async def test_abort_start_releases_its_session_when_admission_checkpoint_is_abs
     backend._execution.executions.record = current
     checkpoints = _Checkpoints(None)
     sessions = _Sessions()
-    backend._recovery = SimpleNamespace(checkpoints=checkpoints)
+    backend._checkpoint = SimpleNamespace(checkpoints=checkpoints)
     backend._conversation = SimpleNamespace(sessions=sessions)
 
     await backend.abort_start(current)
@@ -765,7 +765,7 @@ async def test_abort_start_rejects_an_execution_that_already_started() -> None:
     backend._execution.executions.record = current
     checkpoints = _Checkpoints(None)
     sessions = _Sessions()
-    backend._recovery = SimpleNamespace(checkpoints=checkpoints)
+    backend._checkpoint = SimpleNamespace(checkpoints=checkpoints)
     backend._conversation = SimpleNamespace(sessions=sessions)
 
     with pytest.raises(AIError) as raised:

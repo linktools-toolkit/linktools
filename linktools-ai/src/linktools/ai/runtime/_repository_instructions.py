@@ -18,7 +18,7 @@ from ..errors import AIError, ErrorCode
 from ..spec import RepositoryInstructions
 from ._tool_boundary import RepositoryInstructionBoundary
 from ..execution import ExecutionRecord
-from ..persistence.contracts import RecoveryCheckpoint
+from ..persistence.contracts import ExecutionCheckpoint
 
 if TYPE_CHECKING:
     from ._recovery_coordinator import _RecoveryCoordinator
@@ -75,7 +75,7 @@ def _repository_instructions_contain(
 
 
 def _validate_repository_instruction_frontier(
-    checkpoint: RecoveryCheckpoint,
+    checkpoint: ExecutionCheckpoint,
     overlay: RepositoryInstructions | None,
 ) -> None:
     reference = checkpoint.repository_instruction_overlay

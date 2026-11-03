@@ -96,7 +96,7 @@ async def test_recovery_preserves_each_tool_result_once_with_its_original_positi
             StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant",
             conversation_archive=first.read_store(PersistenceDomain.CONVERSATION),
             execution_archive=archive,
-            recovery_archive=first.read_store(PersistenceDomain.CHECKPOINT),
+            checkpoint_archive=first.read_store(PersistenceDomain.CHECKPOINT),
         )
         await second.initialize()
         second.bind_execution_producer("run", execution_id="execution", producer_generation=1)
@@ -244,7 +244,7 @@ async def test_replayed_model_calls_reuse_effects_and_keep_new_raw_part_indexes(
         quick_result = await execute(bridge_for("first"), original, quick_call)
         second = RuntimeAgentRunStore(
             StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant", conversation_archive=state.run_store.read_store(PersistenceDomain.CONVERSATION),
-            execution_archive=archive, recovery_archive=state.run_store.read_store(PersistenceDomain.CHECKPOINT),
+            execution_archive=archive, checkpoint_archive=state.run_store.read_store(PersistenceDomain.CHECKPOINT),
         )
         await second.initialize()
         recorder = recorder_for(second)
@@ -315,7 +315,7 @@ async def test_delayed_observation_cannot_write_after_another_producer_is_admitt
         archive = first.read_store(PersistenceDomain.TRACE)
         old_producer = RuntimeAgentRunStore(
             StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant", conversation_archive=first.read_store(PersistenceDomain.CONVERSATION),
-            execution_archive=archive, recovery_archive=first.read_store(PersistenceDomain.CHECKPOINT),
+            execution_archive=archive, checkpoint_archive=first.read_store(PersistenceDomain.CHECKPOINT),
         )
         await old_producer.initialize()
         old_producer.trace_persistence.configure("run", buffer=InMemoryCacheBackend(max_bytes=65536))

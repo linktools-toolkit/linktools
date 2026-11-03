@@ -72,7 +72,7 @@ async def test_startup_unknown_commit_never_repeats_provider(
     from linktools.ai.errors import AIError, ErrorCode
     from linktools.ai.persistence.contracts import (
         ExecutionRecord,
-        RecoveryCheckpoint,
+        ExecutionCheckpoint,
     )
     from linktools.ai.persistence.state import active_state_scope
     calls = []
@@ -92,7 +92,7 @@ async def test_startup_unknown_commit_never_repeats_provider(
         faults = []
         def matches(value):
             return (isinstance(value, tuple) and len(value) == 2
-                    and isinstance(value[0], ExecutionRecord) and isinstance(value[1], RecoveryCheckpoint))
+                    and isinstance(value[0], ExecutionRecord) and isinstance(value[1], ExecutionCheckpoint))
         async def mutate(group, stores, callback):
             outer = active_state_scope() is None
             async def guarded(transaction):
@@ -322,8 +322,8 @@ async def test_prepared_attempt_member_conflict_rolls_back_authority_and_context
     from linktools.ai.errors import AIError, ErrorCode
     from linktools.ai.persistence.contracts import (
         AgentAttemptClaim,
-        RecoveryCheckpoint,
-        RecoveryCheckpointState,
+        ExecutionCheckpoint,
+        ExecutionCheckpointState,
         RuntimePayloadRef,
     )
     from linktools.ai.persistence._runtime_commands import StateCommands
@@ -339,11 +339,11 @@ async def test_prepared_attempt_member_conflict_rolls_back_authority_and_context
     try:
         execution = replace(_record(ExecutionStatus.STARTED, 0), revision=1, durable_trace=False)
         await state.execution.executions.create_with_history_head(execution)
-        checkpoint = RecoveryCheckpoint(execution.execution_id, None, RecoveryCheckpointState.ADMITTED,
+        checkpoint = ExecutionCheckpoint(execution.execution_id, None, ExecutionCheckpointState.ADMITTED,
                                         0, execution.created_at, execution.updated_at)
         await state.checkpoint.checkpoints.create(checkpoint)
         commands = StateCommands(state.execution.executions, namespace='startup-member-cas',
-                                        events=state.execution.events, recovery=state.checkpoint.checkpoints,
+                                        events=state.execution.events, checkpoint=state.checkpoint,
                                         background_tasks=set())
         stores = (state.execution.executions.state_store, state.checkpoint.checkpoints.state_store)
         before = [await _snapshot(store) for store in stores]
@@ -363,7 +363,7 @@ async def test_prepared_attempt_member_conflict_rolls_back_authority_and_context
             patch.setattr(_SqlTransaction, 'replace_records', conflict)
             with pytest.raises(AIError) as caught:
                 await commands.commit_prepared_agent_attempt_checkpoint(
-                    AgentAttemptClaim(execution.execution_id, 1, 0, 0, RecoveryCheckpointState.ADMITTED),
+                    AgentAttemptClaim(execution.execution_id, 1, 0, 0, ExecutionCheckpointState.ADMITTED),
                     RuntimePayloadRef(StoredPayload.inline_json({'prepared': True}), None),
                 )
         assert caught.value.code is ErrorCode.STORAGE_CONFLICT

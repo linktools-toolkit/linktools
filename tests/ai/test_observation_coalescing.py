@@ -258,7 +258,7 @@ async def test_transient_observations_do_not_schedule_durability_tasks() -> None
     store = _steps.RuntimeAgentRunStore(
         StagingAgentRunStore(),
         conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
-        execution_archive=None, recovery_archive=None,
+        execution_archive=None, checkpoint_archive=None,
     )
     await store.initialize()
     try:

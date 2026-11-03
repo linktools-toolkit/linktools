@@ -220,14 +220,14 @@ async def test_claim_renewal_covers_large_result_persistence(
                 await clock.advance(seconds)
             return "x" * 70000
 
-        put = bridge._recovery_objects.put
+        put = bridge._checkpoint_objects.put
 
         async def slow_put(*args: Any, **kwargs: Any) -> Any:
             for _ in range(4):
                 await clock.advance(20)
             return await put(*args, **kwargs)
 
-        monkeypatch.setattr(bridge._recovery_objects, "put", slow_put)
+        monkeypatch.setattr(bridge._checkpoint_objects, "put", slow_put)
         assert await _call(bridge, effect) == "x" * 70000
         operation, = await bridge.list_operations()
         assert operation.status is ToolOperationStatus.COMPLETED

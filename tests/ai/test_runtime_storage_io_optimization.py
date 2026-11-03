@@ -23,7 +23,7 @@ from linktools.ai.persistence.contracts import (
 )
 from linktools.ai.persistence._history import TranscriptRepository
 from linktools.ai.persistence._checkpoint_repositories import (
-    RecoveryApprovalRepositoryImpl,
+    ApprovalRepositoryImpl,
 )
 from linktools.ai.persistence._sql import SqlStateStore
 from linktools.ai.storage import (
@@ -203,7 +203,7 @@ async def test_approval_cancel_batches_known_record_sql(
     await provision_database(engine)
     store = SqlStateStore(engine)
     await store.initialize()
-    repository = RecoveryApprovalRepositoryImpl(
+    repository = ApprovalRepositoryImpl(
         store,
         namespace="io-approval",
         tenant_id="tenant",

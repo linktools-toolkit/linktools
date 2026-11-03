@@ -24,8 +24,8 @@ from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence.contracts import (
     AgentAttemptClaim,
     ExecutionRecord,
-    RecoveryCheckpoint,
-    RecoveryCheckpointState,
+    ExecutionCheckpoint,
+    ExecutionCheckpointState,
 )
 from linktools.ai.persistence._runtime_commands import StateCommands
 
@@ -76,16 +76,16 @@ async def _admission(
                 execution, recovery_operation=operation,
             )
         return execution, admit
-    checkpoint = RecoveryCheckpoint(
+    checkpoint = ExecutionCheckpoint(
         execution_id=execution.execution_id, agent_run_id=None,
-        state=RecoveryCheckpointState.ADMITTED, revision=0,
+        state=ExecutionCheckpointState.ADMITTED, revision=0,
         created_at=_NOW, updated_at=_NOW,
     )
     await storage.checkpoint.checkpoints.create(checkpoint)
     commands = StateCommands(
         storage.execution.executions, namespace=_NAMESPACE,
         events=storage.execution.events, operations=storage.execution.operations,
-        recovery=storage.checkpoint.checkpoints, background_tasks=set(),
+        checkpoint=storage.checkpoint, background_tasks=set(),
     )
     claim = AgentAttemptClaim(
         execution.execution_id, execution.revision, execution.agent_run_seq,
@@ -126,7 +126,7 @@ async def test_competing_claims_share_one_recovery_admission(
         checkpoint = await storage.checkpoint.checkpoints.get("execution", tenant_id="tenant")
         assert checkpoint is not None
         assert checkpoint.revision == 1
-        assert checkpoint.state is RecoveryCheckpointState.ACTIVE
+        assert checkpoint.state is ExecutionCheckpointState.ACTIVE
 
     advanced = await storage.execution.executions.compare_and_swap(
         "execution", tenant_id="tenant", expected_revision=admitted.revision,
@@ -172,7 +172,7 @@ async def test_recovery_receipt_rolls_back_with_producer_checkpoint(
     if mode == "attempt":
         checkpoint = await storage.checkpoint.checkpoints.get("execution", tenant_id="tenant")
         assert checkpoint is not None
-        assert checkpoint.state is RecoveryCheckpointState.ADMITTED
+        assert checkpoint.state is ExecutionCheckpointState.ADMITTED
         assert checkpoint.revision == 0
 
 

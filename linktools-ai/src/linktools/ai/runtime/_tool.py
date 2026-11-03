@@ -223,7 +223,7 @@ class RuntimeToolOperationBridge:
     def __init__(
         self,
         repository: _ToolOperationRuntimeRepository,
-        recovery_objects: ObjectStore,
+        checkpoint_objects: ObjectStore,
         *,
         namespace: str,
         tenant_id: str,
@@ -241,7 +241,7 @@ class RuntimeToolOperationBridge:
         require_active: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._repository = repository
-        self._recovery_objects = recovery_objects
+        self._checkpoint_objects = checkpoint_objects
         self._object_keys = ObjectKeyFactory(namespace)
         self._tenant_id = validate_tenant_id(tenant_id)
         self._execution_id = validate_resource_id(execution_id)
@@ -865,7 +865,7 @@ class RuntimeToolOperationBridge:
         if payload_fits_inline(inline, self._payload_policy):
             return inline
         reference = await put_runtime_object(
-            self._recovery_objects,
+            self._checkpoint_objects,
             self._object_keys,
             PersistenceDomain.CHECKPOINT_CONTROL,
             self._tenant_id,
@@ -884,7 +884,7 @@ class RuntimeToolOperationBridge:
             return value
         if payload.ref is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return await read_runtime_object(self._recovery_objects, payload.ref)
+        return await read_runtime_object(self._checkpoint_objects, payload.ref)
 
     def _run_id(self, ctx: PydanticRunContext[None]) -> str:
         del ctx

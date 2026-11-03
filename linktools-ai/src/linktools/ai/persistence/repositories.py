@@ -14,7 +14,7 @@ from ._execution_repositories import (
 )
 from ._plan import PersistenceDomain
 from ._checkpoint_repositories import (
-    ApprovalRepositoryImpl, ExternalCallRepositoryImpl, RecoveryCheckpointRepositoryImpl, ToolRepositoryImpl,
+    ApprovalRepositoryImpl, ExternalCallRepositoryImpl, ExecutionCheckpointRepositoryImpl, ToolRepositoryImpl,
 )
 from ._repository_common import (
     OperationLedgerRepositoryImpl, RepositoryBase, append_operation, decode_operation, decode_record_cursor,
@@ -57,7 +57,7 @@ def build_repository_bundle(
         values.update(
             approvals=ApprovalRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
             external_calls=ExternalCallRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
-            checkpoints=RecoveryCheckpointRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
+            checkpoints=ExecutionCheckpointRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
             tools=ToolRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
         )
     return values
@@ -65,4 +65,4 @@ def build_repository_bundle(
 
 from ._repository_common import operation_identity_matches
 
-__all__ = ['ApprovalRepositoryImpl', 'ArtifactRepositoryImpl', 'BudgetRepositoryImpl', 'ConversationHistoryRepositoryImpl', 'EvaluationRepositoryImpl', 'EventRepositoryImpl', 'ExecutionRepositoryImpl', 'ExternalCallRepositoryImpl', 'IdempotencyRepositoryImpl', 'MemoryRepositoryImpl', 'OperationLedgerRepositoryImpl', 'RecoveryCheckpointRepositoryImpl', 'RepositoryBase', 'SessionRepositoryImpl', 'ToolRepositoryImpl', 'append_operation', 'build_repository_bundle', 'decode_operation', 'decode_record_cursor', 'operation_identity_matches', 'projected_record', 'record_cursor', 'replace_checked', 'require_repository_tenant']
+__all__ = ['ApprovalRepositoryImpl', 'ArtifactRepositoryImpl', 'BudgetRepositoryImpl', 'ConversationHistoryRepositoryImpl', 'EvaluationRepositoryImpl', 'EventRepositoryImpl', 'ExecutionRepositoryImpl', 'ExternalCallRepositoryImpl', 'IdempotencyRepositoryImpl', 'MemoryRepositoryImpl', 'OperationLedgerRepositoryImpl', 'ExecutionCheckpointRepositoryImpl', 'RepositoryBase', 'SessionRepositoryImpl', 'ToolRepositoryImpl', 'append_operation', 'build_repository_bundle', 'decode_operation', 'decode_record_cursor', 'operation_identity_matches', 'projected_record', 'record_cursor', 'replace_checked', 'require_repository_tenant']

@@ -343,12 +343,12 @@ def _runtime_commands(
         events=state.execution.events,
         operations=state.execution.operations,
         conversation=state.conversation.sessions,
-        recovery=state.checkpoint.checkpoints,
+        checkpoint=state.checkpoint,
         conversation_history=state.conversation.histories,
         tools=state.checkpoint.tools,
         conversation_run_store=state.run_store.read_store(PersistenceDomain.CONVERSATION),
         execution_run_store=state.run_store.read_store(PersistenceDomain.TRACE),
-        recovery_run_store=state.run_store.read_store(PersistenceDomain.CHECKPOINT),
+        checkpoint_archive=state.run_store.read_store(PersistenceDomain.CHECKPOINT),
         background_tasks=set() if background_tasks is None else background_tasks,
     )
 

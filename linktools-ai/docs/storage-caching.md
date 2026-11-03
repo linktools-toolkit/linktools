@@ -336,11 +336,24 @@ share a store ID, so stored references must keep their explicit source address.
 All other enum members, `RuntimePayloadRef.source_domain` and terminal-result
 `object_source_domain` types, field names and encoded values remain unchanged.
 
-Low-level call changes are limited to `persistence.recovery.tools` →
+Low-level call changes include `persistence.recovery.tools` →
 `persistence.checkpoint.tools` and `PersistenceDomain.RECOVERY` →
 `PersistenceDomain.CHECKPOINT_CONTROL`; the repository bundle type is now
-`CheckpointRepositories`. Normal Runtime/Capability composition, approval and
-recovery operations need no additional objects, flags or context managers.
+`CheckpointRepositories`. `StateCommands` accepts this existing bundle as
+`checkpoint` instead of separately accepting its approval, external-call and
+execution-checkpoint repositories. Its execution-bound tool adapter remains a
+separate dependency. Both `StateCommands` and `RuntimeAgentRunStore` use
+`checkpoint_archive` for the optional context archive; control records do not
+acquire the archive's optional retention or closing lifecycle.
+
+`ExecutionCheckpoint` and `ExecutionCheckpointState` name the small execution
+control record and its state. `AgentRunCheckpoint` continues to describe the
+larger model-context checkpoint. These Python names do not change the existing
+stored discriminator or payload: supported snapshots remain readable without
+rewriting their source. Direct low-level callers use the new constructor and
+type names; no old-parameter aliases are provided. Normal Runtime/Capability
+composition, approval and recovery operations need no additional objects,
+flags or context managers.
 Control and archive remain separate records under one owner: updating an approval
 or attempt revision does not rewrite model-message bodies. Existing partition
 keys, object references and snapshot layouts remain intact, without online

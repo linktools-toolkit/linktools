@@ -27,8 +27,8 @@ from linktools.ai.persistence.contracts import (
     ExecutionRecord,
     PendingDeferredCall,
     PendingToolContinuation,
-    RecoveryCheckpoint,
-    RecoveryCheckpointState,
+    ExecutionCheckpoint,
+    ExecutionCheckpointState,
     RecoveryHandoffPhase,
     StoredUserInput,
 )
@@ -106,11 +106,11 @@ def _continuation() -> PendingToolContinuation:
     )
 
 
-def _checkpoint(now: datetime) -> RecoveryCheckpoint:
-    return RecoveryCheckpoint(
+def _checkpoint(now: datetime) -> ExecutionCheckpoint:
+    return ExecutionCheckpoint(
         execution_id="execution",
         agent_run_id="step-1",
-        state=RecoveryCheckpointState.ACTIVE,
+        state=ExecutionCheckpointState.ACTIVE,
         revision=0,
         created_at=now,
         updated_at=now,
@@ -149,15 +149,13 @@ def _commands(state: Persistence, namespace: str) -> StateCommands:
         namespace=namespace,
         events=state.execution.events,
         operations=state.execution.operations,
-        approvals=state.checkpoint.approvals,
-        external_calls=state.checkpoint.external_calls,
         conversation=state.conversation.sessions,
-        recovery=state.checkpoint.checkpoints,
+        checkpoint=state.checkpoint,
         conversation_history=state.conversation.histories,
         tools=state.checkpoint.tools,
         conversation_run_store=state.run_store.read_store(PersistenceDomain.CONVERSATION),
         execution_run_store=state.run_store.read_store(PersistenceDomain.TRACE),
-        recovery_run_store=state.run_store.read_store(PersistenceDomain.CHECKPOINT),
+        checkpoint_archive=state.run_store.read_store(PersistenceDomain.CHECKPOINT),
         background_tasks=set(),
     )
 
@@ -168,7 +166,7 @@ async def _enter_waiting(
     Persistence,
     StateCommands,
     ExecutionRecord,
-    RecoveryCheckpoint,
+    ExecutionCheckpoint,
     PendingToolContinuation,
 ]:
     state = Persistence(PersistenceStorage.in_memory())
@@ -221,7 +219,7 @@ async def test_deferred_checkpoint_persists_approval_frontier_atomically() -> No
         assert current is not None
         assert current.status is ExecutionStatus.WAITING_DEFERRED
         assert checkpoint is not None
-        assert checkpoint.state is RecoveryCheckpointState.WAITING
+        assert checkpoint.state is ExecutionCheckpointState.WAITING
         assert checkpoint.pending_tools == continuation
         assert approval is not None and approval.status is ApprovalStatus.PENDING
         events = await state.execution.events.list(
@@ -272,7 +270,7 @@ async def test_deferred_resume_clears_frontier_and_advances_attempt_once() -> No
         )
         assert resumed.status is ExecutionStatus.STARTED
         assert resumed.agent_run_seq == 2
-        assert active.state is RecoveryCheckpointState.ACTIVE
+        assert active.state is ExecutionCheckpointState.ACTIVE
         assert active.pending_tools is None
         assert active.agent_run_id != continuation.source_agent_run_id
     finally:
@@ -318,7 +316,7 @@ async def test_deferred_cancel_cancels_pending_approval_and_clears_frontier() ->
         )
         assert approval is not None and approval.status is ApprovalStatus.CANCELLED
         assert active is not None
-        assert active.state is RecoveryCheckpointState.ACTIVE
+        assert active.state is ExecutionCheckpointState.ACTIVE
         assert active.pending_tools is None
     finally:
         await state.close()

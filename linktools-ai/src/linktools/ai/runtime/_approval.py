@@ -30,9 +30,9 @@ from ..persistence.contracts import (
     ApprovalRepository,
     ExecutionRepository,
     PendingDeferredCall,
-    RecoveryCheckpoint,
-    RecoveryCheckpointRepository,
-    RecoveryCheckpointState,
+    ExecutionCheckpoint,
+    ExecutionCheckpointRepository,
+    ExecutionCheckpointState,
 )
 
 
@@ -55,7 +55,7 @@ class DefaultApprovalService:
         self,
         approvals: ApprovalRepository,
         executions: ExecutionRepository,
-        checkpoints: RecoveryCheckpointRepository,
+        checkpoints: ExecutionCheckpointRepository,
         authorization: AuthorizationPolicy,
         *,
         objects: ObjectStore,
@@ -205,7 +205,7 @@ class DefaultApprovalService:
         execution_id: str,
         *,
         tenant_id: str,
-    ) -> RecoveryCheckpoint | None:
+    ) -> ExecutionCheckpoint | None:
         execution = await self._executions.state_store.read(
             lambda _transaction: self._executions.get(execution_id, tenant_id=tenant_id)
         )
@@ -216,7 +216,7 @@ class DefaultApprovalService:
             return None
         if (
             checkpoint is None
-            or checkpoint.state is not RecoveryCheckpointState.WAITING
+            or checkpoint.state is not ExecutionCheckpointState.WAITING
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return checkpoint
@@ -245,7 +245,7 @@ class DefaultApprovalService:
 
 
 def _pending_approval(
-    checkpoint: RecoveryCheckpoint | None,
+    checkpoint: ExecutionCheckpoint | None,
     approval_id: str,
     *,
     tenant_id: str,

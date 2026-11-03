@@ -17,7 +17,7 @@ from linktools.ai.core import ApprovalStatus, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.persistence.contracts import RecoveryCheckpointState
+from linktools.ai.persistence.contracts import ExecutionCheckpointState
 from linktools.ai.workspace import (
     Workspace,
     WorkspacePolicy,
@@ -84,7 +84,7 @@ async def test_composed_runtime_ask_enters_approval_wait(
             tenant_id=runtime.tenant_id,
         )
         assert checkpoint is not None
-        assert checkpoint.state is RecoveryCheckpointState.WAITING
+        assert checkpoint.state is ExecutionCheckpointState.WAITING
         assert checkpoint.pending_tools is not None
         approvals = await runtime._state.checkpoint.approvals.list_pending(
             execution.execution_id,

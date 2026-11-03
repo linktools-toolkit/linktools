@@ -35,8 +35,8 @@ from linktools.ai.persistence.contracts import (
     ExecutionRecord,
     PendingDeferredCall,
     PendingToolContinuation,
-    RecoveryCheckpoint,
-    RecoveryCheckpointState,
+    ExecutionCheckpoint,
+    ExecutionCheckpointState,
     RecoveryHandoffPhase,
     StoredUserInput,
 )
@@ -214,11 +214,11 @@ def test_recovery_checkpoint_owns_only_the_deferred_frontier() -> None:
     now = datetime.now(timezone.utc)
 
     def checkpoint(
-        state: RecoveryCheckpointState,
+        state: ExecutionCheckpointState,
         agent_run_id: str | None,
         pending_tools: PendingToolContinuation | None = None,
-    ) -> RecoveryCheckpoint:
-        return RecoveryCheckpoint(
+    ) -> ExecutionCheckpoint:
+        return ExecutionCheckpoint(
             execution_id="execution",
             agent_run_id=agent_run_id,
             state=state,
@@ -230,12 +230,12 @@ def test_recovery_checkpoint_owns_only_the_deferred_frontier() -> None:
         )
 
     with pytest.raises(ValueError):
-        checkpoint(RecoveryCheckpointState.ADMITTED, "step-1")
+        checkpoint(ExecutionCheckpointState.ADMITTED, "step-1")
     with pytest.raises(ValueError):
-        checkpoint(RecoveryCheckpointState.ACTIVE, None)
-    assert checkpoint(RecoveryCheckpointState.COMPLETED, None).agent_run_id is None
+        checkpoint(ExecutionCheckpointState.ACTIVE, None)
+    assert checkpoint(ExecutionCheckpointState.COMPLETED, None).agent_run_id is None
     waiting = checkpoint(
-        RecoveryCheckpointState.WAITING,
+        ExecutionCheckpointState.WAITING,
         "step-1",
         _pending_tools(),
     )

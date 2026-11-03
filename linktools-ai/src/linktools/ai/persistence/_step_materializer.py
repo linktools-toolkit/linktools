@@ -72,7 +72,7 @@ def build_runtime_agent_run_store(
         tenant_id=tenant_id,
         conversation_archive=archives[PersistenceDomain.CONVERSATION],
         execution_archive=archives.get(PersistenceDomain.TRACE),
-        recovery_archive=archives.get(PersistenceDomain.CHECKPOINT),
+        checkpoint_archive=archives.get(PersistenceDomain.CHECKPOINT),
     )
 
 

@@ -39,7 +39,7 @@ from linktools.ai.persistence.codec import (
 from linktools.ai.persistence.contracts import (
     ExecutionHistoryState,
     ExecutionRecord,
-    RecoveryCheckpointState,
+    ExecutionCheckpointState,
     RecoveryHandoffPhase,
 )
 
@@ -190,7 +190,7 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
         assert (await recovery.latest_checkpoint(agent_run_id=run_id) is not None) is (restart or split_storage)
         if split_storage:
             handoff = await runtime._state.checkpoint.checkpoints.get(execution.execution_id, tenant_id=runtime.tenant_id)
-            assert handoff is not None and handoff.state is RecoveryCheckpointState.COMPLETED
+            assert handoff is not None and handoff.state is ExecutionCheckpointState.COMPLETED
             assert handoff.handoff_phase is RecoveryHandoffPhase.COMPLETED
             assert handoff.terminal_handoff is not None
 

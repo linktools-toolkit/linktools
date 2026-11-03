@@ -21,8 +21,8 @@ from linktools.ai.persistence.contracts import (
     ExecutionRecord,
     PendingDeferredCall,
     PendingToolContinuation,
-    RecoveryCheckpoint,
-    RecoveryCheckpointState,
+    ExecutionCheckpoint,
+    ExecutionCheckpointState,
     RecoveryHandoffPhase,
     RuntimePayloadRef,
     StoredUserInput,
@@ -100,16 +100,16 @@ def _continuation() -> PendingToolContinuation:
     )
 
 
-def _checkpoint(pending_tools: PendingToolContinuation | None) -> RecoveryCheckpoint:
+def _checkpoint(pending_tools: PendingToolContinuation | None) -> ExecutionCheckpoint:
     now = datetime.now(timezone.utc)
     waiting = pending_tools is not None
-    return RecoveryCheckpoint(
+    return ExecutionCheckpoint(
         execution_id="execution",
         agent_run_id="step-1" if waiting else None,
         state=(
-            RecoveryCheckpointState.WAITING
+            ExecutionCheckpointState.WAITING
             if waiting
-            else RecoveryCheckpointState.ADMITTED
+            else ExecutionCheckpointState.ADMITTED
         ),
         revision=1,
         created_at=now,
@@ -176,7 +176,7 @@ def test_deferred_frontier_round_trips_current_contract() -> None:
 
     assert isinstance(wire, dict)
     assert wire["$dataclass"] == "recovery_checkpoint"
-    assert decode_domain(wire, RecoveryCheckpoint) == current
+    assert decode_domain(wire, ExecutionCheckpoint) == current
 
 
 def test_object_ref_traversal_finds_repository_instruction_object() -> None:

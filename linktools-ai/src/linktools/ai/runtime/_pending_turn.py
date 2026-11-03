@@ -19,7 +19,7 @@ from ..execution import (
     ExecutionTerminalCommitResult,
     RuntimePayloadRef,
 )
-from ..persistence.contracts import RecoveryCheckpoint, RecoveryCheckpointState
+from ..persistence.contracts import ExecutionCheckpoint, ExecutionCheckpointState
 from ..session import SessionRecord
 
 
@@ -29,7 +29,7 @@ class _PendingExecutionTurn:
     reservation: ExecutionStartReservation
     session: SessionRecord | None
     execution: ExecutionRecord
-    recovery: RecoveryCheckpoint
+    recovery: ExecutionCheckpoint
     committing: bool = False
     committed: ExecutionTerminalCommitResult | None = None
     failure: AIError | None = None
@@ -43,10 +43,10 @@ class _PendingExecutionTurn:
 
     def activate(
         self, agent_run_id: str, context: RuntimePayloadRef, *, now: datetime,
-    ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
+    ) -> tuple[ExecutionRecord, ExecutionCheckpoint]:
         if self.committing or self.execution.status is not ExecutionStatus.STARTED:
             raise AIError(ErrorCode.EXECUTION_CANCELLED)
-        if self.recovery.state is not RecoveryCheckpointState.ADMITTED:
+        if self.recovery.state is not ExecutionCheckpointState.ADMITTED:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         # These are semantic revisions, not storage CAS revisions. Only the
         # terminal transaction acquires durable authority for the captured turn.
@@ -56,7 +56,7 @@ class _PendingExecutionTurn:
         )
         self.recovery = replace(
             self.recovery, revision=self.recovery.revision + 1,
-            state=RecoveryCheckpointState.ACTIVE, agent_run_id=agent_run_id,
+            state=ExecutionCheckpointState.ACTIVE, agent_run_id=agent_run_id,
             updated_at=now,
         )
         return self.execution, self.recovery
@@ -153,9 +153,9 @@ class _PendingExecutionTurns:
         )
         turn = _PendingExecutionTurn(
             tenant_id, reservation, session, started,
-            RecoveryCheckpoint(
+            ExecutionCheckpoint(
                 execution_id=execution.execution_id, agent_run_id=None,
-                state=RecoveryCheckpointState.ADMITTED, revision=0,
+                state=ExecutionCheckpointState.ADMITTED, revision=0,
                 created_at=now, updated_at=now,
             ),
         )

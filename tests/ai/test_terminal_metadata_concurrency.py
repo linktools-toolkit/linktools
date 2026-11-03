@@ -30,8 +30,8 @@ from linktools.ai.persistence.contracts import (
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
     ResultRecord,
-    RecoveryCheckpoint,
-    RecoveryCheckpointState,
+    ExecutionCheckpoint,
+    ExecutionCheckpointState,
     RecoveryHandoffPhase,
     RecoveryTerminalHandoff,
     RecoveryTerminalOutcome,
@@ -213,10 +213,10 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
         ExecutionEventType.EXECUTION_FAILED,
         {"error_code": ErrorCode.EXECUTION_FAILED.value, "safe_error_details": {}},
     )
-    source_recovery = RecoveryCheckpoint(
+    source_recovery = ExecutionCheckpoint(
         "execution",
         None,
-        RecoveryCheckpointState.HANDOFF,
+        ExecutionCheckpointState.HANDOFF,
         0,
         current.created_at,
         current.updated_at,
@@ -242,7 +242,7 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
     target_recovery = replace(
         source_recovery,
         revision=1,
-        state=RecoveryCheckpointState.COMPLETED,
+        state=ExecutionCheckpointState.COMPLETED,
         handoff_phase=RecoveryHandoffPhase.COMPLETED,
         terminal_handoff=None,
     )
@@ -252,7 +252,7 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
         events=state.execution.events,
         conversation=state.conversation.sessions,
         conversation_run_store=state.run_store.read_store(PersistenceDomain.CONVERSATION),
-        recovery=state.checkpoint.checkpoints,
+        checkpoint=state.checkpoint,
         background_tasks=set(),
     )
     group = repository.state_store.storage_group
@@ -388,7 +388,7 @@ async def test_terminal_rebase_rejects_semantic_changes_without_writes(
         repository,
         namespace="terminal-conflict",
         events=state.execution.events,
-        recovery=state.checkpoint.checkpoints,
+        checkpoint=state.checkpoint,
         background_tasks=set(),
     )
     recovery = None
@@ -413,15 +413,15 @@ async def test_terminal_rebase_rejects_semantic_changes_without_writes(
             )
         else:
             from linktools.ai.persistence.contracts import (
-                RecoveryCheckpoint,
-                RecoveryCheckpointState,
+                ExecutionCheckpoint,
+                ExecutionCheckpointState,
                 RecoveryHandoffPhase,
             )
 
-            recovery = RecoveryCheckpoint(
+            recovery = ExecutionCheckpoint(
                 "execution",
                 None,
-                RecoveryCheckpointState.COMPLETED,
+                ExecutionCheckpointState.COMPLETED,
                 1,
                 current.created_at,
                 current.updated_at,
@@ -492,7 +492,7 @@ async def test_stale_cancelled_worker_cannot_seal_resumed_attempt_before_run_reg
         resumed = await _commands(state).commit_resumed(original)
         commands = StateCommands(
             repository, namespace="unregistered-terminal-fence",
-            events=state.execution.events, recovery=state.checkpoint.checkpoints,
+            events=state.execution.events, checkpoint=state.checkpoint,
             background_tasks=set(),
         )
         terminal = replace(
@@ -507,13 +507,13 @@ async def test_stale_cancelled_worker_cannot_seal_resumed_attempt_before_run_reg
             producer_generation=original.revision,
         )
         assert decode_domain(encode_domain(commit), ExecutionTerminalCommit) == commit
-        checkpoint = RecoveryCheckpoint(
-            original.execution_id, "run", RecoveryCheckpointState.ACTIVE, 0,
+        checkpoint = ExecutionCheckpoint(
+            original.execution_id, "run", ExecutionCheckpointState.ACTIVE, 0,
             resumed.created_at, resumed.updated_at,
         )
         await state.checkpoint.checkpoints.create(checkpoint)
         handoff = replace(
-            checkpoint, state=RecoveryCheckpointState.HANDOFF, revision=1,
+            checkpoint, state=ExecutionCheckpointState.HANDOFF, revision=1,
             handoff_phase=RecoveryHandoffPhase.PREPARED,
             terminal_handoff=RecoveryTerminalHandoff(
                 RecoveryTerminalOutcome(

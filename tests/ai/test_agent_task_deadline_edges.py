@@ -161,7 +161,7 @@ def test_recovery_deadline_uses_original_start_and_tighter_parent() -> None:
 @pytest.mark.asyncio
 async def test_recovery_deadline_guard_does_not_block_pending_cancellation() -> None:
     from linktools.ai.runtime._recovery_coordinator import _RecoveryCoordinator
-    from linktools.ai.persistence.contracts import RecoveryCheckpointState, RecoveryHandoffPhase
+    from linktools.ai.persistence.contracts import ExecutionCheckpointState, RecoveryHandoffPhase
     from .test_local_execution_recovery import _record
 
     execution = replace(_record(), status=ExecutionStatus.CANCELLING)
@@ -179,7 +179,7 @@ async def test_recovery_deadline_guard_does_not_block_pending_cancellation() -> 
     guard = AsyncMock(return_value=False)
     coordinator.bind_relaunch_guard(guard)
     launched = await coordinator.reconcile_checkpoint(SimpleNamespace(
-        execution_id=execution.execution_id, state=RecoveryCheckpointState.ACTIVE,
+        execution_id=execution.execution_id, state=ExecutionCheckpointState.ACTIVE,
         handoff_phase=RecoveryHandoffPhase.NONE,
     ))
     assert not launched

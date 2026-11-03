@@ -1221,8 +1221,8 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
             assert checkpoint_before.agent_run_id is not None
             agent_run_id = checkpoint_before.agent_run_id
             if with_cancel:
-                recovery_archive = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)
-                durable_interaction_count = await recovery_archive.model_interaction_count(
+                checkpoint_archive = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)
+                durable_interaction_count = await checkpoint_archive.model_interaction_count(
                     agent_run_id=agent_run_id
                 )
             operation_id = effects[0].operation_id

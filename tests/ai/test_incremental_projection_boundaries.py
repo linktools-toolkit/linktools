@@ -306,7 +306,7 @@ async def test_recovery_restores_context_without_assuming_public_checkpoint_ackn
         old = RuntimeAgentRunStore(
             StagingAgentRunStore(), execution_repository=repository, tenant_id="tenant",
             conversation_archive=restored.read_store(PersistenceDomain.CONVERSATION),
-            execution_archive=public, recovery_archive=restored.read_store(PersistenceDomain.CHECKPOINT),
+            execution_archive=public, checkpoint_archive=restored.read_store(PersistenceDomain.CHECKPOINT),
         )
         await old.initialize()
         old.bind_execution_producer(run_id, execution_id="execution", producer_generation=1)

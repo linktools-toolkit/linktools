@@ -24,8 +24,8 @@ from linktools.ai.persistence import Persistence
 from linktools.ai.persistence._archive import ContentArchive, ContentRecord, PreparedArchive
 from linktools.ai.persistence._checkpoint_persistence import CheckpointPersistence
 from linktools.ai.persistence.contracts import (
-    ExecutionTerminalCommit, ExecutionTerminalCommitResult, RecoveryCheckpoint,
-    RecoveryCheckpointState, ResultRecord,
+    ExecutionTerminalCommit, ExecutionTerminalCommitResult, ExecutionCheckpoint,
+    ExecutionCheckpointState, ResultRecord,
 )
 from linktools.ai.persistence._runtime_commands import StateCommands
 from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
@@ -271,11 +271,11 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
     )
     current = _execution()
     run, checkpoint = AgentRunRecord("run"), _checkpoint(2)
-    source = RecoveryCheckpoint(
-        "execution", "run", RecoveryCheckpointState.ACTIVE, 0,
+    source = ExecutionCheckpoint(
+        "execution", "run", ExecutionCheckpointState.ACTIVE, 0,
         current.created_at, current.updated_at,
     )
-    target = replace(source, state=RecoveryCheckpointState.COMPLETED, revision=1)
+    target = replace(source, state=ExecutionCheckpointState.COMPLETED, revision=1)
     result = ResultRecord(None, StopReason.ERROR, UsageMetrics(), current.updated_at)
     commit = ExecutionTerminalCommit(
         current.revision, current.event_seq,
@@ -295,8 +295,8 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
         await state.checkpoint.checkpoints.create(source)
         commands = StateCommands(
             state.execution.executions, namespace="terminal-scopes", events=state.execution.events,
-            recovery=state.checkpoint.checkpoints, execution_run_store=trace,
-            recovery_run_store=recovery, background_tasks=set(),
+            checkpoint=state.checkpoint, execution_run_store=trace,
+            checkpoint_archive=recovery, background_tasks=set(),
         )
         monkeypatch.setattr(ContentArchive, "publish", capture)
         async def commit_terminal():

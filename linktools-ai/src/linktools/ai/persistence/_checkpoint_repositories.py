@@ -25,8 +25,8 @@ from .contracts import ToolOperationRecord
 from .contracts import (
     ApprovalRecord,
     ExternalCallRecord,
-    RecoveryCheckpoint,
-    RecoveryCheckpointState,
+    ExecutionCheckpoint,
+    ExecutionCheckpointState,
     ToolOperationAdmission,
     decode_tool_operation_failure,
 )
@@ -41,7 +41,6 @@ from .state import (
     alias_digest,
 )
 from ._repository_common import (
-    OperationLedgerRepositoryImpl,
     RepositoryBase as _RepositoryBase,
     ResourceRepository as _ResourceRepository,
     projected_record as _projected_record,
@@ -122,29 +121,46 @@ class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
         tenant_id: str,
         decided_at: datetime,
     ) -> tuple[ApprovalRecord, ...]:
-        _require_repository_tenant(tenant_id, self._tenant_id)
+        _validate_cancel_request(approval_ids, tenant_id, self._tenant_id, decided_at)
+        ordered = tuple(dict.fromkeys(approval_ids))
+        if not ordered:
+            return ()
+        keys = tuple(self._key("approval", approval_id) for approval_id in ordered)
+        stored_records = await transaction.get_records(keys)
         values: list[ApprovalRecord] = []
-        for approval_id in approval_ids:
-            record = await self.get_in_transaction(
-                transaction,
-                approval_id,
-                tenant_id=tenant_id,
-            )
-            if record is None or record.execution_id != execution_id:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            stored = await transaction.get_record(self._key("approval", approval_id))
+        replacements: list[RecordReplacement] = []
+        for approval_id, key in zip(ordered, keys, strict=True):
+            stored = stored_records.get(key)
             if stored is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if record.status is not ApprovalStatus.PENDING:
-                values.append(record)
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            current = await self._decode(stored, ApprovalRecord)
+            if current.execution_id != execution_id:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if current.status is not ApprovalStatus.PENDING:
+                values.append(current)
                 continue
-            value = replace(record, status=ApprovalStatus.CANCELLED, decided_at=decided_at)
-            await _replace_checked(
-                transaction,
-                _projected_record(self, stored, value),
-                stored.storage_revision,
+            value = replace(
+                current,
+                status=ApprovalStatus.CANCELLED,
+                decided_at=decided_at,
+            )
+            replacements.append(
+                RecordReplacement(
+                    replace(
+                        self._stored(
+                            "approval",
+                            value.approval_id,
+                            value,
+                            state=value.status.value,
+                        ),
+                        storage_revision=stored.storage_revision + 1,
+                    ),
+                    stored.storage_revision,
+                )
             )
             values.append(value)
+        if replacements:
+            await transaction.replace_records(tuple(replacements))
         return tuple(values)
 
     async def list_pending(
@@ -223,29 +239,46 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
         tenant_id: str,
         cancelled_at: datetime,
     ) -> tuple[ExternalCallRecord, ...]:
-        _require_repository_tenant(tenant_id, self._tenant_id)
+        _validate_cancel_request(call_ids, tenant_id, self._tenant_id, cancelled_at)
+        ordered = tuple(dict.fromkeys(call_ids))
+        if not ordered:
+            return ()
+        keys = tuple(self._key("external_call", call_id) for call_id in ordered)
+        stored_records = await transaction.get_records(keys)
         values: list[ExternalCallRecord] = []
-        for call_id in call_ids:
-            record = await self.get_in_transaction(
-                transaction,
-                call_id,
-                tenant_id=tenant_id,
-            )
-            if record is None or record.execution_id != execution_id:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            stored = await transaction.get_record(self._key("external_call", call_id))
+        replacements: list[RecordReplacement] = []
+        for call_id, key in zip(ordered, keys, strict=True):
+            stored = stored_records.get(key)
             if stored is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if record.status is not ExternalCallStatus.PENDING:
-                values.append(record)
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            current = await self._decode(stored, ExternalCallRecord)
+            if current.execution_id != execution_id:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if current.status is not ExternalCallStatus.PENDING:
+                values.append(current)
                 continue
-            value = replace(record, status=ExternalCallStatus.CANCELLED, supplied_at=cancelled_at)
-            await _replace_checked(
-                transaction,
-                _projected_record(self, stored, value),
-                stored.storage_revision,
+            value = replace(
+                current,
+                status=ExternalCallStatus.CANCELLED,
+                supplied_at=cancelled_at,
+            )
+            replacements.append(
+                RecordReplacement(
+                    replace(
+                        self._stored(
+                            "external_call",
+                            value.call_id,
+                            value,
+                            state=value.status.value,
+                        ),
+                        storage_revision=stored.storage_revision + 1,
+                    ),
+                    stored.storage_revision,
+                )
             )
             values.append(value)
+        if replacements:
+            await transaction.replace_records(tuple(replacements))
         return tuple(values)
 
     async def list_pending(
@@ -263,7 +296,7 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
         )
 
 
-class _RecoveryCheckpointRepository(_ResourceRepository[RecoveryCheckpoint]):
+class ExecutionCheckpointRepositoryImpl(_ResourceRepository[ExecutionCheckpoint]):
     """Store one immutable recovery frontier per execution."""
 
     _KIND = "recovery_checkpoint"
@@ -276,15 +309,15 @@ class _RecoveryCheckpointRepository(_ResourceRepository[RecoveryCheckpoint]):
             domain=PersistenceDomain.CHECKPOINT_CONTROL,
             kind=self._KIND,
             resource_kind=ResourceKind.EXECUTION,
-            value_type=RecoveryCheckpoint,
+            value_type=ExecutionCheckpoint,
         )
 
-    async def list(self, *, tenant_id: str) -> tuple[RecoveryCheckpoint, ...]:
+    async def list(self, *, tenant_id: str) -> tuple[ExecutionCheckpoint, ...]:
         if tenant_id != self._tenant_id:
             return ()
         records = await self._records(self._KIND)
         return tuple(
-            [await self._decode(record, RecoveryCheckpoint) for record in records]
+            [await self._decode(record, ExecutionCheckpoint) for record in records]
         )
 
     async def list_recoverable_page(
@@ -293,7 +326,7 @@ class _RecoveryCheckpointRepository(_ResourceRepository[RecoveryCheckpoint]):
         tenant_id: str,
         cursor: str | None,
         limit: int,
-    ) -> Page[RecoveryCheckpoint]:
+    ) -> Page[ExecutionCheckpoint]:
         if tenant_id != self._tenant_id:
             return Page(())
         _validate_page_limit(limit)
@@ -301,10 +334,10 @@ class _RecoveryCheckpointRepository(_ResourceRepository[RecoveryCheckpoint]):
             self._KIND,
             states=frozenset(
                 {
-                    RecoveryCheckpointState.ADMITTED.value,
-                    RecoveryCheckpointState.ACTIVE.value,
-                    RecoveryCheckpointState.WAITING.value,
-                    RecoveryCheckpointState.HANDOFF.value,
+                    ExecutionCheckpointState.ADMITTED.value,
+                    ExecutionCheckpointState.ACTIVE.value,
+                    ExecutionCheckpointState.WAITING.value,
+                    ExecutionCheckpointState.HANDOFF.value,
                 }
             ),
             cursor=cursor,
@@ -312,18 +345,18 @@ class _RecoveryCheckpointRepository(_ResourceRepository[RecoveryCheckpoint]):
         )
         selected = records[:limit]
         values = tuple(
-            [await self._decode(record, RecoveryCheckpoint) for record in selected]
+            [await self._decode(record, ExecutionCheckpoint) for record in selected]
         )
         next_cursor = _record_cursor(selected[-1]) if len(records) > limit else None
         return Page(values, next_cursor)
 
     async def get(
         self, execution_id: str, *, tenant_id: str
-    ) -> RecoveryCheckpoint | None:
+    ) -> ExecutionCheckpoint | None:
         if tenant_id != self._tenant_id:
             return None
         record = await self._record(self._key(self._KIND, execution_id))
-        return None if record is None else await self._decode(record, RecoveryCheckpoint)
+        return None if record is None else await self._decode(record, ExecutionCheckpoint)
 
     async def get_in_transaction(
         self,
@@ -331,16 +364,16 @@ class _RecoveryCheckpointRepository(_ResourceRepository[RecoveryCheckpoint]):
         execution_id: str,
         *,
         tenant_id: str,
-    ) -> RecoveryCheckpoint | None:
+    ) -> ExecutionCheckpoint | None:
         if tenant_id != self._tenant_id:
             return None
         record = await transaction.get_record(self._key(self._KIND, execution_id))
-        return None if record is None else await self._decode(record, RecoveryCheckpoint)
+        return None if record is None else await self._decode(record, ExecutionCheckpoint)
 
     def checkpoint_record_key(self, execution_id: str) -> bytes:
         return self._key(self._KIND, execution_id)
 
-    async def create(self, record: RecoveryCheckpoint) -> RecoveryCheckpoint:
+    async def create(self, record: ExecutionCheckpoint) -> ExecutionCheckpoint:
         return await self._store.mutate(
             lambda transaction: self.admit_in_transaction(transaction, record)
         )
@@ -348,13 +381,13 @@ class _RecoveryCheckpointRepository(_ResourceRepository[RecoveryCheckpoint]):
     async def admit_in_transaction(
         self,
         transaction: StateTransaction,
-        record: RecoveryCheckpoint,
-    ) -> RecoveryCheckpoint:
+        record: ExecutionCheckpoint,
+    ) -> ExecutionCheckpoint:
         _require_tenant(record, self._tenant_id)
         key = self._key(self._KIND, record.execution_id)
         current = await transaction.get_record(key)
         if current is not None:
-            existing = await self._decode(current, RecoveryCheckpoint)
+            existing = await self._decode(current, ExecutionCheckpoint)
             if existing != record:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             return existing
@@ -374,8 +407,8 @@ class _RecoveryCheckpointRepository(_ResourceRepository[RecoveryCheckpoint]):
         *,
         tenant_id: str,
         expected_revision: int,
-        next_record: RecoveryCheckpoint,
-    ) -> RecoveryCheckpoint:
+        next_record: ExecutionCheckpoint,
+    ) -> ExecutionCheckpoint:
         return await self._store.mutate(
             lambda transaction: self.compare_and_swap_in_transaction(
                 transaction,
@@ -393,8 +426,8 @@ class _RecoveryCheckpointRepository(_ResourceRepository[RecoveryCheckpoint]):
         *,
         tenant_id: str,
         expected_revision: int,
-        next_record: RecoveryCheckpoint,
-    ) -> RecoveryCheckpoint:
+        next_record: ExecutionCheckpoint,
+    ) -> ExecutionCheckpoint:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         _require_tenant(next_record, self._tenant_id)
@@ -402,7 +435,7 @@ class _RecoveryCheckpointRepository(_ResourceRepository[RecoveryCheckpoint]):
         current_record = await transaction.get_record(key)
         if current_record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        current = await self._decode(current_record, RecoveryCheckpoint)
+        current = await self._decode(current_record, ExecutionCheckpoint)
         if current.revision != expected_revision:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         if next_record.execution_id != execution_id:
@@ -1413,129 +1446,12 @@ def _require_live_tool_lease(
         raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
 
 
-_ApprovalRepositoryImpl = ApprovalRepositoryImpl
-_ExternalCallRepositoryImpl = ExternalCallRepositoryImpl
 
 
-class RecoveryApprovalRepositoryImpl(_ApprovalRepositoryImpl):
-    async def cancel_pending_in_transaction(
-        self,
-        transaction: StateTransaction,
-        approval_ids: Sequence[str],
-        *,
-        execution_id: str,
-        tenant_id: str,
-        decided_at: datetime,
-    ) -> tuple[ApprovalRecord, ...]:
-        _validate_cancel_request(approval_ids, tenant_id, self._tenant_id, decided_at)
-        ordered = tuple(dict.fromkeys(approval_ids))
-        if not ordered:
-            return ()
-        keys = tuple(self._key("approval", approval_id) for approval_id in ordered)
-        stored_records = await transaction.get_records(keys)
-        values: list[ApprovalRecord] = []
-        replacements: list[RecordReplacement] = []
-        for approval_id, key in zip(ordered, keys, strict=True):
-            stored = stored_records.get(key)
-            if stored is None:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            current = await self._decode(stored, ApprovalRecord)
-            if current.execution_id != execution_id:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if current.status is not ApprovalStatus.PENDING:
-                values.append(current)
-                continue
-            value = replace(
-                current,
-                status=ApprovalStatus.CANCELLED,
-                decided_at=decided_at,
-            )
-            replacements.append(
-                RecordReplacement(
-                    replace(
-                        self._stored(
-                            "approval",
-                            value.approval_id,
-                            value,
-                            state=value.status.value,
-                        ),
-                        storage_revision=stored.storage_revision + 1,
-                    ),
-                    stored.storage_revision,
-                )
-            )
-            values.append(value)
-        if replacements:
-            await transaction.replace_records(tuple(replacements))
-        return tuple(values)
 
 
-class RecoveryExternalCallRepositoryImpl(_ExternalCallRepositoryImpl):
-    async def cancel_pending_in_transaction(
-        self,
-        transaction: StateTransaction,
-        call_ids: Sequence[str],
-        *,
-        execution_id: str,
-        tenant_id: str,
-        cancelled_at: datetime,
-    ) -> tuple[ExternalCallRecord, ...]:
-        _validate_cancel_request(call_ids, tenant_id, self._tenant_id, cancelled_at)
-        ordered = tuple(dict.fromkeys(call_ids))
-        if not ordered:
-            return ()
-        keys = tuple(self._key("external_call", call_id) for call_id in ordered)
-        stored_records = await transaction.get_records(keys)
-        values: list[ExternalCallRecord] = []
-        replacements: list[RecordReplacement] = []
-        for call_id, key in zip(ordered, keys, strict=True):
-            stored = stored_records.get(key)
-            if stored is None:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            current = await self._decode(stored, ExternalCallRecord)
-            if current.execution_id != execution_id:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if current.status is not ExternalCallStatus.PENDING:
-                values.append(current)
-                continue
-            value = replace(
-                current,
-                status=ExternalCallStatus.CANCELLED,
-                supplied_at=cancelled_at,
-            )
-            replacements.append(
-                RecordReplacement(
-                    replace(
-                        self._stored(
-                            "external_call",
-                            value.call_id,
-                            value,
-                            state=value.status.value,
-                        ),
-                        storage_revision=stored.storage_revision + 1,
-                    ),
-                    stored.storage_revision,
-                )
-            )
-            values.append(value)
-        if replacements:
-            await transaction.replace_records(tuple(replacements))
-        return tuple(values)
 
 
-def build_checkpoint_repository_bundle(
-    store: StateStore,
-    *,
-    namespace: str,
-    tenant_id: str,
-) -> dict[str, _RepositoryBase]:
-    return {
-        "operations": OperationLedgerRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id, domain=PersistenceDomain.CHECKPOINT_CONTROL),
-        "approvals": RecoveryApprovalRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
-        "external_calls": RecoveryExternalCallRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
-        "checkpoints": _RecoveryCheckpointRepository(store, namespace=namespace, tenant_id=tenant_id),
-        "tools": ToolRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
-    }
 
 
 def _validate_cancel_request(
@@ -1554,17 +1470,13 @@ def _validate_cancel_request(
         raise ValueError("timestamp must be timezone-aware")
 
 
-RecoveryCheckpointRepositoryImpl = _RecoveryCheckpointRepository
 tool_admission_matches = _tool_admission_matches
 
 
 __all__ = [
     "ApprovalRepositoryImpl",
     "ExternalCallRepositoryImpl",
-    "RecoveryApprovalRepositoryImpl",
-    "RecoveryExternalCallRepositoryImpl",
-    "RecoveryCheckpointRepositoryImpl",
+    "ExecutionCheckpointRepositoryImpl",
     "ToolRepositoryImpl",
-    "build_checkpoint_repository_bundle",
     "tool_admission_matches",
 ]

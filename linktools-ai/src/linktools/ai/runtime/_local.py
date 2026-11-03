@@ -109,7 +109,7 @@ from ..persistence import PersistenceDomain
 from ..persistence.commands import StateCommands
 from ..persistence.repositories import ExecutionRepositoryImpl
 from ..persistence.repositories import SessionRepositoryImpl
-from ..persistence.repositories import RecoveryCheckpointRepositoryImpl
+from ..persistence.repositories import ExecutionCheckpointRepositoryImpl
 from ..persistence.objects import runtime_object_source_reads
 from ..persistence.contracts import (
     ApprovalRecord,
@@ -124,10 +124,10 @@ from ..persistence.contracts import (
     LoadedContextMessage,
     PendingDeferredCall,
     PendingToolContinuation,
-    RecoveryCheckpointState,
+    ExecutionCheckpointState,
     RecoveryHandoffPhase,
     CheckpointRepositories,
-    RecoveryCheckpoint,
+    ExecutionCheckpoint,
     RecoveryConversationIntent,
     RecoveryTerminalHandoff,
     RecoveryTerminalOutcome,
@@ -243,7 +243,7 @@ _CheckpointT = TypeVar("_CheckpointT")
 @dataclass(frozen=True, slots=True)
 class _InitialAttemptCapture:
     execution: ExecutionRecord
-    checkpoint: RecoveryCheckpoint
+    checkpoint: ExecutionCheckpoint
 
 
 class LocalExecutionBackend:
@@ -253,9 +253,9 @@ class LocalExecutionBackend:
         self,
         conversation: ConversationRepositories,
         execution_state: ExecutionRepositories,
-        recovery: CheckpointRepositories,
+        checkpoint: CheckpointRepositories,
         execution_objects: ObjectStore,
-        recovery_objects: ObjectStore,
+        checkpoint_objects: ObjectStore,
         namespace: str,
         run_store: AgentRunStore,
         executor: AgentExecutor,
@@ -298,11 +298,11 @@ class LocalExecutionBackend:
         self._pending_renewals: dict[str, asyncio.Task[None]] = {}
         self._conversation = conversation
         self._execution = execution_state
-        self._recovery = recovery
+        self._checkpoint = checkpoint
         self._execution_objects = execution_objects
         self._context_archive = ExecutionContextArchive(execution_state.executions.state_store, archive_objects or execution_objects,
             namespace=namespace, tenant_id=tenant_id, object_reader=archive_object_reader)
-        self._recovery_objects = recovery_objects
+        self._checkpoint_objects = checkpoint_objects
         self._metric_recorder = metric_recorder
         self._worker_completed = worker_completed
         self._namespace = namespace
@@ -364,10 +364,8 @@ class LocalExecutionBackend:
             namespace=self._namespace,
             events=self._execution.events,
             operations=self._execution.operations,
-            approvals=self._recovery.approvals,
-            external_calls=self._recovery.external_calls,
             conversation=session_repository,
-            recovery=self._recovery.checkpoints,
+            checkpoint=self._checkpoint,
             conversation_history=self._conversation.histories,
             tools=self._tool_operations,
             conversation_run_store=(
@@ -378,7 +376,7 @@ class LocalExecutionBackend:
             execution_run_store=execution_run_store
             if isinstance(execution_run_store, StateStepArchive)
             else None,
-            recovery_run_store=(
+            checkpoint_archive=(
                 self._run_stores[PersistenceDomain.CHECKPOINT]
                 if isinstance(
                     self._run_stores[PersistenceDomain.CHECKPOINT], StateStepArchive
@@ -441,8 +439,8 @@ class LocalExecutionBackend:
         self,
         *,
         cursor: str | None,
-    ) -> Page[RecoveryCheckpoint]:
-        return await self._recovery.checkpoints.list_recoverable_page(
+    ) -> Page[ExecutionCheckpoint]:
+        return await self._checkpoint.checkpoints.list_recoverable_page(
             tenant_id=self._tenant_id,
             cursor=cursor,
             limit=128,
@@ -453,11 +451,11 @@ class LocalExecutionBackend:
         execution_id: str,
         *,
         tenant_id: str,
-    ) -> RecoveryCheckpoint | None:
+    ) -> ExecutionCheckpoint | None:
         pending = self._pending_turns.get(execution_id, tenant_id=tenant_id)
         if pending is not None:
             return pending.recovery
-        return await self._recovery.checkpoints.get(
+        return await self._checkpoint.checkpoints.get(
             execution_id,
             tenant_id=tenant_id,
         )
@@ -483,7 +481,7 @@ class LocalExecutionBackend:
     async def _commit_start_recovery_checkpoint(
         self,
         execution: ExecutionRecord,
-        checkpoint: RecoveryCheckpoint,
+        checkpoint: ExecutionCheckpoint,
         identity: IdempotencyRecord,
     ) -> ExecutionRecord:
         expected = (
@@ -511,13 +509,13 @@ class LocalExecutionBackend:
         execution: ExecutionRecord,
         *,
         recovery_operation: OperationLedgerInput | None = None,
-    ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
+    ) -> tuple[ExecutionRecord, ExecutionCheckpoint]:
         checkpoint = await self.load_recovery_checkpoint(
             execution.execution_id, tenant_id=self._tenant_id,
         )
         if checkpoint is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if checkpoint.state is RecoveryCheckpointState.ADMITTED:
+        if checkpoint.state is ExecutionCheckpointState.ADMITTED:
             result = await self._runtime_commands.commit_agent_attempt_checkpoint(
                 AgentAttemptClaim(
                     execution_id=execution.execution_id,
@@ -857,13 +855,13 @@ class LocalExecutionBackend:
                     ExecutionStatus.WAITING_DEFERRED,
                 }
             ):
-                checkpoint = await self._recovery.checkpoints.get(
+                checkpoint = await self._checkpoint.checkpoints.get(
                     commit.execution_id,
                     tenant_id=self._tenant_id,
                 )
                 if (
                     checkpoint is None
-                    or checkpoint.state is not RecoveryCheckpointState.WAITING
+                    or checkpoint.state is not ExecutionCheckpointState.WAITING
                     or checkpoint.pending_tools is None
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -957,10 +955,10 @@ class LocalExecutionBackend:
                 or execution.input_context is not None or execution.agent_run_seq != 0
                 or type(self._execution.executions) is not ExecutionRepositoryImpl
                 or type(self._conversation.sessions) is not SessionRepositoryImpl
-                or type(self._recovery.checkpoints) is not RecoveryCheckpointRepositoryImpl):
+                or type(self._checkpoint.checkpoints) is not ExecutionCheckpointRepositoryImpl):
             return False
         stores = (self._execution.executions.state_store,
-                  self._conversation.sessions.state_store, self._recovery.checkpoints.state_store)
+                  self._conversation.sessions.state_store, self._checkpoint.checkpoints.state_store)
         if any(store.storage_group is not stores[0].storage_group for store in stores):
             return False
         binding = self._execution_binding(execution, binding)
@@ -1289,10 +1287,10 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._execution_binding(execution, request.resolved_binding)
         now = datetime.now(timezone.utc)
-        candidate = RecoveryCheckpoint(
+        candidate = ExecutionCheckpoint(
             execution_id=execution.execution_id,
             agent_run_id=None,
-            state=RecoveryCheckpointState.ADMITTED,
+            state=ExecutionCheckpointState.ADMITTED,
             revision=0,
             created_at=now,
             updated_at=now,
@@ -1419,11 +1417,11 @@ class LocalExecutionBackend:
         if request.resolved_binding is None:
             request = replace(request, resolved_binding=self._execution_binding(execution))
         await self._validate_start(request, execution)
-        checkpoint = await self._recovery.checkpoints.get(
+        checkpoint = await self._checkpoint.checkpoints.get(
             execution.execution_id,
             tenant_id=self._tenant_id,
         )
-        if checkpoint is None or checkpoint.state is RecoveryCheckpointState.COMPLETED:
+        if checkpoint is None or checkpoint.state is ExecutionCheckpointState.COMPLETED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if execution.stored_user_input is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1519,7 +1517,7 @@ class LocalExecutionBackend:
             )
         initial_attempt = None
         if (resume is None and producer_generation is None and recovery_operation is None
-                and checkpoint.state is RecoveryCheckpointState.ADMITTED
+                and checkpoint.state is ExecutionCheckpointState.ADMITTED
                 and self._can_prepare_initial_attempt(current, request.resolved_binding)):
             initial_attempt = _InitialAttemptCapture(current, checkpoint)
         self._terminal_events[execution.execution_id] = asyncio.Event()
@@ -1553,7 +1551,7 @@ class LocalExecutionBackend:
             ExecutionStatus.CANCELLED,
         } or current.started_at is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        checkpoint = await self._recovery.checkpoints.get(
+        checkpoint = await self._checkpoint.checkpoints.get(
             current.execution_id,
             tenant_id=self._tenant_id,
         )
@@ -1561,11 +1559,11 @@ class LocalExecutionBackend:
         if checkpoint is not None:
             if checkpoint.terminal_handoff is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if checkpoint.state is RecoveryCheckpointState.ADMITTED:
+            if checkpoint.state is ExecutionCheckpointState.ADMITTED:
                 if checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 finish_checkpoint = True
-            elif checkpoint.state is not RecoveryCheckpointState.COMPLETED:
+            elif checkpoint.state is not ExecutionCheckpointState.COMPLETED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if current.session_id is not None:
             released = await self._conversation.sessions.release_execution(
@@ -1895,7 +1893,7 @@ class LocalExecutionBackend:
         objects = (
             self._execution_objects
             if reference.source_domain is PersistenceDomain.EXECUTION
-            else self._recovery_objects
+            else self._checkpoint_objects
         )
         payload = reference.payload
         if payload.kind == "inline":
@@ -2018,7 +2016,7 @@ class LocalExecutionBackend:
         arguments_payload = StoredPayload.inline_json(arguments)
         if not payload_fits_inline(arguments_payload, self._payload_policy):
             reference = await put_runtime_object(
-                self._recovery_objects,
+                self._checkpoint_objects,
                 ObjectKeyFactory(self._namespace),
                 PersistenceDomain.CHECKPOINT_CONTROL,
                 self._tenant_id,
@@ -2035,14 +2033,14 @@ class LocalExecutionBackend:
     async def commit_deferred_frontier(
         self,
         execution: ExecutionRecord,
-        checkpoint: RecoveryCheckpoint,
+        checkpoint: ExecutionCheckpoint,
         continuation: PendingToolContinuation,
         approval_records: tuple[ApprovalRecord, ...],
         external_records: tuple[ExternalCallRecord, ...],
         occurred_at: datetime,
         *,
         producer_generation: int | None = None,
-    ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
+    ) -> tuple[ExecutionRecord, ExecutionCheckpoint]:
         if not execution.restart_checkpoints:
             await self._agent_run_lifecycle.checkpoint_persistence.materialize_recovery_checkpoint(
                 agent_run_id=continuation.source_agent_run_id, require_complete=False,
@@ -2120,7 +2118,7 @@ class LocalExecutionBackend:
         *,
         tenant_id: str,
     ) -> ApprovalRecord | None:
-        return await self._recovery.approvals.get(
+        return await self._checkpoint.approvals.get(
             approval_id,
             tenant_id=tenant_id,
         )
@@ -2131,7 +2129,7 @@ class LocalExecutionBackend:
         *,
         tenant_id: str,
     ) -> ExternalCallRecord | None:
-        return await self._recovery.external_calls.get(
+        return await self._checkpoint.external_calls.get(
             call_id,
             tenant_id=tenant_id,
         )
@@ -2156,9 +2154,9 @@ class LocalExecutionBackend:
 
     async def claim_deferred_resume(
         self,
-        checkpoint: RecoveryCheckpoint,
+        checkpoint: ExecutionCheckpoint,
         execution: ExecutionRecord,
-    ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
+    ) -> tuple[ExecutionRecord, ExecutionCheckpoint]:
         if checkpoint.pending_tools is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await self._runtime_commands.claim_deferred_resume_checkpoint(
@@ -2178,7 +2176,7 @@ class LocalExecutionBackend:
         else:
             if payload.ref is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            raw = await read_runtime_object(self._recovery_objects, payload.ref)
+            raw = await read_runtime_object(self._checkpoint_objects, payload.ref)
             try:
                 value = json.loads(raw.decode("utf-8"))
             except (UnicodeError, TypeError, ValueError) as error:
@@ -2272,13 +2270,13 @@ class LocalExecutionBackend:
             if self.worker_installed(execution_id):
                 return
             if effects or active_claims == 0:
-                checkpoint = await self._recovery.checkpoints.get(
+                checkpoint = await self._checkpoint.checkpoints.get(
                     execution_id,
                     tenant_id=self._tenant_id,
                 )
                 if checkpoint is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if checkpoint.state is RecoveryCheckpointState.COMPLETED:
+                if checkpoint.state is ExecutionCheckpointState.COMPLETED:
                     return
                 if not self._accepting:
                     return
@@ -2322,7 +2320,7 @@ class LocalExecutionBackend:
 
     async def _reconcile_session_recovery(
         self,
-        checkpoint: RecoveryCheckpoint,
+        checkpoint: ExecutionCheckpoint,
         execution: ExecutionRecord,
         *,
         recovery_operation: OperationLedgerInput | None = None,
@@ -2367,7 +2365,7 @@ class LocalExecutionBackend:
             elif session.active_execution_id == execution.execution_id:
                 if execution.status is ExecutionStatus.WAITING_DEFERRED:
                     if (
-                        checkpoint.state is not RecoveryCheckpointState.WAITING
+                        checkpoint.state is not ExecutionCheckpointState.WAITING
                         or checkpoint.pending_tools is None
                     ):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2392,13 +2390,13 @@ class LocalExecutionBackend:
                     )
                     if committed.status is not ExecutionStatus.CANCELLING:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    fresh_checkpoint = await self._recovery.checkpoints.get(
+                    fresh_checkpoint = await self._checkpoint.checkpoints.get(
                         execution.execution_id,
                         tenant_id=self._tenant_id,
                     )
                     if (
                         fresh_checkpoint is None
-                        or fresh_checkpoint.state is not RecoveryCheckpointState.ACTIVE
+                        or fresh_checkpoint.state is not ExecutionCheckpointState.ACTIVE
                         or fresh_checkpoint.pending_tools is not None
                     ):
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -2408,7 +2406,7 @@ class LocalExecutionBackend:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 elif (
                     execution.status is ExecutionStatus.STARTED
-                    and checkpoint.state is RecoveryCheckpointState.ACTIVE
+                    and checkpoint.state is ExecutionCheckpointState.ACTIVE
                     and checkpoint.pending_tools is not None
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2454,14 +2452,14 @@ class LocalExecutionBackend:
         if source is None or reference is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         store = (
-            self._recovery_objects
+            self._checkpoint_objects
             if source is PersistenceDomain.CHECKPOINT_CONTROL
             else self._execution_objects
         )
         await read_runtime_object(store, reference)
 
     async def _reconcile_handoff(
-        self, checkpoint: RecoveryCheckpoint
+        self, checkpoint: ExecutionCheckpoint
     ) -> ExecutionRecord:
         handoff = checkpoint.terminal_handoff
         if handoff is None:
@@ -2660,7 +2658,7 @@ class LocalExecutionBackend:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def _resolve_handoff_conversation(
-        self, checkpoint: RecoveryCheckpoint, handoff: RecoveryTerminalHandoff
+        self, checkpoint: ExecutionCheckpoint, handoff: RecoveryTerminalHandoff
     ) -> None:
         intent = handoff.conversation
         if intent is None:
@@ -2773,21 +2771,21 @@ class LocalExecutionBackend:
                 terminal, result, message_range=(start_message_index, end_message_index),
             )
 
-    async def _complete_handoff(self, checkpoint: RecoveryCheckpoint) -> None:
-        if checkpoint.state is RecoveryCheckpointState.COMPLETED:
+    async def _complete_handoff(self, checkpoint: ExecutionCheckpoint) -> None:
+        if checkpoint.state is ExecutionCheckpointState.COMPLETED:
             return
         if checkpoint.handoff_phase is not RecoveryHandoffPhase.PREPARED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         completed = replace(
             checkpoint,
             handoff_phase=RecoveryHandoffPhase.COMPLETED,
-            state=RecoveryCheckpointState.COMPLETED,
+            state=ExecutionCheckpointState.COMPLETED,
             pending_tools=None,
             revision=checkpoint.revision + 1,
             updated_at=datetime.now(timezone.utc),
         )
         try:
-            await self._recovery.checkpoints.compare_and_swap(
+            await self._checkpoint.checkpoints.compare_and_swap(
                 checkpoint.execution_id,
                 tenant_id=self._tenant_id,
                 expected_revision=checkpoint.revision,
@@ -2796,13 +2794,13 @@ class LocalExecutionBackend:
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_CONFLICT:
                 raise
-            current = await self._recovery.checkpoints.get(
+            current = await self._checkpoint.checkpoints.get(
                 checkpoint.execution_id,
                 tenant_id=self._tenant_id,
             )
             if (
                 current is None
-                or current.state is not RecoveryCheckpointState.COMPLETED
+                or current.state is not ExecutionCheckpointState.COMPLETED
             ):
                 raise
 
@@ -2861,13 +2859,13 @@ class LocalExecutionBackend:
 
     async def _rewrite_prepared_success_handoff(
         self,
-        checkpoint: RecoveryCheckpoint,
+        checkpoint: ExecutionCheckpoint,
         *,
         target_status: ExecutionStatus,
         error_code: str,
         stop_reason: StopReason,
         error_diagnostics: ErrorDiagnostics | None = None,
-    ) -> RecoveryCheckpoint:
+    ) -> ExecutionCheckpoint:
         handoff = checkpoint.terminal_handoff
         if (
             checkpoint.handoff_phase is not RecoveryHandoffPhase.PREPARED
@@ -2919,7 +2917,7 @@ class LocalExecutionBackend:
             updated_at=datetime.now(timezone.utc),
         )
         try:
-            result = await self._recovery.checkpoints.compare_and_swap(
+            result = await self._checkpoint.checkpoints.compare_and_swap(
                 checkpoint.execution_id,
                 tenant_id=self._tenant_id,
                 expected_revision=checkpoint.revision,
@@ -2928,7 +2926,7 @@ class LocalExecutionBackend:
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_CONFLICT:
                 raise
-            current = await self._recovery.checkpoints.get(
+            current = await self._checkpoint.checkpoints.get(
                 checkpoint.execution_id,
                 tenant_id=self._tenant_id,
             )
@@ -2946,7 +2944,7 @@ class LocalExecutionBackend:
 
     async def _commit_reconciled_terminal(
         self,
-        checkpoint: RecoveryCheckpoint,
+        checkpoint: ExecutionCheckpoint,
         *,
         finish: Callable[[ExecutionRecord], Awaitable[None]],
     ) -> ExecutionRecord:
@@ -2981,7 +2979,7 @@ class LocalExecutionBackend:
                 reference = outcome.output.ref
                 if reference is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                payload = await read_runtime_object(self._recovery_objects, reference)
+                payload = await read_runtime_object(self._checkpoint_objects, reference)
                 execution_ref = StoredPayload.object(
                     await put_runtime_object(
                         self._execution_objects,
@@ -3108,7 +3106,7 @@ class LocalExecutionBackend:
 
     async def _validate_committed_handoff(
         self,
-        checkpoint: RecoveryCheckpoint,
+        checkpoint: ExecutionCheckpoint,
     ) -> None:
         handoff = checkpoint.terminal_handoff
         if handoff is None:
@@ -3635,7 +3633,7 @@ class LocalExecutionBackend:
         self._handoff_scopes[execution_id] = handoff_scope
         execution_handoff_scope.set(handoff_scope)
         execution_tasks = self._execution_task_set(execution_id)
-        checkpoint: RecoveryCheckpoint | None = None
+        checkpoint: ExecutionCheckpoint | None = None
         agent_run_id: str | None = None
         recovery_history_agent_run_id: str | None = None
         metric_recorder = self._metric_recorder
@@ -3653,7 +3651,7 @@ class LocalExecutionBackend:
                 )
                 if current is None:
                     raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-                checkpoint = await self._recovery.checkpoints.get(
+                checkpoint = await self._checkpoint.checkpoints.get(
                     execution_id,
                     tenant_id=self._tenant_id,
                 )
@@ -3664,7 +3662,7 @@ class LocalExecutionBackend:
                 checkpoint = initial_attempt.checkpoint
             if checkpoint is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if checkpoint.state is RecoveryCheckpointState.ADMITTED:
+            if checkpoint.state is ExecutionCheckpointState.ADMITTED:
                 admitted_generation = current.revision + 1
                 admission_claim = AgentAttemptClaim(
                     execution_id=execution_id,
@@ -3688,7 +3686,7 @@ class LocalExecutionBackend:
                         current.agent_run_seq,
                     )
                 claimed_from_admitted = True
-            elif checkpoint.state is RecoveryCheckpointState.WAITING:
+            elif checkpoint.state is ExecutionCheckpointState.WAITING:
                 if current.status is not ExecutionStatus.WAITING_DEFERRED:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 resume = await self._recovery_coordinator.reconcile_waiting_deferred(
@@ -3701,7 +3699,7 @@ class LocalExecutionBackend:
                 current = resume.execution
                 checkpoint = resume.checkpoint
                 producer_generation = resume.producer_generation
-            elif checkpoint.state is not RecoveryCheckpointState.ACTIVE:
+            elif checkpoint.state is not ExecutionCheckpointState.ACTIVE:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if (
                 current.status is not ExecutionStatus.STARTED
@@ -3773,12 +3771,12 @@ class LocalExecutionBackend:
             exact_recovery_context = not claimed_from_admitted
             recovery_history_agent_run_id = None if claimed_from_admitted else agent_run_id
             if recovery_history_agent_run_id is not None:
-                recovery_archive = self._get_run_store(PersistenceDomain.CHECKPOINT)
-                recovery_run = await recovery_archive.get_agent_run(
+                checkpoint_archive = self._get_run_store(PersistenceDomain.CHECKPOINT)
+                recovery_run = await checkpoint_archive.get_agent_run(
                     agent_run_id=recovery_history_agent_run_id
                 )
                 recovery_history_checkpoint = (
-                    await recovery_archive.latest_checkpoint(
+                    await checkpoint_archive.latest_checkpoint(
                         agent_run_id=recovery_history_agent_run_id,
                         include_interrupted=True,
                     )
@@ -4039,7 +4037,7 @@ class LocalExecutionBackend:
             tool_operations = (
                 RuntimeToolOperationBridge(
                     tool_repository,
-                    self._recovery_objects,
+                    self._checkpoint_objects,
                     namespace=self._namespace,
                     tenant_id=self._tenant_id,
                     execution_id=execution_id,
@@ -4535,21 +4533,21 @@ class LocalExecutionBackend:
                 target="runtime",
             )
 
-    async def _finish_checkpoint(self, checkpoint: RecoveryCheckpoint) -> None:
-        if checkpoint.state is RecoveryCheckpointState.COMPLETED:
+    async def _finish_checkpoint(self, checkpoint: ExecutionCheckpoint) -> None:
+        if checkpoint.state is ExecutionCheckpointState.COMPLETED:
             return
         if checkpoint.terminal_handoff is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         updated = replace(
             checkpoint,
-            state=RecoveryCheckpointState.COMPLETED,
+            state=ExecutionCheckpointState.COMPLETED,
             handoff_phase=RecoveryHandoffPhase.NONE,
             pending_tools=None,
             revision=checkpoint.revision + 1,
             updated_at=datetime.now(timezone.utc),
         )
         try:
-            await self._recovery.checkpoints.compare_and_swap(
+            await self._checkpoint.checkpoints.compare_and_swap(
                 checkpoint.execution_id,
                 tenant_id=self._tenant_id,
                 expected_revision=checkpoint.revision,
@@ -4558,12 +4556,12 @@ class LocalExecutionBackend:
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_CONFLICT:
                 raise
-            current = await self._recovery.checkpoints.get(
+            current = await self._checkpoint.checkpoints.get(
                 checkpoint.execution_id, tenant_id=self._tenant_id
             )
             if (
                 current is None
-                or current.state is not RecoveryCheckpointState.COMPLETED
+                or current.state is not ExecutionCheckpointState.COMPLETED
             ):
                 raise
 
@@ -4576,7 +4574,7 @@ class LocalExecutionBackend:
             run_store=self._run_store,
             execution_run_store=self._get_run_store(PersistenceDomain.TRACE),
             conversation_run_store=self._get_run_store(PersistenceDomain.CONVERSATION),
-            recovery_run_store=self._get_run_store(PersistenceDomain.CHECKPOINT),
+            checkpoint_archive=self._get_run_store(PersistenceDomain.CHECKPOINT),
             load_execution=lambda execution_id: self.load_execution(execution_id, tenant_id=self._tenant_id),
         )
 
@@ -4816,7 +4814,7 @@ class LocalExecutionBackend:
             if admission is None or admission.agent_run_seq != 0:
                 return False
             current = await self.load_execution(execution_id, tenant_id=self._tenant_id)
-            checkpoint = await self._recovery.checkpoints.get(execution_id, tenant_id=self._tenant_id)
+            checkpoint = await self._checkpoint.checkpoints.get(execution_id, tenant_id=self._tenant_id)
             if (current is None or checkpoint is None
                     or current.agent_run_seq <= admission.agent_run_seq
                     or head.producer_generation <= admission.revision):
@@ -4944,7 +4942,7 @@ class LocalExecutionBackend:
         return RuntimeRecoveryCommands(
             self._execution.executions,
             self._execution.events,
-            self._recovery.operations,
+            self._checkpoint.operations,
             self._tool_operations,
             execution_operations=self._execution.operations,
             background_tasks=self._execution_task_set(execution_id),
@@ -5478,7 +5476,7 @@ class LocalExecutionBackend:
     async def _complete_recovered_cancel(
         self,
         execution: ExecutionRecord,
-        checkpoint: RecoveryCheckpoint,
+        checkpoint: ExecutionCheckpoint,
         operations: tuple[OperationLedgerRecord, ...],
         *,
         expected_revision: int | None = None,
@@ -5633,7 +5631,7 @@ class LocalExecutionBackend:
             return inline
         return StoredPayload.object(
             await put_runtime_object(
-                self._recovery_objects,
+                self._checkpoint_objects,
                 ObjectKeyFactory(self._namespace),
                 PersistenceDomain.CHECKPOINT_CONTROL,
                 self._tenant_id,
@@ -5652,7 +5650,7 @@ class LocalExecutionBackend:
             stored = inline
         else:
             reference = await put_runtime_object(
-                self._recovery_objects,
+                self._checkpoint_objects,
                 ObjectKeyFactory(self._namespace),
                 PersistenceDomain.CHECKPOINT_CONTROL,
                 self._tenant_id,
@@ -5664,12 +5662,12 @@ class LocalExecutionBackend:
     async def commit_repository_instruction_barrier(
         self,
         execution: ExecutionRecord,
-        checkpoint: RecoveryCheckpoint,
+        checkpoint: ExecutionCheckpoint,
         overlay: RepositoryInstructions,
         barrier: RepositoryInstructionBarrier,
         *,
         producer_generation: int | None = None,
-    ) -> RecoveryCheckpoint:
+    ) -> ExecutionCheckpoint:
         await self.promote_pending_execution(execution.execution_id)
         existing = tuple(
             item
@@ -5680,7 +5678,7 @@ class LocalExecutionBackend:
         if existing:
             if existing[0] != barrier:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            current = await self._recovery.checkpoints.get(
+            current = await self._checkpoint.checkpoints.get(
                 execution.execution_id,
                 tenant_id=self._tenant_id,
             )
@@ -5724,29 +5722,29 @@ class LocalExecutionBackend:
         )
         try:
             if producer_generation is None:
-                return await self._recovery.checkpoints.compare_and_swap(
+                return await self._checkpoint.checkpoints.compare_and_swap(
                     execution.execution_id,
                     tenant_id=self._tenant_id,
                     expected_revision=checkpoint.revision,
                     next_record=next_checkpoint,
                 )
             execution_store = self._execution.executions.state_store
-            recovery_store = self._recovery.checkpoints.state_store
-            if execution_store.storage_group is not recovery_store.storage_group:
+            checkpoint_control_store = self._checkpoint.checkpoints.state_store
+            if execution_store.storage_group is not checkpoint_control_store.storage_group:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
-            async def commit(group: StateGroupTransaction) -> RecoveryCheckpoint:
+            async def commit(group: StateGroupTransaction) -> ExecutionCheckpoint:
                 await self._execution.executions.require_open_history_head_in_transaction(
                     group.transaction(execution_store), execution.execution_id,
                     expected_producer_generation=producer_generation, allow_cancelling=False,
                 )
-                return await self._recovery.checkpoints.compare_and_swap_in_transaction(
-                    group.transaction(recovery_store), execution.execution_id,
+                return await self._checkpoint.checkpoints.compare_and_swap_in_transaction(
+                    group.transaction(checkpoint_control_store), execution.execution_id,
                     tenant_id=self._tenant_id, expected_revision=checkpoint.revision,
                     next_record=next_checkpoint,
                 )
 
-            return await execution_store.storage_group.mutate((execution_store, recovery_store), commit)
+            return await execution_store.storage_group.mutate((execution_store, checkpoint_control_store), commit)
         except AIError as error:
             if error.code is ErrorCode.EXECUTION_CANCELLED:
                 raise
@@ -5756,7 +5754,7 @@ class LocalExecutionBackend:
                 )
                 if head is not None and head.producer_generation > producer_generation:
                     raise AIError(ErrorCode.STORAGE_CONFLICT) from error
-            current = await self._recovery.checkpoints.get(
+            current = await self._checkpoint.checkpoints.get(
                 execution.execution_id,
                 tenant_id=self._tenant_id,
             )
@@ -5824,7 +5822,7 @@ class LocalExecutionBackend:
         expected_cursor: ConversationCursor | None = None,
         conversation_agent_run: AgentRunRecord | None = None,
         conversation_checkpoint: AgentRunCheckpoint | None = None,
-        recovery_checkpoint: RecoveryCheckpoint | None = None,
+        recovery_checkpoint: ExecutionCheckpoint | None = None,
         producer_generation: int | None = None,
         expected_revision: int | None = None,
         observed_execution: ExecutionRecord | None = None,
@@ -5902,7 +5900,7 @@ class LocalExecutionBackend:
         elif output is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if recovery_checkpoint is None:
-            recovery_checkpoint = await self._recovery.checkpoints.get(
+            recovery_checkpoint = await self._checkpoint.checkpoints.get(
                 current.execution_id,
                 tenant_id=self._tenant_id,
             )
@@ -6006,7 +6004,7 @@ class LocalExecutionBackend:
                         )
                         handoff_output = StoredPayload.object(
                             await put_runtime_object(
-                                self._recovery_objects,
+                                self._checkpoint_objects,
                                 ObjectKeyFactory(self._namespace),
                                 PersistenceDomain.CHECKPOINT_CONTROL,
                                 self._tenant_id,
@@ -6075,7 +6073,7 @@ class LocalExecutionBackend:
                 )
                 prepared = replace(
                     recovery_checkpoint,
-                    state=RecoveryCheckpointState.HANDOFF,
+                    state=ExecutionCheckpointState.HANDOFF,
                     handoff_phase=RecoveryHandoffPhase.PREPARED,
                     terminal_handoff=handoff,
                     pending_tools=None,
@@ -6090,7 +6088,7 @@ class LocalExecutionBackend:
                             producer_generation=producer_generation,
                         )
                     else:
-                        recovery_checkpoint = await self._recovery.checkpoints.compare_and_swap(
+                        recovery_checkpoint = await self._checkpoint.checkpoints.compare_and_swap(
                             current.execution_id,
                             tenant_id=self._tenant_id,
                             expected_revision=recovery_checkpoint.revision,
@@ -6099,7 +6097,7 @@ class LocalExecutionBackend:
                 except AIError as error:
                     if error.code is not ErrorCode.STORAGE_CONFLICT:
                         raise
-                    recovery_checkpoint = await self._recovery.checkpoints.get(
+                    recovery_checkpoint = await self._checkpoint.checkpoints.get(
                         current.execution_id,
                         tenant_id=self._tenant_id,
                     )
@@ -6417,7 +6415,7 @@ class LocalExecutionBackend:
     ) -> bool:
         stores = [
             self._execution.executions.state_store,
-            self._recovery.checkpoints.state_store,
+            self._checkpoint.checkpoints.state_store,
         ]
         if execution.session_id is not None:
             stores.append(self._conversation.sessions.state_store)
@@ -6438,7 +6436,7 @@ class LocalExecutionBackend:
     async def _commit_same_group_recovery_terminal(
         self,
         current: ExecutionRecord,
-        checkpoint: RecoveryCheckpoint,
+        checkpoint: ExecutionCheckpoint,
         *,
         status: ExecutionStatus,
         output: StoredPayload | None,
@@ -6526,7 +6524,7 @@ class LocalExecutionBackend:
         commit = replace(commit, producer_generation=producer_generation)
         target = replace(
             checkpoint,
-            state=RecoveryCheckpointState.COMPLETED,
+            state=ExecutionCheckpointState.COMPLETED,
             handoff_phase=RecoveryHandoffPhase.COMPLETED,
             terminal_handoff=None,
             pending_operation_id=None,
@@ -6583,7 +6581,7 @@ class LocalExecutionBackend:
         conversation_agent_run: AgentRunRecord | None = None,
         conversation_checkpoint: AgentRunCheckpoint | None = None,
         conversation_message_range: tuple[int, int] | None = None,
-        recovery_checkpoint: RecoveryCheckpoint | None = None,
+        recovery_checkpoint: ExecutionCheckpoint | None = None,
         recovery_run: AgentRunRecord | None = None,
         recovery_agent_run_checkpoint: AgentRunCheckpoint | None = None,
     ) -> ExecutionTerminalCommitResult:
@@ -6892,7 +6890,7 @@ class LocalExecutionBackend:
         conversation_agent_run: AgentRunRecord | None = None,
         conversation_checkpoint: AgentRunCheckpoint | None = None,
         conversation_message_range: tuple[int, int] | None = None,
-        recovery_checkpoint: RecoveryCheckpoint | None = None,
+        recovery_checkpoint: ExecutionCheckpoint | None = None,
         recovery_run: AgentRunRecord | None = None,
         recovery_agent_run_checkpoint: AgentRunCheckpoint | None = None,
         terminal_plan: ExecutionTerminalSealPlan | None,

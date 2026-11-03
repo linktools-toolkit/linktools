@@ -76,7 +76,7 @@ def test_checkpoint_staging_waits_for_slowest_configured_consumer():
     owner = RuntimeAgentRunStore(
         staging, conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
         execution_archive=InMemoryStepArchive(PersistenceDomain.TRACE),
-        recovery_archive=InMemoryStepArchive(PersistenceDomain.CHECKPOINT),
+        checkpoint_archive=InMemoryStepArchive(PersistenceDomain.CHECKPOINT),
     )
     for index in range(4):
         staging.save_checkpoint_local(AgentRunCheckpoint(
