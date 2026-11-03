@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Pure Task durable-state status helpers."""
 
+from collections.abc import Mapping
+
 from ..core import TaskStatus
 from ..errors import AIError, ErrorCode
 from ..task import TaskGraphView, TaskNode, TaskNodeView
@@ -24,10 +26,17 @@ def _isolated_graph_status(
     nodes: tuple[TaskNodeView, ...],
     definitions: tuple[TaskNode, ...],
 ) -> TaskStatus:
-    statuses = {node.status for node in nodes}
     failure_policies = {node.node_id: node.failure_policy for node in definitions}
     if set(failure_policies) != {node.node_id for node in nodes}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return _aggregate_graph_status(nodes, failure_policies)
+
+
+def _aggregate_graph_status(
+    nodes: tuple[TaskNodeView, ...],
+    failure_policies: Mapping[str, str],
+) -> TaskStatus:
+    statuses = {node.status for node in nodes}
     if TaskStatus.RECOVERY_REQUIRED in statuses:
         return TaskStatus.RECOVERY_REQUIRED
     if TaskStatus.RUNNING in statuses or TaskStatus.WAITING in statuses:

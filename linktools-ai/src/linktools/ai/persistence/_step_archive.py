@@ -2242,10 +2242,8 @@ class StateStepArchive(AgentRunStore):
         target_message_count = head.message_count
         baseline = self._context_baselines.get(run.agent_run_id, LoadedModelContext(()))
         baseline_messages = baseline.model_messages()
-        baseline_sources = tuple(
-            self._reusable_context_source(value.source)
-            for value in baseline.messages
-        )
+        message_archive = MessageArchive()
+        baseline_snapshot = message_archive.snapshot(baseline_messages)
         prepared: list[PreparedAgentRunCheckpoint] = []
         archive = PreparedArchive() if archive is None else archive
         previous_projection = None
@@ -2259,7 +2257,7 @@ class StateStepArchive(AgentRunStore):
 
         for checkpoint in checkpoints:
             before = checkpoint.transcript_message_count_before
-            incoming = tuple(checkpoint.messages)
+            incoming = message_archive.snapshot(checkpoint.messages)
             if (
                 before is None
                 or before > len(incoming)
@@ -2267,33 +2265,11 @@ class StateStepArchive(AgentRunStore):
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             delta = incoming[max(before, target_message_count - archive_base):]
-            raw_sources = tuple(
-                TranscriptMessageRef(
-                    self._runtime_domain,
-                    owner_id,
-                    archive_base + index,
-                )
-                for index in range(len(incoming))
-            )
-            source_messages = (*baseline_messages, *incoming)
-            source_refs = (*baseline_sources, *raw_sources)
             projection_messages = (
-                source_messages
+                message_archive.concatenate(baseline_snapshot, incoming)
                 if checkpoint.context_messages is None
-                else tuple(checkpoint.context_messages)
+                else message_archive.snapshot(checkpoint.context_messages)
             )
-            projection_sources = self._projection_sources(
-                projection_messages,
-                source_messages,
-                source_refs,
-            )
-            projection = self._history.project_context(
-                owner_id,
-                projection_messages,
-                origins=self._message_origins(projection_sources),
-                sources=projection_sources,
-            )
-            self._validate_projection_sources(projection, projection_sources)
             frontier = ()
             if previous_projection is not None and len(previous_projection.items) == 1:
                 block = previous_projection.items[0]
@@ -2308,7 +2284,7 @@ class StateStepArchive(AgentRunStore):
                 owner_id,
                 TranscriptCapture(
                     target_message_count,
-                    delta,
+                    tuple(delta),
                     (TranscriptOrigin.RAW,) * len(delta),
                     head.quality,
                 ),
@@ -2342,76 +2318,6 @@ class StateStepArchive(AgentRunStore):
             0,
             target_message_count,
         )
-
-    def _reusable_context_source(
-        self,
-        source: TranscriptMessageRef | None,
-    ) -> TranscriptMessageRef | None:
-        if source is None:
-            return None
-        if source.source_domain is self._runtime_domain:
-            return source
-        if source.source_domain is PersistenceDomain.CONVERSATION:
-            return source
-        return None
-
-    def _projection_sources(
-        self,
-        projection_messages: Sequence[ModelMessage],
-        incoming: Sequence[ModelMessage],
-        incoming_sources: Sequence[TranscriptMessageRef | None],
-    ) -> tuple[TranscriptMessageRef | None, ...]:
-        if len(incoming) != len(incoming_sources):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        by_signature: dict[bytes, list[int]] = {}
-        for index, message in enumerate(incoming):
-            signature = _exact_message_signature(message)
-            by_signature.setdefault(signature, []).append(index)
-        used: set[int] = set()
-        result: list[TranscriptMessageRef | None] = []
-        for message in projection_messages:
-            signature = _exact_message_signature(message)
-            candidates = by_signature.get(signature, [])
-            index = next((value for value in candidates if value not in used), None)
-            if index is None:
-                result.append(None)
-                continue
-            used.add(index)
-            result.append(incoming_sources[index])
-        return tuple(result)
-
-    def _validate_projection_sources(
-        self,
-        projection: ContextProjection,
-        sources: Sequence[TranscriptMessageRef | None],
-    ) -> None:
-        allowed: dict[tuple[PersistenceDomain, str], list[int]] = {}
-        for source in sources:
-            if source is None:
-                continue
-            allowed.setdefault(
-                (source.source_domain, source.owner_id),
-                [],
-            ).append(source.message_index)
-        spans: dict[tuple[PersistenceDomain, str], list[tuple[int, int]]] = {}
-        for key, indexes in allowed.items():
-            for index in sorted(set(indexes)):
-                values = spans.setdefault(key, [])
-                if values and values[-1][1] == index:
-                    values[-1] = (values[-1][0], index + 1)
-                else:
-                    values.append((index, index + 1))
-        for item in projection.items:
-            if not isinstance(item, TranscriptSpanRef):
-                continue
-            if item.end <= item.start:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            allowed_spans = spans.get((item.source_domain, item.owner_id), ())
-            if not any(
-                item.start >= start and item.end <= end
-                for start, end in allowed_spans
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     def _history_id(self, run: AgentRunRecord) -> str:
         history_id = run.metadata.get("history_id")
@@ -2447,17 +2353,6 @@ class StateStepArchive(AgentRunStore):
             offset += end - start
             start = end
         return tuple(result)
-
-    def _message_origins(
-        self,
-        sources: Sequence[TranscriptMessageRef | None],
-    ) -> tuple[TranscriptOrigin, ...]:
-        return tuple(
-            TranscriptOrigin.RAW
-            if source is not None
-            else TranscriptOrigin.UNKNOWN
-            for source in sources
-        )
 
     async def _normalize_checkpoints_in_transaction(
         self,

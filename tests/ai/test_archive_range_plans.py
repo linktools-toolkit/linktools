@@ -101,3 +101,36 @@ async def test_empty_model_projection_does_not_open_archive_or_keep_baseline(
         assert (await repository.load_projected_context("run", projection)).model_messages() == ()
     finally:
         await state.close()
+
+
+async def test_frozen_projection_reuses_encoded_bodies_and_preserves_rewrites(tmp_path: Path, monkeypatch):
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+    from linktools.ai.persistence import PersistenceDomain
+    from linktools.ai.persistence import _transcript_staging
+    from linktools.ai.persistence._transcript_staging import MessageArchive
+
+    state = Persistence(_storage("memory", tmp_path))
+    await state.initialize(namespace="frozen-projection", tenant_id="tenant")
+    try:
+        repository = state.run_store.read_store(PersistenceDomain.CHECKPOINT).transcript_repository
+        snapshots = MessageArchive()
+        first = snapshots.snapshot([ModelRequest(parts=[UserPromptPart("original")])])
+        appended = snapshots.concatenate(first, [ModelRequest(parts=[UserPromptPart("追加")])])
+        rewritten = snapshots.snapshot([ModelRequest(parts=[UserPromptPart("replacement")])])
+
+        def unexpected_codec(*args, **kwargs):
+            raise AssertionError("frozen context must not decode and re-encode its bodies")
+
+        baseline = None
+        for snapshot in (first, appended, rewritten):
+            prepared = PreparedArchive()
+            with monkeypatch.context() as patch:
+                patch.setattr(_transcript_staging, "decode_model_messages", unexpected_codec)
+                patch.setattr(_transcript_staging, "encode_model_messages", unexpected_codec)
+                projection = await repository.prepare_model_projection(snapshot, prepared, baseline=baseline)
+            await repository.publish_archive(prepared)
+            loaded = await repository.load_projected_context("run", projection)
+            assert loaded.model_messages() == tuple(snapshot)
+            baseline = projection
+    finally:
+        await state.close()

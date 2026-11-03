@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Process-local transcript visibility before checkpoint materialization."""
 
+import hashlib
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from weakref import WeakValueDictionary
@@ -57,6 +58,24 @@ class MessageSnapshot(Sequence[ModelMessage]):
                 stack.append(node.right)
                 stack.append(node.left)
 
+    def encoded_payloads(self) -> Iterator[bytes]:
+        """Yield the already frozen canonical singleton arrays."""
+        return self._payloads()
+
+    def encoded_digest(self) -> tuple[str, int]:
+        """Identify the canonical message array without rebuilding SDK values."""
+        digest = hashlib.sha256(b"[")
+        size = 2
+        for index, payload in enumerate(self._payloads()):
+            if index:
+                digest.update(b",")
+                size += 1
+            fragment = memoryview(payload)[1:-1]
+            digest.update(fragment)
+            size += len(fragment)
+        digest.update(b"]")
+        return digest.hexdigest(), size
+
     def __iter__(self) -> Iterator[ModelMessage]:
         for payload in self._payloads():
             yield decode_model_messages(payload)[0]
@@ -110,6 +129,10 @@ class MessageArchive:
     def __init__(self) -> None:
         self._leaves: WeakValueDictionary[bytes, _MessageTree] = WeakValueDictionary()
         self._branches: WeakValueDictionary[tuple[_MessageTree, _MessageTree], _MessageTree] = WeakValueDictionary()
+
+    def concatenate(self, *groups: Sequence[ModelMessage]) -> MessageSnapshot:
+        """Join frozen sequences without decoding or copying their message bodies."""
+        return MessageSnapshot(tuple(root for group in groups for root in self.snapshot(group)._roots))
 
     def snapshot(self, messages: Sequence[ModelMessage]) -> MessageSnapshot:
         if isinstance(messages, MessageSnapshot):
