@@ -69,14 +69,27 @@ def test_real_legacy_writer_bytes_restore_all_retained_facts_and_keep_raw_archiv
     assert _FIXTURE.read_bytes() == raw
 
 
-@pytest.mark.parametrize('damage', ['dual_identity', 'prompt_extra', 'prompt_bad', 'content_extra', 'usage_collision',
+def test_legacy_ordinary_content_keeps_its_additive_field_compatibility():
+    rows = json.loads(_FIXTURE.read_bytes())
+    for item in rows[1]['parts'][2]['content']['items'][:3]:
+        item['future_display_hint'] = 'optional'
+    raw = canonical_json_bytes(rows)
+    restored = decode_model_messages(raw)
+    assert encode_model_messages(restored) == encode_model_messages(_messages())
+    for row in rows:
+        leaf = canonical_json_bytes([row])
+        combined, _ = decode_model_message_payloads((leaf,))
+        assert combined == leaf
+
+
+@pytest.mark.parametrize('damage', ['dual_identity', 'prompt_extra', 'prompt_bad', 'reference_extra', 'usage_collision',
                                    'attempt_negative', 'attempt_overflow', 'attempt_dual', 'attempt_pairs', 'attempts_mapping', 'unknown_field'])
 def test_legacy_read_rejects_ambiguous_or_corrupt_values(damage):
     rows = json.loads(_FIXTURE.read_bytes())
     if damage == 'dual_identity': rows[0]['conversation_id'] = 'other'
     elif damage == 'prompt_extra': rows[0]['parts'][1]['content']['extra'] = 1
     elif damage == 'prompt_bad': rows[0]['parts'][1]['content']['value'] = 1
-    elif damage == 'content_extra': rows[1]['parts'][2]['content']['items'][0]['extra'] = 1
+    elif damage == 'reference_extra': rows[1]['parts'][2]['content']['items'][3]['extra'] = 1
     elif damage == 'usage_collision': rows[2]['usage']['extensions']['input_tokens'] = 99
     elif damage == 'attempt_negative': rows[2]['failed_attempts'][0]['duration_us'] = -1
     elif damage == 'attempt_overflow': rows[2]['failed_attempts'][0]['duration_us'] = 10**100

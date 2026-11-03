@@ -544,7 +544,6 @@ def _legacy_message_wire(value: dict[str, object]) -> dict[str, object]:
 
     def content(raw: object) -> object:
         item = decode_user_content_item(raw)
-        _require_preserved_fields(raw, encode_user_content_item(item))
         if isinstance(item, (ReferencedContent, RetiredReferencedContent)):
             return {"kind": _HOST_CONTENT, "value": raw}
         return _dump_native(_USER_CONTENT_ADAPTER, item)

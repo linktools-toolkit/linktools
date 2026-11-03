@@ -844,6 +844,9 @@ in one message are rejected. No legacy writer, fallback decoding, second durable
 state or automatic data rewrite is introduced. Archive decoding returns the
 original canonical bytes, so existing payload, projection and checkpoint hashes
 remain meaningful after offline filesystem snapshot restoration.
+Ordinary content items in that retained format keep their existing tolerance for
+additional fields; known values and reference descriptors retain their owned
+validation rules.
 
 This support does not restore unrelated removed fields or promise every obsolete
 development format. It remains necessary while retained filesystem archives are
