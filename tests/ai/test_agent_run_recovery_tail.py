@@ -164,12 +164,12 @@ async def test_replayed_model_calls_reuse_effects_and_keep_new_raw_part_indexes(
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
         commands = StateCommands(
             repository, namespace=namespace, events=state.execution.events,
-            tools=state.recovery.tools, background_tasks=set(),
+            tools=state.checkpoint.tools, background_tasks=set(),
         )
 
         def bridge_for(owner):
             return RuntimeToolOperationBridge(
-                state.recovery.tools, state.object_store(PersistenceDomain.RECOVERY),
+                state.checkpoint.tools, state.object_store(PersistenceDomain.CHECKPOINT_CONTROL),
                 namespace=namespace, tenant_id="tenant", execution_id="execution",
                 agent_run_id=run_id, binding_digest=execution.binding_digest,
                 owner=owner, background_tasks=set(), payload_policy=PayloadPolicy(),

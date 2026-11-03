@@ -203,7 +203,7 @@ async def test_pause_handoff_drains_only_its_execution_while_another_run_is_live
             assert (await paused.history(include_content=True)).items == paused_history.items
             held_record = await runtime._state.execution.executions.get(held.execution_id, tenant_id=runtime.tenant_id)
             assert held_record is not None and held_record.status is ExecutionStatus.STARTED
-            checkpoint = await runtime._state.recovery.checkpoints.get(held.execution_id, tenant_id=runtime.tenant_id)
+            checkpoint = await runtime._state.checkpoint.checkpoints.get(held.execution_id, tenant_id=runtime.tenant_id)
             head = await runtime._state.execution.executions.get_history_head(held.execution_id, tenant_id=runtime.tenant_id)
             assert checkpoint is not None and checkpoint.agent_run_id is not None and head is not None
             await runtime._run_store.flush_execution_projection(

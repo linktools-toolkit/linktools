@@ -307,7 +307,7 @@ async def test_superseded_history_producer_cannot_admit_a_tool_but_owned_effect_
         resumed = await _commands(state).commit_resumed(execution)
         commands = StateCommands(
             repository, namespace="tool-producer-fence", events=state.execution.events,
-            tools=state.recovery.tools, background_tasks=set(),
+            tools=state.checkpoint.tools, background_tasks=set(),
         )
         stale = replace(_admission(), producer_generation=execution.revision)
         assert decode_domain(encode_domain(stale), ToolOperationAdmission) == stale
@@ -315,7 +315,7 @@ async def test_superseded_history_producer_cannot_admit_a_tool_but_owned_effect_
             await asyncio.wait_for(commands.commit_tool_admission(stale), 2)
         assert caught.value.code is ErrorCode.STORAGE_CONFLICT
         assert caught.value.retryable is False
-        assert await state.recovery.tools.get_operation(stale.tool_operation_id, tenant_id="tenant") is None
+        assert await state.checkpoint.tools.get_operation(stale.tool_operation_id, tenant_id="tenant") is None
         admitted = await commands.commit_tool_admission(
             replace(stale, producer_generation=resumed.revision)
         )

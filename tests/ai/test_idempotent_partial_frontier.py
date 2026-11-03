@@ -82,7 +82,7 @@ def test_recovery_preserves_published_partial_tool_result(tmp_path: Path, rich: 
                                     return
                             await asyncio.sleep(0.01)
                     await asyncio.wait_for(published(), 5)
-                    operations = await state.recovery.tools.list_by_execution(handle.execution_id, tenant_id=runtime.tenant_id)
+                    operations = await state.checkpoint.tools.list_by_execution(handle.execution_id, tenant_id=runtime.tenant_id)
                     assert len(operations) == 2 and all(operation.replay_safe for operation in operations)
                     (root / "execution").write_text(handle.execution_id)
                     print("TRACE_A_PUBLISHED_CHECKPOINT_BEFORE_TOOL_GROUP", flush=True)

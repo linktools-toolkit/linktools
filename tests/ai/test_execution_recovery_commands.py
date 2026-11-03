@@ -99,8 +99,8 @@ def _commands(state: Persistence) -> RuntimeRecoveryCommands:
     return RuntimeRecoveryCommands(
         state.execution.executions,
         state.execution.events,
-        state.recovery.operations,
-        state.recovery.tools,
+        state.checkpoint.operations,
+        state.checkpoint.tools,
         execution_operations=state.execution.operations,
         background_tasks=set(),
     )
@@ -301,7 +301,7 @@ async def test_not_applied_resolution_reopens_tool_with_next_fence() -> None:
     await state.initialize(namespace="tool-resolution", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     try:
-        await state.recovery.tools.reserve(_tool(now))
+        await state.checkpoint.tools.reserve(_tool(now))
         operation = OperationLedgerInput(
             "resolution-operation",
             "tenant",
@@ -327,7 +327,7 @@ async def test_not_applied_resolution_reopens_tool_with_next_fence() -> None:
         assert resolved.owner is None
         assert resolved.fence == 3
 
-        claimed = await state.recovery.tools.claim(
+        claimed = await state.checkpoint.tools.claim(
             "tool-operation",
             tenant_id="tenant",
             owner="next-worker",
@@ -371,7 +371,7 @@ async def test_applied_and_failed_effect_resolutions_persist_tool_truth(
     await state.initialize(namespace="tool-resolution-terminal", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     try:
-        await state.recovery.tools.reserve(_tool(now))
+        await state.checkpoint.tools.reserve(_tool(now))
         operation = _resolution_operation(now)
         resolved = await _commands(state).resolve_tool_effect(
             operation,
@@ -386,7 +386,7 @@ async def test_applied_and_failed_effect_resolutions_persist_tool_truth(
         assert resolved.result_payload == result_payload
         assert resolved.error_code == error_code
         assert resolved.error_payload == error_payload
-        committed_operation = await state.recovery.operations.get(
+        committed_operation = await state.checkpoint.operations.get(
             operation.operation_id,
             tenant_id="tenant",
         )
@@ -413,7 +413,7 @@ async def test_tool_effect_resolution_rejects_stale_fence_and_key_reuse(
     await state.initialize(namespace="tool-resolution-conflict", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     try:
-        await state.recovery.tools.reserve(_tool(now))
+        await state.checkpoint.tools.reserve(_tool(now))
         commands = _commands(state)
         operation = _resolution_operation(now)
         if conflict == "idempotency":
@@ -639,7 +639,7 @@ async def test_recovery_write_failure_rolls_back_its_operation_receipt(
     tool = _tool(now)
     try:
         await state.execution.executions.create_with_history_head(execution)
-        await state.recovery.tools.reserve(tool)
+        await state.checkpoint.tools.reserve(tool)
         commands = _commands(state)
         if command == "cancel_intent":
             operation = replace(
@@ -656,8 +656,8 @@ async def test_recovery_write_failure_rolls_back_its_operation_receipt(
             ledger = state.execution.operations
         else:
             operation = _resolution_operation(now)
-            repository = state.recovery.tools
-            ledger = state.recovery.operations
+            repository = state.checkpoint.tools
+            ledger = state.checkpoint.operations
         group = repository.state_store.storage_group
         original = type(group).mutate
         reached_write = False
@@ -694,7 +694,7 @@ async def test_recovery_write_failure_rolls_back_its_operation_receipt(
         assert failed.value.code is ErrorCode.STORAGE_UNAVAILABLE
         assert await ledger.get(operation.operation_id, tenant_id="tenant") is None
         assert await state.execution.executions.get("execution", tenant_id="tenant") == execution
-        assert await state.recovery.tools.get_operation("tool-operation", tenant_id="tenant") == tool
+        assert await state.checkpoint.tools.get_operation("tool-operation", tenant_id="tenant") == tool
         assert not (await state.execution.events.list(
             "execution", tenant_id="tenant", after_event_seq=0, limit=10,
         )).items
@@ -725,7 +725,7 @@ async def test_recovery_repository_rejects_stale_state_before_receipt_admission(
 
     try:
         await state.execution.executions.create_with_history_head(execution)
-        await state.recovery.tools.reserve(tool)
+        await state.checkpoint.tools.reserve(tool)
         with pytest.raises(AIError) as conflict:
             if command == "cancel_intent":
                 repository = state.execution.executions
@@ -736,7 +736,7 @@ async def test_recovery_repository_rejects_stale_state_before_receipt_admission(
                     )
                 )
             else:
-                repository = state.recovery.tools
+                repository = state.checkpoint.tools
                 await repository.state_store.mutate(
                     lambda transaction: repository.resolve_effect_in_transaction(
                         transaction, tool.tool_operation_id,
@@ -752,6 +752,6 @@ async def test_recovery_repository_rejects_stale_state_before_receipt_admission(
         )
         assert not admission_attempted
         assert await state.execution.executions.get("execution", tenant_id="tenant") == execution
-        assert await state.recovery.tools.get_operation("tool-operation", tenant_id="tenant") == tool
+        assert await state.checkpoint.tools.get_operation("tool-operation", tenant_id="tenant") == tool
     finally:
         await state.close()

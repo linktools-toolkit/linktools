@@ -13,7 +13,7 @@ from ._execution_repositories import (
     IdempotencyRepositoryImpl,
 )
 from ._plan import PersistenceDomain
-from ._recovery_repositories import (
+from ._checkpoint_repositories import (
     ApprovalRepositoryImpl, ExternalCallRepositoryImpl, RecoveryCheckpointRepositoryImpl, ToolRepositoryImpl,
 )
 from ._repository_common import (
@@ -53,7 +53,7 @@ def build_repository_bundle(
             records=EvaluationRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
             idempotency=IdempotencyRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id, domain=domain),
         )
-    elif domain is PersistenceDomain.RECOVERY:
+    elif domain is PersistenceDomain.CHECKPOINT_CONTROL:
         values.update(
             approvals=ApprovalRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
             external_calls=ExternalCallRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),

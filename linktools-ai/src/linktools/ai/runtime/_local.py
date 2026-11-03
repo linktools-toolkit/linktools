@@ -126,7 +126,7 @@ from ..persistence.contracts import (
     PendingToolContinuation,
     RecoveryCheckpointState,
     RecoveryHandoffPhase,
-    RecoveryRepositories,
+    CheckpointRepositories,
     RecoveryCheckpoint,
     RecoveryConversationIntent,
     RecoveryTerminalHandoff,
@@ -253,7 +253,7 @@ class LocalExecutionBackend:
         self,
         conversation: ConversationRepositories,
         execution_state: ExecutionRepositories,
-        recovery: RecoveryRepositories,
+        recovery: CheckpointRepositories,
         execution_objects: ObjectStore,
         recovery_objects: ObjectStore,
         namespace: str,
@@ -1889,7 +1889,7 @@ class LocalExecutionBackend:
             return None
         if reference.source_domain not in {
             PersistenceDomain.EXECUTION,
-            PersistenceDomain.RECOVERY,
+            PersistenceDomain.CHECKPOINT_CONTROL,
         }:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         objects = (
@@ -2020,7 +2020,7 @@ class LocalExecutionBackend:
             reference = await put_runtime_object(
                 self._recovery_objects,
                 ObjectKeyFactory(self._namespace),
-                PersistenceDomain.RECOVERY,
+                PersistenceDomain.CHECKPOINT_CONTROL,
                 self._tenant_id,
                 canonical_json_bytes(arguments),
             )
@@ -2455,7 +2455,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         store = (
             self._recovery_objects
-            if source is PersistenceDomain.RECOVERY
+            if source is PersistenceDomain.CHECKPOINT_CONTROL
             else self._execution_objects
         )
         await read_runtime_object(store, reference)
@@ -2976,7 +2976,7 @@ class LocalExecutionBackend:
             execution_ref = outcome.output
             if (
                 outcome.output.kind == "object"
-                and outcome.object_source_domain is PersistenceDomain.RECOVERY
+                and outcome.object_source_domain is PersistenceDomain.CHECKPOINT_CONTROL
             ):
                 reference = outcome.output.ref
                 if reference is None:
@@ -5635,7 +5635,7 @@ class LocalExecutionBackend:
             await put_runtime_object(
                 self._recovery_objects,
                 ObjectKeyFactory(self._namespace),
-                PersistenceDomain.RECOVERY,
+                PersistenceDomain.CHECKPOINT_CONTROL,
                 self._tenant_id,
                 data,
             )
@@ -5654,12 +5654,12 @@ class LocalExecutionBackend:
             reference = await put_runtime_object(
                 self._recovery_objects,
                 ObjectKeyFactory(self._namespace),
-                PersistenceDomain.RECOVERY,
+                PersistenceDomain.CHECKPOINT_CONTROL,
                 self._tenant_id,
                 canonical_json_bytes(payload),
             )
             stored = StoredPayload.object(reference)
-        return RuntimePayloadRef(stored, PersistenceDomain.RECOVERY)
+        return RuntimePayloadRef(stored, PersistenceDomain.CHECKPOINT_CONTROL)
 
     async def commit_repository_instruction_barrier(
         self,
@@ -6008,12 +6008,12 @@ class LocalExecutionBackend:
                             await put_runtime_object(
                                 self._recovery_objects,
                                 ObjectKeyFactory(self._namespace),
-                                PersistenceDomain.RECOVERY,
+                                PersistenceDomain.CHECKPOINT_CONTROL,
                                 self._tenant_id,
                                 content,
                             )
                         )
-                        source_domain = PersistenceDomain.RECOVERY
+                        source_domain = PersistenceDomain.CHECKPOINT_CONTROL
                 conversation = None
                 if (
                     current.conversation

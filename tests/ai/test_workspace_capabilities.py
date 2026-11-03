@@ -131,24 +131,6 @@ class _RecordingSandbox:
         return session
 
 
-class _FailingCloseSession(_RecordingSession):
-    async def close(self) -> None:
-        self.closed += 1
-        raise RuntimeError("close failed")
-
-
-class _BlockingCloseSession(_RecordingSession):
-    def __init__(self) -> None:
-        super().__init__()
-        self.close_started = asyncio.Event()
-        self.close_release = asyncio.Event()
-
-    async def close(self) -> None:
-        self.closed += 1
-        self.close_started.set()
-        await self.close_release.wait()
-
-
 class _SpoofedSandboxCapability(AbstractCapability[object]):
     id = "linktools.workspace-sandbox"
 
@@ -517,29 +499,6 @@ async def test_custom_sandbox_does_not_fallback_to_host_filesystem(tmp_path: Pat
     ]
     await run_toolset.__aexit__(None, None, None)
     await session.close()
-
-
-@pytest.mark.asyncio
-async def test_workspace_sandbox_close_failure_propagates_without_primary_error(tmp_path: Path) -> None:
-    session = _FailingCloseSession()
-
-    with pytest.raises(RuntimeError, match="close failed"):
-        await session.close()
-    assert session.closed == 1
-
-
-@pytest.mark.asyncio
-async def test_workspace_sandbox_close_is_completed_during_cancellation(tmp_path: Path) -> None:
-    session = _BlockingCloseSession()
-    closing = asyncio.create_task(session.close())
-    await session.close_started.wait()
-
-    closing.cancel()
-    await asyncio.sleep(0)
-    session.close_release.set()
-    with pytest.raises(asyncio.CancelledError):
-        await closing
-    assert session.closed == 1
 
 
 @pytest.mark.asyncio

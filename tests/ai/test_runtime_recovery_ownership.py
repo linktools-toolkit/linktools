@@ -419,9 +419,9 @@ async def test_concurrent_sql_startup_converges_on_one_deferred_resume(
         worker = original._execution_service.runtime_backend()._tasks.get(execution.execution_id)
         if worker is not None:
             await asyncio.wait_for(asyncio.shield(worker), 10)
-        approvals = await original._state.recovery.approvals.list_pending(execution.execution_id, tenant_id=tenant)
+        approvals = await original._state.checkpoint.approvals.list_pending(execution.execution_id, tenant_id=tenant)
         assert len(approvals) == 1
-        await original._state.recovery.approvals.decide(
+        await original._state.checkpoint.approvals.decide(
             approvals[0].approval_id, tenant_id=tenant, expected_status=ApprovalStatus.PENDING,
             idempotency_key_digest="a" * 64, decision=ApprovalDecision.DENY,
             principal_id=original.default_principal.principal_id, decision_digest="b" * 64,

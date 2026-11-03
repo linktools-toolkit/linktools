@@ -104,7 +104,10 @@ source root must remain byte-for-byte unchanged: reader internals write only
 coordination locks, but an explicitly colocated destination still receives the
 requested snapshot objects. Verify the restored records/receipts/content before
 switching consumers. Filesystem State writers and routes are removed; this
-reader preserves only offline access to supported clean legacy data. The unused
+reader preserves only offline access to supported clean legacy data. Restored
+message payloads use the model codec's frozen read-only filesystem-format adapter;
+source/archive bytes and their recorded hashes are not rewritten. This does not
+provide a general converter for obsolete development protocols. The unused
 `storage.FilesystemJournal` transaction API is removed with those State writers;
 independent atomic-file, file-lock, cache and ObjectStore APIs remain. Opaque
 custom-object closure and journal replay are not provided.
@@ -311,11 +314,37 @@ flush/close ownership.
 `PersistencePlan.checkpoint=None` and `trace=None` inherit the execution route,
 including its hot-read cache. Registering CheckpointCapability or TraceCapability
 enables behavior; neither capability accepts a physical storage argument. An explicit archive route must remain
-in the same `StateStorageGroup` as Execution and Recovery, because their safety
+in the same `StateStorageGroup` as Execution and Checkpoint control, because their safety
 and terminal boundaries require atomic writes. Persistence validates this when it opens. Routes share a group when they use the same SQLite path, the same SQL
 engine instance; memory routes share
 one binding-local group. Separate SQL engine instances targeting the same database do not
 establish a shared SQL group.
+
+Checkpoint owns the small execution-control records, approval/external-result
+waits, retained tool results and the run-context archive. Its control repositories
+are available at `persistence.checkpoint`, replacing `persistence.recovery`.
+`CheckpointCapability` enables automatic model/tool-boundary captures; omitting it
+does not remove the minimal execution control or the checkpoint required to resume
+an approval or external-result wait.
+
+The existing low-level `PersistenceDomain` also identifies physical storage
+addresses. `CHECKPOINT_CONTROL` retains the stored value `"recovery"` and the
+Execution route; `CHECKPOINT` retains `"checkpoint"` and the explicit archive
+route. Control is not another configurable business domain and is omitted from
+`resolved_routes` and `Persistence.status()`. Separate in-memory ObjectStores can
+share a store ID, so stored references must keep their explicit source address.
+All other enum members, `RuntimePayloadRef.source_domain` and terminal-result
+`object_source_domain` types, field names and encoded values remain unchanged.
+
+Low-level call changes are limited to `persistence.recovery.tools` →
+`persistence.checkpoint.tools` and `PersistenceDomain.RECOVERY` →
+`PersistenceDomain.CHECKPOINT_CONTROL`; the repository bundle type is now
+`CheckpointRepositories`. Normal Runtime/Capability composition, approval and
+recovery operations need no additional objects, flags or context managers.
+Control and archive remain separate records under one owner: updating an approval
+or attempt revision does not rewrite model-message bodies. Existing partition
+keys, object references and snapshot layouts remain intact, without online
+rekeying, dual writes or read-miss fallback.
 
 For a per-archive hot cache, derive the execution route rather than selecting
 an unrelated database. This current API example keeps Checkpoint's inherited
@@ -723,7 +752,7 @@ Deletion or source damage is detected on the next source read. A caller arriving
 after a shared load's deadline starts a new source read; a slow original read
 may finish for its original callers without restarting indefinitely.
 
-Recovery-domain objects always retain current source-membership checks. Other
+Checkpoint control and archive objects always retain current source-membership checks. Other
 strong consumers retain them as well: explicit result/wait,
 History results, persistent checkpoint reads, model/recovery context loading, and every rebuilt session
 display (including `max_age=0`). They may reuse verified bytes after the existing

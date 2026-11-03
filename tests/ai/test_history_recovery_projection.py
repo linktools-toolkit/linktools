@@ -169,7 +169,7 @@ async def test_public_response_ahead_then_distinct_sdk_response(
         ]
         assert [m async for m in public.iter_messages(agent_run_id=run_id)] == [user, a]
         assert (
-            await state.recovery.tools.list_by_agent_run(run_id, tenant_id="tenant")
+            await state.checkpoint.tools.list_by_agent_run(run_id, tenant_id="tenant")
             == ()
         )
         updated = await repository.compare_and_swap(
@@ -251,12 +251,12 @@ async def test_public_response_ahead_then_distinct_sdk_response(
             repository,
             namespace=namespace,
             events=state.execution.events,
-            tools=state.recovery.tools,
+            tools=state.checkpoint.tools,
             background_tasks=set(),
         )
         bridge = RuntimeToolOperationBridge(
-            state.recovery.tools,
-            state.object_store(PersistenceDomain.RECOVERY),
+            state.checkpoint.tools,
+            state.object_store(PersistenceDomain.CHECKPOINT_CONTROL),
             namespace=namespace,
             tenant_id="tenant",
             execution_id="execution",
@@ -272,8 +272,8 @@ async def test_public_response_ahead_then_distinct_sdk_response(
         effects = []
         for attempt in range(2):
             bridge = RuntimeToolOperationBridge(
-                state.recovery.tools,
-                state.object_store(PersistenceDomain.RECOVERY),
+                state.checkpoint.tools,
+                state.object_store(PersistenceDomain.CHECKPOINT_CONTROL),
                 namespace=namespace,
                 tenant_id="tenant",
                 execution_id="execution",

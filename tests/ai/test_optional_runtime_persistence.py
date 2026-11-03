@@ -189,7 +189,7 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
         recovery = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)
         assert (await recovery.latest_checkpoint(agent_run_id=run_id) is not None) is (restart or split_storage)
         if split_storage:
-            handoff = await runtime._state.recovery.checkpoints.get(execution.execution_id, tenant_id=runtime.tenant_id)
+            handoff = await runtime._state.checkpoint.checkpoints.get(execution.execution_id, tenant_id=runtime.tenant_id)
             assert handoff is not None and handoff.state is RecoveryCheckpointState.COMPLETED
             assert handoff.handoff_phase is RecoveryHandoffPhase.COMPLETED
             assert handoff.terminal_handoff is not None
@@ -506,7 +506,7 @@ async def test_remote_force_cancel_orders_with_tool_admission(
             worker = owner._execution_service.runtime_backend()._tasks[execution.execution_id]
             async with Persistence.open(_NAMESPACE, storage=remote_state) as persistence_523, Runtime.attach(persistence=persistence_523, features=model_features(models, group)) as observer:
                 remote = await observer.executions.get(execution.execution_id)
-                operations = await observer._state.recovery.tools.list_by_execution(
+                operations = await observer._state.checkpoint.tools.list_by_execution(
                     execution.execution_id, tenant_id=observer.tenant_id,
                 )
                 assert [operation.status for operation in operations] == (
@@ -527,7 +527,7 @@ async def test_remote_force_cancel_orders_with_tool_admission(
                 await asyncio.wait_for(asyncio.gather(worker, return_exceptions=True), 10)
                 if not claimed:
                     assert effects == []
-                    assert await observer._state.recovery.tools.list_by_execution(
+                    assert await observer._state.checkpoint.tools.list_by_execution(
                         execution.execution_id, tenant_id=observer.tenant_id,
                     ) == ()
                     assert await observer._state.execution.executions.get(
@@ -581,7 +581,7 @@ async def test_remote_force_cancel_requires_explicit_tool_effect_resolution(
             assert await observer._state.execution.executions.get_result(
                 execution.execution_id, tenant_id=observer.tenant_id,
             ) is None
-            operations = await observer._state.recovery.tools.list_by_execution(
+            operations = await observer._state.checkpoint.tools.list_by_execution(
                 execution.execution_id, tenant_id=observer.tenant_id,
             )
             assert len(operations) == 1 and operations[0].status is ToolOperationStatus.EFFECT_UNKNOWN
@@ -827,7 +827,7 @@ async def test_unknown_delegated_tool_effect_prevents_parent_cancel_and_session_
                 with pytest.raises(AIError) as busy:
                     await observer.agents.get().session("session").start("next", idempotency_key="busy")
                 assert busy.value.code is ErrorCode.SESSION_BUSY
-                operations = await observer._state.recovery.tools.list_by_execution(child_id, tenant_id=observer.tenant_id)
+                operations = await observer._state.checkpoint.tools.list_by_execution(child_id, tenant_id=observer.tenant_id)
                 assert len(operations) == 1 and operations[0].status is ToolOperationStatus.EFFECT_UNKNOWN
                 remote_child = await observer.executions.get(child_id)
                 effect = operations[0]

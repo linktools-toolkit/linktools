@@ -41,7 +41,7 @@ async def test_recoverable_checkpoint_is_visible_from_first_write() -> None:
     state = Persistence(state)
     await state.initialize(namespace="recovery-integrity", tenant_id="tenant")
     try:
-        repository = state.recovery.checkpoints
+        repository = state.checkpoint.checkpoints
         await repository.create(_checkpoint("e1", RecoveryCheckpointState.ACTIVE))
         await repository.create(_checkpoint("e2", RecoveryCheckpointState.COMPLETED))
 
@@ -61,7 +61,7 @@ async def test_completed_transition_removes_recoverable_checkpoint() -> None:
     state = Persistence(state)
     await state.initialize(namespace="recovery-complete", tenant_id="tenant")
     try:
-        repository = state.recovery.checkpoints
+        repository = state.checkpoint.checkpoints
         created = await repository.create(
             _checkpoint("e1", RecoveryCheckpointState.ACTIVE)
         )
@@ -94,7 +94,7 @@ async def test_missing_checkpoint_cannot_be_updated_as_recoverable() -> None:
     await state.initialize(namespace="recovery-missing", tenant_id="tenant")
     try:
         with pytest.raises(AIError) as raised:
-            await state.recovery.checkpoints.compare_and_swap(
+            await state.checkpoint.checkpoints.compare_and_swap(
                 "missing",
                 tenant_id="tenant",
                 expected_revision=0,

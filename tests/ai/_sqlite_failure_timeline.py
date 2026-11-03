@@ -43,7 +43,7 @@ class _SqliteTimeline:
 
     def format(self) -> str:
         return "SQLite lifecycle timeline (bounded; scheduling may be perturbed; dropped=" + str(self.dropped) + ")\n" + "\n".join(
-            str(row) for row in self.events
+            str(row) for row in tuple(self.events)
         )
 
     def failure_snapshot(self) -> None:

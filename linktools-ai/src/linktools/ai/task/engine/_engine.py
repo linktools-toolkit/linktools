@@ -166,7 +166,6 @@ class TaskEngine(Generic[AppT]):
             input_captures=self._input_captures, input_materializer=self._input_materializer,
             task_durable=persistence.plan.route(PersistenceDomain.TASK).retention is StorageRetentionMode.DURABLE,
             execution_durable=persistence.plan.route(PersistenceDomain.EXECUTION).retention is StorageRetentionMode.DURABLE,
-            recovery_durable=persistence.plan.route(PersistenceDomain.RECOVERY).retention is StorageRetentionMode.DURABLE,
         )
         self._launcher = LocalTaskGraphLauncher(
             persistence.task.tasks, self._task_node_runtime,

@@ -62,7 +62,7 @@ async def test_pending_unsuccessful_outcome_and_source_replay(
         assert stored.status is (IdempotencyStatus.FAILED if status is ExecutionStatus.FAILED
                                  else IdempotencyStatus.CANCELLED)
         assert stored.result_digest is None and stored.error_code == result.execution.error_code
-        recovery = await state.storage.recovery.checkpoints.get(result.execution.execution_id, tenant_id="tenant")
+        recovery = await state.storage.checkpoint.checkpoints.get(result.execution.execution_id, tenant_id="tenant")
         assert recovery.state is RecoveryCheckpointState.COMPLETED
         assert recovery.agent_run_id == (None if sequence == 0 else agent_run_id(
             namespace=_NAMESPACE, tenant_id="tenant", execution_id=result.execution.execution_id, agent_run_seq=1,
@@ -174,7 +174,7 @@ async def test_pending_failure_requires_conversation_repository(tmp_path: Path, 
     async with _turn_state("memory", tmp_path) as state:
         commands = StateCommands(
             state.storage.execution.executions, namespace=_NAMESPACE,
-            events=state.storage.execution.events, recovery=state.storage.recovery.checkpoints,
+            events=state.storage.execution.events, recovery=state.storage.checkpoint.checkpoints,
             background_tasks=set(),
         )
         turn = _outcome(state, status)

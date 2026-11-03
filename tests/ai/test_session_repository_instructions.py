@@ -290,13 +290,13 @@ async def test_session_execution_recovery_keeps_pinned_instructions_and_permissi
                 lambda: persistence.execution.executions.get(execution.execution_id, tenant_id=tenant),
                 lambda record: record is not None and record.status is ExecutionStatus.WAITING_DEFERRED,
             )
-            approvals = await persistence.recovery.approvals.list_pending(execution.execution_id, tenant_id=tenant)
+            approvals = await persistence.checkpoint.approvals.list_pending(execution.execution_id, tenant_id=tenant)
             assert len(approvals) == 1 and requests == pause_requests
-            checkpoint = await persistence.recovery.checkpoints.get(execution.execution_id, tenant_id=tenant)
+            checkpoint = await persistence.checkpoint.checkpoints.get(execution.execution_id, tenant_id=tenant)
             assert checkpoint is not None and checkpoint.pending_tools is not None
             assert len(checkpoint.pending_tools.approvals[0].metadata["linktools"]["repository_instruction_frontier"]) == 64
             rules.write_text("LATER-RULE", encoding="utf-8")
-            await persistence.recovery.approvals.decide(
+            await persistence.checkpoint.approvals.decide(
                 approvals[0].approval_id, tenant_id=tenant, expected_status=ApprovalStatus.PENDING,
                 idempotency_key_digest="a" * 64, decision=ApprovalDecision.APPROVE,
                 principal_id=runtime.default_principal.principal_id, decision_digest="b" * 64,
@@ -309,7 +309,7 @@ async def test_session_execution_recovery_keeps_pinned_instructions_and_permissi
             )
             assert finished.result.status is ExecutionStatus.SUCCEEDED
             assert requests == pause_requests + 1
-            assert await persistence.recovery.approvals.list_pending(execution.execution_id, tenant_id=tenant) == ()
+            assert await persistence.checkpoint.approvals.list_pending(execution.execution_id, tenant_id=tenant) == ()
 
 
 @pytest.mark.asyncio
@@ -545,9 +545,9 @@ async def test_native_and_custom_approvals_restore_observed_frontier_with_valida
                 lambda: persistence.execution.executions.get(execution.execution_id, tenant_id=tenant),
                 lambda record: record is not None and record.status is ExecutionStatus.WAITING_DEFERRED,
             )
-            approvals = await persistence.recovery.approvals.list_pending(execution.execution_id, tenant_id=tenant)
+            approvals = await persistence.checkpoint.approvals.list_pending(execution.execution_id, tenant_id=tenant)
             assert len(approvals) == 1 and calls == [] and requests == 1
-        await persistence.recovery.approvals.decide(
+        await persistence.checkpoint.approvals.decide(
             approvals[0].approval_id, tenant_id=tenant, expected_status=ApprovalStatus.PENDING,
             idempotency_key_digest="c" * 64, decision=ApprovalDecision.APPROVE,
             principal_id=principal_id, decision_digest="d" * 64,
@@ -560,7 +560,7 @@ async def test_native_and_custom_approvals_restore_observed_frontier_with_valida
             )
             assert finished.result.status is ExecutionStatus.SUCCEEDED
             assert requests == 2 and calls == [(7, "default")]
-            assert await persistence.recovery.approvals.list_pending(execution.execution_id, tenant_id=tenant) == ()
+            assert await persistence.checkpoint.approvals.list_pending(execution.execution_id, tenant_id=tenant) == ()
 
 
 @pytest.mark.asyncio

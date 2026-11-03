@@ -403,6 +403,25 @@ if(process.argv[3]==='sdk') {
   detailResponses.set(path,{items:[sdk],next_cursor:null});
   await descendants(node('conversation')).find(item=>item.tagName==='BUTTON' && item.textContent==='Read model input').click();
   assert.match(node('conversation').textContent,/dynamic instruction/);
+  const direct={...sdk,request:{},response:{kind:'response',parts:[{part_kind:'text',content:'direct result body'}]}};
+  detailResponses.set(path,{items:[direct],next_cursor:null});
+  await descendants(node('conversation')).find(item=>item.tagName==='BUTTON' && item.textContent==='Refresh requests').click();
+  assert.match(node('conversation').textContent,/direct result body/);
+  assert.match(node('conversation').textContent,/No retained SDK model input is available/);
+  assert.match(node('conversation').textContent,/Missing model input does not identify the response source or establish whether external network calls occurred/);
+  assert.doesNotMatch(node('conversation').textContent,/is_direct_result/);
+  assert.doesNotMatch(node('conversation').textContent,/SDK preparation evidence|Model input captured at SDK preparation|dynamic instruction/);
+  assert.ok(descendants(node('conversation')).some(item=>item.tagName==='SUMMARY' && item.textContent==='SDK response'));
+  await tab('sdkmodels').click();
+  assert.match(node('inspector-content').textContent,/SDK interaction 1/);
+  assert.match(node('inspector-content').textContent,/direct result body/);
+  assert.doesNotMatch(node('inspector-content').textContent,/SDK prompt architecture/);
+  detailResponses.set(path,{items:[{...direct,content_included:false,response:null,stream_attempts:[{stream_attempt_seq:1,status:'FAILED',response:{parts:[{part_kind:'text',content:'not included partial'}]}}]}],next_cursor:null});
+  await node('native-mode').click();
+  await descendants(node('conversation')).find(item=>item.tagName==='BUTTON' && item.textContent==='Refresh requests').click();
+  assert.match(node('conversation').textContent,/SDK content was not included/);
+  assert.doesNotMatch(node('conversation').textContent,/direct result body|not included partial/);
+  detailResponses.set(path,{items:[sdk],next_cursor:null});
   await tab('sdkmodels').click();assert.match(node('inspector-content').textContent,/effective instruction/);
   // A terminal metadata event must fetch SDK content even without client captures.
   await select('#session=b');

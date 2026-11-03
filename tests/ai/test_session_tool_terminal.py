@@ -396,7 +396,7 @@ async def test_rejected_session_start_cleans_only_its_admission(
                 assert len(identities) == 1
                 assert identities[0].status.value == "FAILED"
 
-                checkpoint = await runtime._state.recovery.checkpoints.get(
+                checkpoint = await runtime._state.checkpoint.checkpoints.get(
                     rejected.execution_id,
                     tenant_id=runtime.default_principal.tenant_id,
                 )
@@ -408,7 +408,7 @@ async def test_rejected_session_start_cleans_only_its_admission(
                     await runtime._execution_service.runtime_backend().abort_start(
                         rejected
                     )
-                    assert await runtime._state.recovery.checkpoints.get(
+                    assert await runtime._state.checkpoint.checkpoints.get(
                         rejected.execution_id,
                         tenant_id=runtime.default_principal.tenant_id,
                     ) == checkpoint
@@ -499,13 +499,13 @@ async def test_split_start_cleanup_failure_remains_recoverable_after_restart(
                 execution_id = failed.execution_id
                 assert failed.status is ExecutionStatus.FAILED
                 assert failed.started_at is None
-                checkpoint = await runtime._state.recovery.checkpoints.get(
+                checkpoint = await runtime._state.checkpoint.checkpoints.get(
                     execution_id,
                     tenant_id=runtime.default_principal.tenant_id,
                 )
                 assert checkpoint is not None
                 assert checkpoint.state.value == ("completed" if release_committed else "admitted")
-                recoverable = await runtime._state.recovery.checkpoints.list_recoverable_page(
+                recoverable = await runtime._state.checkpoint.checkpoints.list_recoverable_page(
                     tenant_id=runtime.default_principal.tenant_id,
                     cursor=None,
                     limit=10,
@@ -530,7 +530,7 @@ async def test_split_start_cleanup_failure_remains_recoverable_after_restart(
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('start-cleanup-restart', storage=reopened) as persistence_540, Runtime.attach(persistence=persistence_540, features=model_features(_ToolModels(), application)) as runtime:
-            checkpoint = await runtime._state.recovery.checkpoints.get(
+            checkpoint = await runtime._state.checkpoint.checkpoints.get(
                 execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )
@@ -728,7 +728,7 @@ async def test_pending_start_cancel_commits_terminal_before_admission(
                 execution_record.execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             ) is not None
-            checkpoint = await runtime._state.recovery.checkpoints.get(
+            checkpoint = await runtime._state.checkpoint.checkpoints.get(
                 execution_record.execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )
@@ -802,7 +802,7 @@ async def test_cancel_during_unknown_tool_effect_preserves_recovery_and_cancel_i
                 tenant_id=runtime.default_principal.tenant_id,
             ) is None
 
-            operations = await runtime._state.recovery.tools.list_by_execution(
+            operations = await runtime._state.checkpoint.tools.list_by_execution(
                 execution.execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )
@@ -1213,7 +1213,7 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
             effects = await execution.recovery_effects()
             assert len(effects) == 1
             cancel_key = "cancel-after-effect-recovery"
-            checkpoint_before = await runtime._state.recovery.checkpoints.get(
+            checkpoint_before = await runtime._state.checkpoint.checkpoints.get(
                 execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )
@@ -1259,7 +1259,7 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
             )
             assert result.status is expected_execution_status
 
-            tool = await runtime._state.recovery.tools.get_operation(
+            tool = await runtime._state.checkpoint.tools.get_operation(
                 operation_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )
@@ -1282,7 +1282,7 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
             )
             assert session_record is not None
             assert session_record.active_execution_id is None
-            checkpoint = await runtime._state.recovery.checkpoints.get(
+            checkpoint = await runtime._state.checkpoint.checkpoints.get(
                 execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )
@@ -1432,7 +1432,7 @@ async def test_cancel_at_unknown_effect_boundaries_stays_nonterminal(
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open(f'cancel-unknown-boundary-{boundary}', storage=state) as persistence_1473, Runtime.attach(persistence=persistence_1473, features=model_features(_ToolModels(), application)) as runtime:
             if boundary == "unknown_write":
-                repository = runtime._state.recovery.tools
+                repository = runtime._state.checkpoint.tools
                 original_mark = repository.mark_effect_unknown
 
                 async def pause_unknown_write(*args: Any, **kwargs: Any) -> Any:
@@ -1494,7 +1494,7 @@ async def test_cancel_at_unknown_effect_boundaries_stays_nonterminal(
                 execution.execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             ) is None
-            tools = await runtime._state.recovery.tools.list_by_execution(
+            tools = await runtime._state.checkpoint.tools.list_by_execution(
                 execution.execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )
@@ -1589,7 +1589,7 @@ async def test_unverified_unknown_effect_write_does_not_terminalize_execution(
         async with Persistence.open(f'unknown-write-{readback}', storage=state) as persistence_1633, Runtime.attach(persistence=persistence_1633, features=model_features(_ToolModels(), application)) as runtime:
             source_group = persistence_1633.execution.executions.state_store.storage_group
             owners = tuple(persistence_1633._runtime_owners)
-            repository = runtime._state.recovery.tools
+            repository = runtime._state.checkpoint.tools
             original_get = repository.get_operation
 
             async def fail_unknown_write(*args: Any, **kwargs: Any) -> Any:
@@ -1629,7 +1629,7 @@ async def test_unverified_unknown_effect_write_does_not_terminalize_execution(
                 execution.execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             ) is None
-            tools = await runtime._state.recovery.tools.list_by_execution(
+            tools = await runtime._state.checkpoint.tools.list_by_execution(
                 execution.execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )
@@ -1836,8 +1836,8 @@ async def test_completed_tool_operation_is_reused_after_reopen(
     await first.initialize(namespace="tool-replay", tenant_id="tenant")
     try:
         first_bridge = RuntimeToolOperationBridge(
-            first.recovery.tools,
-            first.object_store(PersistenceDomain.RECOVERY),
+            first.checkpoint.tools,
+            first.object_store(PersistenceDomain.CHECKPOINT_CONTROL),
             namespace="tool-replay",
             tenant_id="tenant",
             execution_id="execution",
@@ -1875,8 +1875,8 @@ async def test_completed_tool_operation_is_reused_after_reopen(
     await second.initialize(namespace="tool-replay", tenant_id="tenant")
     try:
         replay_bridge = RuntimeToolOperationBridge(
-            second.recovery.tools,
-            second.object_store(PersistenceDomain.RECOVERY),
+            second.checkpoint.tools,
+            second.object_store(PersistenceDomain.CHECKPOINT_CONTROL),
             namespace="tool-replay",
             tenant_id="tenant",
             execution_id="execution",
@@ -1940,7 +1940,7 @@ async def test_expired_tool_claim_waits_for_explicit_recovery_after_restart(
             )
             assert current is not None
             assert current.status is ExecutionStatus.STARTED
-            tools = await runtime._state.recovery.tools.list_by_execution(
+            tools = await runtime._state.checkpoint.tools.list_by_execution(
                 execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )
@@ -1996,7 +1996,7 @@ async def test_idempotent_replay_does_not_claim_active_tool_execution(
         application.capability(CheckpointCapability(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('session-tool-crash', storage=state) as persistence_2047, Runtime.attach(persistence=persistence_2047, features=model_features(_ToolModels(), application)) as runtime:
-            tools = await runtime._state.recovery.tools.list_by_execution(
+            tools = await runtime._state.checkpoint.tools.list_by_execution(
                 execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )
@@ -2031,7 +2031,7 @@ async def test_idempotent_replay_does_not_claim_active_tool_execution(
 
             with monkeypatch.context() as clock:
                 clock.setattr(
-                    runtime._state.recovery.tools.state_store.context.dialect,
+                    runtime._state.checkpoint.tools.state_store.context.dialect,
                     "database_now", after_lease_expiry,
                 )
                 with pytest.raises(AIError) as raised:
@@ -2084,7 +2084,7 @@ async def test_split_storage_handoff_reconciles_prepared_checkpoint_after_restar
         execution_id,
         tenant_id="default",
     )
-    checkpoint = await inspection.recovery.checkpoints.get(
+    checkpoint = await inspection.checkpoint.checkpoints.get(
         execution_id,
         tenant_id="default",
     )
@@ -2113,7 +2113,7 @@ async def test_split_storage_handoff_reconciles_prepared_checkpoint_after_restar
             assert result.status is ExecutionStatus.SUCCEEDED
             assert calls == []
             assert effect_log.read_text().splitlines() == committed_effects
-            completed = await runtime._state.recovery.checkpoints.get(
+            completed = await runtime._state.checkpoint.checkpoints.get(
                 execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )
@@ -2169,7 +2169,7 @@ async def test_split_storage_success_handoff_wins_cancel_race(
         async with Persistence.open('split-storage-handoff-cancel-race', storage=state) as persistence_2226, Runtime.attach(persistence=persistence_2226, features=model_features(_ToolModels(), application)) as runtime:
             assert (
                 runtime._state.execution.executions.state_store.storage_group
-                is runtime._state.recovery.checkpoints.state_store.storage_group
+                is runtime._state.checkpoint.checkpoints.state_store.storage_group
             )
             assert (
                 runtime._state.execution.executions.state_store.storage_group
@@ -2180,7 +2180,7 @@ async def test_split_storage_success_handoff_wins_cancel_race(
             execution = await session.start("inspect", idempotency_key="turn-1")
             await asyncio.wait_for(handoff_started.wait(), timeout=10)
 
-            prepared = await runtime._state.recovery.checkpoints.get(
+            prepared = await runtime._state.checkpoint.checkpoints.get(
                 execution.execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )
@@ -2211,7 +2211,7 @@ async def test_split_storage_success_handoff_wins_cancel_race(
             )
             assert final_execution is not None
             assert final_execution.status is ExecutionStatus.SUCCEEDED
-            completed = await runtime._state.recovery.checkpoints.get(
+            completed = await runtime._state.checkpoint.checkpoints.get(
                 execution.execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )

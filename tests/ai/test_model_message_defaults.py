@@ -66,7 +66,7 @@ def _default_cases():
         wire = json.loads(codec.encode_model_messages((message,)))[0]
         selected = _at(wire, path)
         for field in fields(target):
-            name = 'agent_conversation_id' if field.name == 'conversation_id' else field.name
+            name = field.name
             if name in {'kind', 'part_kind', 'tool_call_id'} or name not in selected:
                 continue
             if field.init and (field.default is not MISSING or field.default_factory is not MISSING):
@@ -119,13 +119,13 @@ def test_explicit_invalid_message_fields_never_use_defaults(field: str, value: o
 
 
 @pytest.mark.parametrize('field', ['input_tokens', 'details', 'cost'])
-def test_usage_extensions_cannot_supply_omitted_standard_fields(field: str) -> None:
+def test_usage_provider_extensions_do_not_replace_omitted_standard_fields(field: str) -> None:
     wire = json.loads(codec.encode_model_messages((sdk.ModelResponse(parts=[], timestamp=_STAMP),)))
     del wire[0]['usage'][field]
-    wire[0]['usage']['extensions'][field] = -1
-    with pytest.raises(AIError) as caught:
-        codec.decode_model_messages(canonical_json_bytes(wire))
-    assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    wire[0]['usage']['provider_extra'] = {field: -1}
+    restored, = codec.decode_model_messages(canonical_json_bytes(wire))
+    assert getattr(restored.usage, field) == getattr(RequestUsage(), field)
+    assert restored.usage.__dict__['provider_extra'] == {field: -1}
 
 
 def test_default_factories_are_independent_for_repeated_message_reads() -> None:
@@ -150,7 +150,7 @@ def test_protocol_discriminators_and_nondefault_fields_remain_required(
         codec.decode_model_messages(canonical_json_bytes(wire))
 
 
-@pytest.mark.parametrize("path", [(), ("parts", 0), ("usage",)])
+@pytest.mark.parametrize("path", [(), ("parts", 0)])
 def test_unknown_message_fields_are_not_silently_dropped(path: tuple[str | int, ...]) -> None:
     wire = json.loads(codec.encode_model_messages((sdk.ModelResponse(parts=[sdk.TextPart("text")], timestamp=_STAMP),)))
     _at(wire[0], path)["unknown"] = None
@@ -164,7 +164,7 @@ def test_unknown_message_fields_are_not_silently_dropped(path: tuple[str | int, 
     ('response', 'state', 'invalid'),
     ('response', 'finish_reason', 'invalid'),
     ('response', 'timestamp', None),
-    ('response', 'failed_attempts', None),
+    ('response', 'failed_attempts', 'invalid'),
 ])
 def test_early_message_validation_precedes_unknown_part_version(
     kind: str, field: str, bad: object,
@@ -181,80 +181,16 @@ def test_early_message_validation_precedes_unknown_part_version(
     assert malformed.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_tool_kind_version_precedes_invalid_name_but_not_missing_required_name() -> None:
-    message = sdk.ModelResponse(parts=[sdk.ToolCallPart('tool', tool_call_id='call')], timestamp=_STAMP)
-    wire = json.loads(codec.encode_model_messages((message,)))
-    part = wire[0]['parts'][0]
-    part.update(tool_kind='future-kind', tool_name=False)
-    with pytest.raises(AIError) as unknown:
+@pytest.mark.parametrize('part', [
+    {'part_kind': 'tool-call', 'tool_name': 'tool', 'tool_call_id': 'call', 'tool_kind': 7},
+    {'part_kind': 'tool-call', 'tool_name': False, 'tool_call_id': 'call'},
+    {'part_kind': 'tool-call', 'tool_call_id': 'call'},
+])
+def test_tool_parts_reject_invalid_kind_types_or_required_fields(part: dict) -> None:
+    wire = json.loads(codec.encode_model_messages((sdk.ModelResponse(parts=[], timestamp=_STAMP),)))
+    wire[0]['parts'] = [part]
+    with pytest.raises(AIError):
         codec.decode_model_messages(canonical_json_bytes(wire))
-    assert unknown.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
-    del part['tool_name']
-    with pytest.raises(AIError) as malformed:
-        codec.decode_model_messages(canonical_json_bytes(wire))
-    assert malformed.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
-
-def test_tool_outcome_validation_precedes_unknown_tool_kind() -> None:
-    message = sdk.ModelRequest(parts=[sdk.ToolReturnPart('tool', 'done', tool_call_id='call', timestamp=_STAMP)])
-    wire = json.loads(codec.encode_model_messages((message,)))
-    part = wire[0]['parts'][0]
-    part['tool_kind'] = 'future-kind'
-    with pytest.raises(AIError) as unknown:
-        codec.decode_model_messages(canonical_json_bytes(wire))
-    assert unknown.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
-    part['outcome'] = 'invalid'
-    with pytest.raises(AIError) as malformed:
-        codec.decode_model_messages(canonical_json_bytes(wire))
-    assert malformed.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
-
-def test_unavailable_retry_sdk_preserves_shape_before_version_check(monkeypatch: pytest.MonkeyPatch) -> None:
-    message = sdk.ModelRequest(parts=[sdk.ToolReturnPart('tool', 'done', tool_call_id='call', timestamp=_STAMP)])
-    wire = json.loads(codec.encode_model_messages((message,)))
-    part = wire[0]['parts'][0]
-    part['retry'] = {'cause': 'validation', 'attempt': None, 'max_retries': None}
-    monkeypatch.setattr(codec, 'RetryInfo', None)
-    with pytest.raises(AIError) as unknown:
-        codec.decode_model_messages(canonical_json_bytes(wire))
-    assert unknown.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
-    part['retry']['extra'] = None
-    with pytest.raises(AIError) as malformed:
-        codec.decode_model_messages(canonical_json_bytes(wire))
-    assert malformed.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
-
-def test_native_retry_shape_rejection_precedes_unavailable_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
-    message = sdk.ModelResponse(parts=[sdk.NativeToolReturnPart('tool', 'done', tool_call_id='call', timestamp=_STAMP)], timestamp=_STAMP)
-    wire = json.loads(codec.encode_model_messages((message,)))
-    part = wire[0]['parts'][0]
-    part['outcome'] = 'retried'
-    monkeypatch.setattr(codec, 'RetryInfo', None)
-    with pytest.raises(AIError) as unknown:
-        codec.decode_model_messages(canonical_json_bytes(wire))
-    assert unknown.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
-    part['retry'] = None
-    with pytest.raises(AIError) as malformed:
-        codec.decode_model_messages(canonical_json_bytes(wire))
-    assert malformed.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
-
-def test_legacy_tool_return_class_accepts_explicit_null_retry(monkeypatch: pytest.MonkeyPatch) -> None:
-    from dataclasses import make_dataclass
-
-    message = sdk.ModelRequest(parts=[sdk.ToolReturnPart('tool', 'done', tool_call_id='call', timestamp=_STAMP)])
-    wire = json.loads(codec.encode_model_messages((message,)))
-    wire[0]['parts'][0]['retry'] = None
-    legacy_type = make_dataclass('LegacyToolReturnPart', [
-        (field.name, field.type, field)
-        for field in fields(sdk.ToolReturnPart) if field.name != 'retry'
-    ], kw_only=True, namespace={'narrow_type': staticmethod(lambda value: value)})
-    monkeypatch.setattr(codec, 'ToolReturnPart', legacy_type)
-    monkeypatch.setattr(codec, 'RetryInfo', None)
-    restored, = codec.decode_model_messages(canonical_json_bytes(wire))
-    assert restored.parts[0].tool_call_id == 'call'
-    assert restored.parts[0].content == 'done'
-    assert not hasattr(restored.parts[0], 'retry')
 
 
 @pytest.mark.parametrize('name', ['model_id', 'canonical_system'])

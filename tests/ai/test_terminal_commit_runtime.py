@@ -231,7 +231,7 @@ async def test_pending_approval_promotes_before_persisting_frontier(tmp_path: Pa
                 break
             await asyncio.sleep(.01)
         assert record is not None and record.status is ExecutionStatus.WAITING_DEFERRED
-        approvals = await runtime._state.recovery.approvals.list_pending(execution.execution_id, tenant_id=runtime.tenant_id)
+        approvals = await runtime._state.checkpoint.approvals.list_pending(execution.execution_id, tenant_id=runtime.tenant_id)
         assert len(approvals) == 1
 
 

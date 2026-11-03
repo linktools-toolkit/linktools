@@ -271,7 +271,7 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
                 assert view.status is ExecutionStatus.RECOVERY_REQUIRED
             assert slow_stopped.is_set()
             assert requests == 1
-            operations = await owner._state.recovery.tools.list_by_execution(
+            operations = await owner._state.checkpoint.tools.list_by_execution(
                 execution.execution_id, tenant_id=owner.default_principal.tenant_id,
             )
             if checkpoint:
@@ -473,7 +473,7 @@ async def test_remote_cancel_during_tool_budget_admission_never_dispatches(
             assert result.status is ExecutionStatus.CANCELLED
             assert effects == []
             assert requests == [1]
-            assert await owner._state.recovery.tools.list_by_execution(
+            assert await owner._state.checkpoint.tools.list_by_execution(
                 execution.execution_id, tenant_id=owner.tenant_id,
             ) == ()
         finally:

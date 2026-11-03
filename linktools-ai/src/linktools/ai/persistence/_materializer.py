@@ -24,13 +24,13 @@ from .contracts import (
     EvaluationRepositories,
     ExecutionRepositories,
     MemoryRepositories,
-    RecoveryRepositories,
+    CheckpointRepositories,
     TaskRepositories,
 )
 from ._memory import InMemoryStateStore
 from ._object_router import _RuntimeObjectRouter, build_runtime_object_router
 from ._plan import PersistenceDomain, PersistencePlan, runtime_domain_uses_object_store
-from ._recovery_repositories import build_recovery_repository_bundle
+from ._checkpoint_repositories import build_checkpoint_repository_bundle
 from .repositories import (
     OperationLedgerRepositoryImpl,
     RepositoryBase,
@@ -80,7 +80,7 @@ class _MaterializedRuntimeStorage:
     artifact: ArtifactRepositories
     task: TaskRepositories
     evaluation: EvaluationRepositories
-    recovery: RecoveryRepositories
+    checkpoint: CheckpointRepositories
     objects: _RuntimeObjectRouter
     run_store: RuntimeAgentRunStore
     retention: RuntimeRetentionController
@@ -98,7 +98,7 @@ class _RuntimeRepositories:
     artifact: ArtifactRepositories
     task: TaskRepositories
     evaluation: EvaluationRepositories
-    recovery: RecoveryRepositories
+    checkpoint: CheckpointRepositories
 
 
 async def materialize_runtime_storage(
@@ -187,7 +187,7 @@ async def materialize_runtime_storage(
         await store.initialize()
 
     execution_store = stores[PersistenceDomain.EXECUTION]
-    recovery_store = stores[PersistenceDomain.RECOVERY]
+    recovery_store = stores[PersistenceDomain.CHECKPOINT_CONTROL]
     if execution_store.storage_group is not recovery_store.storage_group:
         raise AIError(
             ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
@@ -207,9 +207,9 @@ async def materialize_runtime_storage(
             stores[domain], namespace=namespace, tenant_id=tenant_id, domain=domain
         )
         for domain in PersistenceDomain
-        if domain not in {PersistenceDomain.RECOVERY, PersistenceDomain.TASK, PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}
+        if domain not in {PersistenceDomain.CHECKPOINT_CONTROL, PersistenceDomain.TASK, PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}
     }
-    bundles[PersistenceDomain.RECOVERY] = build_recovery_repository_bundle(
+    bundles[PersistenceDomain.CHECKPOINT_CONTROL] = build_checkpoint_repository_bundle(
         recovery_store,
         namespace=namespace,
         tenant_id=tenant_id,
@@ -290,7 +290,7 @@ async def materialize_runtime_storage(
         artifact=repositories.artifact,
         task=repositories.task,
         evaluation=repositories.evaluation,
-        recovery=repositories.recovery,
+        checkpoint=repositories.checkpoint,
         objects=objects,
         run_store=run_store,
         retention=retention,
@@ -336,12 +336,12 @@ def _repositories(
                 cast("IdempotencyRepository", bundles[PersistenceDomain.EVALUATION]["idempotency"]),
                 cast("OperationLedgerRepository", bundles[PersistenceDomain.EVALUATION]["operations"]),
             ),
-            recovery=RecoveryRepositories(
-                cast("ApprovalRepository", bundles[PersistenceDomain.RECOVERY]["approvals"]),
-                cast("ExternalCallRepository", bundles[PersistenceDomain.RECOVERY]["external_calls"]),
-                cast("RecoveryCheckpointRepository", bundles[PersistenceDomain.RECOVERY]["checkpoints"]),
-                cast("OperationLedgerRepository", bundles[PersistenceDomain.RECOVERY]["operations"]),
-                cast("ToolStateRepository", bundles[PersistenceDomain.RECOVERY]["tools"]),
+            checkpoint=CheckpointRepositories(
+                cast("ApprovalRepository", bundles[PersistenceDomain.CHECKPOINT_CONTROL]["approvals"]),
+                cast("ExternalCallRepository", bundles[PersistenceDomain.CHECKPOINT_CONTROL]["external_calls"]),
+                cast("RecoveryCheckpointRepository", bundles[PersistenceDomain.CHECKPOINT_CONTROL]["checkpoints"]),
+                cast("OperationLedgerRepository", bundles[PersistenceDomain.CHECKPOINT_CONTROL]["operations"]),
+                cast("ToolStateRepository", bundles[PersistenceDomain.CHECKPOINT_CONTROL]["tools"]),
             ),
         )
     except KeyError as error:

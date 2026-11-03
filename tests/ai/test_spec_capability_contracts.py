@@ -611,7 +611,7 @@ def test_runtime_domain_object_store_trait_has_one_owner() -> None:
         PersistenceDomain.ARTIFACT,
         PersistenceDomain.TASK,
         PersistenceDomain.EVALUATION,
-        PersistenceDomain.RECOVERY,
+        PersistenceDomain.CHECKPOINT_CONTROL,
         PersistenceDomain.TRACE,
         PersistenceDomain.CHECKPOINT,
     }

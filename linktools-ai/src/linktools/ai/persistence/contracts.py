@@ -632,6 +632,10 @@ class StreamAttemptRecord:
 class ModelInteractionRecord:
     """Canonical lifecycle of one admitted logical model request.
 
+    request_context and request_envelope jointly record observed managed request
+    preparation. Both may be absent even with a received response; this does not
+    identify a cache or exclude external network calls.
+
     client_requests is absent for uncaptured history; an empty tuple means the
     completed observation scope saw no client dispatch. Array positions belong
     only to actual client dispatches within this logical request. Stream attempt
@@ -699,12 +703,8 @@ class ModelInteractionRecord:
             self.duration_ns is None or self.finished_at is None
         ):
             raise ValueError("terminal model interaction needs completion data")
-        if self.status == "SUCCEEDED" and (
-            self.request_context is None or self.response_context is None
-        ):
-            raise ValueError("successful model interaction needs request and response context")
-        if self.response_context is not None and self.request_context is None:
-            raise ValueError("model response context needs prepared request context")
+        if self.status == "SUCCEEDED" and self.response_context is None:
+            raise ValueError("successful model interaction needs response context")
         if self.status == "FAILED" and not self.error_code:
             raise ValueError("failed model interaction needs an error code")
         if self.stream_attempts is not None:
@@ -730,6 +730,9 @@ class ModelInteractionRecord:
             "attachments",
             tuple(_normalize_model_attachment_fact(value) for value in self.attachments),
         )
+
+        if self.response_context is not None and self.request_context is None and any(value["fact"] == "included_in_request" for value in self.attachments):
+            raise ValueError("direct result cannot claim prepared request attachments")
 
     def validate_storage_domain(self, domain: PersistenceDomain) -> None:
         """Failed response bodies belong only to the trace retention domain."""
@@ -1314,7 +1317,7 @@ class RecoveryTerminalOutcome:
         if self.object_source_domain not in {
             None,
             PersistenceDomain.EXECUTION,
-            PersistenceDomain.RECOVERY,
+            PersistenceDomain.CHECKPOINT_CONTROL,
         }:
             raise ValueError("recovery object source domain is invalid")
         if self.result_created_at.tzinfo is None:
@@ -2294,7 +2297,9 @@ class EvaluationRepositories:
 
 
 @dataclass(frozen=True, slots=True)
-class RecoveryRepositories:
+class CheckpointRepositories:
+    """Control records paired with Checkpoint's run-context archive."""
+
     approvals: ApprovalRepository
     external_calls: ExternalCallRepository
     checkpoints: RecoveryCheckpointRepository
@@ -2304,7 +2309,7 @@ class RecoveryRepositories:
 
 from ._evaluation_records import EvaluationHumanDecision
 
-__all__ = ['AgentAttemptClaim', 'ApprovalRecord', 'ApprovalRepository', 'ArchivedContextBlock', 'ArtifactRecord', 'ArtifactRepositories', 'ArtifactRepository', 'BudgetRepository', 'ContextProjection', 'ConversationCursor', 'ConversationHistoryRecord', 'ConversationHistoryRepository', 'ConversationRepositories', 'EvaluationHumanDecision', 'EvaluationLaunchIntent', 'EvaluationRecord', 'EvaluationRepositories', 'EvaluationRepository', 'EvaluationSlotDisposition', 'EvaluationTrialEvidence', 'EventRepository', 'ExecutionCancelRequestCommit', 'ExecutionEventAppend', 'ExecutionEventRecord', 'ExecutionHistorySealRecord', 'ExecutionHistoryState', 'ExecutionRecord', 'ExecutionRepositories', 'ExecutionRepository', 'ExecutionRunSealHead', 'ExecutionStartClaim', 'ExecutionStartReservation', 'ExecutionStartReservationResult', 'ExecutionStartUnknownCommit', 'ExecutionTerminalCommit', 'ExecutionTerminalCommitResult', 'ExternalCallRecord', 'ExternalCallRepository', 'HistoryQuality', 'IdempotencyRecord', 'IdempotencyRepository', 'IdempotencyTerminalUpdate', 'InlineContextBlock', 'LoadedContextMessage', 'LoadedModelContext', 'MemoryRecord', 'MemoryRepositories', 'MemoryRepository', 'ModelClientBodyRef', 'ModelClientRequestRef', 'ModelClientResponseRef', 'ModelInteractionRecord', 'OperationLedgerRepository', 'OperationTerminalUpdate', 'PendingDeferredCall', 'PendingToolContinuation', 'RecoveryCheckpoint', 'RecoveryCheckpointRepository', 'RecoveryCheckpointState', 'RecoveryConversationIntent', 'RecoveryHandoffPhase', 'RecoveryRepositories', 'RecoveryTerminalHandoff', 'RecoveryTerminalOutcome', 'RepositoryInstructionBarrier', 'ResultRecord', 'RuntimePayloadRef', 'RuntimeRepository', 'SessionRecord', 'SessionRepository', 'StoredAgentRunCheckpoint', 'StreamAttemptRecord', 'TaskAdmissionRepository', 'TaskPreparedInputRecord', 'TaskRepositories', 'TaskRepository', 'ToolOperationAdmission', 'ToolOperationRecord', 'ToolStateRepository', 'TranscriptChunk', 'TranscriptHeadRecord', 'TranscriptMessageRef', 'TranscriptOrigin', 'TranscriptOwnerDomain', 'TranscriptSeekDimension', 'TranscriptSeekRecord', 'TranscriptSpanRef', 'decode_tool_operation_failure', 'deferred_resource_id']
+__all__ = ['AgentAttemptClaim', 'ApprovalRecord', 'ApprovalRepository', 'ArchivedContextBlock', 'ArtifactRecord', 'ArtifactRepositories', 'ArtifactRepository', 'BudgetRepository', 'ContextProjection', 'ConversationCursor', 'ConversationHistoryRecord', 'ConversationHistoryRepository', 'ConversationRepositories', 'EvaluationHumanDecision', 'EvaluationLaunchIntent', 'EvaluationRecord', 'EvaluationRepositories', 'EvaluationRepository', 'EvaluationSlotDisposition', 'EvaluationTrialEvidence', 'EventRepository', 'ExecutionCancelRequestCommit', 'ExecutionEventAppend', 'ExecutionEventRecord', 'ExecutionHistorySealRecord', 'ExecutionHistoryState', 'ExecutionRecord', 'ExecutionRepositories', 'ExecutionRepository', 'ExecutionRunSealHead', 'ExecutionStartClaim', 'ExecutionStartReservation', 'ExecutionStartReservationResult', 'ExecutionStartUnknownCommit', 'ExecutionTerminalCommit', 'ExecutionTerminalCommitResult', 'ExternalCallRecord', 'ExternalCallRepository', 'HistoryQuality', 'IdempotencyRecord', 'IdempotencyRepository', 'IdempotencyTerminalUpdate', 'InlineContextBlock', 'LoadedContextMessage', 'LoadedModelContext', 'MemoryRecord', 'MemoryRepositories', 'MemoryRepository', 'ModelClientBodyRef', 'ModelClientRequestRef', 'ModelClientResponseRef', 'ModelInteractionRecord', 'OperationLedgerRepository', 'OperationTerminalUpdate', 'PendingDeferredCall', 'PendingToolContinuation', 'RecoveryCheckpoint', 'RecoveryCheckpointRepository', 'RecoveryCheckpointState', 'RecoveryConversationIntent', 'RecoveryHandoffPhase', 'CheckpointRepositories', 'RecoveryTerminalHandoff', 'RecoveryTerminalOutcome', 'RepositoryInstructionBarrier', 'ResultRecord', 'RuntimePayloadRef', 'RuntimeRepository', 'SessionRecord', 'SessionRepository', 'StoredAgentRunCheckpoint', 'StreamAttemptRecord', 'TaskAdmissionRepository', 'TaskPreparedInputRecord', 'TaskRepositories', 'TaskRepository', 'ToolOperationAdmission', 'ToolOperationRecord', 'ToolStateRepository', 'TranscriptChunk', 'TranscriptHeadRecord', 'TranscriptMessageRef', 'TranscriptOrigin', 'TranscriptOwnerDomain', 'TranscriptSeekDimension', 'TranscriptSeekRecord', 'TranscriptSpanRef', 'decode_tool_operation_failure', 'deferred_resource_id']
 
 
 class ToolStateRepository(Protocol):

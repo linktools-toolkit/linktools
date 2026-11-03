@@ -900,7 +900,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 # Freeze the resolved SDK identity before publishing the completed request.
                 response.run_id = response.run_id or ctx.run_id
                 response.conversation_id = response.conversation_id or ctx.conversation_id
-                if hasattr(response, "model_id"):
+                if model_request_seq in self._prepared_models and hasattr(response, "model_id"):
                     response.model_id = (response.model_id or self._serving_model_ids.get(model_request_seq)
                                          or request_context.model_id or selected_model.model_id)
                 interrupted = await self._complete_request(

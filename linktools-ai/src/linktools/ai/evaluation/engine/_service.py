@@ -472,7 +472,7 @@ class Evaluations:
 
     def _validate_storage(self, policy: EvaluationPolicy) -> None:
         domains = (PersistenceDomain.EVALUATION, PersistenceDomain.TASK, PersistenceDomain.EXECUTION,
-                   PersistenceDomain.RECOVERY, PersistenceDomain.ARTIFACT)
+                   PersistenceDomain.ARTIFACT)
         for domain in domains:
             retention = self._plan.route(domain).retention
             if retention is StorageRetentionMode.TRANSIENT or (
@@ -682,7 +682,7 @@ class Evaluations:
                         or persistence.plan != self._plan):
                     raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "trial scope requires an independent engine over shared storage")
                 for domain in (PersistenceDomain.EVALUATION, PersistenceDomain.TASK, PersistenceDomain.EXECUTION,
-                               PersistenceDomain.RECOVERY, PersistenceDomain.ARTIFACT):
+                               PersistenceDomain.CHECKPOINT_CONTROL, PersistenceDomain.ARTIFACT):
                     if (persistence.plan.route(domain).retention is not StorageRetentionMode.DURABLE
                             or persistence.object_store(domain).store_id != self._object_stores[domain].store_id):
                         raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "trial scope requires shared retained evidence stores")
@@ -848,11 +848,13 @@ class Evaluations:
 
     async def _trials(
         self, record: EvaluationRecord, principal: Principal,
-        *, trial_ids: tuple[str, ...] | None = None,
+        *, trial_ids: tuple[str, ...] | None = None, include_execution: bool = True,
     ) -> tuple[tuple[TrialView, ...], dict[str, int]]:
         if record.manifest.kind == "score_only":
             source = await self._record(record.manifest.source_experiment_id, principal)
-            trials, revisions = await self._trials(source, principal, trial_ids=trial_ids)
+            trials, revisions = await self._trials(
+                source, principal, trial_ids=trial_ids, include_execution=include_execution,
+            )
             wanted = set(record.manifest.source_trials)
             refs = {item.trial: item.evidence_ref for item in record.evidence}
             return tuple(replace(item, evidence_ref=refs.get(item.trial, item.evidence_ref))
@@ -872,7 +874,7 @@ class Evaluations:
             item = TrialView(trial, plan.case_ref, plan.candidate_slot_id, plan.repetition,
                              disposition=dispositions.get(slot), evidence_ref=evidence.get(trial))
             intent = intents.get(slot)
-            if intent is not None:
+            if include_execution and intent is not None:
                 state = await self._graph_state(intent, principal)
                 if state is not None:
                     graph_ref = GraphSubjectRef(self._namespace, principal.tenant_id, state.graph_id)
@@ -1292,7 +1294,9 @@ class Evaluations:
                             "evidence_expired" if expired else record.gate, cancelled=True)
             return
         assert engine is not None
-        trials, _ = await self._trials(record, principal)
+        # Launch planning consumes declared inputs and retained evidence, not a
+        # second projection of live graph/execution state already read above.
+        trials, _ = await self._trials(record, principal, include_execution=False)
         dispositions = {item.slot_id: item.disposition for item in record.dispositions}
         intents = {item.slot_id: item for item in record.intents}
         case_refs = tuple(dict.fromkeys(trial.case_ref for trial in trials))

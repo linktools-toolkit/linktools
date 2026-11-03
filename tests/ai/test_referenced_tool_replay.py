@@ -255,7 +255,7 @@ async def test_pending_reference_reopens_from_checkpoint_with_original_principal
         return _TEXT_BODY
 
     async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.from_root(path, exclusive_writer=True)) as persistence_260, Runtime.attach(persistence=persistence_260, authorization=_RecoveryAuthorization(), features=_recovery_features(authorized_load, authorized_text if multiple_sources else None), auto_recover=False) as runtime:
-        checkpoint = await runtime._state.recovery.checkpoints.get(
+        checkpoint = await runtime._state.checkpoint.checkpoints.get(
             execution_id, tenant_id=_ADMITTED.tenant_id,
         )
         assert checkpoint is not None

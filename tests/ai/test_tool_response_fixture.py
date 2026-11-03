@@ -468,7 +468,7 @@ async def test_native_runtime_consumes_fixture_with_captured_effect_policy(
             assert result.status is ExecutionStatus.SUCCEEDED
             assert result.output == {"text": "Fixture consumed"}
             assert consumed == [expected]
-            operations = await runtime._state.recovery.tools.list_by_execution(
+            operations = await runtime._state.checkpoint.tools.list_by_execution(
                 execution.execution_id, tenant_id=runtime.default_principal.tenant_id,
             )
             if strict:

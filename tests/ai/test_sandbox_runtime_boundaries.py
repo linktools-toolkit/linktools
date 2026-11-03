@@ -131,27 +131,6 @@ async def test_workspace_capability_adapts_the_caller_owned_session(
     assert session.calls[0] == "echo ok"
 
 
-class _CancellingCloseSession:
-    async def close(self) -> None:
-        raise asyncio.CancelledError
-
-
-@pytest.mark.asyncio
-async def test_cancelled_close_does_not_replace_primary_failure(tmp_path: Path) -> None:
-    del tmp_path
-    session = _CancellingCloseSession()
-    with pytest.raises(asyncio.CancelledError):
-        await session.close()
-
-
-@pytest.mark.asyncio
-async def test_cancelled_close_propagates_without_primary_failure(tmp_path: Path) -> None:
-    del tmp_path
-    session = _CancellingCloseSession()
-    with pytest.raises(asyncio.CancelledError):
-        await session.close()
-
-
 @pytest.mark.parametrize(
     ("effect", "expected_type"),
     (

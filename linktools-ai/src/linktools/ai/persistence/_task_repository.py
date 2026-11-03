@@ -840,6 +840,14 @@ class TaskRepositoryImpl(RepositoryBase):
         state = await self._event_state_in_transaction(transaction, graph_id)
         if state is None:
             return None
+        return await self._graph_state_from_projection(transaction, state)
+
+    async def _graph_state_from_projection(
+        self,
+        transaction: StateTransaction,
+        state: _TaskEventState,
+    ) -> TaskGraphState:
+        graph_id = state.graph.graph_id
         stream = _task_event_stream(
             self._namespace,
             self._tenant_id,
@@ -2047,20 +2055,16 @@ class TaskRepositoryImpl(RepositoryBase):
                 now=now,
             )
             next_status = _isolated_graph_status(next_nodes, before.graph.nodes)
-            await self._apply_graph_transition(
+            applied = await self._apply_graph_transition(
                 transaction,
                 before,
                 graph_record,
                 next_nodes,
                 next_status,
             )
-            state = await self._graph_state_in_transaction(
-                transaction,
-                graph_id,
+            return await self._graph_state_from_projection(
+                transaction, _TaskEventState(applied, next_nodes),
             )
-            if state is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return state
 
         try:
             return await self._mutate_with_event_retry(mutate)
@@ -2386,7 +2390,7 @@ class TaskRepositoryImpl(RepositoryBase):
             nonlocal expected_fence
             graph_key = self._graph_key(graph_id)
             node_key = self._state_key(graph_id, node_id)
-            records = await transaction.get_records((graph_key, node_key))
+            records = await transaction.get_records((graph_key, node_key, self._admission_key(graph_id)))
             graph_record = records.get(graph_key)
             node_record = records.get(node_key)
             if graph_record is None or node_record is None:
@@ -2660,7 +2664,9 @@ class TaskRepositoryImpl(RepositoryBase):
             graph_key = self._graph_key(target_graph_id)
             node_key = self._state_key(target_graph_id, target_node_id)
             result_key = self._result_key(target_graph_id, target_node_id)
-            records = await transaction.get_records((graph_key, node_key, result_key))
+            records = await transaction.get_records(
+                (graph_key, node_key, result_key, self._admission_key(target_graph_id)),
+            )
             graph_record = records.get(graph_key)
             node_record = records.get(node_key)
             if graph_record is None or node_record is None:

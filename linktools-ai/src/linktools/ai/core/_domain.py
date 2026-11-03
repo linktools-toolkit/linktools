@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Logical persistence ownership shared by domains and storage composition."""
+"""Stable persistence addresses shared by repositories and storage composition."""
 from enum import Enum
 
 
@@ -13,7 +13,7 @@ class PersistenceDomain(str, Enum):
     ARTIFACT = "artifact"
     TASK = "task"
     EVALUATION = "evaluation"
-    RECOVERY = "recovery"
+    CHECKPOINT_CONTROL = "recovery"  # Stable address for Checkpoint's control records.
     TRACE = "trace"
     CHECKPOINT = "checkpoint"
 
