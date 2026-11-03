@@ -79,7 +79,7 @@ async def test_pending_session_commits_once_and_retains_canonical_replay(
         assert result.status is ExecutionStatus.SUCCEEDED
         assert result.output == {'text': 'answer'}
         assert len(commits) == 1
-        assert set(commits[0].removeprefix('runtime.state.group[').removesuffix(']').split(',')) == {'execution', 'conversation', 'recovery', 'group_internal'}
+        assert set(commits[0].removeprefix('runtime.state.group[').removesuffix(']').split(',')) == {'execution', 'conversation', 'checkpoint', 'group_internal'}
         stored = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert stored is not None and stored.retention_closed and stored.conversation
         replay = await session.start('first', idempotency_key='first')
