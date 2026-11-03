@@ -124,7 +124,7 @@ async def test_runtime_run_store_pages_plain_staging(enhanced: bool) -> None:
         StagingAgentRunStore(),
         conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
         execution_archive=None,
-        recovery_archive=None,
+        checkpoint_archive=None,
     )
     await store.initialize()
     try:
@@ -148,7 +148,7 @@ async def test_runtime_run_store_continues_recovery_interaction_high_water() -> 
         staging,
         conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
         execution_archive=None,
-        recovery_archive=recovery,
+        checkpoint_archive=recovery,
     )
     await store.initialize()
     try:

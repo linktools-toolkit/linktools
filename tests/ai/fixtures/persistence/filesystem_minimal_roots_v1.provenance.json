@@ -38,7 +38,7 @@
       "memory_digest": "bb4efc3ef95bd04e2a0d9c480629c29c0d841b67c23e189398d90d18a679098a",
       "memory_version": "m1:4dbf510fd1719f8b087c071a3f792477fac07995bc66c0786b967cfd8a665359",
       "namespace": "memory-migration",
-      "snapshot_digest": "e94b09130b417e6b4acad913d4e44e94a4d1f9612cad334f8cd86aa4f0119c3c",
+      "snapshot_digest": "ec59e0c42d7fadd034e6dfbdc266f252b71f9b06262a82833a828ad96c03f15c",
       "snapshot_object_store_id": "root-fixture-snapshot",
       "tenant_id": "tenant"
     },
@@ -69,7 +69,7 @@
         "trace/e645fc8f0102ea6ba76efaf39aebf8b6353f8cc26ab6e1b62612946539956c49/bde7e378c5b73a6860ef1ef2331a98c58dedc6efe2e746a195b8640795827731/manifest.json": "326c0d2f201062db6e5c959159a740673fd1567ea878bb80943494179ee134db"
       },
       "namespace": "root-migration",
-      "snapshot_digest": "dffec9ebbbec5e67083ee897f1df5dc7254828da0f812cdf6262c82aee4a76ee",
+      "snapshot_digest": "e4cf07cbb2609adfd323cf79eed2a68a1c55623d4d9ec6e85a591cb72b4898f0",
       "snapshot_object_store_id": "root-fixture-snapshot",
       "tenant_id": "tenant"
     }

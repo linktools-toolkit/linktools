@@ -104,7 +104,10 @@ source root must remain byte-for-byte unchanged: reader internals write only
 coordination locks, but an explicitly colocated destination still receives the
 requested snapshot objects. Verify the restored records/receipts/content before
 switching consumers. Filesystem State writers and routes are removed; this
-reader preserves only offline access to supported clean legacy data. The unused
+reader preserves only offline access to supported clean legacy data. Restored
+message payloads use the model codec's frozen read-only filesystem-format adapter;
+source/archive bytes and their recorded hashes are not rewritten. This does not
+provide a general converter for obsolete development protocols. The unused
 `storage.FilesystemJournal` transaction API is removed with those State writers;
 independent atomic-file, file-lock, cache and ObjectStore APIs remain. Opaque
 custom-object closure and journal replay are not provided.
@@ -310,14 +313,44 @@ flush/close ownership.
 
 `PersistencePlan.checkpoint=None` and `trace=None` inherit the execution route,
 including its hot-read cache. Registering CheckpointCapability or TraceCapability
-enables behavior; neither capability accepts a physical storage argument. An explicit archive route must remain
-in the same `StateStorageGroup` as Execution and Recovery, because their safety
-and terminal boundaries require atomic writes. Persistence validates this when it opens. Routes share a group when they use the same SQLite path, the same SQL
+enables behavior; neither capability accepts a physical storage argument. An explicit
+Trace or Checkpoint route must remain in the same `StateStorageGroup` as Execution,
+because safety and terminal boundaries require atomic writes. Persistence validates this when it opens. Routes share a group when they use the same SQLite path, the same SQL
 engine instance; memory routes share
 one binding-local group. Separate SQL engine instances targeting the same database do not
 establish a shared SQL group.
 
-For a per-archive hot cache, derive the execution route rather than selecting
+Checkpoint owns the small execution-control records, approval/external-result
+waits, retained tool results and the run-context archive. Its control repositories
+are available at `persistence.checkpoint`, replacing `persistence.recovery`.
+`CheckpointCapability` enables automatic model/tool-boundary captures; omitting it
+does not remove the minimal execution control or the checkpoint required to resume
+an approval or external-result wait.
+
+`PersistenceDomain.CHECKPOINT` is the single domain for control records and the
+run-context archive. Both use the same route, StateStore, transaction group and
+object source. `resolved_routes` and `Persistence.status()` report that domain
+once. Small control updates do not rewrite model-message bodies.
+
+Low-level callers use `persistence.checkpoint.tools` and
+`PersistenceDomain.CHECKPOINT`; the repository bundle is `CheckpointRepositories`.
+`StateCommands` accepts this bundle as `checkpoint` and the optional context
+archive as `checkpoint_archive`. `ExecutionCheckpoint` and
+`ExecutionCheckpointState` describe the control record; `AgentRunCheckpoint`
+describes the model-context checkpoint.
+
+The retired `recovery` data partition is not migrated. Existing filesystem
+sources retain their recorded layout. Offline export accepts an empty retired
+partition and includes the current domains only; retained `checkpoint` archives
+and unrelated domains are preserved. Populated retired partitions or references
+into retired recovery data require their original reader.
+
+A transient Checkpoint route retains unscoped control objects for the Runtime's
+lifetime. Releasing one execution removes only its scoped working objects;
+it does not remove control payloads or another execution's working objects.
+Durable routes still share the Execution transaction group.
+
+For a per-domain hot cache, derive the execution route rather than selecting
 an unrelated database. This current API example keeps Checkpoint's inherited
 cache while disabling Trace's hot cache:
 
@@ -723,7 +756,7 @@ Deletion or source damage is detected on the next source read. A caller arriving
 after a shared load's deadline starts a new source read; a slow original read
 may finish for its original callers without restarting indefinitely.
 
-Recovery-domain objects always retain current source-membership checks. Other
+Checkpoint control and archive objects always retain current source-membership checks. Other
 strong consumers retain them as well: explicit result/wait,
 History results, persistent checkpoint reads, model/recovery context loading, and every rebuilt session
 display (including `max_age=0`). They may reuse verified bytes after the existing

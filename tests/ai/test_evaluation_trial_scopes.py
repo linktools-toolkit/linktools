@@ -525,7 +525,7 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
             )
             execution_id = bound.node_states[0].execution_id
             original = await runtime._state.execution.executions.get(execution_id, tenant_id=PRINCIPAL.tenant_id)
-            checkpoint = await runtime._state.recovery.checkpoints.get(execution_id, tenant_id=PRINCIPAL.tenant_id)
+            checkpoint = await runtime._state.checkpoint.checkpoints.get(execution_id, tenant_id=PRINCIPAL.tenant_id)
             assert checkpoint is not None
             assert original.status is ExecutionStatus.STARTED
             stop_owner.set()

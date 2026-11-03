@@ -1,15 +1,12 @@
 [
   {
-    "agent_conversation_id": null,
+    "conversation_id": null,
     "instructions": null,
     "kind": "request",
     "metadata": null,
     "parts": [
       {
-        "content": {
-          "type": "text",
-          "value": "runtime-persistence-v1"
-        },
+        "content": "runtime-persistence-v1",
         "part_kind": "user-prompt",
         "timestamp": "2026-01-01T00:00:00Z"
       }

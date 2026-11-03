@@ -11,6 +11,7 @@ import pytest
 from openai import DefaultAsyncHttpxClient
 from pydantic_ai.messages import (
     BinaryContent,
+    BinaryImage,
     ImageUrl,
     ModelRequest,
     ModelResponse,
@@ -188,10 +189,16 @@ def test_arbitrary_json_text_is_not_treated_as_generated_metadata() -> None:
     assert not is_binary_attachment_text(TextContent(text), binary)
 
 
-def test_checkpoint_keeps_tool_return_and_pending_index_after_empty_user_part_removal() -> None:
+@pytest.mark.parametrize("binary", [
+    BinaryContent(_BODY, media_type="image/png"),
+    BinaryImage(_BODY, media_type="image/png", identifier="explicit-image", vendor_metadata={"detail": "high"}),
+    BinaryContent(b"audio", media_type="audio/wav", identifier="explicit-audio"),
+    BinaryContent(b"document", media_type="application/pdf", vendor_metadata={"source": "fixture"}),
+])
+def test_checkpoint_keeps_tool_return_and_pending_index_after_empty_user_part_removal(binary: BinaryContent) -> None:
     recorder = AgentRunRecorder(object(), execution_id="execution", agent_run_id="run")
     request = _bound_request(("evidence.png",))
-    pending = ModelRequest(parts=[UserPromptPart(content=[BinaryContent(_BODY, media_type="image/png")])])
+    pending = ModelRequest(parts=[UserPromptPart(content=[binary])])
 
     context, pending_index = recorder.checkpoint_context(
         [request, ModelResponse(parts=[TextPart("done")])], pending=pending,
@@ -199,7 +206,17 @@ def test_checkpoint_keeps_tool_return_and_pending_index_after_empty_user_part_re
 
     assert context[0].parts == [request.parts[0]]
     assert pending_index == 2
-    assert context[pending_index] == pending
+    restored = context[pending_index]
+    recovered = restored.parts[0].content[0]
+    assert isinstance(recovered, BinaryContent)
+    assert (recovered.data, recovered.media_type, recovered.identifier, recovered.vendor_metadata) == (
+        binary.data, binary.media_type, binary.identifier, binary.vendor_metadata,
+    )
+    assert recovered.is_image == binary.is_image
+    assert restored.parts[0].timestamp == pending.parts[0].timestamp
+    assert encode_model_messages([restored]) == encode_model_messages([pending])
+    completed = ModelResponse([TextPart("done")])
+    assert project_transient_binary_content([restored, completed]) == project_transient_binary_content([pending, completed])
 
 
 def test_projection_is_idempotent_and_preserves_raw_history_and_old_markers() -> None:

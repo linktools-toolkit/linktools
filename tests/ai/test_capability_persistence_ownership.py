@@ -301,7 +301,7 @@ async def test_core_producer_fencing_does_not_require_trace_archive(checkpoint_e
         store = RuntimeAgentRunStore(
             StagingAgentRunStore(),
             conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
-            execution_archive=None, recovery_archive=recovery if checkpoint_enabled else None,
+            execution_archive=None, checkpoint_archive=recovery if checkpoint_enabled else None,
             execution_repository=repository, tenant_id="tenant",
         )
         await store.initialize()

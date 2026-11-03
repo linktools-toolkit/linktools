@@ -264,6 +264,7 @@ class ModelInteractionCapture:
             )
         )
 
+
     def _stream_attempt(self, attempt: ModelStreamAttempt) -> StagedStreamAttemptRecord:
         error = attempt.error
         projected = (model_binding_error(error) if isinstance(error, Exception) else None)

@@ -17,7 +17,7 @@ from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._recovery_coordinator import _RecoveryCoordinator
 from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.persistence.contracts import (
-    RecoveryCheckpointState,
+    ExecutionCheckpointState,
     RecoveryHandoffPhase,
 )
 from linktools.ai.task import DefaultTaskGraphService
@@ -222,11 +222,11 @@ async def test_recovery_reconcile_defers_unavailable_definition_per_execution() 
     checkpoints = (
         SimpleNamespace(
             execution_id="unavailable",
-            state=RecoveryCheckpointState.ADMITTED,
+            state=ExecutionCheckpointState.ADMITTED,
         ),
         SimpleNamespace(
             execution_id="available",
-            state=RecoveryCheckpointState.ADMITTED,
+            state=ExecutionCheckpointState.ADMITTED,
         ),
     )
 
@@ -259,7 +259,7 @@ async def test_recovery_reconcile_defers_unavailable_definition_per_execution() 
 async def test_recovery_reconcile_rejects_workspace_mismatch() -> None:
     checkpoint = SimpleNamespace(
         execution_id="execution",
-        state=RecoveryCheckpointState.ADMITTED,
+        state=ExecutionCheckpointState.ADMITTED,
     )
 
     class Port:
@@ -352,7 +352,7 @@ async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
         execution_id="execution",
         tenant_id="tenant",
         handoff_phase=RecoveryHandoffPhase.NONE,
-        state=RecoveryCheckpointState.ACTIVE,
+        state=ExecutionCheckpointState.ACTIVE,
     )
     with pytest.raises(AIError) as captured:
         await coordinator.reconcile_checkpoint(checkpoint)  # type: ignore[arg-type]

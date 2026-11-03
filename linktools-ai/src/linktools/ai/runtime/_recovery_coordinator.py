@@ -65,8 +65,8 @@ from ..persistence.contracts import (
     ExternalCallRecord,
     PendingDeferredCall,
     PendingToolContinuation,
-    RecoveryCheckpoint,
-    RecoveryCheckpointState,
+    ExecutionCheckpoint,
+    ExecutionCheckpointState,
     RecoveryHandoffPhase,
     RepositoryInstructionBarrier,
     ToolOperationRecord,
@@ -81,7 +81,7 @@ _logger = environ.get_logger("ai.runtime.local")
 @dataclass(frozen=True, slots=True)
 class _DeferredResume:
     execution: ExecutionRecord
-    checkpoint: RecoveryCheckpoint
+    checkpoint: ExecutionCheckpoint
     history: tuple[ModelMessage, ...]
     results: DeferredToolResults
     producer_generation: int
@@ -99,7 +99,7 @@ class _RecoveryCoordinatorPort(Protocol):
         self,
         *,
         cursor: str | None,
-    ) -> Page[RecoveryCheckpoint]: ...
+    ) -> Page[ExecutionCheckpoint]: ...
 
     async def _recovery_failure_effects(
         self,
@@ -174,7 +174,7 @@ class _RecoveryCoordinatorPort(Protocol):
         execution_id: str,
         *,
         tenant_id: str,
-    ) -> RecoveryCheckpoint | None: ...
+    ) -> ExecutionCheckpoint | None: ...
 
     async def materialize_deferred_call(
         self,
@@ -189,14 +189,14 @@ class _RecoveryCoordinatorPort(Protocol):
     async def commit_deferred_frontier(
         self,
         execution: ExecutionRecord,
-        checkpoint: RecoveryCheckpoint,
+        checkpoint: ExecutionCheckpoint,
         continuation: PendingToolContinuation,
         approval_records: tuple[ApprovalRecord, ...],
         external_records: tuple[ExternalCallRecord, ...],
         occurred_at: datetime,
         *,
         producer_generation: int | None = None,
-    ) -> tuple[ExecutionRecord, RecoveryCheckpoint]: ...
+    ) -> tuple[ExecutionRecord, ExecutionCheckpoint]: ...
 
     async def load_approval(
         self,
@@ -221,9 +221,9 @@ class _RecoveryCoordinatorPort(Protocol):
 
     async def claim_deferred_resume(
         self,
-        checkpoint: RecoveryCheckpoint,
+        checkpoint: ExecutionCheckpoint,
         execution: ExecutionRecord,
-    ) -> tuple[ExecutionRecord, RecoveryCheckpoint]: ...
+    ) -> tuple[ExecutionRecord, ExecutionCheckpoint]: ...
 
     def validate_binding(self, execution: ExecutionRecord, *, binding: AgentBinding | None = None) -> AgentBinding: ...
 
@@ -241,7 +241,7 @@ class _RecoveryCoordinatorPort(Protocol):
 
     async def _reconcile_session_recovery(
         self,
-        checkpoint: RecoveryCheckpoint,
+        checkpoint: ExecutionCheckpoint,
         execution: ExecutionRecord,
         *,
         recovery_operation: OperationLedgerInput | None = None,
@@ -249,7 +249,7 @@ class _RecoveryCoordinatorPort(Protocol):
 
     async def _reconcile_handoff(
         self,
-        checkpoint: RecoveryCheckpoint,
+        checkpoint: ExecutionCheckpoint,
     ) -> ExecutionRecord: ...
 
     async def _release_session_execution(
@@ -257,7 +257,7 @@ class _RecoveryCoordinatorPort(Protocol):
         execution: ExecutionRecord,
     ) -> None: ...
 
-    async def _finish_checkpoint(self, checkpoint: RecoveryCheckpoint) -> None: ...
+    async def _finish_checkpoint(self, checkpoint: ExecutionCheckpoint) -> None: ...
 
     async def _recovery_idempotency(
         self,
@@ -292,7 +292,7 @@ class _RecoveryCoordinatorPort(Protocol):
         expected_cursor: ConversationCursor | None = None,
         conversation_agent_run: AgentRunRecord | None = None,
         conversation_checkpoint: AgentRunCheckpoint | None = None,
-        recovery_checkpoint: RecoveryCheckpoint | None = None,
+        recovery_checkpoint: ExecutionCheckpoint | None = None,
         producer_generation: int | None = None,
         expected_revision: int | None = None,
     ) -> ExecutionRecord: ...
@@ -300,7 +300,7 @@ class _RecoveryCoordinatorPort(Protocol):
     async def _commit_start_recovery_checkpoint(
         self,
         execution: ExecutionRecord,
-        checkpoint: RecoveryCheckpoint,
+        checkpoint: ExecutionCheckpoint,
         identity: IdempotencyRecord,
     ) -> ExecutionRecord: ...
 
@@ -314,7 +314,7 @@ class _RecoveryCoordinatorPort(Protocol):
     async def _complete_recovered_cancel(
         self,
         resumed: ExecutionRecord,
-        checkpoint: RecoveryCheckpoint,
+        checkpoint: ExecutionCheckpoint,
         operations: tuple[OperationLedgerRecord, ...],
         *,
         expected_revision: int | None = None,
@@ -326,7 +326,7 @@ class _RecoveryCoordinatorPort(Protocol):
         execution: ExecutionRecord,
         *,
         recovery_operation: OperationLedgerInput | None = None,
-    ) -> tuple[ExecutionRecord, RecoveryCheckpoint]: ...
+    ) -> tuple[ExecutionRecord, ExecutionCheckpoint]: ...
 
     async def _admit_recovery_without_producer(
         self, execution: ExecutionRecord, operation: OperationLedgerInput,
@@ -353,12 +353,12 @@ class _RecoveryCoordinatorPort(Protocol):
     async def commit_repository_instruction_barrier(
         self,
         execution: ExecutionRecord,
-        checkpoint: RecoveryCheckpoint,
+        checkpoint: ExecutionCheckpoint,
         overlay: RepositoryInstructions,
         barrier: RepositoryInstructionBarrier,
         *,
         producer_generation: int | None = None,
-    ) -> RecoveryCheckpoint: ...
+    ) -> ExecutionCheckpoint: ...
 
     def _prepare_recovery_relaunch(self, execution_id: str) -> bool: ...
 
@@ -418,7 +418,7 @@ class _RecoveryCoordinator:
         )
         if (
             checkpoint is None
-            or checkpoint.state is not RecoveryCheckpointState.ACTIVE
+            or checkpoint.state is not ExecutionCheckpointState.ACTIVE
             or checkpoint.agent_run_id is None
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -526,7 +526,7 @@ class _RecoveryCoordinator:
             return current
         if (
             current.status is not ExecutionStatus.STARTED
-            or checkpoint.state is not RecoveryCheckpointState.ACTIVE
+            or checkpoint.state is not ExecutionCheckpointState.ACTIVE
             or checkpoint.agent_run_id != agent_run_id
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -748,7 +748,7 @@ class _RecoveryCoordinator:
 
     async def reconcile_checkpoint(
         self,
-        checkpoint: RecoveryCheckpoint,
+        checkpoint: ExecutionCheckpoint,
         *,
         producer_generation: int | None = None,
         allow_active_recovery: bool = True,
@@ -786,7 +786,7 @@ class _RecoveryCoordinator:
             or checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE
             or (
                 execution.status is ExecutionStatus.WAITING_DEFERRED
-                and checkpoint.state is RecoveryCheckpointState.WAITING
+                and checkpoint.state is ExecutionCheckpointState.WAITING
             )
         ):
             # A SQL reader has no proof that an unhanded-off producer stopped.
@@ -798,8 +798,8 @@ class _RecoveryCoordinator:
                 checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE
                 or checkpoint.state
                 not in {
-                    RecoveryCheckpointState.ACTIVE,
-                    RecoveryCheckpointState.WAITING,
+                    ExecutionCheckpointState.ACTIVE,
+                    ExecutionCheckpointState.WAITING,
                 }
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -810,8 +810,8 @@ class _RecoveryCoordinator:
             and checkpoint.handoff_phase is RecoveryHandoffPhase.NONE
             and checkpoint.state
             in {
-                RecoveryCheckpointState.ACTIVE,
-                RecoveryCheckpointState.WAITING,
+                ExecutionCheckpointState.ACTIVE,
+                ExecutionCheckpointState.WAITING,
             }
         ):
             effects, active_claims = await self._port._reconcile_tool_effects(
@@ -884,7 +884,7 @@ class _RecoveryCoordinator:
             await self._port._finish_checkpoint(checkpoint)
             return False
         if (not execution.restart_checkpoints
-                and checkpoint.state in {RecoveryCheckpointState.ADMITTED, RecoveryCheckpointState.ACTIVE}
+                and checkpoint.state in {ExecutionCheckpointState.ADMITTED, ExecutionCheckpointState.ACTIVE}
                 and execution.status is not ExecutionStatus.CANCELLING):
             # Paused continuations and prepared terminal handoffs have their own
             # durable boundaries; interrupted work requires an opted-in checkpoint.
@@ -895,22 +895,22 @@ class _RecoveryCoordinator:
             return False
         resolved_binding = self._port.validate_binding(execution, binding=resolved_binding)
         if checkpoint.state in {
-            RecoveryCheckpointState.ADMITTED,
-            RecoveryCheckpointState.ACTIVE,
-            RecoveryCheckpointState.WAITING,
+            ExecutionCheckpointState.ADMITTED,
+            ExecutionCheckpointState.ACTIVE,
+            ExecutionCheckpointState.WAITING,
         } and not await self._port._reconcile_session_recovery(
             checkpoint, execution, recovery_operation=recovery_operation,
         ):
             return False
         if (
             producer_generation is None
-            and checkpoint.state in {RecoveryCheckpointState.ADMITTED, RecoveryCheckpointState.ACTIVE}
+            and checkpoint.state in {ExecutionCheckpointState.ADMITTED, ExecutionCheckpointState.ACTIVE}
             and execution.status in {ExecutionStatus.PENDING_START, ExecutionStatus.STARTED}
         ):
             await self._port.validate_recovery_inputs(execution, binding=resolved_binding)
         identity = await self._port._recovery_idempotency(execution)
         if (
-            checkpoint.state is RecoveryCheckpointState.ADMITTED
+            checkpoint.state is ExecutionCheckpointState.ADMITTED
             and execution.status is ExecutionStatus.PENDING_START
         ):
             execution = await self._port._commit_start_recovery_checkpoint(
@@ -931,12 +931,12 @@ class _RecoveryCoordinator:
             return False
         elif execution.status is ExecutionStatus.START_UNKNOWN:
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
-        elif checkpoint.state is RecoveryCheckpointState.ADMITTED:
+        elif checkpoint.state is ExecutionCheckpointState.ADMITTED:
             await self._port._ensure_recovery_idempotency(
                 execution,
                 expected_status=IdempotencyStatus.STARTED,
             )
-        elif checkpoint.state is RecoveryCheckpointState.WAITING:
+        elif checkpoint.state is ExecutionCheckpointState.WAITING:
             if execution.status is not ExecutionStatus.WAITING_DEFERRED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             resume = await self.reconcile_waiting_deferred(
@@ -952,7 +952,7 @@ class _RecoveryCoordinator:
                 execution,
                 expected_status=IdempotencyStatus.STARTED,
             )
-        elif checkpoint.state is RecoveryCheckpointState.ACTIVE:
+        elif checkpoint.state is ExecutionCheckpointState.ACTIVE:
             if execution.status is not ExecutionStatus.STARTED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await self._port._ensure_recovery_idempotency(
@@ -981,10 +981,10 @@ class _RecoveryCoordinator:
         if resume is not None:
             producer_generation = resume.producer_generation
         elif producer_generation is None and (
-            checkpoint.state is RecoveryCheckpointState.ACTIVE
-            or (checkpoint.state is RecoveryCheckpointState.ADMITTED and expected_revision is not None)
+            checkpoint.state is ExecutionCheckpointState.ACTIVE
+            or (checkpoint.state is ExecutionCheckpointState.ADMITTED and expected_revision is not None)
         ):
-            admitted = checkpoint.state is RecoveryCheckpointState.ADMITTED
+            admitted = checkpoint.state is ExecutionCheckpointState.ADMITTED
             producer_generation = execution.revision + 1
             execution, checkpoint = await self._port._commit_recovery_resume(
                 execution, recovery_operation=recovery_operation,
@@ -1084,9 +1084,9 @@ class _RecoveryCoordinator:
             checkpoint is None
             or checkpoint.state
             not in {
-                RecoveryCheckpointState.ADMITTED,
-                RecoveryCheckpointState.ACTIVE,
-                RecoveryCheckpointState.WAITING,
+                ExecutionCheckpointState.ADMITTED,
+                ExecutionCheckpointState.ACTIVE,
+                ExecutionCheckpointState.WAITING,
             }
             or checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE
         ):
@@ -1103,7 +1103,7 @@ class _RecoveryCoordinator:
                 current, checkpoint, cancel_operations, expected_revision=current.revision,
             )
             return cancelled, False
-        if checkpoint.state is RecoveryCheckpointState.ADMITTED:
+        if checkpoint.state is ExecutionCheckpointState.ADMITTED:
             launched = await self.reconcile_checkpoint(
                 checkpoint, expected_revision=current.revision,
                 recovery_operation=recovery_operation,
@@ -1147,7 +1147,7 @@ class _RecoveryCoordinator:
 
     async def reconcile_waiting_deferred(
         self,
-        checkpoint: RecoveryCheckpoint,
+        checkpoint: ExecutionCheckpoint,
         execution: ExecutionRecord,
         *,
         binding: AgentBinding | None = None,
@@ -1169,7 +1169,7 @@ class _RecoveryCoordinator:
         if (
             current.status is not ExecutionStatus.WAITING_DEFERRED
             or recovery != checkpoint
-            or recovery.state is not RecoveryCheckpointState.WAITING
+            or recovery.state is not ExecutionCheckpointState.WAITING
             or recovery.pending_tools is None
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1295,8 +1295,8 @@ class _RecoveryCoordinator:
         )
 
     def _deferred_attempt_advanced(
-        self, execution: ExecutionRecord, checkpoint: RecoveryCheckpoint,
-        current: ExecutionRecord, recovery: RecoveryCheckpoint,
+        self, execution: ExecutionRecord, checkpoint: ExecutionCheckpoint,
+        current: ExecutionRecord, recovery: ExecutionCheckpoint,
     ) -> bool:
         return (
             current.revision > execution.revision
@@ -1326,7 +1326,7 @@ class _RecoveryCoordinator:
             execution is None
             or checkpoint is None
             or execution.status is not ExecutionStatus.WAITING_DEFERRED
-            or checkpoint.state is not RecoveryCheckpointState.WAITING
+            or checkpoint.state is not ExecutionCheckpointState.WAITING
             or checkpoint.pending_tools is None
         ):
             return None
@@ -1343,7 +1343,7 @@ class _RecoveryCoordinator:
                 cursor=cursor,
             )
             for checkpoint in page.items:
-                if checkpoint.state is RecoveryCheckpointState.COMPLETED:
+                if checkpoint.state is ExecutionCheckpointState.COMPLETED:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 try:
                     await self.reconcile_checkpoint(

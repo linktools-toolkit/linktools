@@ -24,8 +24,8 @@ from linktools.ai.persistence import Persistence
 from linktools.ai.persistence._archive import ContentArchive, ContentRecord, PreparedArchive
 from linktools.ai.persistence._checkpoint_persistence import CheckpointPersistence
 from linktools.ai.persistence.contracts import (
-    ExecutionTerminalCommit, ExecutionTerminalCommitResult, RecoveryCheckpoint,
-    RecoveryCheckpointState, ResultRecord,
+    ExecutionTerminalCommit, ExecutionTerminalCommitResult, ExecutionCheckpoint,
+    ExecutionCheckpointState, ResultRecord,
 )
 from linktools.ai.persistence._runtime_commands import StateCommands
 from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
@@ -271,11 +271,11 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
     )
     current = _execution()
     run, checkpoint = AgentRunRecord("run"), _checkpoint(2)
-    source = RecoveryCheckpoint(
-        "execution", "run", RecoveryCheckpointState.ACTIVE, 0,
+    source = ExecutionCheckpoint(
+        "execution", "run", ExecutionCheckpointState.ACTIVE, 0,
         current.created_at, current.updated_at,
     )
-    target = replace(source, state=RecoveryCheckpointState.COMPLETED, revision=1)
+    target = replace(source, state=ExecutionCheckpointState.COMPLETED, revision=1)
     result = ResultRecord(None, StopReason.ERROR, UsageMetrics(), current.updated_at)
     commit = ExecutionTerminalCommit(
         current.revision, current.event_seq,
@@ -292,11 +292,11 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
 
     try:
         await state.execution.executions.create_with_history_head(current)
-        await state.recovery.checkpoints.create(source)
+        await state.checkpoint.checkpoints.create(source)
         commands = StateCommands(
             state.execution.executions, namespace="terminal-scopes", events=state.execution.events,
-            recovery=state.recovery.checkpoints, execution_run_store=trace,
-            recovery_run_store=recovery, background_tasks=set(),
+            checkpoint=state.checkpoint, execution_run_store=trace,
+            checkpoint_archive=recovery, background_tasks=set(),
         )
         monkeypatch.setattr(ContentArchive, "publish", capture)
         async def commit_terminal():
@@ -319,7 +319,7 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
                 assert not await content.store.read(lambda tx: tx.scan_records())
                 assert await owner.get_agent_run(agent_run_id="run") is None
             assert await state.execution.executions.get("execution", tenant_id="tenant") == current
-            assert await state.recovery.checkpoints.get("execution", tenant_id="tenant") == source
+            assert await state.checkpoint.checkpoints.get("execution", tenant_id="tenant") == source
             return
         committed = await commit_terminal()
         assert committed.execution.status is ExecutionStatus.FAILED
@@ -329,7 +329,7 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
             latest = await owner.latest_checkpoint(agent_run_id="run")
             assert latest is not None and latest.messages == checkpoint.messages
             assert await owner.checkpoint_count(agent_run_id="run") == 1
-        assert await state.recovery.checkpoints.get("execution", tenant_id="tenant") == target
+        assert await state.checkpoint.checkpoints.get("execution", tenant_id="tenant") == target
     finally:
         await state.close()
 

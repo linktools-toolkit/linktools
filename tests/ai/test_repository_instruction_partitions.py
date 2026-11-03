@@ -9,7 +9,7 @@ from linktools.ai.core import canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._recovery_coordinator import _RecoveryCoordinator
 from linktools.ai.persistence.contracts import (
-    RecoveryCheckpointState,
+    ExecutionCheckpointState,
     RepositoryInstructionBarrier,
 )
 from linktools.ai.spec import (
@@ -83,7 +83,7 @@ def _checkpoint(
         )
     )
     checkpoint = SimpleNamespace(
-        state=RecoveryCheckpointState.ACTIVE,
+        state=ExecutionCheckpointState.ACTIVE,
         agent_run_id="step",
         repository_instruction_overlay=reference,
         repository_instruction_barriers=(first_barrier, latest_barrier),
@@ -183,7 +183,7 @@ async def test_dynamic_instruction_union_limits_precede_barrier_commit(tmp_path,
         max_repository_instruction_bytes=len(full.render().encode("utf-8")) - 1 if kind == "bytes" else 256 * 1024,
     )
     checkpoint = SimpleNamespace(
-        state=RecoveryCheckpointState.ACTIVE, agent_run_id="run",
+        state=ExecutionCheckpointState.ACTIVE, agent_run_id="run",
         repository_instruction_overlay=None, repository_instruction_barriers=(),
     )
 
@@ -223,7 +223,7 @@ async def test_pinned_sources_are_not_recounted_or_revalidated_without_discovery
     initial = RepositoryInstructions((RepositoryInstructionDocument("agents:AGENTS.md", ".", "pinned root"),))
     (tmp_path / "AGENTS.md").write_bytes(b"\xff")  # A pinned source must not be read again.
     checkpoint = SimpleNamespace(
-        state=RecoveryCheckpointState.ACTIVE, agent_run_id="run",
+        state=ExecutionCheckpointState.ACTIVE, agent_run_id="run",
         repository_instruction_overlay=None, repository_instruction_barriers=(),
     )
     coordinator = _RecoveryCoordinator(

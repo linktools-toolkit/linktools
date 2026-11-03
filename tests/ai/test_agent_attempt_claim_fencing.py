@@ -15,8 +15,8 @@ from linktools.ai.persistence.contracts import (
     AgentAttemptClaim,
     PendingDeferredCall,
     PendingToolContinuation,
-    RecoveryCheckpoint,
-    RecoveryCheckpointState,
+    ExecutionCheckpoint,
+    ExecutionCheckpointState,
 )
 from linktools.ai.storage import StoredPayload
 
@@ -43,14 +43,14 @@ async def test_admission_readback_requires_own_receipt(
             _execution(now), revision=1, agent_run_seq=0 if pending is None else 1,
             status=ExecutionStatus.STARTED if pending is None else ExecutionStatus.WAITING_DEFERRED,
         )
-        checkpoint = RecoveryCheckpoint(
+        checkpoint = ExecutionCheckpoint(
             execution.execution_id, None if pending is None else pending.source_agent_run_id,
-            RecoveryCheckpointState.ADMITTED if pending is None else RecoveryCheckpointState.WAITING,
+            ExecutionCheckpointState.ADMITTED if pending is None else ExecutionCheckpointState.WAITING,
             0, now, now, pending_tools=pending,
         )
         repository = state.execution.executions
         await repository.create_with_history_head(execution)
-        await state.recovery.checkpoints.create(checkpoint)
+        await state.checkpoint.checkpoints.create(checkpoint)
         commands = _commands(state, namespace)
 
         async def claim():
@@ -99,7 +99,7 @@ async def test_admission_readback_requires_own_receipt(
         else:
             current, active = await claim()
         assert current.agent_run_seq == execution.agent_run_seq + 1
-        assert active.state is RecoveryCheckpointState.ACTIVE
+        assert active.state is ExecutionCheckpointState.ACTIVE
         head = await repository.get_history_head(execution.execution_id, tenant_id="tenant")
         assert head.producer_generation == execution.revision + 1
         assert isinstance(head.producer_claim_id, str) and head.producer_claim_id

@@ -343,7 +343,7 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
                 ("accepted", loads[0].identifier), ("included_in_request", loads[0].identifier),
             ]
             assert all(item.source == "read_file" and item.call_id == "render" for item in facts.items)
-        operations = await runtime._state.recovery.tools.list_by_execution(
+        operations = await runtime._state.checkpoint.tools.list_by_execution(
             execution.execution_id, tenant_id=principal.tenant_id,
         )
         assert len(operations) == (0 if kind in {"none", "read_file"} else 1)
@@ -407,7 +407,7 @@ async def test_projection_failure_preserves_effect_classification(
         except AIError as error:
             assert kind != "none" and error.code is ErrorCode.TOOL_EFFECT_UNKNOWN
         assert len(processed) == 1
-        operations = await runtime._state.recovery.tools.list_by_execution(
+        operations = await runtime._state.checkpoint.tools.list_by_execution(
             execution.execution_id, tenant_id=runtime.default_principal.tenant_id,
         )
         if kind == "none":

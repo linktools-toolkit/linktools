@@ -65,7 +65,7 @@ async def test_execution_callbacks_use_bound_promise_without_mutating_declaratio
 async def test_wrapped_execution_owner_is_bound_to_captured_policy_once(retained: bool, combined: bool) -> None:
     staging = StagingAgentRunStore()
     store = RuntimeAgentRunStore(staging, conversation_archive=StagingAgentRunStore(),
-                                execution_archive=None, recovery_archive=None)
+                                execution_archive=None, checkpoint_archive=None)
     store.bind_execution_producer('run', execution_id='execution', producer_generation=1,
                                   conversation=retained, restart_checkpoints=False, durable_trace=False)
     declaration = ExecutionCapability(retain_history=not retained)

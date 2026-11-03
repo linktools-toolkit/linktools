@@ -632,6 +632,10 @@ class StreamAttemptRecord:
 class ModelInteractionRecord:
     """Canonical lifecycle of one admitted logical model request.
 
+    request_context and request_envelope jointly record observed managed request
+    preparation. Both may be absent even with a received response; this does not
+    identify a cache or exclude external network calls.
+
     client_requests is absent for uncaptured history; an empty tuple means the
     completed observation scope saw no client dispatch. Array positions belong
     only to actual client dispatches within this logical request. Stream attempt
@@ -699,12 +703,8 @@ class ModelInteractionRecord:
             self.duration_ns is None or self.finished_at is None
         ):
             raise ValueError("terminal model interaction needs completion data")
-        if self.status == "SUCCEEDED" and (
-            self.request_context is None or self.response_context is None
-        ):
-            raise ValueError("successful model interaction needs request and response context")
-        if self.response_context is not None and self.request_context is None:
-            raise ValueError("model response context needs prepared request context")
+        if self.status == "SUCCEEDED" and self.response_context is None:
+            raise ValueError("successful model interaction needs response context")
         if self.status == "FAILED" and not self.error_code:
             raise ValueError("failed model interaction needs an error code")
         if self.stream_attempts is not None:
@@ -730,6 +730,9 @@ class ModelInteractionRecord:
             "attachments",
             tuple(_normalize_model_attachment_fact(value) for value in self.attachments),
         )
+
+        if self.response_context is not None and self.request_context is None and any(value["fact"] == "included_in_request" for value in self.attachments):
+            raise ValueError("direct result cannot claim prepared request attachments")
 
     def validate_storage_domain(self, domain: PersistenceDomain) -> None:
         """Failed response bodies belong only to the trace retention domain."""
@@ -957,7 +960,7 @@ class AgentAttemptClaim:
     expected_execution_revision: int
     expected_agent_run_seq: int
     expected_recovery_revision: int
-    expected_recovery_state: RecoveryCheckpointState
+    expected_recovery_state: ExecutionCheckpointState
 
 
 @dataclass(frozen=True, slots=True)
@@ -1186,7 +1189,7 @@ class RepositoryInstructionBarrier:
             raise ValueError("repository instruction barrier is invalid")
 
 
-class RecoveryCheckpointState(str, Enum):
+class ExecutionCheckpointState(str, Enum):
     __str__ = str.__str__
     __format__ = str.__format__
     ADMITTED = "admitted"
@@ -1205,10 +1208,10 @@ class RecoveryHandoffPhase(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
-class RecoveryCheckpoint:
+class ExecutionCheckpoint:
     execution_id: str
     agent_run_id: str | None
-    state: RecoveryCheckpointState
+    state: ExecutionCheckpointState
     revision: int
     created_at: datetime
     updated_at: datetime
@@ -1220,18 +1223,18 @@ class RecoveryCheckpoint:
     pending_operation_id: str | None = None
 
     def __post_init__(self) -> None:
-        if self.state is RecoveryCheckpointState.ADMITTED and (
+        if self.state is ExecutionCheckpointState.ADMITTED and (
             self.agent_run_id is not None
             or self.pending_operation_id is not None
             or self.pending_tools is not None
         ):
             raise ValueError("admitted recovery checkpoint cannot have an attempt")
         if self.state in {
-            RecoveryCheckpointState.ACTIVE,
-            RecoveryCheckpointState.WAITING,
+            ExecutionCheckpointState.ACTIVE,
+            ExecutionCheckpointState.WAITING,
         } and self.agent_run_id is None:
             raise ValueError("active recovery checkpoint requires an attempt")
-        if self.state is RecoveryCheckpointState.WAITING:
+        if self.state is ExecutionCheckpointState.WAITING:
             if (
                 self.pending_tools is None
                 or self.agent_run_id != self.pending_tools.source_agent_run_id
@@ -1242,13 +1245,13 @@ class RecoveryCheckpoint:
                 raise ValueError("deferred waiting checkpoint is inconsistent")
         if (
             self.state
-            in {RecoveryCheckpointState.HANDOFF, RecoveryCheckpointState.COMPLETED}
+            in {ExecutionCheckpointState.HANDOFF, ExecutionCheckpointState.COMPLETED}
             and self.pending_tools is not None
         ):
             raise ValueError(
                 "terminal recovery checkpoint cannot retain deferred continuation"
             )
-        if self.state is RecoveryCheckpointState.ACTIVE and self.pending_tools is not None:
+        if self.state is ExecutionCheckpointState.ACTIVE and self.pending_tools is not None:
             raise ValueError("active recovery checkpoint cannot retain deferred work")
         barriers = tuple(self.repository_instruction_barriers)
         identities = tuple((item.agent_run_id, item.tool_call_id) for item in barriers)
@@ -1260,16 +1263,16 @@ class RecoveryCheckpoint:
                 raise ValueError(
                     "unprepared recovery checkpoint cannot contain a handoff"
                 )
-            if self.state is RecoveryCheckpointState.HANDOFF:
+            if self.state is ExecutionCheckpointState.HANDOFF:
                 raise ValueError(
                     "unprepared recovery checkpoint cannot be in handoff state"
                 )
         elif self.handoff_phase is RecoveryHandoffPhase.COMPLETED:
-            if self.state is not RecoveryCheckpointState.COMPLETED:
+            if self.state is not ExecutionCheckpointState.COMPLETED:
                 raise ValueError("completed recovery checkpoint must be completed")
         elif self.terminal_handoff is None:
             raise ValueError("prepared recovery checkpoint requires a terminal handoff")
-        elif self.state is not RecoveryCheckpointState.HANDOFF:
+        elif self.state is not ExecutionCheckpointState.HANDOFF:
             raise ValueError(
                 "active recovery checkpoint handoff must be in handoff state"
             )
@@ -1314,7 +1317,7 @@ class RecoveryTerminalOutcome:
         if self.object_source_domain not in {
             None,
             PersistenceDomain.EXECUTION,
-            PersistenceDomain.RECOVERY,
+            PersistenceDomain.CHECKPOINT,
         }:
             raise ValueError("recovery object source domain is invalid")
         if self.result_created_at.tzinfo is None:
@@ -1936,34 +1939,34 @@ class ExternalCallRepository(RuntimeRepository, Protocol):
     ) -> tuple[ExternalCallRecord, ...]: ...
 
 
-class RecoveryCheckpointRepository(RuntimeRepository, Protocol):
-    async def create(self, record: RecoveryCheckpoint) -> RecoveryCheckpoint: ...
+class ExecutionCheckpointRepository(RuntimeRepository, Protocol):
+    async def create(self, record: ExecutionCheckpoint) -> ExecutionCheckpoint: ...
     async def get(
         self, execution_id: str, *, tenant_id: str
-    ) -> RecoveryCheckpoint | None: ...
+    ) -> ExecutionCheckpoint | None: ...
     async def get_in_transaction(
         self,
         transaction: StateTransaction,
         execution_id: str,
         *,
         tenant_id: str,
-    ) -> RecoveryCheckpoint | None: ...
-    async def list(self, *, tenant_id: str) -> tuple[RecoveryCheckpoint, ...]: ...
+    ) -> ExecutionCheckpoint | None: ...
+    async def list(self, *, tenant_id: str) -> tuple[ExecutionCheckpoint, ...]: ...
     async def list_recoverable_page(
         self,
         *,
         tenant_id: str,
         cursor: str | None,
         limit: int,
-    ) -> Page[RecoveryCheckpoint]: ...
+    ) -> Page[ExecutionCheckpoint]: ...
     async def compare_and_swap(
         self,
         execution_id: str,
         *,
         tenant_id: str,
         expected_revision: int,
-        next_record: RecoveryCheckpoint,
-    ) -> RecoveryCheckpoint: ...
+        next_record: ExecutionCheckpoint,
+    ) -> ExecutionCheckpoint: ...
     async def compare_and_swap_in_transaction(
         self,
         transaction: StateTransaction,
@@ -1971,8 +1974,8 @@ class RecoveryCheckpointRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         expected_revision: int,
-        next_record: RecoveryCheckpoint,
-    ) -> RecoveryCheckpoint: ...
+        next_record: ExecutionCheckpoint,
+    ) -> ExecutionCheckpoint: ...
 
 
 class OperationLedgerRepository(RuntimeRepository, Protocol):
@@ -2294,17 +2297,19 @@ class EvaluationRepositories:
 
 
 @dataclass(frozen=True, slots=True)
-class RecoveryRepositories:
+class CheckpointRepositories:
+    """Control records paired with Checkpoint's run-context archive."""
+
     approvals: ApprovalRepository
     external_calls: ExternalCallRepository
-    checkpoints: RecoveryCheckpointRepository
+    checkpoints: ExecutionCheckpointRepository
     operations: OperationLedgerRepository
     tools: ToolStateRepository
 
 
 from ._evaluation_records import EvaluationHumanDecision
 
-__all__ = ['AgentAttemptClaim', 'ApprovalRecord', 'ApprovalRepository', 'ArchivedContextBlock', 'ArtifactRecord', 'ArtifactRepositories', 'ArtifactRepository', 'BudgetRepository', 'ContextProjection', 'ConversationCursor', 'ConversationHistoryRecord', 'ConversationHistoryRepository', 'ConversationRepositories', 'EvaluationHumanDecision', 'EvaluationLaunchIntent', 'EvaluationRecord', 'EvaluationRepositories', 'EvaluationRepository', 'EvaluationSlotDisposition', 'EvaluationTrialEvidence', 'EventRepository', 'ExecutionCancelRequestCommit', 'ExecutionEventAppend', 'ExecutionEventRecord', 'ExecutionHistorySealRecord', 'ExecutionHistoryState', 'ExecutionRecord', 'ExecutionRepositories', 'ExecutionRepository', 'ExecutionRunSealHead', 'ExecutionStartClaim', 'ExecutionStartReservation', 'ExecutionStartReservationResult', 'ExecutionStartUnknownCommit', 'ExecutionTerminalCommit', 'ExecutionTerminalCommitResult', 'ExternalCallRecord', 'ExternalCallRepository', 'HistoryQuality', 'IdempotencyRecord', 'IdempotencyRepository', 'IdempotencyTerminalUpdate', 'InlineContextBlock', 'LoadedContextMessage', 'LoadedModelContext', 'MemoryRecord', 'MemoryRepositories', 'MemoryRepository', 'ModelClientBodyRef', 'ModelClientRequestRef', 'ModelClientResponseRef', 'ModelInteractionRecord', 'OperationLedgerRepository', 'OperationTerminalUpdate', 'PendingDeferredCall', 'PendingToolContinuation', 'RecoveryCheckpoint', 'RecoveryCheckpointRepository', 'RecoveryCheckpointState', 'RecoveryConversationIntent', 'RecoveryHandoffPhase', 'RecoveryRepositories', 'RecoveryTerminalHandoff', 'RecoveryTerminalOutcome', 'RepositoryInstructionBarrier', 'ResultRecord', 'RuntimePayloadRef', 'RuntimeRepository', 'SessionRecord', 'SessionRepository', 'StoredAgentRunCheckpoint', 'StreamAttemptRecord', 'TaskAdmissionRepository', 'TaskPreparedInputRecord', 'TaskRepositories', 'TaskRepository', 'ToolOperationAdmission', 'ToolOperationRecord', 'ToolStateRepository', 'TranscriptChunk', 'TranscriptHeadRecord', 'TranscriptMessageRef', 'TranscriptOrigin', 'TranscriptOwnerDomain', 'TranscriptSeekDimension', 'TranscriptSeekRecord', 'TranscriptSpanRef', 'decode_tool_operation_failure', 'deferred_resource_id']
+__all__ = ['AgentAttemptClaim', 'ApprovalRecord', 'ApprovalRepository', 'ArchivedContextBlock', 'ArtifactRecord', 'ArtifactRepositories', 'ArtifactRepository', 'BudgetRepository', 'ContextProjection', 'ConversationCursor', 'ConversationHistoryRecord', 'ConversationHistoryRepository', 'ConversationRepositories', 'EvaluationHumanDecision', 'EvaluationLaunchIntent', 'EvaluationRecord', 'EvaluationRepositories', 'EvaluationRepository', 'EvaluationSlotDisposition', 'EvaluationTrialEvidence', 'EventRepository', 'ExecutionCancelRequestCommit', 'ExecutionEventAppend', 'ExecutionEventRecord', 'ExecutionHistorySealRecord', 'ExecutionHistoryState', 'ExecutionRecord', 'ExecutionRepositories', 'ExecutionRepository', 'ExecutionRunSealHead', 'ExecutionStartClaim', 'ExecutionStartReservation', 'ExecutionStartReservationResult', 'ExecutionStartUnknownCommit', 'ExecutionTerminalCommit', 'ExecutionTerminalCommitResult', 'ExternalCallRecord', 'ExternalCallRepository', 'HistoryQuality', 'IdempotencyRecord', 'IdempotencyRepository', 'IdempotencyTerminalUpdate', 'InlineContextBlock', 'LoadedContextMessage', 'LoadedModelContext', 'MemoryRecord', 'MemoryRepositories', 'MemoryRepository', 'ModelClientBodyRef', 'ModelClientRequestRef', 'ModelClientResponseRef', 'ModelInteractionRecord', 'OperationLedgerRepository', 'OperationTerminalUpdate', 'PendingDeferredCall', 'PendingToolContinuation', 'ExecutionCheckpoint', 'ExecutionCheckpointRepository', 'ExecutionCheckpointState', 'RecoveryConversationIntent', 'RecoveryHandoffPhase', 'CheckpointRepositories', 'RecoveryTerminalHandoff', 'RecoveryTerminalOutcome', 'RepositoryInstructionBarrier', 'ResultRecord', 'RuntimePayloadRef', 'RuntimeRepository', 'SessionRecord', 'SessionRepository', 'StoredAgentRunCheckpoint', 'StreamAttemptRecord', 'TaskAdmissionRepository', 'TaskPreparedInputRecord', 'TaskRepositories', 'TaskRepository', 'ToolOperationAdmission', 'ToolOperationRecord', 'ToolStateRepository', 'TranscriptChunk', 'TranscriptHeadRecord', 'TranscriptMessageRef', 'TranscriptOrigin', 'TranscriptOwnerDomain', 'TranscriptSeekDimension', 'TranscriptSeekRecord', 'TranscriptSpanRef', 'decode_tool_operation_failure', 'deferred_resource_id']
 
 
 class ToolStateRepository(Protocol):

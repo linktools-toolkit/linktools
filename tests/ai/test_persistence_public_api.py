@@ -24,7 +24,7 @@ def test_persistence_root_contains_configuration_and_offline_snapshot_reader() -
 def test_persistence_domain_wire_values_do_not_depend_on_python_names() -> None:
     assert {domain.value for domain in PersistenceDomain} == {
         'conversation', 'execution', 'memory', 'artifact', 'task',
-        'evaluation', 'recovery', 'trace', 'checkpoint',
+        'evaluation', 'trace', 'checkpoint',
     }
 
 

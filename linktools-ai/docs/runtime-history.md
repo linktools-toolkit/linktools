@@ -115,6 +115,31 @@ in the normal recursive scope. Without selectors, the existing scope is
 unchanged. Read child requests using the child's own `execution_id` so that
 its execution authorization applies.
 
+Model interactions may retain a response with an empty `request` projection
+when the managed request preparation was not observed. The existing request and
+response fields expose retained content independently; no public classification
+flag or event field is added. An absent request does **not** identify cache
+provenance or prove that no external network call occurred. Actual response,
+explicit model identity and usage are preserved without inventing a provider
+request envelope or an `included_in_request` attachment fact. The interaction’s
+`model` metadata identifies its selected logical binding, not proof that the
+binding served the response. A missing response `model_id` is not filled from
+that entry selection. With `include_content=False`, both bodies remain omitted.
+
+The durable owner uses the same request-context/envelope pair; it does not store
+an additional classification. One absent half is invalid, success requires a
+response. A retained response without request preparation cannot claim attachment
+inclusion. Running trace metadata can omit prepared request bodies while retaining
+already observed attachment facts; absence of those bodies is not proof that
+preparation never occurred.
+Prepared running records cannot lose that preparation in a successor. Integrity
+checks still verify stored bytes; two deliberately rewritten absent request
+fields have the same shape as a legitimately unprepared response and cannot be
+distinguished by shape alone. New message bodies use the native codec described
+below. The retained filesystem message format has a read-only adapter; existing
+bytes and their integrity references are unchanged. Upgrade participating readers
+before writing the current shape; an SDK-only rollback is not safe.
+
 `include_client_requests=True` loads original client attempt bodies independently
 of `include_content=True`, which loads the SDK request/response projection.
 Both default to false on the public API. Selectors apply before either body
@@ -761,8 +786,8 @@ derived fields remain required. Explicit values still undergo the original type,
 constructor and derived-value checks; an invalid explicit value never falls back
 to a default. Wire types and schema versions are unchanged. Format-specific
 adapters retain their projections and compact encodings; ordinary dataclass
-fields use the same declared-default rule. Writers retain their existing field
-sets. Reads do not rewrite or migrate source records.
+fields use the same declared-default rule. Generic record writers retain their declared field sets. Message serialization
+is described separately below. Reads do not rewrite or migrate source records.
 
 Defaults mean what the model declares, not a recovered historical value. For
 example, omitted budget counts use their declared zero, an omitted optional
@@ -784,14 +809,71 @@ lease ownership and resolved dependencies remain outside that projection.
 Format-specific TaskNode input semantics and explicit dependency/failure policies
 retain their custom required-field contracts.
 
-The owned model-message v1 codec follows the same constructor-default rule for
-mapped message, part, retry, instruction and usage fields, including the explicit
-conversation-ID and attempt-duration wire mappings. Wire `version`, `kind` and
+The model-message v1 codec uses the installed Pydantic AI public message
+adapter for ordinary message, part, identity, usage and attempt fields. Native
+field names and representations are retained; LinkTools does not keep a second
+field-by-field schema. The top-level array, per-message `version`, `kind` and
 `part_kind` discriminators remain explicit. Durable tool call/result/retry IDs
 also remain required: generating independent authoring IDs on restore would break
-call/result correlation. An omitted clock factory runs at read time; it is not
-proof of a historical timestamp. Exact pending continuation still fails closed
-when a missing clock value prevents proving that the recorded part is unchanged.
+call/result correlation. Native `tool_kind` strings remain open: a reader without
+a custom kind registration preserves the kind and ordinary base-part content;
+registering that kind can recover its typed parts. Tool-return content always
+uses its owned portable codec, preserving Asset references, retired references,
+multimodal content and snapshots independently of kind. Native typed promotion
+runs on that restored content, not a transport placeholder. Process registration
+is not a condition for retaining durable history. Declared missing defaults may be materialized; supplied
+facts must not be silently discarded or coerced. Provider usage extensions remain
+open data, not a way to replace standard usage fields.
+
+Thin owned extensions retain Runtime summary provenance, Asset reference and
+retirement descriptors, portable tool-return values, open recorded settings, and
+supported `RetryPromptPart` tool correlation that the native union otherwise
+upgrades to feedback. These are not new public authoring parameters. Native
+validation is supplemented only for durable facts its authoring dataclasses do
+not enforce, such as nonnegative usage/durations and valid instruction digests.
+An omitted clock factory runs at read time; it is not proof of a historical
+timestamp. Exact pending continuation still fails closed when a missing clock
+value prevents proving that the recorded part is unchanged.
+
+The current writer uses native conversation and attempt duration fields only.
+The retained filesystem format is recognized by its explicit
+`agent_conversation_id` field, rather than a failed native decode. Its frozen
+prompt envelope, usage-extension envelope and microsecond duration are lowered
+in memory to the same native validation path. Both conversation identity fields
+in one message are rejected. No legacy writer, fallback decoding, second durable
+state or automatic data rewrite is introduced. Archive decoding returns the
+original canonical bytes, so existing payload, projection and checkpoint hashes
+remain meaningful after offline filesystem snapshot restoration.
+Ordinary content items in that retained format keep their existing tolerance for
+additional fields; known values and reference descriptors retain their owned
+validation rules.
+
+This support does not restore unrelated removed fields or promise every obsolete
+development format. It remains necessary while retained filesystem archives are
+supported; removing it requires retiring that retained-data contract explicitly.
+Readers must be upgraded before current writers. Do not clear actual stores,
+rewrite stored hashes, or claim an SDK-only rollback is safe after writing the
+current shape.
+
+Native response identities are internal recorded facts, not untrusted import
+credentials. `model_id` records the actual successful configured model;
+`canonical_system` identifies the provider verification domain. Arbitrary
+`metadata` is never promoted into either field or into workspace authority.
+`workspace_ref` retains the provider/environment reference without credentials.
+It does not recreate a closed workspace or authorize access: configured workspace
+backends/resolvers still own attachment, lifetime and permissions. An explicitly
+configured backend takes precedence over a historical reference. Do not accept
+untrusted client-supplied histories as trusted internal records; use the native
+sanitization boundary when importing external history.
+
+`history_digest` and `provider_response_id` jointly guard server-side continuation.
+Dropping only the digest can make changed/redacted history continue from the
+provider's old unredacted state. Preserve them together; when intentionally
+removing the continuation proof, also remove its provider response ID. The native
+digest is unkeyed SHA-256 unless the model is configured with a key, so retain it
+under the same confidentiality policy as the history: low-entropy redacted content
+can otherwise be guessed offline. A stored reference or digest does not extend
+the lifetime of the remote state or prove it is still available.
 
 Archive byte checks use the original verified canonical leaf bytes, not a
 serialization with defaults filled in. The message codec owns canonical singleton-array
@@ -804,20 +886,16 @@ retains an immutable exact-content proof after original stored-byte validation,
 without changing source payloads or accepting changed part IDs, content, metadata
 or explicit part timestamps.
 
-Ordinary user-content items use that same default mechanism, including metadata,
-identifiers, vendor metadata, optional URL media/download settings and cache-point
-TTL. SDK public constructor aliases are consulted only where there is no matching
-dataclass field declaration. Required content bytes/media type, URL, uploaded-file
-identity/provider and wire discriminators are not guessed. Explicit values retain
-their original validation, and ordinary content keeps its existing tolerance for
-extra fields.
-
-An omitted identifier uses the SDK's deterministic content/URL/file default; it
-cannot recover a discarded custom identifier. Missing URL media type retains the
-SDK's deferred inference behavior, which can still fail for an opaque URL. A
-referenced-content descriptor keeps its separate ref/source/revision/provenance
-validation. Removing retired-reference metadata yields ordinary text, not a
-fabricated reference; an explicit malformed descriptor is still rejected.
+The standalone portable user-content helper retains its declared defaults and
+ordinary extra-field tolerance. Message persistence instead uses the native
+user-content schema and rejects silently discarded fields. Required content
+bytes/media type, URL, uploaded-file identity/provider and discriminators are
+not guessed. An omitted identifier uses the SDK's deterministic content/URL/file
+default; it cannot recover a discarded custom identifier. Missing URL media type
+retains the SDK's deferred inference behavior, which can fail for an opaque URL.
+The host reference envelope keeps separate ref/source/revision/provenance
+validation. A malformed or stripped reference descriptor is rejected, not
+promoted from ordinary text or metadata into a fabricated reference.
 
 For an existing `SessionRecord` v1 without `repository_instruction_scopes`, this
 same generic rule uses the field's existing empty-tuple default. The earlier

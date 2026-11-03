@@ -252,7 +252,7 @@ def _run_store_for_preflight() -> RuntimeAgentRunStore:
         StagingAgentRunStore(),
         conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
         execution_archive=None,
-        recovery_archive=None,
+        checkpoint_archive=None,
     )
 
 

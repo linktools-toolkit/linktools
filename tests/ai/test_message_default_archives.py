@@ -19,6 +19,7 @@ from linktools.ai.persistence import Persistence, PersistenceDomain
 from linktools.ai.persistence._archive import PreparedArchive
 from linktools.ai.persistence.contracts import ContextProjection
 from linktools.ai.persistence import _history as history_module
+from linktools.ai.persistence import _transcript_staging as staging_module
 from linktools.ai.model.messages import encode_model_messages
 
 from .test_incremental_projection_boundaries import _storage
@@ -56,6 +57,7 @@ async def test_transcript_and_archived_projection_verify_original_omitted_field_
         bundle = PreparedArchive()
         with monkeypatch.context() as writer:
             writer.setattr(history_module, "encode_model_messages", _omitted_payload)
+            writer.setattr(staging_module, "encode_model_messages", _omitted_payload)
             prepared = await repository.prepare_observation("run", _messages(), first_message_index=0, pending=None, pending_keys=())
             projection = await repository.prepare_model_projection(_messages(), bundle)
             await archive.state_store.mutate(lambda tx: repository.commit_observation(tx, prepared))
@@ -209,6 +211,7 @@ async def test_loaded_projection_reuse_digest_describes_original_root_bytes(tmp_
         projections = []
         with monkeypatch.context() as writer:
             writer.setattr(history_module, "encode_model_messages", _omitted_payload)
+            writer.setattr(staging_module, "encode_model_messages", _omitted_payload)
             for group in groups:
                 projections.append(await repository.prepare_model_projection(group, bundle))
         projection = ContextProjection(tuple(item for part in projections for item in part.items))

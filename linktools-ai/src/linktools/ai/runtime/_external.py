@@ -38,9 +38,9 @@ from ..persistence.contracts import (
     ExternalCallRepository,
     ExecutionRepository,
     PendingDeferredCall,
-    RecoveryCheckpoint,
-    RecoveryCheckpointRepository,
-    RecoveryCheckpointState,
+    ExecutionCheckpoint,
+    ExecutionCheckpointRepository,
+    ExecutionCheckpointState,
 )
 from ..persistence import PersistenceDomain
 
@@ -64,7 +64,7 @@ class DefaultExternalService:
         self,
         calls: ExternalCallRepository,
         executions: ExecutionRepository,
-        checkpoints: RecoveryCheckpointRepository,
+        checkpoints: ExecutionCheckpointRepository,
         authorization: AuthorizationPolicy,
         *,
         objects: ObjectStore,
@@ -207,7 +207,7 @@ class DefaultExternalService:
         execution_id: str,
         *,
         tenant_id: str,
-    ) -> RecoveryCheckpoint | None:
+    ) -> ExecutionCheckpoint | None:
         execution = await self._executions.state_store.read(
             lambda _transaction: self._executions.get(execution_id, tenant_id=tenant_id)
         )
@@ -216,7 +216,7 @@ class DefaultExternalService:
         checkpoint = await self._checkpoints.get(execution_id, tenant_id=tenant_id)
         if execution.status.value != "WAITING_DEFERRED":
             return None
-        if checkpoint is None or checkpoint.state is not RecoveryCheckpointState.WAITING:
+        if checkpoint is None or checkpoint.state is not ExecutionCheckpointState.WAITING:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return checkpoint
 
@@ -234,7 +234,7 @@ class DefaultExternalService:
             reference = await put_runtime_object(
                 self._objects,
                 self._object_key_factory,
-                PersistenceDomain.RECOVERY,
+                PersistenceDomain.CHECKPOINT,
                 request.principal.tenant_id,
                 raw,
             )
@@ -247,7 +247,7 @@ class DefaultExternalService:
 
 
 def _pending_call(
-    checkpoint: RecoveryCheckpoint | None,
+    checkpoint: ExecutionCheckpoint | None,
     call_id: str,
     *,
     tenant_id: str,

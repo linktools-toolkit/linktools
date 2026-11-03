@@ -87,7 +87,7 @@ def _runtime_process(
                 execution = await runtime._state.execution.executions.get(execution_id, tenant_id=tenant)
                 head = await runtime._state.execution.executions.get_history_head(execution_id, tenant_id=tenant)
                 assert execution is not None and head is not None
-                checkpoint = await runtime._state.recovery.checkpoints.get(execution_id, tenant_id=tenant)
+                checkpoint = await runtime._state.checkpoint.checkpoints.get(execution_id, tenant_id=tenant)
                 session = await runtime._state.conversation.sessions.get("session", tenant_id=tenant)
                 return {
                     "handoff_phase": None if checkpoint is None else checkpoint.handoff_phase.value,

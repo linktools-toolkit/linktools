@@ -15,7 +15,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.contracts import (
     AgentAttemptClaim, ExecutionHistoryState, ExecutionRecord,
-    RecoveryCheckpoint, RecoveryCheckpointState, RuntimePayloadRef,
+    ExecutionCheckpoint, ExecutionCheckpointState, RuntimePayloadRef,
 )
 from linktools.ai.persistence.state import active_state_scope
 from linktools.ai.storage import StoredPayload
@@ -41,7 +41,7 @@ def _context() -> RuntimePayloadRef:
 
 async def _promote(
     state: _TurnState, turn: _PendingTurn, context: RuntimePayloadRef | None,
-) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
+) -> tuple[ExecutionRecord, ExecutionCheckpoint]:
     return await state.commands.promote_pending_turn(
         turn.reservation, expected_session=state.session, captured_input_context=context,
     )
@@ -49,7 +49,7 @@ async def _promote(
 
 async def _assert_promoted(
     state: _TurnState, turn: _PendingTurn, context: RuntimePayloadRef | None,
-    result: tuple[ExecutionRecord, RecoveryCheckpoint],
+    result: tuple[ExecutionRecord, ExecutionCheckpoint],
 ) -> None:
     execution, recovery = result
     initial = turn.reservation.execution
@@ -59,15 +59,15 @@ async def _assert_promoted(
         event_seq=1, agent_run_seq=1 if prepared else 0, input_context=context,
         started_at=initial.created_at, updated_at=execution.updated_at,
     )
-    assert recovery == RecoveryCheckpoint(
+    assert recovery == ExecutionCheckpoint(
         initial.execution_id,
         agent_run_id(namespace=_NAMESPACE, tenant_id="tenant", execution_id=initial.execution_id, agent_run_seq=1) if prepared else None,
-        RecoveryCheckpointState.ACTIVE if prepared else RecoveryCheckpointState.ADMITTED,
+        ExecutionCheckpointState.ACTIVE if prepared else ExecutionCheckpointState.ADMITTED,
         1 if prepared else 0, initial.created_at, execution.updated_at,
     )
     storage = state.storage
     assert await storage.execution.executions.get(initial.execution_id, tenant_id="tenant") == execution
-    assert await storage.recovery.checkpoints.get(initial.execution_id, tenant_id="tenant") == recovery
+    assert await storage.checkpoint.checkpoints.get(initial.execution_id, tenant_id="tenant") == recovery
     identity = turn.reservation.idempotency
     assert await storage.execution.idempotency.get(identity.scope, identity.idempotency_key_digest, tenant_id="tenant") == replace(
         identity, status=IdempotencyStatus.STARTED,
@@ -192,7 +192,7 @@ async def test_pending_turn_promotion_last_stage_failure_rolls_back_all_domains(
                 await _promote(state, turn, context)
         assert raised.value.code is ErrorCode.STORAGE_CONFLICT and len(staged) == 1
         assert staged[0][0].revision == (3 if prepared else 1)
-        assert staged[0][1].state is (RecoveryCheckpointState.ACTIVE if prepared else RecoveryCheckpointState.ADMITTED)
+        assert staged[0][1].state is (ExecutionCheckpointState.ACTIVE if prepared else ExecutionCheckpointState.ADMITTED)
         assert await _snapshot(state) == before
         await _assert_promoted(state, turn, context, await _promote(state, turn, context))
 
@@ -285,7 +285,7 @@ async def test_pending_turn_promotion_independent_connections_grant_only_one_can
             losing_id = next(turn.reservation.execution.execution_id for turn in turns if turn is not winning_turn)
             assert await first.storage.execution.executions.get(losing_id, tenant_id="tenant") is None
             assert await first.storage.execution.executions.get_history_head(losing_id, tenant_id="tenant") is None
-            assert await first.storage.recovery.checkpoints.get(losing_id, tenant_id="tenant") is None
+            assert await first.storage.checkpoint.checkpoints.get(losing_id, tenant_id="tenant") is None
             assert not (await first.storage.execution.events.list(losing_id, tenant_id="tenant", after_event_seq=0, limit=20)).items
         finally:
             await second_storage.close()

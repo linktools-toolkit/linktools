@@ -35,7 +35,7 @@ async def test_transient_runtime_storage_closes_repository_and_object_domains() 
         **{
             domain.value: StorageRoute.transient()
             for domain in PersistenceDomain
-            if domain not in {PersistenceDomain.RECOVERY, PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}
+            if domain not in {PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}
         }
     )
     state = Persistence(PersistenceStorage.from_plan(plan))

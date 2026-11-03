@@ -15,6 +15,7 @@ from ..storage import ObjectRef, ObjectStore, StoredPayload, read_object
 from ._storage_keys import runtime_object_key
 from ..model.messages import combine_model_message_payloads, decode_model_message_payloads, decode_model_messages, encode_model_messages
 from ._archive import ArchiveRoot, ContentArchive, PreparedArchive
+from ._transcript_staging import MessageArchive
 from .codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -136,71 +137,6 @@ class _HistoryResolution:
     segments: tuple[_HistorySegment, ...]
 
 
-class _ContextProjector:
-    def __init__(self, runtime_domain: PersistenceDomain) -> None:
-        self._runtime_domain = runtime_domain
-
-    def project(
-        self,
-        owner_id: str,
-        messages: Sequence[ModelMessage],
-        *,
-        origins: Sequence[TranscriptOrigin] = (),
-        sources: Sequence[TranscriptMessageRef | None] = (),
-    ) -> ContextProjection:
-        values = tuple(messages)
-        origin_values = tuple(origins)
-        source_values = tuple(sources)
-        items: list[TranscriptSpanRef | InlineContextBlock] = []
-        index = 0
-        while index < len(values):
-            origin = (
-                origin_values[index]
-                if index < len(origin_values)
-                else TranscriptOrigin.RAW
-            )
-            source = source_values[index] if index < len(source_values) else None
-            end = index + 1
-            while end < len(values):
-                next_origin = (
-                    origin_values[end]
-                    if end < len(origin_values)
-                    else TranscriptOrigin.RAW
-                )
-                next_source = source_values[end] if end < len(source_values) else None
-                if (
-                    next_origin is not TranscriptOrigin.RAW
-                    or source is None
-                    or next_source is None
-                    or next_source.source_domain is not source.source_domain
-                    or next_source.owner_id != source.owner_id
-                    or next_source.message_index != source.message_index + (end - index)
-                ):
-                    break
-                end += 1
-            if source is not None and origin is TranscriptOrigin.RAW:
-                items.append(
-                    TranscriptSpanRef(
-                        source.source_domain,
-                        source.owner_id,
-                        source.message_index,
-                        source.message_index + (end - index),
-                    )
-                )
-            else:
-                raw = encode_model_messages(values[index:end])
-                items.append(
-                    InlineContextBlock(
-                        RuntimePayloadRef(
-                            StoredPayload.inline_bytes(raw),
-                            self._runtime_domain,
-                        )
-                    )
-                )
-            index = end
-        return ContextProjection(tuple(items))
-
-
 class TranscriptRepository:
     """Persist lossless transcript chunks and read the active context view."""
 
@@ -230,7 +166,6 @@ class TranscriptRepository:
         self._runtime_domain = runtime_domain
         self._context_sources = dict(context_sources or {})
         self._history_repository = history_repository
-        self._projector = _ContextProjector(runtime_domain)
         self._pending_cache: dict[str, _PendingCache] = {}
         self._content_archive: ContentArchive | None = None
 
@@ -1041,7 +976,8 @@ class TranscriptRepository:
         if not messages:
             return ContextProjection(())
         archive = await self.content_archive(create=True)
-        raw = encode_model_messages(messages)
+        snapshot = MessageArchive().snapshot(messages)
+        raw_digest, raw_size = snapshot.encoded_digest()
         root = archive.empty_root()
         start = 0
         previous_root = None
@@ -1052,18 +988,19 @@ class TranscriptRepository:
                     and block.root.content_scope == archive.content_scope):
                 previous_root = block.root
                 if block.root.count <= len(messages):
-                    prefix = raw if block.root.count == len(messages) else encode_model_messages(messages[:block.root.count])
-                    if len(prefix) == block.raw_size and hashlib.sha256(prefix).hexdigest() == block.raw_digest:
+                    prefix_digest, prefix_size = ((raw_digest, raw_size) if block.root.count == len(snapshot)
+                                                  else snapshot[:block.root.count].encoded_digest())
+                    if prefix_size == block.raw_size and prefix_digest == block.raw_digest:
                         root = block.root
                         start = block.root.count
                         if baseline_frontier and start < len(messages):
                             archive.reuse_frontier(root, baseline_frontier, prepared)
-        encoded = tuple(("model-message", encode_model_messages((message,))) for message in messages[start:])
+        encoded = tuple(("model-message", payload) for payload in snapshot[start:].encoded_payloads())
         if previous_root is not None and not start and previous_root.count:
             root = await archive.rewrite(previous_root, encoded, prepared)
         else:
             root = await archive.prepare_append(root, encoded, prepared)
-        return ContextProjection((ArchivedContextBlock(root, hashlib.sha256(raw).hexdigest(), len(raw)),))
+        return ContextProjection((ArchivedContextBlock(root, raw_digest, raw_size),))
 
     async def prepare_projection(
         self,
@@ -2124,21 +2061,6 @@ class TranscriptRepository:
                     )
                 )
             )
-
-    def project_context(
-        self,
-        owner_id: str,
-        messages: Sequence[ModelMessage],
-        *,
-        origins: Sequence[TranscriptOrigin] = (),
-        sources: Sequence[TranscriptMessageRef | None] = (),
-    ) -> ContextProjection:
-        return self._projector.project(
-            owner_id,
-            messages,
-            origins=origins,
-            sources=sources,
-        )
 
     async def _read_payload(self, payload: StoredPayload) -> bytes:
         require_no_run_history_lock("TranscriptRepository._read_payload")

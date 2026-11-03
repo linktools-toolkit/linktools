@@ -512,7 +512,7 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
     record = project_record(
         namespace="runtime",
         tenant_id="tenant",
-        domain=PersistenceDomain.RECOVERY,
+        domain=PersistenceDomain.CHECKPOINT,
         kind="tool_operation",
         identity=operation.tool_operation_id,
         value=operation,
@@ -522,7 +522,7 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
     aliases, sequences = canonical_snapshot_indexes(
         namespace="runtime",
         tenant_id="tenant",
-        domain=PersistenceDomain.RECOVERY,
+        domain=PersistenceDomain.CHECKPOINT,
         records=(record,),
         facts=(),
         operations=(),
@@ -531,7 +531,7 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
     expected_alias = alias_digest(
         "runtime",
         "tenant",
-        PersistenceDomain.RECOVERY.value,
+        PersistenceDomain.CHECKPOINT.value,
         "tool_call",
         [operation.agent_run_id, operation.tool_call_id],
     )
@@ -541,7 +541,7 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
     validate_snapshot_domain(
         namespace="runtime",
         tenant_id="tenant",
-        domain=PersistenceDomain.RECOVERY,
+        domain=PersistenceDomain.CHECKPOINT,
         records=(record,),
         aliases=aliases,
         facts=(),
@@ -552,7 +552,7 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
         validate_snapshot_domain(
             namespace="runtime",
             tenant_id="tenant",
-            domain=PersistenceDomain.RECOVERY,
+            domain=PersistenceDomain.CHECKPOINT,
             records=(record,),
             aliases=(StoredAlias(b"x" * 32, record.key_digest),),
             facts=(),

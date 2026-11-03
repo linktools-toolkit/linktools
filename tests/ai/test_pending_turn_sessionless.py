@@ -14,7 +14,7 @@ from linktools.ai.core import ExecutionStatus, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.contracts import (
     ExecutionTerminalCommitResult,
-    RecoveryCheckpointState,
+    ExecutionCheckpointState,
     PersistenceDomain,
     RuntimePayloadRef,
 )
@@ -92,8 +92,8 @@ async def test_sessionless_pending_commit_replay_and_unique_result(tmp_path: Pat
         assert result.execution.retention_closed and result.result == turn.commit.result
         if engine is not None:
             assert len(transactions) == 1 and None not in transactions
-        recovery = await state.storage.recovery.checkpoints.get("execution", tenant_id="tenant")
-        assert recovery is not None and recovery.state is RecoveryCheckpointState.COMPLETED
+        recovery = await state.storage.checkpoint.checkpoints.get("execution", tenant_id="tenant")
+        assert recovery is not None and recovery.state is ExecutionCheckpointState.COMPLETED
         assert await _conversation(state) == before
         committed = await _snapshot(state)
         assert await _commit(state, turn) == result
@@ -132,7 +132,7 @@ async def test_sessionless_pending_failure_rolls_back_every_domain(tmp_path: Pat
     async with _turn_state(backend, tmp_path) as state:
         turn = _standalone(state)
         before = await _snapshot(state)
-        repository = state.storage.recovery.checkpoints
+        repository = state.storage.checkpoint.checkpoints
         original = type(repository).admit_in_transaction
 
         async def fail(self, transaction, record):
@@ -197,7 +197,7 @@ async def test_sessionless_pending_promotes_before_effects(tmp_path: Path, backe
         assert execution.session_id is None
         assert execution.revision == (3 if prepared else 1)
         assert execution.agent_run_seq == (1 if prepared else 0)
-        assert recovery.state is (RecoveryCheckpointState.ACTIVE if prepared else RecoveryCheckpointState.ADMITTED)
+        assert recovery.state is (ExecutionCheckpointState.ACTIVE if prepared else ExecutionCheckpointState.ADMITTED)
         assert await _conversation(state) == before
 
 @pytest.mark.parametrize("identity", ("same_request", "different_request", "conflicting_digest"))

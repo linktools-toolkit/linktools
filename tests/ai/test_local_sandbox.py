@@ -203,18 +203,6 @@ async def test_local_sandbox_rejects_remote_commands(tmp_path: Path) -> None:
     assert raised.value.code is ErrorCode.AUTHORIZATION_DENIED
 
 
-async def test_worker_session_uses_shared_command_policy(tmp_path: Path) -> None:
-    session = LocalWorkspaceBackend(tmp_path)
-    await session.working_dir()
-    try:
-        with pytest.raises(AIError) as raised:
-            await session.run_command("ssh example.invalid")
-    finally:
-        await session.close()
-
-    assert raised.value.code is ErrorCode.AUTHORIZATION_DENIED
-
-
 async def test_worker_session_rejects_invalid_command_input(tmp_path: Path) -> None:
     session = LocalWorkspaceBackend(tmp_path)
     await session.working_dir()

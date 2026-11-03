@@ -76,7 +76,7 @@ def test_checkpoint_staging_waits_for_slowest_configured_consumer():
     owner = RuntimeAgentRunStore(
         staging, conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
         execution_archive=InMemoryStepArchive(PersistenceDomain.TRACE),
-        recovery_archive=InMemoryStepArchive(PersistenceDomain.CHECKPOINT),
+        checkpoint_archive=InMemoryStepArchive(PersistenceDomain.CHECKPOINT),
     )
     for index in range(4):
         staging.save_checkpoint_local(AgentRunCheckpoint(
@@ -145,3 +145,23 @@ async def test_memory_archive_counts_and_ranges_do_not_decode_whole_checkpoint(m
     page = [message async for message in archive.iter_message_range(agent_run_id="run", start=90, end=92)]
     assert [message.parts[0].content for message in page] == ["90", "91"]
     assert len(decoded) == 2
+
+
+def test_frozen_message_digest_matches_durable_codec_and_concatenation():
+    import hashlib
+    from pydantic_ai.messages import ModelResponse, TextPart, ToolReturnPart
+    from linktools.ai.model.messages import encode_model_messages
+
+    values = [
+        ModelRequest(parts=[UserPromptPart("你好，世界")]),
+        ModelResponse(parts=[TextPart("answer")]),
+        ModelRequest(parts=[ToolReturnPart("tool", {"value": [1, None, "é"]}, "call")]),
+    ]
+    archive = MessageArchive()
+    snapshot = archive.concatenate(archive.snapshot(values[:1]), archive.snapshot(values[1:]))
+    for sequence in (snapshot, snapshot[:2], snapshot[1:], snapshot[:0]):
+        raw = encode_model_messages(tuple(sequence))
+        assert sequence.encoded_digest() == (hashlib.sha256(raw).hexdigest(), len(raw))
+        assert tuple(sequence.encoded_payloads()) == tuple(encode_model_messages((message,)) for message in sequence)
+    values[0].parts[0].content = "changed"
+    assert snapshot[0].parts[0].content == "你好，世界"

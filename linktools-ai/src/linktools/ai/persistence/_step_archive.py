@@ -21,7 +21,7 @@ from ..errors import AIError, ErrorCode
 from ..model import ModelClientRequest
 from ..storage import ObjectRef, ObjectStore, StoredPayload
 from ..model.messages import decode_model_messages, encode_model_messages
-from ._transcript_staging import MessageArchive, StagedTranscript
+from ._transcript_staging import MessageArchive, MessageSnapshot, StagedTranscript
 from ._model_interaction import (
     StagedContextSpan,
     StagedContextInline,
@@ -1035,22 +1035,30 @@ class InMemoryStepArchive(StagingAgentRunStore):
         client_requests = await resolve_client_requests(
             interaction.client_requests, self._runtime_domain,
         ) if include_client_requests else None
-        if not include_content or interaction.request_context is None or interaction.request_envelope is None:
+        if not include_content:
             return None, None, None, client_requests, (
                 None if interaction.stream_attempts is None else tuple(None for _ in interaction.stream_attempts)
             )
-        checkpoint = await self.latest_checkpoint(
-            agent_run_id=interaction.agent_run_id,
-            include_interrupted=True,
+        projections = (
+            interaction.request_context, interaction.response_context,
+            *(attempt.response_context for attempt in interaction.stream_attempts or ()),
         )
-        if checkpoint is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        checkpoint = None
+        if (interaction.request_context is not None
+                or any(isinstance(item, TranscriptSpanRef) for projection in projections
+                       if projection is not None for item in projection.items)):
+            checkpoint = await self.latest_checkpoint(
+                agent_run_id=interaction.agent_run_id,
+                include_interrupted=True,
+            )
+            if checkpoint is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         def resolve(projection: ContextProjection) -> tuple[ModelMessage, ...]:
             values: list[ModelMessage] = []
             for item in projection.items:
                 if isinstance(item, TranscriptSpanRef):
-                    if item.start < 0 or item.end > len(checkpoint.messages):
+                    if checkpoint is None or item.start < 0 or item.end > len(checkpoint.messages):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     values.extend(checkpoint.messages[item.start : item.end])
                     continue
@@ -1063,8 +1071,8 @@ class InMemoryStepArchive(StagingAgentRunStore):
                 values.extend(decode_model_messages(raw))
             return tuple(values)
 
-        envelope = interaction.request_envelope.payload.decode()
-        if not isinstance(envelope, bytes):
+        envelope = None if interaction.request_envelope is None else interaction.request_envelope.payload.decode()
+        if envelope is not None and not isinstance(envelope, bytes):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         response = (
             None
@@ -1075,7 +1083,8 @@ class InMemoryStepArchive(StagingAgentRunStore):
             None if attempt.response_context is None else resolve(attempt.response_context)
             for attempt in interaction.stream_attempts
         )
-        return resolve(interaction.request_context), response, envelope, client_requests, stream_responses
+        request = None if interaction.request_context is None else resolve(interaction.request_context)
+        return request, response, envelope, client_requests, stream_responses
 
     async def resolve_model_interactions(
         self,
@@ -1095,8 +1104,7 @@ class InMemoryStepArchive(StagingAgentRunStore):
 @dataclass(frozen=True, slots=True)
 class _CheckpointPrefixReceipt:
     checkpoint: StoredAgentRunCheckpoint
-    raw_digest: str
-    raw_size: int
+    messages: MessageSnapshot
 
 
 class StateStepArchive(AgentRunStore):
@@ -1371,11 +1379,11 @@ class StateStepArchive(AgentRunStore):
         client_requests = await resolve_client_requests(
             interaction.client_requests, self._runtime_domain, self._history,
         ) if include_client_requests else None
-        if not include_content or interaction.request_context is None or interaction.request_envelope is None:
+        if not include_content:
             return None, None, None, client_requests, (
                 None if interaction.stream_attempts is None else tuple(None for _ in interaction.stream_attempts)
             )
-        request = await self._history.load_projected_context(
+        request = None if interaction.request_context is None else await self._history.load_projected_context(
             interaction.agent_run_id,
             interaction.request_context,
         )
@@ -1387,7 +1395,7 @@ class StateStepArchive(AgentRunStore):
                     interaction.response_context,
                 )
             ).model_messages()
-        envelope = await self._history.read_payload(
+        envelope = None if interaction.request_envelope is None else await self._history.read_payload(
             interaction.request_envelope.payload
         )
         stream_responses = None if interaction.stream_attempts is None else tuple([
@@ -1395,7 +1403,7 @@ class StateStepArchive(AgentRunStore):
                 interaction.agent_run_id, attempt.response_context,
             )).model_messages() for attempt in interaction.stream_attempts
         ])
-        return request.model_messages(), response, envelope, client_requests, stream_responses
+        return None if request is None else request.model_messages(), response, envelope, client_requests, stream_responses
 
     async def resolve_model_interactions(
         self,
@@ -1440,21 +1448,26 @@ class StateStepArchive(AgentRunStore):
             client_requests = await resolve_client_requests(
                 record.client_requests, self._runtime_domain, self._history,
             ) if include_client_requests else None
-            if not include_content or record.request_context is None or record.request_envelope is None:
+            if not include_content:
                 result.append((None, None, None, client_requests,
                                None if record.stream_attempts is None else tuple(None for _ in record.stream_attempts)))
                 continue
-            request = contexts[context_index].model_messages()
-            context_index += 1
+            request = None
+            if record.request_context is not None:
+                request = contexts[context_index].model_messages()
+                context_index += 1
             response = None
             if record.response_context is not None:
                 response = contexts[context_index].model_messages()
                 context_index += 1
-            digest = record.request_envelope.payload.digest
-            if digest not in envelopes:
-                envelopes[digest] = await self._history.read_payload(
-                    record.request_envelope.payload
-                )
+            envelope = None
+            if record.request_envelope is not None:
+                digest = record.request_envelope.payload.digest
+                if digest not in envelopes:
+                    envelopes[digest] = await self._history.read_payload(
+                        record.request_envelope.payload
+                    )
+                envelope = envelopes[digest]
             stream_responses = None
             if record.stream_attempts is not None:
                 partials = []
@@ -1465,7 +1478,7 @@ class StateStepArchive(AgentRunStore):
                         context_index += 1
                     partials.append(partial)
                 stream_responses = tuple(partials)
-            result.append((request, response, envelopes[digest], client_requests, stream_responses))
+            result.append((request, response, envelope, client_requests, stream_responses))
         return result
 
     async def prepare_interactions(
@@ -1716,14 +1729,16 @@ class StateStepArchive(AgentRunStore):
     def confirm_checkpoint_prefix(
         self, checkpoint: AgentRunCheckpoint, prepared: PreparedAgentRunCheckpoint,
     ) -> None:
-        """Retain a bounded prefix proof after the producer confirms durable commit."""
+        """Retain the immutable prefix after the producer confirms durable commit."""
         if (self._runtime_domain is PersistenceDomain.CONVERSATION
                 or checkpoint.agent_run_id != prepared.stored.agent_run_id
                 or len(checkpoint.messages) != prepared.stored.transcript_message_count):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        raw = encode_model_messages(checkpoint.messages)
+        # Staging already owns immutable encoded leaves. Keep that exact prefix
+        # rather than serializing its SDK values again after every commit.
+        messages = MessageArchive().snapshot(checkpoint.messages)
         self._checkpoint_prefix_receipts[checkpoint.agent_run_id] = _CheckpointPrefixReceipt(
-            prepared.stored, hashlib.sha256(raw).hexdigest(), len(raw),
+            prepared.stored, messages,
         )
 
     async def transcript_message_count_for_run(
@@ -1967,13 +1982,14 @@ class StateStepArchive(AgentRunStore):
             head = self._history.decode_head(head_record)
             before = head.message_count
 
-        source_messages = tuple(checkpoint.messages)
+        source_messages = (checkpoint.messages if isinstance(checkpoint.messages, MessageSnapshot)
+                           else tuple(checkpoint.messages))
         if before > len(source_messages):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if (before and receipt is not None and observed_checkpoint == receipt.checkpoint
                 and before == receipt.checkpoint.transcript_message_count):
-            raw = encode_model_messages(source_messages[:before])
-            if len(raw) != receipt.raw_size or hashlib.sha256(raw).hexdigest() != receipt.raw_digest:
+            prefix = MessageArchive().snapshot(source_messages[:before])
+            if prefix != receipt.messages:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return replace(checkpoint, transcript_message_count_before=before), records
         if before:
@@ -2226,10 +2242,8 @@ class StateStepArchive(AgentRunStore):
         target_message_count = head.message_count
         baseline = self._context_baselines.get(run.agent_run_id, LoadedModelContext(()))
         baseline_messages = baseline.model_messages()
-        baseline_sources = tuple(
-            self._reusable_context_source(value.source)
-            for value in baseline.messages
-        )
+        message_archive = MessageArchive()
+        baseline_snapshot = message_archive.snapshot(baseline_messages)
         prepared: list[PreparedAgentRunCheckpoint] = []
         archive = PreparedArchive() if archive is None else archive
         previous_projection = None
@@ -2243,7 +2257,7 @@ class StateStepArchive(AgentRunStore):
 
         for checkpoint in checkpoints:
             before = checkpoint.transcript_message_count_before
-            incoming = tuple(checkpoint.messages)
+            incoming = message_archive.snapshot(checkpoint.messages)
             if (
                 before is None
                 or before > len(incoming)
@@ -2251,33 +2265,11 @@ class StateStepArchive(AgentRunStore):
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             delta = incoming[max(before, target_message_count - archive_base):]
-            raw_sources = tuple(
-                TranscriptMessageRef(
-                    self._runtime_domain,
-                    owner_id,
-                    archive_base + index,
-                )
-                for index in range(len(incoming))
-            )
-            source_messages = (*baseline_messages, *incoming)
-            source_refs = (*baseline_sources, *raw_sources)
             projection_messages = (
-                source_messages
+                message_archive.concatenate(baseline_snapshot, incoming)
                 if checkpoint.context_messages is None
-                else tuple(checkpoint.context_messages)
+                else message_archive.snapshot(checkpoint.context_messages)
             )
-            projection_sources = self._projection_sources(
-                projection_messages,
-                source_messages,
-                source_refs,
-            )
-            projection = self._history.project_context(
-                owner_id,
-                projection_messages,
-                origins=self._message_origins(projection_sources),
-                sources=projection_sources,
-            )
-            self._validate_projection_sources(projection, projection_sources)
             frontier = ()
             if previous_projection is not None and len(previous_projection.items) == 1:
                 block = previous_projection.items[0]
@@ -2292,7 +2284,7 @@ class StateStepArchive(AgentRunStore):
                 owner_id,
                 TranscriptCapture(
                     target_message_count,
-                    delta,
+                    tuple(delta),
                     (TranscriptOrigin.RAW,) * len(delta),
                     head.quality,
                 ),
@@ -2326,76 +2318,6 @@ class StateStepArchive(AgentRunStore):
             0,
             target_message_count,
         )
-
-    def _reusable_context_source(
-        self,
-        source: TranscriptMessageRef | None,
-    ) -> TranscriptMessageRef | None:
-        if source is None:
-            return None
-        if source.source_domain is self._runtime_domain:
-            return source
-        if source.source_domain is PersistenceDomain.CONVERSATION:
-            return source
-        return None
-
-    def _projection_sources(
-        self,
-        projection_messages: Sequence[ModelMessage],
-        incoming: Sequence[ModelMessage],
-        incoming_sources: Sequence[TranscriptMessageRef | None],
-    ) -> tuple[TranscriptMessageRef | None, ...]:
-        if len(incoming) != len(incoming_sources):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        by_signature: dict[bytes, list[int]] = {}
-        for index, message in enumerate(incoming):
-            signature = _exact_message_signature(message)
-            by_signature.setdefault(signature, []).append(index)
-        used: set[int] = set()
-        result: list[TranscriptMessageRef | None] = []
-        for message in projection_messages:
-            signature = _exact_message_signature(message)
-            candidates = by_signature.get(signature, [])
-            index = next((value for value in candidates if value not in used), None)
-            if index is None:
-                result.append(None)
-                continue
-            used.add(index)
-            result.append(incoming_sources[index])
-        return tuple(result)
-
-    def _validate_projection_sources(
-        self,
-        projection: ContextProjection,
-        sources: Sequence[TranscriptMessageRef | None],
-    ) -> None:
-        allowed: dict[tuple[PersistenceDomain, str], list[int]] = {}
-        for source in sources:
-            if source is None:
-                continue
-            allowed.setdefault(
-                (source.source_domain, source.owner_id),
-                [],
-            ).append(source.message_index)
-        spans: dict[tuple[PersistenceDomain, str], list[tuple[int, int]]] = {}
-        for key, indexes in allowed.items():
-            for index in sorted(set(indexes)):
-                values = spans.setdefault(key, [])
-                if values and values[-1][1] == index:
-                    values[-1] = (values[-1][0], index + 1)
-                else:
-                    values.append((index, index + 1))
-        for item in projection.items:
-            if not isinstance(item, TranscriptSpanRef):
-                continue
-            if item.end <= item.start:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            allowed_spans = spans.get((item.source_domain, item.owner_id), ())
-            if not any(
-                item.start >= start and item.end <= end
-                for start, end in allowed_spans
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     def _history_id(self, run: AgentRunRecord) -> str:
         history_id = run.metadata.get("history_id")
@@ -2431,17 +2353,6 @@ class StateStepArchive(AgentRunStore):
             offset += end - start
             start = end
         return tuple(result)
-
-    def _message_origins(
-        self,
-        sources: Sequence[TranscriptMessageRef | None],
-    ) -> tuple[TranscriptOrigin, ...]:
-        return tuple(
-            TranscriptOrigin.RAW
-            if source is not None
-            else TranscriptOrigin.UNKNOWN
-            for source in sources
-        )
 
     async def _normalize_checkpoints_in_transaction(
         self,

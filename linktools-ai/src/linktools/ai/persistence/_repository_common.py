@@ -39,7 +39,7 @@ from .contracts import (
     ExternalCallRecord,
     IdempotencyRecord,
     MemoryRecord,
-    RecoveryCheckpoint,
+    ExecutionCheckpoint,
     SessionRecord,
 )
 from ._evaluation_records import (
@@ -859,7 +859,7 @@ def _canonical_record_identity(kind: str, value: object) -> object:
         return value.ref.evidence_id
     if isinstance(value, (EvaluationReport, ComparisonReport)):
         return value.report_id
-    if isinstance(value, RecoveryCheckpoint):
+    if isinstance(value, ExecutionCheckpoint):
         return value.execution_id
     if isinstance(value, ApprovalRecord):
         return value.approval_id
@@ -933,7 +933,7 @@ def _domain_revision(value: object) -> int:
             IdempotencyRecord,
             MemoryRecord,
             EvaluationRecord,
-            RecoveryCheckpoint,
+            ExecutionCheckpoint,
         ),
     ):
         return value.revision
@@ -941,7 +941,7 @@ def _domain_revision(value: object) -> int:
 
 
 def _status_value(value: object) -> str | None:
-    if isinstance(value, RecoveryCheckpoint):
+    if isinstance(value, ExecutionCheckpoint):
         return value.state.value
     if isinstance(
         value,

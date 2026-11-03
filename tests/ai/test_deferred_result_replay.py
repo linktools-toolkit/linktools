@@ -33,8 +33,8 @@ from linktools.ai.persistence.contracts import (
     ExternalCallRecord,
     PendingDeferredCall,
     PendingToolContinuation,
-    RecoveryCheckpoint,
-    RecoveryCheckpointState,
+    ExecutionCheckpoint,
+    ExecutionCheckpointState,
 )
 from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy, StoredPayload
 from linktools.ai.persistence.objects import ObjectKeyFactory
@@ -83,10 +83,10 @@ class _Executions:
 
 class _Checkpoints:
     def __init__(self, pending: PendingDeferredCall, *, approvals: bool) -> None:
-        self.record = RecoveryCheckpoint(
+        self.record = ExecutionCheckpoint(
             execution_id="execution",
             agent_run_id="step",
-            state=RecoveryCheckpointState.WAITING,
+            state=ExecutionCheckpointState.WAITING,
             revision=0,
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
@@ -102,7 +102,7 @@ class _Checkpoints:
         execution_id: str,
         *,
         tenant_id: str,
-    ) -> RecoveryCheckpoint | None:
+    ) -> ExecutionCheckpoint | None:
         if execution_id == "execution" and tenant_id == "tenant":
             return self.record
         return None

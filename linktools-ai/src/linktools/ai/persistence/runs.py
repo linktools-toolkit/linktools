@@ -123,7 +123,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         *,
         conversation_archive: AgentRunStore,
         execution_archive: AgentRunStore | None,
-        recovery_archive: AgentRunStore | None,
+        checkpoint_archive: AgentRunStore | None,
         execution_repository: ExecutionRepository | None = None,
         tenant_id: str | None = None,
     ) -> None:
@@ -137,7 +137,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._archives = {
             PersistenceDomain.CONVERSATION: conversation_archive,
             **({PersistenceDomain.TRACE: execution_archive} if execution_archive is not None else {}),
-            **({PersistenceDomain.CHECKPOINT: recovery_archive} if recovery_archive is not None else {}),
+            **({PersistenceDomain.CHECKPOINT: checkpoint_archive} if checkpoint_archive is not None else {}),
         }
         self._initialized = False
         self._preflight = False
@@ -160,7 +160,7 @@ class RuntimeAgentRunStore(AgentRunStore):
             background_tasks=self._background_tasks,
         )
         self.checkpoint_persistence = CheckpointPersistence(
-            staging, recovery_archive, execution_archive,
+            staging, checkpoint_archive, execution_archive,
             trace_source_only=self.trace_persistence.failed_admission_settled,
         )
         for archive in self._archives.values():

@@ -169,7 +169,7 @@ class ConversationService(AbstractCapability[AgentContext[AppT]]):
         run_store: RuntimeAgentRunStore,
         execution_run_store: AgentRunStore,
         conversation_run_store: AgentRunStore,
-        recovery_run_store: AgentRunStore,
+        checkpoint_archive: AgentRunStore,
         load_execution: Callable[[str], Awaitable[ExecutionRecord | None]],
     ) -> list[object]:
         if not execution.conversation:
@@ -223,7 +223,7 @@ class ConversationService(AbstractCapability[AgentContext[AppT]]):
             agent_run_seq=base.agent_run_seq,
         )
         if not base.durable_trace and base.session_id is None:
-            execution_run_store = recovery_run_store
+            execution_run_store = checkpoint_archive
             if isinstance(execution_run_store, StateStepArchive):
                 checkpoint = await execution_run_store.latest_checkpoint(
                     agent_run_id=agent_run_id

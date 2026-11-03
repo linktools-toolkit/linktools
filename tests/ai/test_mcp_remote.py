@@ -935,7 +935,7 @@ async def test_cleanup_failure_preserves_confirmed_tool_result_and_idempotent_re
             assert result.status is ExecutionStatus.FAILED
             assert result.error_code == ErrorCode.MCP_CLEANUP_FAILED.value
             assert "private-cleanup-response" not in str(result)
-            operations = await runtime._state.recovery.tools.list_by_execution(
+            operations = await runtime._state.checkpoint.tools.list_by_execution(
                 execution.execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )

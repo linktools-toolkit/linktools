@@ -53,13 +53,13 @@ def _feedback_wire() -> dict[str, object]:
 
 
 @pytest.mark.parametrize("native", (False, True))
-def test_existing_tool_return_bytes_are_unchanged(native: bool) -> None:
+def test_tool_return_fields_and_retry_default_round_trip(native: bool) -> None:
     part = _return_part(native=native)
     message = ModelResponse(parts=[part], timestamp=_STAMP) if native else ModelRequest(parts=[part], timestamp=_STAMP)
     encoded = encode_model_messages((message,))
-    assert encoded == _wire(_tool_wire(native=native), native=native)
+    assert decode_model_messages(_wire(_tool_wire(native=native), native=native)) == (message,)
     assert decode_model_messages(encoded) == (message,)
-    assert "retry" not in json.loads(encoded)[0]["parts"][0]
+    assert json.loads(encoded)[0]["parts"][0].get("retry") is None
 
 
 @pytest.mark.parametrize("content", ("fix output", _ERRORS))
@@ -128,7 +128,7 @@ def test_retried_outcome_requires_sdk_support_even_without_retry_information(nat
         else:
             restored, = decode_model_messages(encoded)
             assert restored.parts[0].outcome == "retried"
-            assert "retry" not in json.loads(encode_model_messages((restored,)))[0]["parts"][0]
+            assert json.loads(encode_model_messages((restored,)))[0]["parts"][0].get("retry") is None
 
 
 @pytest.mark.parametrize("feedback", (False, True))

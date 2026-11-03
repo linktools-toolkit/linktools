@@ -11,20 +11,20 @@ import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence.contracts import (
-    RecoveryCheckpoint,
-    RecoveryCheckpointState,
+    ExecutionCheckpoint,
+    ExecutionCheckpointState,
     RecoveryHandoffPhase,
 )
 
 
 def _checkpoint(
     execution_id: str,
-    state: RecoveryCheckpointState,
+    state: ExecutionCheckpointState,
     revision: int = 0,
-) -> RecoveryCheckpoint:
+) -> ExecutionCheckpoint:
     now = datetime.now(timezone.utc)
-    active = state is RecoveryCheckpointState.ACTIVE
-    return RecoveryCheckpoint(
+    active = state is ExecutionCheckpointState.ACTIVE
+    return ExecutionCheckpoint(
         execution_id=execution_id,
         agent_run_id="run-1" if active else None,
         state=state,
@@ -41,9 +41,9 @@ async def test_recoverable_checkpoint_is_visible_from_first_write() -> None:
     state = Persistence(state)
     await state.initialize(namespace="recovery-integrity", tenant_id="tenant")
     try:
-        repository = state.recovery.checkpoints
-        await repository.create(_checkpoint("e1", RecoveryCheckpointState.ACTIVE))
-        await repository.create(_checkpoint("e2", RecoveryCheckpointState.COMPLETED))
+        repository = state.checkpoint.checkpoints
+        await repository.create(_checkpoint("e1", ExecutionCheckpointState.ACTIVE))
+        await repository.create(_checkpoint("e2", ExecutionCheckpointState.COMPLETED))
 
         page = await repository.list_recoverable_page(
             tenant_id="tenant",
@@ -61,9 +61,9 @@ async def test_completed_transition_removes_recoverable_checkpoint() -> None:
     state = Persistence(state)
     await state.initialize(namespace="recovery-complete", tenant_id="tenant")
     try:
-        repository = state.recovery.checkpoints
+        repository = state.checkpoint.checkpoints
         created = await repository.create(
-            _checkpoint("e1", RecoveryCheckpointState.ACTIVE)
+            _checkpoint("e1", ExecutionCheckpointState.ACTIVE)
         )
         await repository.compare_and_swap(
             "e1",
@@ -71,7 +71,7 @@ async def test_completed_transition_removes_recoverable_checkpoint() -> None:
             expected_revision=created.revision,
             next_record=replace(
                 created,
-                state=RecoveryCheckpointState.COMPLETED,
+                state=ExecutionCheckpointState.COMPLETED,
                 agent_run_id=None,
                 revision=created.revision + 1,
                 updated_at=datetime.now(timezone.utc),
@@ -94,13 +94,13 @@ async def test_missing_checkpoint_cannot_be_updated_as_recoverable() -> None:
     await state.initialize(namespace="recovery-missing", tenant_id="tenant")
     try:
         with pytest.raises(AIError) as raised:
-            await state.recovery.checkpoints.compare_and_swap(
+            await state.checkpoint.checkpoints.compare_and_swap(
                 "missing",
                 tenant_id="tenant",
                 expected_revision=0,
                 next_record=_checkpoint(
                     "missing",
-                    RecoveryCheckpointState.COMPLETED,
+                    ExecutionCheckpointState.COMPLETED,
                 ),
             )
         assert raised.value.code is ErrorCode.STORAGE_NOT_FOUND

@@ -152,3 +152,44 @@ async def test_prefix_receipt_never_hides_deleted_recovery_body_from_fresh_reade
     finally:
         await fresh.close()
         await state.close()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_immutable_prefix_never_decodes_or_reencodes_old_messages(tmp_path, monkeypatch):
+    from linktools.ai.persistence._transcript_staging import MessageArchive, MessageSnapshot
+
+    state = Persistence(_storage("sqlite", tmp_path))
+    await state.initialize(namespace="immutable-prefix-receipt", tenant_id="tenant")
+    try:
+        run = AgentRunRecord("run")
+        await state.run_store.register_agent_run(run)
+        await state.run_store.save_checkpoint(_checkpoint(2))
+        archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+        receipt = archive._checkpoint_prefix_receipts["run"]
+        # Independent immutable snapshots also compare encoded bytes directly;
+        # sharing leaf identities is an optimization, not an authority check.
+        incoming = replace(_checkpoint(3), messages=MessageArchive().snapshot(_checkpoint(3).messages))
+
+        def no_decode(self):
+            raise AssertionError("confirmed prefix must stay encoded")
+
+        monkeypatch.setattr(MessageSnapshot, "__iter__", no_decode)
+        relocated, _ = await archive._relocate_run_checkpoint(run, incoming, use_confirmed_prefix=True)
+        assert relocated.transcript_message_count_before == 2
+        assert archive._checkpoint_prefix_receipts["run"] is receipt
+    finally:
+        await state.close()
+
+
+def test_shared_checkpoint_prefix_compares_tree_nodes_without_scanning_payloads(monkeypatch):
+    from linktools.ai.persistence._transcript_staging import MessageArchive, MessageSnapshot
+
+    archive = MessageArchive()
+    committed = archive.snapshot(_checkpoint(17).messages)
+    extended = archive.snapshot(_checkpoint(23).messages)
+
+    def no_payload_scan(self):
+        raise AssertionError("shared immutable prefix must compare existing tree nodes")
+
+    monkeypatch.setattr(MessageSnapshot, "_payloads", no_payload_scan)
+    assert extended[:len(committed)] == committed

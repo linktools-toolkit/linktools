@@ -24,8 +24,8 @@ from linktools.ai.persistence.contracts import (
     RecoveryConversationIntent,
     RecoveryTerminalHandoff,
     RecoveryTerminalOutcome,
-    RecoveryCheckpoint,
-    RecoveryCheckpointState,
+    ExecutionCheckpoint,
+    ExecutionCheckpointState,
     RecoveryHandoffPhase,
     SessionRecord,
 )
@@ -111,7 +111,7 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
         backend._run_stores = {
             PersistenceDomain.CONVERSATION: archive,
             PersistenceDomain.EXECUTION: object(),
-            PersistenceDomain.RECOVERY: object(),
+            PersistenceDomain.CHECKPOINT: object(),
         }
         backend._run_store = state.run_store
         backend._agent_run_lifecycle = Lifecycle()
@@ -163,10 +163,10 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
             "run",
             intent,
         )
-        recovery_checkpoint = RecoveryCheckpoint(
+        recovery_checkpoint = ExecutionCheckpoint(
             execution_id="execution",
             agent_run_id="run",
-            state=RecoveryCheckpointState.HANDOFF,
+            state=ExecutionCheckpointState.HANDOFF,
             revision=0,
             created_at=now,
             updated_at=now,

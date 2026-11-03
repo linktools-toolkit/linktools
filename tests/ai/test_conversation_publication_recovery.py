@@ -16,7 +16,7 @@ from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.contracts import (
-    RecoveryCheckpointState,
+    ExecutionCheckpointState,
     RecoveryHandoffPhase,
 )
 
@@ -66,12 +66,12 @@ async def test_unknown_release_must_not_report_success_without_envelope(
             assert commits == ()
             raw = await runtime._state.execution.executions.get(execution_id, tenant_id=tenant)
             header = await sessions.get("s", tenant_id=tenant)
-            recovery = await runtime._state.recovery.checkpoints.get(
+            recovery = await runtime._state.checkpoint.checkpoints.get(
                 execution_id, tenant_id=tenant
             )
             assert header.active_execution_id == execution_id
             assert not raw.retention_closed
-            assert recovery.state is RecoveryCheckpointState.HANDOFF
+            assert recovery.state is ExecutionCheckpointState.HANDOFF
             assert recovery.handoff_phase is RecoveryHandoffPhase.PREPARED
             with pytest.raises(AIError) as result_error:
                 await runtime.executions.result(execution_id, principal=principal)
@@ -230,8 +230,8 @@ async def test_completed_receipt_old_handoff_after_later_turn(tmp_path, monkeypa
         current = await runtime._state.conversation.sessions.get("s", tenant_id=principal.tenant_id)
         assert current.continuation == expected_session.continuation
         assert current.active_execution_id is None
-        checkpoint = await runtime._state.recovery.checkpoints.get(first_id, tenant_id=principal.tenant_id)
-        assert checkpoint.state is RecoveryCheckpointState.COMPLETED
+        checkpoint = await runtime._state.checkpoint.checkpoints.get(first_id, tenant_id=principal.tenant_id)
+        assert checkpoint.state is ExecutionCheckpointState.COMPLETED
         commits = await runtime._state.conversation.sessions.list_timeline_commits(
             "s", tenant_id=principal.tenant_id, start_turn_seq=1, end_turn_seq=3,
         )

@@ -770,35 +770,39 @@ function nativeMessages(container,projection,key,api) {
   });
 }
 function sdkMessages(container,item,key) {
-  container.append(element('p','source-note','Model input captured at SDK preparation, reconstructed from retained context. Message and part order are preserved; instructions and tools remain separate SDK fields, not invented provider messages.'));
+  container.append(element('p','source-note',Array.isArray(item.request?.messages)?'Model input captured at SDK preparation, reconstructed from retained context. Message and part order are preserved; instructions and tools remain separate SDK fields, not invented provider messages.':'Retained SDK interaction content. Missing model input does not identify the response source or establish whether external network calls occurred.'));
   for(const attempt of item.stream_attempts || []) {
     const failed=attempt.status!=='SUCCEEDED';
     const detail=readerDetail(key+':stream:'+attempt.stream_attempt_seq,`Model stream attempt ${attempt.stream_attempt_seq} · ${attempt.status}${failed?' · partial content is not an answer':' · successful segment; logical response below'}`,'stream-attempt-history');
     const metadata=Object.fromEntries(Object.entries(attempt).filter(([name])=>name!=='response'));
     detail.append(properties(metadata));
-    if(failed)detail.append(attempt.response!=null?rawDetail(attempt.response,'Failed SDK partial response'):element('p','muted','Partial response not retained or not included.'));
+    if(failed)detail.append(item.content_included!==false && attempt.response!=null?rawDetail(attempt.response,'Failed SDK partial response'):element('p','muted','Partial response not retained or not included.'));
     container.append(detail);
   }
   const request=item.request;
-  if(item.content_included===false || !Array.isArray(request?.messages)){
-    container.append(element('p','muted',item.status==='RUNNING'?'Model input is not committed yet.':'No retained SDK model input is available.'));return;
+  if(item.content_included===false){
+    container.append(element('p','muted',item.status==='RUNNING'?'Model input is not committed yet.':'SDK content was not included.'));return;
   }
-  request.messages.forEach((message,index)=>{
-    const row=element('article','native-message'),heading=element('div','native-role'),body=element('div','native-message-body');
-    heading.append(element('span','',index),element('strong','',message.kind || 'message'));row.append(heading,body);
-    for(const part of message.parts || []){
-      const section=element('section','sdk-part');section.append(element('strong','',part.part_kind || 'part'));
-      if(Object.hasOwn(part,'content'))section.append(element('pre','native-literal',text(part.content)));
-      const fields=Object.fromEntries(Object.entries(part).filter(([name])=>!['part_kind','content'].includes(name)));
-      if(Object.keys(fields).length)section.append(element('pre','native-literal',json(fields)));
-      body.append(section);
-    }
-    const fields=Object.fromEntries(Object.entries(message).filter(([name])=>!['kind','parts'].includes(name)));
-    if(Object.keys(fields).length)body.append(rawDetail(fields,'Message fields and instructions'));
-    container.append(row);
-  });
-  const envelope=Object.fromEntries(Object.entries(request).filter(([name])=>name!=='messages'));
-  if(Object.keys(envelope).length){const detail=readerDetail(key+':sdk-envelope','Instructions, tools & model settings','native-envelope');detail.append(element('pre','native-literal',json(envelope)));container.append(detail);}
+  if(!Array.isArray(request?.messages)){
+    container.append(element('p','muted',item.status==='RUNNING'?'Model input is not committed yet.':'No retained SDK model input is available.'));
+  } else {
+    request.messages.forEach((message,index)=>{
+      const row=element('article','native-message'),heading=element('div','native-role'),body=element('div','native-message-body');
+      heading.append(element('span','',index),element('strong','',message.kind || 'message'));row.append(heading,body);
+      for(const part of message.parts || []){
+        const section=element('section','sdk-part');section.append(element('strong','',part.part_kind || 'part'));
+        if(Object.hasOwn(part,'content'))section.append(element('pre','native-literal',text(part.content)));
+        const fields=Object.fromEntries(Object.entries(part).filter(([name])=>!['part_kind','content'].includes(name)));
+        if(Object.keys(fields).length)section.append(element('pre','native-literal',json(fields)));
+        body.append(section);
+      }
+      const fields=Object.fromEntries(Object.entries(message).filter(([name])=>!['kind','parts'].includes(name)));
+      if(Object.keys(fields).length)body.append(rawDetail(fields,'Message fields and instructions'));
+      container.append(row);
+    });
+    const envelope=Object.fromEntries(Object.entries(request).filter(([name])=>name!=='messages'));
+    if(Object.keys(envelope).length){const detail=readerDetail(key+':sdk-envelope','Instructions, tools & model settings','native-envelope');detail.append(element('pre','native-literal',json(envelope)));container.append(detail);}
+  }
   if(item.response!=null)container.append(rawDetail(item.response,['FAILED','CANCELLED'].includes(item.status)
     ?`Incomplete SDK response · ${item.status} · diagnostic aggregate, not a completed answer`:'SDK response'));
 }
@@ -830,7 +834,7 @@ function renderNativeTimeline(container,{conversation=false}={}) {
   if(selected)state.readerSelection=selected.key;
   if(!selected){selected=choices[0];state.readerSelection=selected?.key || null;}
   const select=element('select','native-request');select.setAttribute('aria-label','Select model request and attempt');select.dataset.requestFocus='reader:selection';
-  choices.forEach(choice=>{const option=element('option','',`Request ${choice.item.model_request_seq} · ${!state.readerHttp?'SDK input':choice.attempt?'Attempt '+(choice.index+1):'not captured'}${choice.item.agent_run_seq>1?' · run '+choice.item.agent_run_seq:''}${choice.item.purpose && choice.item.purpose!=='agent'?' · '+choice.item.purpose:''}${choice.item.execution_id!==view.id?' · '+short(choice.item.execution_id):''}`);option.value=choice.key;select.append(option);});
+  choices.forEach(choice=>{const option=element('option','',`Request ${choice.item.model_request_seq} · ${!state.readerHttp?'SDK record':choice.attempt?'Attempt '+(choice.index+1):'not captured'}${choice.item.agent_run_seq>1?' · run '+choice.item.agent_run_seq:''}${choice.item.purpose && choice.item.purpose!=='agent'?' · '+choice.item.purpose:''}${choice.item.execution_id!==view.id?' · '+short(choice.item.execution_id):''}`);option.value=choice.key;select.append(option);});
   select.value=state.readerSelection || '';select.disabled=!selected;select.onchange=()=>{state.readerExpanded.delete('reader:tools');state.readerSelection=select.value;state.readerCache=null;renderNativeViews();};toolbar.append(select);
   const status=selected?.attempt?.response?.status_code;
   if(status>=400 || selected?.item.status && selected.item.status!=='SUCCEEDED')toolbar.append(element('span','native-status',status>=400?`HTTP ${status}`:selected.item.status));
@@ -846,7 +850,7 @@ function renderNativeTimeline(container,{conversation=false}={}) {
   if(!selected)container.append(element('p','empty',view.loading?'Loading model records…':'No records for this selection.'));
   else {
     const {item,attempt}=selected;
-    const metadata=readerDetail(modelKey(item)+':metadata','Request details','native-envelope native-info');metadata.hidden=!metadata.open;metadata.append(element('p','native-identity',`${modelLabel(item.model)} · ${item.purpose}`),element('p','source-note',state.readerHttp?'SDK-client input, in original array order. View raw and Download bytes retain the source; readable strings are decoded. Provider-server receipt is not observable here. Supported Chat, Responses and Anthropic dispatches are captured; SDK history never fills missing captures.':'SDK preparation evidence, not provider wire bytes.'),element('pre','json',json({execution_id:item.execution_id,agent_run_seq:item.agent_run_seq,model_request_seq:item.model_request_seq,purpose:item.purpose,step_index:item.step_index,output_retry_index:item.output_retry_index,started_at:item.started_at,finished_at:item.finished_at,duration_ns:item.duration_ns,status:item.status,error_code:item.error_code,usage:item.usage,api:attempt?.api,record_http_bodies:attempt?.record_http_bodies,diagnostics:attempt?.diagnostics})));if(item.usage)metadata.append(element('p','muted',usageLabel(item.usage)));container.append(metadata);
+    const metadata=readerDetail(modelKey(item)+':metadata','Request details','native-envelope native-info');metadata.hidden=!metadata.open;metadata.append(element('p','native-identity',`${modelLabel(item.model)} · ${item.purpose}`),element('p','source-note',state.readerHttp?'SDK-client input, in original array order. View raw and Download bytes retain the source; readable strings are decoded. Provider-server receipt is not observable here. Supported Chat, Responses and Anthropic dispatches are captured; SDK history never fills missing captures.':'Retained SDK interaction content, not provider wire bytes.'),element('pre','json',json({execution_id:item.execution_id,agent_run_seq:item.agent_run_seq,model_request_seq:item.model_request_seq,purpose:item.purpose,step_index:item.step_index,output_retry_index:item.output_retry_index,started_at:item.started_at,finished_at:item.finished_at,duration_ns:item.duration_ns,status:item.status,error_code:item.error_code,usage:item.usage,api:attempt?.api,record_http_bodies:attempt?.record_http_bodies,diagnostics:attempt?.diagnostics})));if(item.usage)metadata.append(element('p','muted',usageLabel(item.usage)));container.append(metadata);
     const toggleInfo=metadata.ontoggle;metadata.ontoggle=()=>{toggleInfo();if(!metadata.isConnected)return;metadata.hidden=!metadata.open;if(!metadata.open && metadata.contains(document.activeElement))tools.children[0].focus({preventScroll:true});};
     if(!state.readerHttp)sdkMessages(container,item,selected.key);
     else if(!attempt)container.append(element('p','muted',!item.client_requests_included?'Original client content was not requested.':item.status==='RUNNING'?'Request running; capture is saved on completion.':item.client_requests===null?'Original client messages were not recorded.':'No supported client dispatch was observed.'));
@@ -1038,7 +1042,7 @@ function renderDetails() {
   clear('inspector-content');
   if(['history','transcript','sdkmodels'].includes(state.tab)) {
     const note=element('div','source-note');
-    const explanation=state.tab==='history' ? 'SDK structured records, not outbound messages. Instructions is a separate SDK request field, not an earlier system or developer message. Display order is not client message order.' : state.tab==='transcript' ? 'SDK text excerpts only: user text and assistant text. System, instructions, tools and other structured parts are omitted; this is not a complete model request.' : 'SDK preparation snapshot, not the final client request. Categories describe framework input, not outbound message order.';
+    const explanation=state.tab==='history' ? 'SDK structured records, not outbound messages. Instructions is a separate SDK request field, not an earlier system or developer message. Display order is not client message order.' : state.tab==='transcript' ? 'SDK text excerpts only: user text and assistant text. System, instructions, tools and other structured parts are omitted; this is not a complete model request.' : 'Retained SDK request and response content, not provider wire records. Missing input does not establish response provenance.';
     note.append(element('p','',state.tab==='transcript'?'SDK text excerpts, not a complete request.':'SDK records, not outbound messages.'));
     const about=element('details');about.append(element('summary','','About this SDK view'),element('p','',explanation));note.append(about);
     note.append(button('View model messages',async()=>{state.tab='models';await loadDetail();}));$('inspector-content').append(note);
@@ -1052,7 +1056,7 @@ function renderDetails() {
   state.details.forEach(item=>{
     const card=element('div','detail-card');
     if(state.tab==='sdkmodels') {
-      card.append(element('h3','',`SDK request snapshot ${item.model_request_seq} · ${item.status}`),element('p','',`${short(item.execution_id)} · ${modelLabel(item.model)} · ${duration(item.duration_ns)}`));
+      card.append(element('h3','',`SDK interaction ${item.model_request_seq} · ${item.status}`),element('p','',`${short(item.execution_id)} · ${modelLabel(item.model)} · ${duration(item.duration_ns)}`));
       if(item.usage)card.append(element('p','',usageLabel(item.usage)));
       sdkMessages(card,item,modelKey(item));
       if(Array.isArray(item.request?.messages)){const layers=element('details');layers.append(element('summary','','SDK prompt architecture'),properties(Object.fromEntries(promptLayers(item.request))));card.append(layers);}

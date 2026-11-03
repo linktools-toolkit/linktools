@@ -269,7 +269,7 @@ async def test_recovery_reads_fixture_only_before_actual_resume_and_preserves_or
     from linktools.ai.core import ExternalCallStatus
     from linktools.ai.runtime._recovery_coordinator import _RecoveryCoordinator
     from linktools.ai.persistence.contracts import (
-        PendingDeferredCall, PendingToolContinuation, RecoveryCheckpoint, RecoveryCheckpointState,
+        PendingDeferredCall, PendingToolContinuation, ExecutionCheckpoint, ExecutionCheckpointState,
     )
     from linktools.ai.storage import StoredPayload
 
@@ -282,15 +282,15 @@ async def test_recovery_reads_fixture_only_before_actual_resume_and_preserves_or
         "cancel_recovery": ExecutionStatus.CANCELLING,
         "terminal_cleanup": ExecutionStatus.SUCCEEDED,
     }.get(path, ExecutionStatus.STARTED)
-    state = (RecoveryCheckpointState.ADMITTED if path in {"pending_admission", "admitted_first_attempt"}
-             else RecoveryCheckpointState.WAITING if path in {"ready_deferred", "pending_deferred"}
-             else RecoveryCheckpointState.ACTIVE)
+    state = (ExecutionCheckpointState.ADMITTED if path in {"pending_admission", "admitted_first_attempt"}
+             else ExecutionCheckpointState.WAITING if path in {"ready_deferred", "pending_deferred"}
+             else ExecutionCheckpointState.ACTIVE)
     execution = replace(accepted, session_id=None, status=status, tool_response_ref=_reference())
     pending = (PendingToolContinuation("run", calls=(
         PendingDeferredCall("call", "lookup", StoredPayload.inline_json({})),
-    )) if state is RecoveryCheckpointState.WAITING else None)
-    checkpoint = RecoveryCheckpoint(execution.execution_id,
-        None if state is RecoveryCheckpointState.ADMITTED else "run", state, 0,
+    )) if state is ExecutionCheckpointState.WAITING else None)
+    checkpoint = ExecutionCheckpoint(execution.execution_id,
+        None if state is ExecutionCheckpointState.ADMITTED else "run", state, 0,
         execution.created_at, execution.updated_at, pending_tools=pending)
     checked = []
     mutations = []
@@ -301,7 +301,7 @@ async def test_recovery_reads_fixture_only_before_actual_resume_and_preserves_or
         async def load_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord:
             return execution
 
-        async def load_recovery_checkpoint(self, execution_id: str, *, tenant_id: str) -> RecoveryCheckpoint:
+        async def load_recovery_checkpoint(self, execution_id: str, *, tenant_id: str) -> ExecutionCheckpoint:
             return checkpoint
 
         def validate_binding(self, value: ExecutionRecord, *, binding: object = None) -> None:
@@ -338,7 +338,7 @@ async def test_recovery_reads_fixture_only_before_actual_resume_and_preserves_or
             mutations.append("cancel")
             return replace(execution, status=ExecutionStatus.CANCELLED)
 
-        async def _finish_checkpoint(self, value: RecoveryCheckpoint) -> None:
+        async def _finish_checkpoint(self, value: ExecutionCheckpoint) -> None:
             mutations.append("terminal-cleanup")
 
         async def load_external_call(self, *args: object, **kwargs: object) -> object:

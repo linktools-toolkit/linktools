@@ -495,3 +495,24 @@ async def test_unknown_sql_write_invalidates_hot_snapshot_without_replaying_sour
             assert raised.value is uncertain
         assert await store.read_record(old.key_digest) == (new if committed else old)
         assert callbacks == int(committed)
+
+
+@pytest.mark.parametrize("backend", ("memory", "sql"))
+async def test_batch_cache_reuses_key_set_with_duplicates_and_absent_records(
+    backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _store(backend, tmp_path / backend, InMemoryCacheBackend(max_bytes=100000)) as store:
+        records = tuple(_record(1, str(index)) for index in range(16))
+        await store.mutate(lambda tx: tx.insert_records(records))
+        missing = _record(1, "missing").key_digest
+        keys = tuple(record.key_digest for record in records) + (missing,)
+        expected = {record.key_digest: record for record in records}
+        assert await store.read_records(keys + keys) == expected
+
+        async def unexpected_source_read(fn):
+            raise AssertionError("an equivalent key set must reuse its cached batch")
+
+        monkeypatch.setattr(store, "read", unexpected_source_read)
+        result = await store.read_records(tuple(reversed(keys)))
+        assert result == expected
+        assert tuple(result) == tuple(sorted(expected))
