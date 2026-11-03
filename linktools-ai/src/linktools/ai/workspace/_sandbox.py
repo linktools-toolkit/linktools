@@ -3,11 +3,11 @@
 """Filesystem and process execution boundary."""
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, BinaryIO, Protocol, runtime_checkable
 
 from ..asset import AssetStoreReader, AssetVersionRef
 from ..core import JsonValue
@@ -197,12 +197,26 @@ class WorkspaceResource:
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceReadPolicy:
-    """Root-relative read rules shared by supported sandbox backends."""
+    """Root-relative read rules shared by supported sandbox backends.
+
+    A trusted, synchronous read_validator may inspect the owned binary stream
+    after its initial file state is captured, before any output is produced.
+    Arguments are the authorized logical path, resource key, and stream. It
+    must not retain/close/write the stream; it owns a bounded validation budget.
+    The backend restores the stream position and checks file state afterwards.
+    Validation rejection is not an empty search result. Backends that cannot
+    run this in-process policy must reject it rather than silently discard it.
+    """
 
     readable_paths: tuple[str, ...]
     resource_paths: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    read_validator: Callable[[str, str | None, BinaryIO], None] | None = field(
+        default=None, compare=False, repr=False,
+    )
 
     def __post_init__(self) -> None:
+        if self.read_validator is not None and not callable(self.read_validator):
+            raise TypeError("read_validator must be callable")
         if isinstance(self.readable_paths, (str, bytes, bytearray)):
             raise TypeError("readable_paths must be a sequence")
         readable = tuple(self.readable_paths)
