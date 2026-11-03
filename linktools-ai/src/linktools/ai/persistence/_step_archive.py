@@ -21,7 +21,7 @@ from ..errors import AIError, ErrorCode
 from ..model import ModelClientRequest
 from ..storage import ObjectRef, ObjectStore, StoredPayload
 from ..model.messages import decode_model_messages, encode_model_messages
-from ._transcript_staging import MessageArchive, StagedTranscript
+from ._transcript_staging import MessageArchive, MessageSnapshot, StagedTranscript
 from ._model_interaction import (
     StagedContextSpan,
     StagedContextInline,
@@ -1104,8 +1104,7 @@ class InMemoryStepArchive(StagingAgentRunStore):
 @dataclass(frozen=True, slots=True)
 class _CheckpointPrefixReceipt:
     checkpoint: StoredAgentRunCheckpoint
-    raw_digest: str
-    raw_size: int
+    messages: MessageSnapshot
 
 
 class StateStepArchive(AgentRunStore):
@@ -1730,14 +1729,16 @@ class StateStepArchive(AgentRunStore):
     def confirm_checkpoint_prefix(
         self, checkpoint: AgentRunCheckpoint, prepared: PreparedAgentRunCheckpoint,
     ) -> None:
-        """Retain a bounded prefix proof after the producer confirms durable commit."""
+        """Retain the immutable prefix after the producer confirms durable commit."""
         if (self._runtime_domain is PersistenceDomain.CONVERSATION
                 or checkpoint.agent_run_id != prepared.stored.agent_run_id
                 or len(checkpoint.messages) != prepared.stored.transcript_message_count):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        raw = encode_model_messages(checkpoint.messages)
+        # Staging already owns immutable encoded leaves. Keep that exact prefix
+        # rather than serializing its SDK values again after every commit.
+        messages = MessageArchive().snapshot(checkpoint.messages)
         self._checkpoint_prefix_receipts[checkpoint.agent_run_id] = _CheckpointPrefixReceipt(
-            prepared.stored, hashlib.sha256(raw).hexdigest(), len(raw),
+            prepared.stored, messages,
         )
 
     async def transcript_message_count_for_run(
@@ -1981,13 +1982,14 @@ class StateStepArchive(AgentRunStore):
             head = self._history.decode_head(head_record)
             before = head.message_count
 
-        source_messages = tuple(checkpoint.messages)
+        source_messages = (checkpoint.messages if isinstance(checkpoint.messages, MessageSnapshot)
+                           else tuple(checkpoint.messages))
         if before > len(source_messages):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if (before and receipt is not None and observed_checkpoint == receipt.checkpoint
                 and before == receipt.checkpoint.transcript_message_count):
-            raw = encode_model_messages(source_messages[:before])
-            if len(raw) != receipt.raw_size or hashlib.sha256(raw).hexdigest() != receipt.raw_digest:
+            prefix = MessageArchive().snapshot(source_messages[:before])
+            if prefix != receipt.messages:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return replace(checkpoint, transcript_message_count_before=before), records
         if before:

@@ -32,7 +32,8 @@ class StateRecordCache:
         return records.get(key)
 
     async def read_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
-        ordered = tuple(sorted(set(keys)))
+        requested = set(keys)
+        ordered = tuple(sorted(requested))
         active = active_state_transaction(self._store)
         if active is not None:
             return await active.get_records(ordered)
@@ -56,7 +57,7 @@ class StateRecordCache:
             result: dict[bytes, StoredRecord] = {}
             for value in values:
                 record = decode_record(value)
-                if record.key_digest not in ordered or record.key_digest in result:
+                if record.key_digest not in requested or record.key_digest in result:
                     raise ValueError("cached record identity does not match")
                 result[record.key_digest] = record
             return result

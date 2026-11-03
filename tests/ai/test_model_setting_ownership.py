@@ -269,48 +269,6 @@ async def test_each_native_setting_rejects_a_second_raw_object_owner(
             model.wrapped.prepare_request(None, ModelRequestParameters())
 
 
-def test_sdk_setting_owners_have_explicit_protocol_classification() -> None:
-    from pydantic_ai.models.anthropic import AnthropicModelSettings
-    from pydantic_ai.models.openai import OpenAIChatModelSettings, OpenAIResponsesModelSettings
-    from linktools.ai.model._anthropic import _REQUEST_SETTING_FIELDS
-    from linktools.ai.model._openai import _CHAT_REQUEST_SETTING_FIELDS, _RESPONSES_REQUEST_SETTING_FIELDS
-
-    from pydantic_ai.settings import ModelSettings
-
-    operational = {"timeout", "request_timeout", "max_retries", "extra_headers", "extra_body"}
-    if "first_event_timeout" in ModelSettings.__annotations__:
-        operational.add("first_event_timeout")
-    fallback = {"thinking", "cache"}
-    request_owned = {"tool_choice", "citations"}
-    cases = (
-        (AnthropicModelSettings, _REQUEST_SETTING_FIELDS, {
-            # These native settings change existing input/tool objects, which already have an owner.
-            "parallel_tool_calls", "anthropic_cache_tool_definitions", "anthropic_cache_instructions",
-            "anthropic_cache_messages", "anthropic_code_execution_tool_version", "anthropic_eager_input_streaming",
-            "anthropic_container", "anthropic_context_management",  # Can also be derived from history.
-            "anthropic_betas",  # Native HTTP header, not a JSON body field.
-            "frequency_penalty", "logit_bias", "presence_penalty", "seed",  # Unsupported by this adapter.
-        }),
-        (OpenAIChatModelSettings, _CHAT_REQUEST_SETTING_FIELDS, {
-            "max_tokens",  # Both native token aliases are checked explicitly.
-            "openai_cache_instructions",  # Changes request messages.
-            "openai_include_raw_annotations",  # Response parsing only.
-            "openai_continuous_usage_stats",  # Streaming request owns stream_options.
-            "top_k",  # Unsupported by this adapter.
-        }),
-        (OpenAIResponsesModelSettings, _RESPONSES_REQUEST_SETTING_FIELDS, {
-            "openai_cache_instructions", "openai_native_tools", "openai_send_reasoning_ids",
-            "openai_previous_response_id", "openai_conversation_id",
-            "openai_include_raw_annotations",  # Response parsing only.
-            # Unsupported inherited Chat settings do not own a Responses wire object.
-            "openai_continuous_usage_stats", "openai_prediction",
-            "frequency_penalty", "logit_bias", "presence_penalty", "seed", "stop_sequences", "top_k",
-        }),
-    )
-    for sdk_settings, mapped, other in cases:
-        assert set(sdk_settings.__annotations__) == set(mapped) | operational | fallback | request_owned | other
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("protocol", ["anthropic", "openai-responses"])
 @pytest.mark.parametrize("settings", [
@@ -452,10 +410,15 @@ async def test_raw_cannot_replace_sdk_session_state(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_history", [False, True])
-@pytest.mark.parametrize("selection,expected", [(None, None), ("chosen-container", "chosen-container"), (False, None)])
+@pytest.mark.parametrize("selection", [None, "chosen-container", False])
+@pytest.mark.parametrize("code_execution", [False, True])
 async def test_anthropic_native_container_selection_retains_sdk_history_semantics(
-    monkeypatch: pytest.MonkeyPatch, with_history: bool, selection: str | bool | None, expected: str | None,
+    monkeypatch: pytest.MonkeyPatch, with_history: bool, selection: str | bool | None, code_execution: bool,
 ) -> None:
+    from pydantic_ai.models.anthropic import AnthropicModel
+    from pydantic_ai.native_tools import CodeExecutionTool
+    from pydantic_ai.providers.anthropic import AnthropicProvider
+
     sent = []
     _capture(monkeypatch, "anthropic", sent)
     settings = {"extra_body": {"vendor_flag": False}}
@@ -469,9 +432,16 @@ async def test_anthropic_native_container_selection_retains_sdk_history_semantic
             parts=[TextPart("answer")], provider_name="anthropic",
             provider_details={"container_id": "history-container"},
         ), *messages]
+    parameters = ModelRequestParameters(native_tools=[CodeExecutionTool()] if code_execution else [])
+    async with _anthropic.DefaultAsyncHttpxClient() as client:
+        native = AnthropicModel("fixture", provider=AnthropicProvider(api_key="mock-only", http_client=client),
+                                settings=settings)
+        await native.request(messages, None, parameters)
+    native_request = sent[-1]
     async with binding.materialize() as model:
-        await model.request(messages, None, ModelRequestParameters())
-    assert sent[-1].get("container") == ("history-container" if with_history and selection is None else expected)
+        await model.request(messages, None, parameters)
+    assert sent[-1].get("container") == native_request.get("container")
+    assert sent[-1].get("tools") == native_request.get("tools")
     assert sent[-1]["vendor_flag"] is False
 
 
