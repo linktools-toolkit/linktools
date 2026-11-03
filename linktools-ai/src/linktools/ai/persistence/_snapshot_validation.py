@@ -131,7 +131,7 @@ _ALLOWED_RECORD_KINDS = {
         }
     ),
     PersistenceDomain.EVALUATION: frozenset({"evaluation", "idempotency", "evaluation_case", "evaluation_dataset", "evaluation_evidence", "evaluation_report", "evaluation_comparison", "evaluation_tombstone", "evaluation_content_tombstone", "evaluation_cleanup"}),
-    PersistenceDomain.CHECKPOINT_CONTROL: frozenset(
+    PersistenceDomain.CHECKPOINT: frozenset(
         {
             "recovery_checkpoint",
             "approval",
@@ -150,9 +150,7 @@ _ARCHIVE_RECORD_KINDS = frozenset({
     "transcript_head", "transcript_seek", "context_projection", "agent_run", "model_interaction",
 })
 _ALLOWED_RECORD_KINDS[PersistenceDomain.TRACE] = _ARCHIVE_RECORD_KINDS | {"history_association"}
-_ALLOWED_RECORD_KINDS[PersistenceDomain.CHECKPOINT] = _ARCHIVE_RECORD_KINDS
 _ALLOWED_RECORD_KINDS[PersistenceDomain.EXECUTION] -= _ARCHIVE_RECORD_KINDS | {"history_association"}
-_ALLOWED_RECORD_KINDS[PersistenceDomain.CHECKPOINT_CONTROL] -= _ARCHIVE_RECORD_KINDS
 _ALLOWED_RECORD_KINDS[PersistenceDomain.EXECUTION] |= _TURN_RECORD_KINDS
 
 
@@ -396,7 +394,7 @@ def _canonical_aliases(
     domain: PersistenceDomain,
     values: Mapping[bytes, object],
 ) -> tuple[StoredAlias, ...]:
-    if domain is not PersistenceDomain.CHECKPOINT_CONTROL:
+    if domain is not PersistenceDomain.CHECKPOINT:
         return ()
     aliases: dict[bytes, bytes] = {}
     for record_key, value in values.items():

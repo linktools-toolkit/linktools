@@ -1317,7 +1317,7 @@ class RecoveryTerminalOutcome:
         if self.object_source_domain not in {
             None,
             PersistenceDomain.EXECUTION,
-            PersistenceDomain.CHECKPOINT_CONTROL,
+            PersistenceDomain.CHECKPOINT,
         }:
             raise ValueError("recovery object source domain is invalid")
         if self.result_created_at.tzinfo is None:

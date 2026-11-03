@@ -35,7 +35,7 @@ class PersistencePlan:
     def from_default(cls, route: StorageRoute) -> "PersistencePlan":
         """Apply one default resource to the independently routed domains."""
         return cls(**{domain.value: route for domain in PersistenceDomain
-                      if domain not in {PersistenceDomain.CHECKPOINT_CONTROL, PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}})
+                      if domain not in {PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}})
 
 
     def __post_init__(self) -> None:
@@ -49,8 +49,7 @@ class PersistencePlan:
 
     @property
     def resolved_routes(self) -> Mapping[PersistenceDomain, StorageRoute]:
-        return MappingProxyType({domain: self.route(domain) for domain in PersistenceDomain
-                                 if domain is not PersistenceDomain.CHECKPOINT_CONTROL})
+        return MappingProxyType({domain: self.route(domain) for domain in PersistenceDomain})
 
     def validate_object_store(self, object_store: ObjectStore | None) -> None:
         if object_store is not None and not any(
@@ -88,7 +87,6 @@ class PersistencePlan:
             PersistenceDomain.ARTIFACT: self.artifact,
             PersistenceDomain.TASK: self.task,
             PersistenceDomain.EVALUATION: self.evaluation,
-            PersistenceDomain.CHECKPOINT_CONTROL: self.execution,
             PersistenceDomain.TRACE: self.trace or self.execution,
             PersistenceDomain.CHECKPOINT: self.checkpoint or self.execution,
         }[domain]

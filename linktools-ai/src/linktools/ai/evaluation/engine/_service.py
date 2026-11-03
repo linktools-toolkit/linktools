@@ -682,7 +682,7 @@ class Evaluations:
                         or persistence.plan != self._plan):
                     raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "trial scope requires an independent engine over shared storage")
                 for domain in (PersistenceDomain.EVALUATION, PersistenceDomain.TASK, PersistenceDomain.EXECUTION,
-                               PersistenceDomain.CHECKPOINT_CONTROL, PersistenceDomain.ARTIFACT):
+                               PersistenceDomain.CHECKPOINT, PersistenceDomain.ARTIFACT):
                     if (persistence.plan.route(domain).retention is not StorageRetentionMode.DURABLE
                             or persistence.object_store(domain).store_id != self._object_stores[domain].store_id):
                         raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "trial scope requires shared retained evidence stores")

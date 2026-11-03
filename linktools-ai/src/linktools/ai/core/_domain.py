@@ -13,7 +13,6 @@ class PersistenceDomain(str, Enum):
     ARTIFACT = "artifact"
     TASK = "task"
     EVALUATION = "evaluation"
-    CHECKPOINT_CONTROL = "recovery"  # Stable address for Checkpoint's control records.
     TRACE = "trace"
     CHECKPOINT = "checkpoint"
 

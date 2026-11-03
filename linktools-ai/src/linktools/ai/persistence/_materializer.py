@@ -186,13 +186,6 @@ async def materialize_runtime_storage(
         await store.initialize()
 
     execution_store = stores[PersistenceDomain.EXECUTION]
-    checkpoint_store = stores[PersistenceDomain.CHECKPOINT_CONTROL]
-    if execution_store.storage_group is not checkpoint_store.storage_group:
-        raise AIError(
-            ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
-            "execution and checkpoint control must share a StateStorageGroup",
-        )
-
     atomic_domains = {PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}
     for domain in atomic_domains:
         if stores[domain].storage_group is not execution_store.storage_group:
@@ -206,7 +199,7 @@ async def materialize_runtime_storage(
             stores[domain], namespace=namespace, tenant_id=tenant_id, domain=domain
         )
         for domain in PersistenceDomain
-        if domain not in {PersistenceDomain.TASK, PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}
+        if domain not in {PersistenceDomain.TASK, PersistenceDomain.TRACE}
     }
     task_store = stores[PersistenceDomain.TASK]
     bundles[PersistenceDomain.TASK] = {
@@ -331,11 +324,11 @@ def _repositories(
                 cast("OperationLedgerRepository", bundles[PersistenceDomain.EVALUATION]["operations"]),
             ),
             checkpoint=CheckpointRepositories(
-                cast("ApprovalRepository", bundles[PersistenceDomain.CHECKPOINT_CONTROL]["approvals"]),
-                cast("ExternalCallRepository", bundles[PersistenceDomain.CHECKPOINT_CONTROL]["external_calls"]),
-                cast("ExecutionCheckpointRepository", bundles[PersistenceDomain.CHECKPOINT_CONTROL]["checkpoints"]),
-                cast("OperationLedgerRepository", bundles[PersistenceDomain.CHECKPOINT_CONTROL]["operations"]),
-                cast("ToolStateRepository", bundles[PersistenceDomain.CHECKPOINT_CONTROL]["tools"]),
+                cast("ApprovalRepository", bundles[PersistenceDomain.CHECKPOINT]["approvals"]),
+                cast("ExternalCallRepository", bundles[PersistenceDomain.CHECKPOINT]["external_calls"]),
+                cast("ExecutionCheckpointRepository", bundles[PersistenceDomain.CHECKPOINT]["checkpoints"]),
+                cast("OperationLedgerRepository", bundles[PersistenceDomain.CHECKPOINT]["operations"]),
+                cast("ToolStateRepository", bundles[PersistenceDomain.CHECKPOINT]["tools"]),
             ),
         )
     except KeyError as error:

@@ -804,7 +804,7 @@ async def _build_local_components(
             state.execution,
             state.checkpoint,
             state.object_store(PersistenceDomain.EXECUTION),
-            state.object_store(PersistenceDomain.CHECKPOINT_CONTROL),
+            state.object_store(PersistenceDomain.CHECKPOINT),
             namespace,
             run_store,
             executor,
@@ -910,7 +910,7 @@ async def _build_local_components(
             state.execution.executions,
             state.checkpoint.checkpoints,
             authorization,
-            objects=state.object_store(PersistenceDomain.CHECKPOINT_CONTROL),
+            objects=state.object_store(PersistenceDomain.CHECKPOINT),
             continuation=backend,
         )
         external = DefaultExternalService(
@@ -918,7 +918,7 @@ async def _build_local_components(
             state.execution.executions,
             state.checkpoint.checkpoints,
             authorization,
-            objects=state.object_store(PersistenceDomain.CHECKPOINT_CONTROL),
+            objects=state.object_store(PersistenceDomain.CHECKPOINT),
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
             continuation=backend,

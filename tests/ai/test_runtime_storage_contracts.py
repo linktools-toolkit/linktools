@@ -374,7 +374,7 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
         background_tasks: set[asyncio.Task[object]] = set()
         bridge = RuntimeToolOperationBridge(
             state.checkpoint.tools,
-            state.object_store(PersistenceDomain.CHECKPOINT_CONTROL),
+            state.object_store(PersistenceDomain.CHECKPOINT),
             namespace="parallel-tools",
             tenant_id="tenant",
             execution_id="execution",

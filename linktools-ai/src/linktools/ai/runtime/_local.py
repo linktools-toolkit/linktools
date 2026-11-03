@@ -1887,7 +1887,7 @@ class LocalExecutionBackend:
             return None
         if reference.source_domain not in {
             PersistenceDomain.EXECUTION,
-            PersistenceDomain.CHECKPOINT_CONTROL,
+            PersistenceDomain.CHECKPOINT,
         }:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         objects = (
@@ -2018,7 +2018,7 @@ class LocalExecutionBackend:
             reference = await put_runtime_object(
                 self._checkpoint_objects,
                 ObjectKeyFactory(self._namespace),
-                PersistenceDomain.CHECKPOINT_CONTROL,
+                PersistenceDomain.CHECKPOINT,
                 self._tenant_id,
                 canonical_json_bytes(arguments),
             )
@@ -2453,7 +2453,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         store = (
             self._checkpoint_objects
-            if source is PersistenceDomain.CHECKPOINT_CONTROL
+            if source is PersistenceDomain.CHECKPOINT
             else self._execution_objects
         )
         await read_runtime_object(store, reference)
@@ -2974,7 +2974,7 @@ class LocalExecutionBackend:
             execution_ref = outcome.output
             if (
                 outcome.output.kind == "object"
-                and outcome.object_source_domain is PersistenceDomain.CHECKPOINT_CONTROL
+                and outcome.object_source_domain is PersistenceDomain.CHECKPOINT
             ):
                 reference = outcome.output.ref
                 if reference is None:
@@ -5633,7 +5633,7 @@ class LocalExecutionBackend:
             await put_runtime_object(
                 self._checkpoint_objects,
                 ObjectKeyFactory(self._namespace),
-                PersistenceDomain.CHECKPOINT_CONTROL,
+                PersistenceDomain.CHECKPOINT,
                 self._tenant_id,
                 data,
             )
@@ -5652,12 +5652,12 @@ class LocalExecutionBackend:
             reference = await put_runtime_object(
                 self._checkpoint_objects,
                 ObjectKeyFactory(self._namespace),
-                PersistenceDomain.CHECKPOINT_CONTROL,
+                PersistenceDomain.CHECKPOINT,
                 self._tenant_id,
                 canonical_json_bytes(payload),
             )
             stored = StoredPayload.object(reference)
-        return RuntimePayloadRef(stored, PersistenceDomain.CHECKPOINT_CONTROL)
+        return RuntimePayloadRef(stored, PersistenceDomain.CHECKPOINT)
 
     async def commit_repository_instruction_barrier(
         self,
@@ -5729,8 +5729,8 @@ class LocalExecutionBackend:
                     next_record=next_checkpoint,
                 )
             execution_store = self._execution.executions.state_store
-            checkpoint_control_store = self._checkpoint.checkpoints.state_store
-            if execution_store.storage_group is not checkpoint_control_store.storage_group:
+            checkpoint_store = self._checkpoint.checkpoints.state_store
+            if execution_store.storage_group is not checkpoint_store.storage_group:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
             async def commit(group: StateGroupTransaction) -> ExecutionCheckpoint:
@@ -5739,12 +5739,12 @@ class LocalExecutionBackend:
                     expected_producer_generation=producer_generation, allow_cancelling=False,
                 )
                 return await self._checkpoint.checkpoints.compare_and_swap_in_transaction(
-                    group.transaction(checkpoint_control_store), execution.execution_id,
+                    group.transaction(checkpoint_store), execution.execution_id,
                     tenant_id=self._tenant_id, expected_revision=checkpoint.revision,
                     next_record=next_checkpoint,
                 )
 
-            return await execution_store.storage_group.mutate((execution_store, checkpoint_control_store), commit)
+            return await execution_store.storage_group.mutate((execution_store, checkpoint_store), commit)
         except AIError as error:
             if error.code is ErrorCode.EXECUTION_CANCELLED:
                 raise
@@ -6006,12 +6006,12 @@ class LocalExecutionBackend:
                             await put_runtime_object(
                                 self._checkpoint_objects,
                                 ObjectKeyFactory(self._namespace),
-                                PersistenceDomain.CHECKPOINT_CONTROL,
+                                PersistenceDomain.CHECKPOINT,
                                 self._tenant_id,
                                 content,
                             )
                         )
-                        source_domain = PersistenceDomain.CHECKPOINT_CONTROL
+                        source_domain = PersistenceDomain.CHECKPOINT
                 conversation = None
                 if (
                     current.conversation

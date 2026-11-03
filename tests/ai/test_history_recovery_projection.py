@@ -256,7 +256,7 @@ async def test_public_response_ahead_then_distinct_sdk_response(
         )
         bridge = RuntimeToolOperationBridge(
             state.checkpoint.tools,
-            state.object_store(PersistenceDomain.CHECKPOINT_CONTROL),
+            state.object_store(PersistenceDomain.CHECKPOINT),
             namespace=namespace,
             tenant_id="tenant",
             execution_id="execution",
@@ -273,7 +273,7 @@ async def test_public_response_ahead_then_distinct_sdk_response(
         for attempt in range(2):
             bridge = RuntimeToolOperationBridge(
                 state.checkpoint.tools,
-                state.object_store(PersistenceDomain.CHECKPOINT_CONTROL),
+                state.object_store(PersistenceDomain.CHECKPOINT),
                 namespace=namespace,
                 tenant_id="tenant",
                 execution_id="execution",

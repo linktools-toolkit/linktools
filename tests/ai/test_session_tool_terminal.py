@@ -1837,7 +1837,7 @@ async def test_completed_tool_operation_is_reused_after_reopen(
     try:
         first_bridge = RuntimeToolOperationBridge(
             first.checkpoint.tools,
-            first.object_store(PersistenceDomain.CHECKPOINT_CONTROL),
+            first.object_store(PersistenceDomain.CHECKPOINT),
             namespace="tool-replay",
             tenant_id="tenant",
             execution_id="execution",
@@ -1876,7 +1876,7 @@ async def test_completed_tool_operation_is_reused_after_reopen(
     try:
         replay_bridge = RuntimeToolOperationBridge(
             second.checkpoint.tools,
-            second.object_store(PersistenceDomain.CHECKPOINT_CONTROL),
+            second.object_store(PersistenceDomain.CHECKPOINT),
             namespace="tool-replay",
             tenant_id="tenant",
             execution_id="execution",

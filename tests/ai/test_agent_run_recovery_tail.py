@@ -169,7 +169,7 @@ async def test_replayed_model_calls_reuse_effects_and_keep_new_raw_part_indexes(
 
         def bridge_for(owner):
             return RuntimeToolOperationBridge(
-                state.checkpoint.tools, state.object_store(PersistenceDomain.CHECKPOINT_CONTROL),
+                state.checkpoint.tools, state.object_store(PersistenceDomain.CHECKPOINT),
                 namespace=namespace, tenant_id="tenant", execution_id="execution",
                 agent_run_id=run_id, binding_digest=execution.binding_digest,
                 owner=owner, background_tasks=set(), payload_policy=PayloadPolicy(),

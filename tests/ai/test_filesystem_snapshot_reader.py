@@ -107,6 +107,37 @@ async def test_legacy_reader_preserves_source_and_restores_typed_archive_and_mem
     assert _contents(root) == before
 
 
+async def test_legacy_reader_rejects_retired_control_data_before_export(tmp_path: Path) -> None:
+    from dataclasses import replace
+    from linktools.ai.persistence.codec import encode_record
+    from linktools.ai.persistence.contracts import ExecutionCheckpoint, ExecutionCheckpointState
+    from linktools.ai.persistence._repository_common import project_record
+    from linktools.ai.persistence.state import record_key_digest
+
+    await _source(tmp_path)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    value = ExecutionCheckpoint("execution", None, ExecutionCheckpointState.ADMITTED, 0, now, now)
+    record = project_record(namespace=NAMESPACE, tenant_id=TENANT, domain=PersistenceDomain.CHECKPOINT,
+                            kind="recovery_checkpoint", identity=value.execution_id, value=value)
+    key = record_key_digest(NAMESPACE, TENANT, "recovery", record.kind, value.execution_id)
+    record = replace(record, key_digest=key)
+    root = next((tmp_path / "recovery").rglob("manifest.json")).parent
+    path = root / "records" / record.kind / key.hex()[:2] / (key.hex() + ".json")
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(encode_record(record)))
+    before = _contents(tmp_path)
+    objects = InMemoryObjectStore()
+    reader = FilesystemSnapshotReader(tmp_path, namespace=NAMESPACE, tenant_id=TENANT)
+    try:
+        with pytest.raises(AIError) as caught:
+            await reader.export_snapshot(object_store=objects, limits=LIMITS)
+        assert caught.value.code is ErrorCode.SNAPSHOT_UNSUPPORTED
+        assert [item async for item in objects.list_objects()] == []
+    finally:
+        await reader.close()
+    assert _contents(tmp_path) == before
+
+
 @pytest.mark.parametrize("damage", ("missing_root", "missing_member", "missing_manifest", "partial_members", "dirty_commit", "custom", "marker", "bad_marker"))
 async def test_legacy_reader_rejects_incomplete_or_unproven_sources_without_writes(tmp_path: Path, damage: str) -> None:
     root = tmp_path / "source"

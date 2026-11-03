@@ -313,9 +313,9 @@ flush/close ownership.
 
 `PersistencePlan.checkpoint=None` and `trace=None` inherit the execution route,
 including its hot-read cache. Registering CheckpointCapability or TraceCapability
-enables behavior; neither capability accepts a physical storage argument. An explicit archive route must remain
-in the same `StateStorageGroup` as Execution and Checkpoint control, because their safety
-and terminal boundaries require atomic writes. Persistence validates this when it opens. Routes share a group when they use the same SQLite path, the same SQL
+enables behavior; neither capability accepts a physical storage argument. An explicit
+Trace or Checkpoint route must remain in the same `StateStorageGroup` as Execution,
+because safety and terminal boundaries require atomic writes. Persistence validates this when it opens. Routes share a group when they use the same SQLite path, the same SQL
 engine instance; memory routes share
 one binding-local group. Separate SQL engine instances targeting the same database do not
 establish a shared SQL group.
@@ -327,39 +327,30 @@ are available at `persistence.checkpoint`, replacing `persistence.recovery`.
 does not remove the minimal execution control or the checkpoint required to resume
 an approval or external-result wait.
 
-The existing low-level `PersistenceDomain` also identifies physical storage
-addresses. `CHECKPOINT_CONTROL` retains the stored value `"recovery"` and the
-Execution route; `CHECKPOINT` retains `"checkpoint"` and the explicit archive
-route. Control is not another configurable business domain and is omitted from
-`resolved_routes` and `Persistence.status()`. Separate in-memory ObjectStores can
-share a store ID, so stored references must keep their explicit source address.
-All other enum members, `RuntimePayloadRef.source_domain` and terminal-result
-`object_source_domain` types, field names and encoded values remain unchanged.
+`PersistenceDomain.CHECKPOINT` is the single domain for control records and the
+run-context archive. Both use the same route, StateStore, transaction group and
+object source. `resolved_routes` and `Persistence.status()` report that domain
+once. Small control updates do not rewrite model-message bodies.
 
-Low-level call changes include `persistence.recovery.tools` →
-`persistence.checkpoint.tools` and `PersistenceDomain.RECOVERY` →
-`PersistenceDomain.CHECKPOINT_CONTROL`; the repository bundle type is now
-`CheckpointRepositories`. `StateCommands` accepts this existing bundle as
-`checkpoint` instead of separately accepting its approval, external-call and
-execution-checkpoint repositories. Its execution-bound tool adapter remains a
-separate dependency. Both `StateCommands` and `RuntimeAgentRunStore` use
-`checkpoint_archive` for the optional context archive; control records do not
-acquire the archive's optional retention or closing lifecycle.
+Low-level callers use `persistence.checkpoint.tools` and
+`PersistenceDomain.CHECKPOINT`; the repository bundle is `CheckpointRepositories`.
+`StateCommands` accepts this bundle as `checkpoint` and the optional context
+archive as `checkpoint_archive`. `ExecutionCheckpoint` and
+`ExecutionCheckpointState` describe the control record; `AgentRunCheckpoint`
+describes the model-context checkpoint.
 
-`ExecutionCheckpoint` and `ExecutionCheckpointState` name the small execution
-control record and its state. `AgentRunCheckpoint` continues to describe the
-larger model-context checkpoint. These Python names do not change the existing
-stored discriminator or payload: supported snapshots remain readable without
-rewriting their source. Direct low-level callers use the new constructor and
-type names; no old-parameter aliases are provided. Normal Runtime/Capability
-composition, approval and recovery operations need no additional objects,
-flags or context managers.
-Control and archive remain separate records under one owner: updating an approval
-or attempt revision does not rewrite model-message bodies. Existing partition
-keys, object references and snapshot layouts remain intact, without online
-rekeying, dual writes or read-miss fallback.
+The retired `recovery` data partition is not migrated. Existing filesystem
+sources retain their recorded layout. Offline export accepts an empty retired
+partition and includes the current domains only; retained `checkpoint` archives
+and unrelated domains are preserved. Populated retired partitions or references
+into retired recovery data require their original reader.
 
-For a per-archive hot cache, derive the execution route rather than selecting
+A transient Checkpoint route retains unscoped control objects for the Runtime's
+lifetime. Releasing one execution removes only its scoped working objects;
+it does not remove control payloads or another execution's working objects.
+Durable routes still share the Execution transaction group.
+
+For a per-domain hot cache, derive the execution route rather than selecting
 an unrelated database. This current API example keeps Checkpoint's inherited
 cache while disabling Trace's hot cache:
 

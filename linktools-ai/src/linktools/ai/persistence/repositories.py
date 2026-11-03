@@ -53,7 +53,7 @@ def build_repository_bundle(
             records=EvaluationRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
             idempotency=IdempotencyRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id, domain=domain),
         )
-    elif domain is PersistenceDomain.CHECKPOINT_CONTROL:
+    elif domain is PersistenceDomain.CHECKPOINT:
         values.update(
             approvals=ApprovalRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
             external_calls=ExternalCallRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),

@@ -61,7 +61,7 @@ class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
             store,
             namespace=namespace,
             tenant_id=tenant_id,
-            domain=PersistenceDomain.CHECKPOINT_CONTROL,
+            domain=PersistenceDomain.CHECKPOINT,
             kind="approval",
             resource_kind=ResourceKind.APPROVAL,
             value_type=ApprovalRecord,
@@ -182,7 +182,7 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
             store,
             namespace=namespace,
             tenant_id=tenant_id,
-            domain=PersistenceDomain.CHECKPOINT_CONTROL,
+            domain=PersistenceDomain.CHECKPOINT,
             kind="external_call",
             resource_kind=ResourceKind.EXTERNAL_CALL,
             value_type=ExternalCallRecord,
@@ -306,7 +306,7 @@ class ExecutionCheckpointRepositoryImpl(_ResourceRepository[ExecutionCheckpoint]
             store,
             namespace=namespace,
             tenant_id=tenant_id,
-            domain=PersistenceDomain.CHECKPOINT_CONTROL,
+            domain=PersistenceDomain.CHECKPOINT,
             kind=self._KIND,
             resource_kind=ResourceKind.EXECUTION,
             value_type=ExecutionCheckpoint,
@@ -460,7 +460,7 @@ class ToolRepositoryImpl(_RepositoryBase):
             store,
             namespace=namespace,
             tenant_id=tenant_id,
-            domain=PersistenceDomain.CHECKPOINT_CONTROL,
+            domain=PersistenceDomain.CHECKPOINT,
         )
 
     def _tool_key(self, identity: str) -> bytes:

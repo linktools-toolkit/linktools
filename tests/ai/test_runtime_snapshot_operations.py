@@ -153,16 +153,21 @@ async def test_object_cleanup_requires_exclusivity_before_deletion() -> None:
 
 
 @pytest.mark.asyncio
-async def test_snapshot_keeps_existing_checkpoint_without_a_module_declaration(tmp_path: Path) -> None:
+async def test_snapshot_keeps_checkpoint_controls_and_archive_without_a_capability(tmp_path: Path) -> None:
     from linktools.ai.persistence import PersistenceStorage
     from linktools.ai.persistence import Persistence
     from linktools.ai.persistence._step_contracts import AgentRunRecord
+    from linktools.ai.persistence.contracts import ExecutionCheckpoint, ExecutionCheckpointState
+    from datetime import datetime, timezone
 
+    now = datetime.now(timezone.utc)
+    control = ExecutionCheckpoint("execution", "retained-run", ExecutionCheckpointState.ACTIVE, 0, now, now)
     configuration = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     writer = Persistence(configuration)
     await writer.initialize(namespace="checkpoint-snapshot", tenant_id="tenant")
     try:
         await writer.run_store.read_store(PersistenceDomain.CHECKPOINT).register_agent_run(AgentRunRecord("retained-run"))
+        await writer.checkpoint.checkpoints.create(control)
     finally:
         await writer.close()
 
@@ -175,13 +180,17 @@ async def test_snapshot_keeps_existing_checkpoint_without_a_module_declaration(t
         await reader.close()
     manifest = json.loads(await read_object(archive, reference.key,
         expected_digest=reference.digest, expected_size=reference.size))
-    assert manifest["domains"]["checkpoint"]["records"]
+    assert {"agent_run", "recovery_checkpoint"}.issubset(
+        {value["kind"] for value in manifest["domains"]["checkpoint"]["records"]},
+    )
 
     restored_root = tmp_path / "restored"
     await Persistence.restore_snapshot(reference, object_store=archive, root=restored_root, limits=LIMITS)
     restored = Persistence(PersistenceStorage.from_root(restored_root))
     await restored.initialize(namespace="checkpoint-snapshot", tenant_id="tenant", read_only=True)
     try:
+        assert await restored.checkpoint.checkpoints.get("execution", tenant_id="tenant") == control
+        assert await restored.run_store.read_store(PersistenceDomain.CHECKPOINT).get_agent_run(agent_run_id="retained-run") is not None
         roundtrip = await restored.export_snapshot(object_store=archive, limits=LIMITS)
     finally:
         await restored.close()

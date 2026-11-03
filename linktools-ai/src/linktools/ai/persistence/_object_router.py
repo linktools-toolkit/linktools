@@ -123,7 +123,7 @@ class _RuntimeObjectRouter:
             )
         else:
             task = flight[1]
-            if domain in {PersistenceDomain.CHECKPOINT_CONTROL, PersistenceDomain.CHECKPOINT} or _source_reads.get():
+            if domain is PersistenceDomain.CHECKPOINT or _source_reads.get():
                 await self._validate_source(store, reference)
         return await asyncio.shield(task)
 
@@ -142,7 +142,7 @@ class _RuntimeObjectRouter:
         content = await self._hot[domain].get(key, load)
         if (isinstance(content, bytes) and len(content) == reference.size
                 and (loaded or hashlib.sha256(content).hexdigest() == reference.digest)):
-            if not loaded and (domain in {PersistenceDomain.CHECKPOINT_CONTROL, PersistenceDomain.CHECKPOINT} or _source_reads.get()):
+            if not loaded and (domain is PersistenceDomain.CHECKPOINT or _source_reads.get()):
                 await self._validate_source(store, reference)
             return content
         await self._hot[domain].invalidate(key)

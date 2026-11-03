@@ -867,7 +867,7 @@ class RuntimeToolOperationBridge:
         reference = await put_runtime_object(
             self._checkpoint_objects,
             self._object_keys,
-            PersistenceDomain.CHECKPOINT_CONTROL,
+            PersistenceDomain.CHECKPOINT,
             self._tenant_id,
             data,
         )

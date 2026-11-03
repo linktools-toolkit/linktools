@@ -56,7 +56,7 @@
   "description": "Clean grouped filesystem state written through the legacy persistence APIs; retained checkpoint and large Memory content with an idempotent operation receipt.",
   "memory_version": "m1:a83f949bf231e59e7a02c6370e99a2fa7b11b8f2f008e59e1f9050d40afb253f",
   "namespace": "legacy-reader",
-  "snapshot_digest": "8a5ca5a2234e6165adf369423ab63aee9d2871f05ef9e17f4498c3b618045085",
+  "snapshot_digest": "cfda206c6ccd3202b92d3355f23155bf69891cb8be4aa673f4db6c481b1f8d15",
   "snapshot_object_store_id": "fixture-snapshot",
   "tenant_id": "tenant",
   "writer_commit": "fe5a04e14fc38d4d2913a414105f8399d9126a61",

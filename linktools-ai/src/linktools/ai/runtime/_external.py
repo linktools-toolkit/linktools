@@ -234,7 +234,7 @@ class DefaultExternalService:
             reference = await put_runtime_object(
                 self._objects,
                 self._object_key_factory,
-                PersistenceDomain.CHECKPOINT_CONTROL,
+                PersistenceDomain.CHECKPOINT,
                 request.principal.tenant_id,
                 raw,
             )

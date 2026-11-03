@@ -16,6 +16,12 @@ from .snapshots import _SnapshotArchive, _SnapshotExportSource, _export_snapshot
 from ._snapshot import SnapshotLimits
 from .state import FactScanCursor, OperationScanCursor, RecordScanCursor, StoredFact, StoredOperation, StoredRecord
 
+_LEGACY_DOMAINS = frozenset({
+    "conversation", "execution", "memory", "artifact", "task", "evaluation",
+    "recovery", "trace", "checkpoint",
+})
+
+
 class _FilesystemSnapshotPartition:
     def __init__(self, root: Path) -> None:
         self._cache = _FilesystemCache(root)
@@ -74,22 +80,27 @@ class FilesystemSnapshotReader:
         async with self._group.offline_exclusivity():
             inventory = self._group.describe()
             members = inventory.members
-            if any(member.runtime_domain not in {domain.value for domain in PersistenceDomain} | {"group_archive"}
+            if any(member.runtime_domain not in _LEGACY_DOMAINS | {"group_archive"}
                    or member.partition_key is not None for member in members):
                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Opaque capability partitions require their original migration owner")
             roots = {member.runtime_domain: member.root for member in members}
-            if not {domain.value for domain in PersistenceDomain}.issubset(roots):
+            if not _LEGACY_DOMAINS.issubset(roots):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             suffix = Path(namespace_digest(self._namespace)) / hashlib.sha256(("tenant:" + self._tenant_id).encode()).hexdigest()
-            for domain in PersistenceDomain:
-                if roots[domain.value] != self._root / domain.value / suffix:
+            for name in _LEGACY_DOMAINS:
+                if roots[name] != self._root / name / suffix:
                     raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "The legacy source is not a standard grouped filesystem root")
+            recovery = _FilesystemSnapshotPartition(roots["recovery"])
+            if (await recovery.scan_records_page(after=None, limit=1)
+                    or await recovery.scan_facts_page(after=None, limit=1)
+                    or await recovery.scan_operations_page(after=None, limit=1)):
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED,
+                              "Retired recovery data requires its original reader")
             readers = {domain: _FilesystemSnapshotPartition(roots[domain.value]) for domain in PersistenceDomain}
             source_stores = {}
             for domain in PersistenceDomain:
                 route_root = (self._root if domain in {
-                    PersistenceDomain.EXECUTION, PersistenceDomain.CHECKPOINT_CONTROL,
-                    PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT,
+                    PersistenceDomain.EXECUTION, PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT,
                 } else self._root / domain.value)
                 source_stores[domain] = (self._source_object_store if self._source_object_store is not None
                                          else FilesystemObjectStore(route_root / "objects"))

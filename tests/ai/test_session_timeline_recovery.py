@@ -111,7 +111,7 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
         backend._run_stores = {
             PersistenceDomain.CONVERSATION: archive,
             PersistenceDomain.EXECUTION: object(),
-            PersistenceDomain.CHECKPOINT_CONTROL: object(),
+            PersistenceDomain.CHECKPOINT: object(),
         }
         backend._run_store = state.run_store
         backend._agent_run_lifecycle = Lifecycle()
