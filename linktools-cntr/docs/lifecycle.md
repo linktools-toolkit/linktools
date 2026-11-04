@@ -64,10 +64,13 @@ callbacks. Additional consumers execute generated-file start hooks and nonrecurs
 `chown` hooks targeting those exact declared files,
 not their persistent initialization or source-download hooks.
 
-There is no additional global runtime-provider discovery or readiness gate.
-Container dependencies and native Compose edges retain their existing meaning.
-Nginx performs its own validation when it is applied; an unselected nginx
-container does not impose checks on unrelated named operations.
+There is no global runtime-provider discovery. Named operations check required
+unselected dependencies once for availability. Container dependencies and native
+Compose edges still determine selection and start order. Execution preserves
+dependency `required` and `restart` options, but normalizes every
+`depends_on.condition` to `service_started`; it does not wait for health checks
+or job completion. Nginx performs its own validation when it is applied; an
+unselected nginx container does not impose checks on unrelated named operations.
 
 An operation without names still resolves the full project, its required
 providers and running declared consumers. Full-project generated-input metadata
@@ -107,7 +110,9 @@ The operation then runs:
    runs once, followed by final model validation.
 4. Prepare explicit images, then run `on_check` and `CHECK` for actual targets.
    All candidate files exist, but no service has been stopped or replaced.
-5. Apply services through Compose, confirm readiness and record successful models.
+5. Apply services through Compose and inspect the resulting runtime state once
+   to verify the intended image, replica count and start/success-exit state.
+   Do not wait for health checks or job completion; record successful models.
    The source paths in those models identify the exact generated files used.
 6. `on_started` and `AFTER_START` run for applied owners. A failure here reports
    that services were applied; it does not trigger deployment rollback.
@@ -118,8 +123,8 @@ start preparation, build or native check.
 Status reads metadata and actual state without invoking preparation callbacks.
 Named operations diagnose required outside actions before image refresh or service
 mutation. Explicit joint selection is required even when rollback could need to
-rebind a running dependent. Inspection and readiness checks do not imply that an
-existing service is restarted or recreated.
+rebind a running dependent. Runtime inspection does not imply that an existing
+service is restarted or recreated.
 
 `on_prepare()` runs after config registration. Named `up` and `restart` prepare
 only explicitly named owners before reading their service declarations. Full
