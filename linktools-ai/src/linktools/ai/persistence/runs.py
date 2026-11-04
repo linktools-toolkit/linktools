@@ -3,7 +3,7 @@
 """Runtime AgentRunStore orchestration over durable archives."""
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from time import monotonic
 from typing import TYPE_CHECKING, TypeVar, cast
@@ -70,7 +70,7 @@ from ._step_archive import (
     _sync_projection,
 )
 from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent, AgentRunStore
-from .state import GroupRecordReader, StateGroupTransaction, StateTransaction
+from .state import GroupRecordReader, StateGroupTransaction, StateTransaction, StoredRecord
 
 if TYPE_CHECKING:
     from .capabilities import RuntimeCapabilityWrites
@@ -484,6 +484,7 @@ class RuntimeAgentRunStore(AgentRunStore):
             prepared_checkpoint: PreparedAgentRunCheckpoint | None = None
             prepared_sequence = 0
             cancellation_requested = False
+            committed_checkpoint_records: Mapping[bytes, StoredRecord] | None = None
 
             async def operation(
                 target_recovery: AgentRunStore = recovery,
@@ -491,6 +492,8 @@ class RuntimeAgentRunStore(AgentRunStore):
                 target_checkpoint: AgentRunCheckpoint = checkpoint,
             ) -> None:
                 nonlocal prepared_interactions, prepared_checkpoint, prepared_sequence, cancellation_requested
+                nonlocal committed_checkpoint_records
+                committed_checkpoint_records = None
                 if isinstance(target_recovery, StateStepArchive):
                     prepared_checkpoint, prepared_interactions, prepared_sequence = await self.checkpoint_persistence.prepare_checkpoint(
                         target_recovery, target_agent_run, target_checkpoint, recovery_interactions_snapshot,
@@ -514,8 +517,10 @@ class RuntimeAgentRunStore(AgentRunStore):
                             )
                             stores = tuple(dict.fromkeys((*stores, *publication_records)))
 
+                        publication_snapshot: Mapping[bytes, StoredRecord] | None = None
+
                         async def guarded_commit(group: StateGroupTransaction) -> None:
-                            nonlocal cancellation_requested
+                            nonlocal cancellation_requested, publication_snapshot
                             try:
                                 await execution.require_open_history_head_in_transaction(
                                     group.transaction(execution.state_store), execution_id,
@@ -529,10 +534,16 @@ class RuntimeAgentRunStore(AgentRunStore):
                             if publication_records and isinstance(group, GroupRecordReader):
                                 await group.get_records(publication_records)
                             await commit(group.transaction(target_recovery.state_store))
+                            if publication_records and isinstance(group, GroupRecordReader):
+                                captured = await group.get_records({
+                                    target_recovery.state_store: publication_records[target_recovery.state_store],
+                                })
+                                publication_snapshot = captured[target_recovery.state_store]
 
                         await execution.state_store.storage_group.mutate(
                             stores, guarded_commit,
                         )
+                        committed_checkpoint_records = publication_snapshot
                     else:
                         await target_recovery.state_store.mutate(commit)
                     return
@@ -584,7 +595,12 @@ class RuntimeAgentRunStore(AgentRunStore):
 
             await self._settle_durability_flight(flight, operation, readback)
             if isinstance(recovery, StateStepArchive) and prepared_checkpoint is not None:
-                recovery.confirm_checkpoint_prefix(checkpoint, prepared_checkpoint)
+                if type(recovery).confirm_checkpoint_prefix is StateStepArchive.confirm_checkpoint_prefix:
+                    recovery.confirm_checkpoint_prefix(
+                        checkpoint, prepared_checkpoint, records=committed_checkpoint_records,
+                    )
+                else:
+                    recovery.confirm_checkpoint_prefix(checkpoint, prepared_checkpoint)
             async with self._history_lock.hold(checkpoint.agent_run_id):
                 self._checkpoint_acknowledged[checkpoint.agent_run_id] = max(
                     self._checkpoint_acknowledged.get(checkpoint.agent_run_id, 0), staged_checkpoint_offset,

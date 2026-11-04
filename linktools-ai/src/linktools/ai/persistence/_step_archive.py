@@ -164,6 +164,7 @@ class PreparedAgentRunCheckpoint:
     projection: ContextProjection
     history_quality: HistoryQuality = HistoryQuality.COMPLETE
     archive: PreparedArchive = field(default_factory=PreparedArchive)
+    preparation_receipt: "_CheckpointPrefixReceipt | None" = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1105,6 +1106,7 @@ class InMemoryStepArchive(StagingAgentRunStore):
 class _CheckpointPrefixReceipt:
     checkpoint: StoredAgentRunCheckpoint
     messages: MessageSnapshot
+    records: Mapping[bytes, StoredRecord] | None = field(default=None, repr=False, compare=False)
 
 
 class StateStepArchive(AgentRunStore):
@@ -1728,6 +1730,7 @@ class StateStepArchive(AgentRunStore):
 
     def confirm_checkpoint_prefix(
         self, checkpoint: AgentRunCheckpoint, prepared: PreparedAgentRunCheckpoint,
+        *, records: Mapping[bytes, StoredRecord] | None = None,
     ) -> None:
         """Retain the immutable prefix after the producer confirms durable commit."""
         if (self._runtime_domain is PersistenceDomain.CONVERSATION
@@ -1737,8 +1740,13 @@ class StateStepArchive(AgentRunStore):
         # Staging already owns immutable encoded leaves. Keep that exact prefix
         # rather than serializing its SDK values again after every commit.
         messages = MessageArchive().snapshot(checkpoint.messages)
+        keys = (self._agent_run_key(checkpoint.agent_run_id),
+                self._history.head_key(checkpoint.agent_run_id),
+                self._history.projection_key(checkpoint.agent_run_id))
+        confirmed = ({key: records[key] for key in keys}
+                     if records is not None and all(key in records for key in keys) else None)
         self._checkpoint_prefix_receipts[checkpoint.agent_run_id] = _CheckpointPrefixReceipt(
-            prepared.stored, messages,
+            prepared.stored, messages, confirmed,
         )
 
     async def transcript_message_count_for_run(
@@ -1937,13 +1945,19 @@ class StateStepArchive(AgentRunStore):
             return relocated, await self.prepare_checkpoints(run, (relocated,))
         if self._runtime_domain is PersistenceDomain.CONVERSATION:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        receipt = self._checkpoint_prefix_receipts.get(run.agent_run_id)
         relocated, records = await self._relocate_run_checkpoint(run, checkpoint, use_confirmed_prefix=True)
-        return relocated, await self._prepare_explicit_checkpoints(
+        batch = await self._prepare_explicit_checkpoints(
             run,
             (relocated,),
             archive=archive,
             observed_records=records,
         )
+        if receipt is not None and records is receipt.records:
+            batch = replace(batch, checkpoints=tuple(
+                replace(value, preparation_receipt=receipt) for value in batch.checkpoints
+            ))
+        return relocated, batch
 
     async def _relocate_run_checkpoint(
         self,
@@ -1970,7 +1984,11 @@ class StateStepArchive(AgentRunStore):
                     observed_checkpoint = observed
             return records
 
-        records = await self._store.read(capture_metadata)
+        if receipt is not None and receipt.records is not None:
+            records = receipt.records
+            observed_checkpoint = receipt.checkpoint
+        else:
+            records = await self._store.read(capture_metadata)
         existing_run = records.get(self._agent_run_key(run.agent_run_id))
         before, head = 0, None
         if existing_run is not None:
@@ -2757,6 +2775,13 @@ class StateStepArchive(AgentRunStore):
             for fact in existing
         ):
             return
+        receipt = checkpoint.preparation_receipt
+        if receipt is not None:
+            current = await transaction.get_records(tuple(receipt.records))
+            latest = None if not existing else _decode_step(existing[0].data)
+            if current != receipt.records or latest != receipt.checkpoint:
+                self._checkpoint_prefix_receipts.pop(run.agent_run_id, None)
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
         owner = self._agent_run_key(run.agent_run_id)
         checkpoint_fact = StoredFact(
             stream, 0, owner, "step_checkpoint", None,
