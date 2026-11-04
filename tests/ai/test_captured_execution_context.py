@@ -5,7 +5,7 @@ from linktools.ai.task.engine import TaskEngine
 
 from linktools.ai.persistence import Persistence
 """Historical reexecution imports the accepted framework context, not live state."""
-from ._runtime_test_helpers import model_features
+from ._runtime_test_helpers import is_tool_retry, model_features
 
 from ._runtime_test_helpers import workspace_features
 
@@ -326,7 +326,7 @@ async def test_model_memory_tool_reads_captured_content_after_production_changes
         ModelMessage,
         ModelRequest,
         ModelResponse,
-        RetryPromptPart,
+        RetryFeedbackPart,
         TextPart,
         ToolCallPart,
         ToolReturnPart,
@@ -338,7 +338,7 @@ async def test_model_memory_tool_reads_captured_content_after_production_changes
         del info
         last = messages[-1]
         if isinstance(last, ModelRequest):
-            assert not any(isinstance(part, RetryPromptPart) for part in last.parts), repr(last)
+            assert not any(isinstance(part, RetryFeedbackPart) or is_tool_retry(part) for part in last.parts), repr(last)
         returned = next((part for part in last.parts if isinstance(part, ToolReturnPart)), None) if isinstance(last, ModelRequest) else None
         if returned is not None:
             return ModelResponse(parts=[TextPart("read:" + str(returned.content))])

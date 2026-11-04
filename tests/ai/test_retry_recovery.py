@@ -2,36 +2,24 @@
 # -*- coding: utf-8 -*-
 """Recorded retry bytes and pending identities survive native replay."""
 
-import hashlib
-import json
 from dataclasses import replace
 from functools import partial
-from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart, UserPromptPart
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model.messages import decode_model_messages, encode_model_messages
 from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence import _history as transcript
 from linktools.ai.persistence.runs import StagedTranscript
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 
 from .test_history_request_association import _history
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.filterwarnings("error:`RetryPromptPart` is deprecated")]
-_FIXTURE = Path(__file__).parent / "fixtures" / "persistence" / "legacy_retry_pending_v1.json"
+pytestmark = pytest.mark.asyncio
 
 
-async def test_legacy_pending_retry_retains_bytes_and_cursor_through_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
-    raw = _FIXTURE.read_bytes()
-    provenance = json.loads(_FIXTURE.with_suffix(".provenance.json").read_text())
-    assert hashlib.sha256(raw).hexdigest() == provenance["sha256"]
-    message, = decode_model_messages(raw)
-    retry, = message.parts
-    assert isinstance(retry, ToolReturnPart) and retry.outcome == "retried"
-    assert retry.tool_name == "echo" and retry.tool_call_id == "call"
+async def test_pending_retry_retains_bytes_and_cursor_through_recovery() -> None:
+    retry = ToolReturnPart("echo", "retry result", tool_call_id="call", outcome="retried")
 
     async with _history() as history:
         recorder, = history.recorders
@@ -45,28 +33,19 @@ async def test_legacy_pending_retry_retains_bytes_and_cursor_through_recovery(mo
         )
         await recorder.record_tool_start(call, 1)
         history.state.run_store.stage_transcript(recorder.agent_run_id, StagedTranscript(
-            recorder.transcript_messages(), ModelRequest(parts=[retry]), ("retry:call",),
+            recorder.transcript_messages(), ModelRequest(parts=[retry]), ("tool_result:call",),
         ))
 
-        def recorded_writer(messages):
-            # Replay real writer bytes only for the frozen pending part.
-            if len(messages) == 1 and list(messages[0].parts) == [retry]:
-                return raw
-            return encode_model_messages(messages)
-
-        with monkeypatch.context() as patch:
-            patch.setattr(transcript, "encode_model_messages", recorded_writer)
-            await recorder.commit_history_boundary()
+        await recorder.commit_history_boundary()
         archive_store = history.state.run_store.read_store(PersistenceDomain.TRACE)
         repository = archive_store.transcript_repository
         head = await repository.get_head(recorder.agent_run_id)
         chunks, keys = await archive_store.state_store.read(
             lambda tx: repository.capture_pending_in_transaction(tx, head),
         )
-        assert keys == ("retry:call",)
+        assert keys == ("tool_result:call",)
         content_archive = await repository.content_archive()
         original = await content_archive.read_ranges((chunks[0].content,), codec="model-message")
-        assert original == ((raw,),)
         with pytest.raises(AIError) as corrupt:
             await repository._decode_chunk_messages(replace(chunks[0], raw_digest="0" * 64))
         assert corrupt.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -104,8 +83,6 @@ async def test_legacy_pending_retry_retains_bytes_and_cursor_through_recovery(mo
         )
         assert [item.status for item in latest.items] == ["FAILED", "FAILED"]
         assert await content_archive.read_ranges((chunks[0].content,), codec="model-message") == original
-        assert _FIXTURE.read_bytes() == raw
         results = [part for item in recorder.transcript_messages() for part in item.parts
                    if isinstance(part, ToolReturnPart)]
         assert results == [retry]
-        assert b'"retry-prompt"' not in encode_model_messages(recorder.transcript_messages())

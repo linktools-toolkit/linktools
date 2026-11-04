@@ -227,14 +227,9 @@ post-validation parameters or a separate external-effect ledger. A call can be
 visible before any result exists. A failed or cancelled call without a returned
 part does not acquire a fabricated result.
 
-The durable message codec reads legacy `retry-prompt` records through the SDK's
-native request-part adapter. Tool-bound retries become retried tool returns with
-the same tool name and call ID; tool-less retries become feedback without tool
-coordinates. The history view uses these native item kinds for old records too.
-Original archive bytes and integrity hashes remain unchanged. New writes and
-checkpoints use only the native shapes, including explicit unknown (`None`)
-retry budgets. Ordinary tool returns without retry information keep their
-existing encoding. These message semantics do not change the format version.
+Writes and checkpoints use native retry shapes, including explicit unknown
+(`None`) retry budgets. Ordinary tool returns without retry information keep
+their existing encoding. These message semantics do not change the format version.
 
 An empty page means no matching committed fact is currently available. During
 an active run it does not prove that a live-observed request or call is absent.

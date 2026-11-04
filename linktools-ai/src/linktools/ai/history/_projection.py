@@ -2953,9 +2953,6 @@ def _select_message_parts(
         for index, part in enumerate(message.parts)
     )
     by_key = dict(zip(keys, message.parts, strict=True))
-    for part in message.parts:
-        if isinstance(part, ToolReturnPart) and part.outcome == "retried":
-            by_key.setdefault(f"retry:{part.tool_call_id}", part)
     try:
         return replace(message, parts=[by_key[key] for key in selected_keys])
     except KeyError as error:
@@ -2986,10 +2983,6 @@ def _history_parts(
     if not selected_keys:
         return values
     by_key = dict(zip(keys, values, strict=True))
-    if isinstance(message, (ModelRequest, ModelResponse)):
-        for part, item in zip(message.parts, values[1:] if has_instructions else values, strict=True):
-            if isinstance(part, ToolReturnPart) and part.outcome == "retried":
-                by_key.setdefault(f"retry:{part.tool_call_id}", item)
     try:
         return tuple(by_key[key] for key in selected_keys)
     except KeyError as error:

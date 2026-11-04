@@ -16,7 +16,7 @@ import pytest
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import ModelHTTPError, UnexpectedModelBehavior
-from pydantic_ai.messages import ModelMessage, ModelResponse, RetryInfo, RetryPromptPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, RetryInfo, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from pydantic_ai.usage import RunUsage, UsageLimits
 
@@ -206,10 +206,7 @@ async def test_model_corrects_output_from_safe_retry_feedback() -> None:
         retries = [part for message in messages for part in message.parts if is_tool_retry(part)]
         if retries:
             part = retries[-1]
-            retry_feedback.append(
-                part.model_response() if isinstance(part, RetryPromptPart)
-                else part.model_response_str()
-            )
+            retry_feedback.append(part.model_response_str())
         return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {"count": 3 if retries else _SECRET})])
 
     binding = _binding({"count": {"type": "integer"}})

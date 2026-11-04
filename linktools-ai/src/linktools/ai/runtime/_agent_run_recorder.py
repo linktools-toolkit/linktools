@@ -304,12 +304,6 @@ class AgentRunRecorder:
                 for part in message.parts
                 if isinstance(part, ToolReturnPart)
             }
-        for pending in self._pending_parts.values():
-            part = pending.parts[0]
-            if isinstance(part, ToolReturnPart) and part.outcome == "retried":
-                result = parts.get(f"tool_result:{part.tool_call_id}")
-                if result is not None:
-                    parts[f"retry:{part.tool_call_id}"] = result
         return all(
             type(pending) is type(message)
             and key in parts and pending.parts[0] == parts[key]
@@ -403,8 +397,6 @@ class AgentRunRecorder:
                     self.finish_transcript(interrupted=True)
         # Each result is complete even while sibling calls are still running.
         key = f"tool_result:{part.tool_call_id}"
-        if part.outcome == "retried" and f"retry:{part.tool_call_id}" in self._pending_parts:
-            key = f"retry:{part.tool_call_id}"
         self._pending_parts[key] = freeze_model_messages(
             (ModelRequest(parts=[part]),)
         )[0]

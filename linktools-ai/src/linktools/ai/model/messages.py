@@ -19,7 +19,7 @@ from typing import get_args
 from pydantic_ai.messages import (
     BinaryContent, FilePart, InstructionBaselinePart, InstructionDeltaPart, InstructionDigest,
     InstructionId, InstructionPart, SerializedInstructionId, ModelMessage, ModelMessagesTypeAdapter, ModelRequest,
-    ModelRequestAttempt, ModelRequestPart, ModelResponse, NativeToolReturnPart,
+    ModelRequestAttempt, ModelResponse, NativeToolReturnPart,
     SpeechPart, SystemPromptPart, TextContent, ToolReturnPart, UserContent, UserPromptPart,
 )
 
@@ -44,14 +44,13 @@ from ._tool_return_codec import decode_tool_return_content, encode_tool_return_c
 _MESSAGE_VERSION = 1
 _HOST_CONTENT = "linktools-content"
 _SUMMARY_KIND = "runtime-summary-prompt"
-_REQUEST_PART_ADAPTER = TypeAdapter(ModelRequestPart)
 _USAGE_ADAPTER = TypeAdapter(RequestUsage)
 _USER_CONTENT_ADAPTER = TypeAdapter(UserContent)
 _DURATION_ADAPTER = TypeAdapter(timedelta)
 _INSTRUCTION_ID_ADAPTER = TypeAdapter(SerializedInstructionId)
 _USAGE_TOKEN_FIELDS = tuple(field.name for field in fields(RequestUsage) if field.name.endswith("_tokens"))
 _CORRELATED_PARTS = frozenset({
-    "tool-call", "builtin-tool-call", "tool-return", "builtin-tool-return", "retry-prompt",
+    "tool-call", "builtin-tool-call", "tool-return", "builtin-tool-return",
 })
 
 
@@ -469,27 +468,6 @@ def _require_preserved_fields(supplied: object, restored: object) -> None:
         raise ValueError("native message decoder changed an explicit value")
 
 
-def _read_legacy_retry_part(part: dict[str, object]) -> ModelRequestPart:
-    """Validate recorded facts before the SDK upgrades its retired wire shape."""
-    if part.keys() - {"part_kind", "content", "tool_name", "tool_call_id", "timestamp"}:
-        raise ValueError("legacy retry contains unknown fields")
-    if not isinstance(part.get("tool_call_id"), str) or not part["tool_call_id"]:
-        raise ValueError("durable tool correlation is required")
-    restored = _REQUEST_PART_ADAPTER.validate_python(part)
-    if "timestamp" in part:
-        _require_preserved_fields(part["timestamp"], _encode_datetime(restored.timestamp))
-    if part.get("tool_name") is not None:
-        _require_preserved_fields(part["tool_name"], restored.tool_name)
-    # The SDK normalizes tool validation errors and removes error context.
-    # Validate the original content through its feedback branch before that
-    # intentional conversion, so malformed or unknown fields cannot disappear.
-    feedback = _REQUEST_PART_ADAPTER.validate_python({**part, "tool_name": None})
-    _require_preserved_fields(
-        part["content"], _REQUEST_PART_ADAPTER.dump_python(feedback, mode="json", warnings="error")["content"],
-    )
-    return restored
-
-
 def _encode_messages(messages: Sequence[ModelMessage]) -> list[JsonValue]:
     lowered = []
     patches = []
@@ -499,8 +477,6 @@ def _encode_messages(messages: Sequence[ModelMessage]) -> list[JsonValue]:
             message = project_model_response_attempts(message)
         parts = []
         for pi, part in enumerate(message.parts):
-            if part.part_kind == "retry-prompt":
-                part = _read_legacy_retry_part(_dump_native(_REQUEST_PART_ADAPTER, part))
             if ModelSettingsDeltaPart is not None and isinstance(part, ModelSettingsDeltaPart):
                 settings = _recorded_settings(part.settings)
                 parts.append(replace(part, settings={}))
@@ -673,10 +649,7 @@ def _decode_message(value: object) -> ModelMessage:
                     raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if kind in _CORRELATED_PARTS and "tool_call_id" not in part:
             raise ValueError("durable tool correlation is required")
-        if kind == "retry-prompt":
-            restored = _read_legacy_retry_part(part)
-            wire["parts"][pi] = _REQUEST_PART_ADAPTER.dump_python(restored, mode="json", warnings="error")
-        elif kind == "model-settings-delta":
+        if kind == "model-settings-delta":
             patches.append((pi, "settings", _recorded_settings(part["settings"])))
             part["settings"] = {}
         elif kind == _SUMMARY_KIND:

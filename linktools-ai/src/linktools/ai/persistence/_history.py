@@ -384,7 +384,7 @@ class TranscriptRepository:
         if isinstance(key, str):
             kind, separator, suffix = key.partition(":")
             if separator and suffix and (
-                kind in {"tool_result", "retry"}
+                kind == "tool_result"
                 or kind == "part" and suffix.isascii() and suffix.isdigit()
                 and (suffix == "0" or not suffix.startswith("0"))
             ):
@@ -402,9 +402,6 @@ class TranscriptRepository:
                 if key in result:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 result[key] = part
-                if part.outcome == "retried":
-                    # Existing pending facts keep their original key and bytes.
-                    result[f"retry:{part.tool_call_id}"] = part
         return result
 
     async def prepare_observation(
@@ -482,9 +479,9 @@ class TranscriptRepository:
                     if not isinstance(pending, ModelResponse):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 else:
-                    kind, _, call_id = key.partition(":")
+                    _, _, call_id = key.partition(":")
                     if (not isinstance(pending, ModelRequest) or not isinstance(part, ToolReturnPart)
-                            or part.tool_call_id != call_id or kind == "retry" and part.outcome != "retried"):
+                            or part.tool_call_id != call_id):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if index < len(previous):
                     existing = previous[index]
