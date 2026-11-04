@@ -6315,7 +6315,7 @@ class LocalExecutionBackend:
                 if not self.worker_installed(current.execution_id):
                     self._record_worker_failure(current.execution_id, failure)
                     cleanup = asyncio.create_task(self._cleanup_failed_pending_turn(turn))
-                    self._track_checkpoint_task(cleanup, "pending_release", current.execution_id)
+                    self._track_checkpoint_task(cleanup, "pending_release")
                 return False
             turn.confirm(committed)
             turn.uncertain = False

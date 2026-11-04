@@ -18,7 +18,7 @@ from linktools.ai.errors import ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._runtime_commands import StateCommands
 from linktools.ai.runtime import Runtime, RuntimeFeatures
-from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.storage import InMemoryCacheBackend, InMemoryStreamBackend
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 from .test_execution_terminal_payload_runtime import _PayloadBuffer
 
@@ -220,6 +220,9 @@ async def test_probe_lease_loss_after_last_check_before_sql_commit(
 
     database, effects = tmp_path / 'state.db', tmp_path / 'effects.db'
     cache = InMemoryCacheBackend(max_bytes=16 * 1024 * 1024)
+    streams = InMemoryStreamBackend(max_bytes=16 * 1024 * 1024)
+    monkeypatch.setattr(cache, 'open_stream', streams.open_stream, raising=False)
+    monkeypatch.setattr(cache, 'read_stream', streams.read_stream, raising=False)
     storage = PersistenceStorage.sqlite(database, cache=cache, coordination=cache)
     commit_entered, commit_release = asyncio.Event(), asyncio.Event()
     new_entered, new_release = asyncio.Event(), asyncio.Event()
@@ -283,7 +286,35 @@ async def test_probe_lease_loss_after_last_check_before_sql_commit(
                         assert outcomes['old'] == 'SUCCEEDED'
                         if receipt == 'unknown_close':
                             assert outcomes['new'] == ErrorCode.STORAGE_COMMIT_UNKNOWN.value
-                            await new.close()
+                            cleanup_entered, cleanup_release, shared_closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                            cleanup = new_backend._cleanup_failed_pending_turn
+                            close_shared = new_backend._live_broker.close_shared
+                            assert new_backend._live_broker.shared is not None
+
+                            async def delayed_cleanup(turn: object, *, forget: bool = False) -> None:
+                                if not forget:
+                                    cleanup_entered.set()
+                                    await cleanup_release.wait()
+                                await cleanup(turn, forget=forget)
+
+                            async def observe_shared_close() -> None:
+                                shared_closed.set()
+                                await close_shared()
+
+                            monkeypatch.setattr(new_backend, '_cleanup_failed_pending_turn', delayed_cleanup)
+                            monkeypatch.setattr(new_backend._live_broker, 'close_shared', observe_shared_close)
+                            closing = asyncio.create_task(new.close())
+                            try:
+                                await asyncio.wait_for(cleanup_entered.wait(), 5)
+                                try:
+                                    await asyncio.wait_for(shared_closed.wait(), 0.1)
+                                    premature_shared_close = True
+                                except asyncio.TimeoutError:
+                                    premature_shared_close = False
+                            finally:
+                                cleanup_release.set()
+                                await asyncio.wait_for(closing, 10)
+                            assert not premature_shared_close
                             outcomes['new'] = 'closed_after_readback'
                         elif outcomes['new'] == ErrorCode.STORAGE_COMMIT_UNKNOWN.value:
                             with pytest.raises(AIError) as reconciled:
