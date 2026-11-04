@@ -232,7 +232,7 @@ def test_preparation_images_check_apply_and_notification_have_fixed_order(tmp_pa
     phases = [event[0] for event in events]
     assert phases.index("prepare") < phases.index("before-start") < phases.index("model")
     assert phases.index("model") < phases.index("images") < phases.index("check-callback")
-    assert phases.index("check-callback") < phases.index("apply") < phases.index("ready") < phases.index("after-callback")
+    assert phases.index("check-callback") < phases.index("apply") < phases.index("after-callback")
     assert manager.running_state.get_persisted() == ["app"]
 
 

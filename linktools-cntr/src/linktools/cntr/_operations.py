@@ -603,10 +603,7 @@ class ComposeOperations:
                                 else:
                                     warn_collateral(service, "restart", "deployment recovery changed a declared dependency")
                                     runner.restart_service(context, service, model=models[service])
-                                if service in temporary:
-                                    running.discard(service)
-                                elif service in restore:
-                                    running.add(service)
+                                running.add(service)
                                 touched.add(service)
                                 if service in owners:
                                     self._update_running_state(context, running, owners[service])
