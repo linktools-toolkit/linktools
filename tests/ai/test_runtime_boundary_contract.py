@@ -72,8 +72,8 @@ class _EventRepository:
 
 
 class _ExecutionService:
-    async def request_terminal_handoff(self, execution_id: str, *, tenant_id: str) -> None:
-        del execution_id, tenant_id
+    async def request_terminal_handoff(self, execution_id: str, *, tenant_id: str, terminal_commit: bool = False) -> None:
+        del execution_id, tenant_id, terminal_commit
 
 
 def _event_service(
