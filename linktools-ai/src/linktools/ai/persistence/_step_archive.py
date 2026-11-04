@@ -1938,13 +1938,11 @@ class StateStepArchive(AgentRunStore):
         if self._runtime_domain is PersistenceDomain.CONVERSATION:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         relocated, records = await self._relocate_run_checkpoint(run, checkpoint, use_confirmed_prefix=True)
-        # Prefix verification reads object bodies outside the metadata scope. Only
-        # an empty prefix permits reuse before preparation starts its own body I/O.
         return relocated, await self._prepare_explicit_checkpoints(
             run,
             (relocated,),
             archive=archive,
-            observed_records=records if relocated.transcript_message_count_before == 0 else None,
+            observed_records=records,
         )
 
     async def _relocate_run_checkpoint(
@@ -1952,7 +1950,7 @@ class StateStepArchive(AgentRunStore):
         run: AgentRunRecord,
         checkpoint: AgentRunCheckpoint,
         *, use_confirmed_prefix: bool = False,
-    ) -> tuple[AgentRunCheckpoint, Mapping[bytes, StoredRecord]]:
+    ) -> tuple[AgentRunCheckpoint, Mapping[bytes, StoredRecord] | None]:
         receipt = self._checkpoint_prefix_receipts.get(run.agent_run_id) if use_confirmed_prefix else None
         observed_checkpoint: StoredAgentRunCheckpoint | None = None
 
@@ -1962,7 +1960,9 @@ class StateStepArchive(AgentRunStore):
             nonlocal observed_checkpoint
             run_key = self._agent_run_key(run.agent_run_id)
             head_key = self._history.head_key(run.agent_run_id)
-            records = await transaction.get_records((run_key, head_key))
+            projection_key = self._history.projection_key(run.agent_run_id)
+            keys = (run_key, head_key, projection_key) if use_confirmed_prefix else (run_key, head_key)
+            records = await transaction.get_records(keys)
             if receipt is not None:
                 facts = await transaction.list_facts(FactQuery(self._stream(run.agent_run_id, "checkpoint"), latest=True))
                 observed = None if not facts else _decode_step(facts[0].data)
@@ -2010,7 +2010,7 @@ class StateStepArchive(AgentRunStore):
         return replace(
             checkpoint,
             transcript_message_count_before=before,
-        ), records
+        ), None if before else records
 
     async def prepare_checkpoints(
         self,

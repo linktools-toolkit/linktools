@@ -193,3 +193,37 @@ def test_shared_checkpoint_prefix_compares_tree_nodes_without_scanning_payloads(
 
     monkeypatch.setattr(MessageSnapshot, "_payloads", no_payload_scan)
     assert extended[:len(committed)] == committed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_warm_checkpoint_reuses_complete_metadata_snapshot(tmp_path, monkeypatch, backend):
+    from .test_checkpoint_metadata_snapshot_io import _assert_prepared_values_equal
+
+    state = Persistence(_storage(backend, tmp_path))
+    await state.initialize(namespace="warm-checkpoint-metadata", tenant_id="tenant")
+    try:
+        run = AgentRunRecord("run")
+        await state.run_store.register_agent_run(run)
+        await state.run_store.save_checkpoint(_checkpoint(2))
+        archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+        prepare = archive._prepare_explicit_checkpoints
+        observed = []
+
+        async def capture(*args, **kwargs):
+            observed.append(kwargs.get("observed_records"))
+            return await prepare(*args, **kwargs)
+
+        monkeypatch.setattr(archive, "_prepare_explicit_checkpoints", capture)
+        relocated, prepared = await archive.prepare_run_checkpoint(run, _checkpoint(3))
+        assert observed[0] is not None
+        assert archive.transcript_repository.projection_key("run") in observed[0]
+        fresh = await archive.prepare_checkpoints(run, (relocated,))
+        await _assert_prepared_values_equal(archive, prepared, fresh)
+
+        archive.release_runtime_cache("run")
+        await archive.prepare_run_checkpoint(run, _checkpoint(3))
+        # Body I/O can interleave a publication; cold preparation must recapture.
+        assert observed[-1] is None
+    finally:
+        await state.close()
