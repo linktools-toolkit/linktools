@@ -64,6 +64,12 @@ def test_explicit_co_selection_orders_only_native_dependency_edges():
     assert order_services((nginx, provider), ("nginx", "provider")) == ("nginx", "provider")
 
 
+def test_selected_optional_dependency_still_orders_before_consumer():
+    app = Container("app", {"app": {"depends_on": {"metrics": {"required": False}}}})
+    metrics = Container("metrics", {"metrics": {}})
+    assert order_services((app, metrics), ("app", "metrics")) == ("metrics", "app")
+
+
 
 
 
