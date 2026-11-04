@@ -39,7 +39,7 @@ def test_native_batch_keeps_selected_edges_without_python_service_loop():
         "db": {}, "app": {"depends_on": {"db": {"condition": "service_healthy"}}}}})
     runner._model_args = lambda ctx: nullcontext(["compose"])
     runner.apply_services(context, ("db", "app"))
-    assert calls == [("compose", "up", "--detach", "--no-build", "--pull", "never", "--no-deps", "db", "app")]
+    assert calls == [("compose", "up", "--wait", "--wait-timeout", "300", "--no-build", "--pull", "never", "--no-deps", "db", "app")]
     assert context.compose_model["services"]["app"]["depends_on"]["db"]["condition"] == "service_healthy"
 
 
@@ -49,29 +49,37 @@ def test_native_batch_keeps_selected_edges_without_python_service_loop():
 def test_batch_rejects_incomplete_replicas_wrong_images_and_unhealthy_instances(observed):
     runner, context, queries = readiness_case({"app": {"deploy": {"replicas": 2}}}, [observed])
     with pytest.raises(ContainerError, match="Service app did not reach"):
-        runner.wait_services_ready(context, ("app",), {"app": "sha256:target"})
+        runner.verify_services_ready(context, ("app",), {"app": "sha256:target"})
     assert len(queries) == 1
 
 
 @pytest.mark.parametrize("health", [None, "unhealthy"])
-def test_batch_waits_for_remaining_job_replicas_without_rechecking_completed_ones_individually(monkeypatch, health):
+def test_batch_verification_does_not_poll_for_unfinished_jobs(health):
     specs = {"job": {"scale": 2}, "app": {"depends_on": {
         "job": {"condition": "service_completed_successfully"}}}}
-    snapshots = [[instance("job", state="exited", code=0, health=health), instance("job", health=health), instance("app")],
-                 [instance("job", state="exited", code=0, health=health),
+    snapshots = [[instance("job", state="exited", code=0, health=health),
+                  instance("job", health=health), instance("app")]]
+    runner, context, queries = readiness_case(specs, snapshots)
+    with pytest.raises(ContainerError, match="Service job did not reach"):
+        runner.verify_services_ready(context, ("job", "app"), {"job": "sha256:target", "app": "sha256:target"})
+    assert queries == [("job", "app")]
+
+
+@pytest.mark.parametrize("health", [None, "unhealthy"])
+def test_batch_verification_accepts_completed_jobs(health):
+    specs = {"job": {"scale": 2}, "app": {"depends_on": {
+        "job": {"condition": "service_completed_successfully"}}}}
+    snapshots = [[instance("job", state="exited", code=0, health=health),
                   instance("job", state="exited", code=0, health=health), instance("app")]]
     runner, context, queries = readiness_case(specs, snapshots)
-    sleeps = []
-    monkeypatch.setattr("time.sleep", sleeps.append)
-    result = runner.wait_services_ready(context, ("job", "app"), {"job": "sha256:target", "app": "sha256:target"})
+    result = runner.verify_services_ready(context, ("job", "app"), {"job": "sha256:target", "app": "sha256:target"})
     assert result.running_services == {"app"}
-    assert queries == [("job", "app"), ("job", "app")]
-    assert sleeps == [0.5]
+    assert queries == [("job", "app")]
 
 
 def test_zero_replicas_requires_observed_removal():
     runner, context, _ = readiness_case({"app": {"scale": 0}}, [[]])
-    assert runner.wait_services_ready(context, ("app",), {"app": "sha256:target"}).services == ()
+    assert runner.verify_services_ready(context, ("app",), {"app": "sha256:target"}).services == ()
     state = ProjectRuntimeState("test", (instance("app"),), "docker")
     assert runner.ready_services(context, ("app",), state, {"app": "sha256:target"}) == set()
 
@@ -110,7 +118,7 @@ def test_maintenance_oneoff_does_not_count_as_a_service_replica():
     maintenance = instance("app", state="exited", code=0)
     maintenance.labels["com.docker.compose.oneoff"] = "True"
     runner, context, queries = readiness_case({"app": {}}, [[instance("app"), maintenance]])
-    runner.wait_services_ready(context, ("app",), {"app": "sha256:target"})
+    runner.verify_services_ready(context, ("app",), {"app": "sha256:target"})
     assert len(queries) == 1
     assert runner.ready_services(context, ("app",), ProjectRuntimeState("test", (maintenance,), "docker"),
                                  {"app": "sha256:target"}) == set()

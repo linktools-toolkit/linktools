@@ -163,7 +163,7 @@ class ComposeRunner:
         return args
 
     def up_args(self, options: ComposeOptions) -> "list[str]":
-        args: "list[str]" = ["up", "--detach", "--no-build"]
+        args: "list[str]" = ["up", "--wait", "--wait-timeout", "300", "--no-build"]
         args.extend(["--pull", "never"])
         if options.remove_orphans:
             args.append("--remove-orphans")
@@ -401,30 +401,16 @@ class ComposeRunner:
                 ready.add(service)
         return ready
 
-    def wait_services_ready(self, context: "OperationContext", services: "Sequence[str]",
-                            image_ids: "Mapping[str, str]") -> "ProjectRuntimeState":
-        """Observe the whole batch once per readiness polling interval."""
-        import time
+    def verify_services_ready(self, context: "OperationContext", services: "Sequence[str]",
+                              image_ids: "Mapping[str, str]") -> "ProjectRuntimeState":
+        """Validate one observed batch after native Compose readiness completes."""
         from ..errors import ContainerError
-        completed = self._completed_services(context, services)
-        while True:
-            state = self.manager.docker_inspector.get_project_state(context.project_containers, services=services)
-            pending = set(services) - self.ready_services(context, services, state, image_ids)
-            if not pending:
-                return state
-            for service in pending:
-                matches = state.service_instances(service)
-                spec = context.compose_model["services"][service]
-                if not matches or any((item.state not in ("running", "restarting") and not
-                                       (item.state == "exited" and item.exit_code == 0 and
-                                        (service in completed or item.health is None))) or
-                                      (service not in completed and item.health == "unhealthy") or item.image_id != image_ids[service]
-                                      for item in matches):
-                    raise ContainerError("Service {} did not reach its desired runtime state".format(service))
-                replicas = spec.get("scale", spec.get("deploy", {}).get("replicas", 1))
-                if len(matches) != replicas:
-                    raise ContainerError("Service {} did not reach its desired replica count".format(service))
-            time.sleep(0.5)
+        state = self.manager.docker_inspector.get_project_state(context.project_containers, services=services)
+        pending = set(services) - self.ready_services(context, services, state, image_ids)
+        if pending:
+            raise ContainerError("Service {} did not reach its desired runtime state".format(
+                ", ".join(sorted(pending))))
+        return state
 
     def restart_service(self, context: "OperationContext", service: str,
                         model: "dict[str, Any] | None" = None) -> int:

@@ -59,7 +59,7 @@ def test_up_always_disables_compose_side_build_and_pull(fresh_manager):
     runner = fresh_manager.compose_runner
     opts = ComposeOptions(services=["portainer"])
     assert runner.up_args(opts) == [
-        "up", "--detach", "--no-build", "--pull", "never", "portainer",
+        "up", "--wait", "--wait-timeout", "300", "--no-build", "--pull", "never", "portainer",
     ]
 
 
@@ -67,7 +67,7 @@ def test_up_full_adds_remove_orphans(fresh_manager):
     runner = fresh_manager.compose_runner
     opts = ComposeOptions(remove_orphans=True, services=[])
     assert runner.up_args(opts) == [
-        "up", "--detach", "--no-build", "--pull", "never", "--remove-orphans",
+        "up", "--wait", "--wait-timeout", "300", "--no-build", "--pull", "never", "--remove-orphans",
     ]
 
 
@@ -132,5 +132,5 @@ def test_build_and_apply_route_args_through_process(fresh_manager, monkeypatch):
     runner.apply_service(ctx, "portainer")
     assert recorded[0] == ("build", "portainer")
     assert recorded[1] == (
-        "up", "--detach", "--no-build", "--pull", "never", "--no-deps", "portainer",
+        "up", "--wait", "--wait-timeout", "300", "--no-build", "--pull", "never", "--no-deps", "portainer",
     )

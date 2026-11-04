@@ -129,10 +129,10 @@ def test_batch_readiness_requires_expected_image_on_every_regular_replica(observ
     ready = observed_image == "sha256:app"
     assert runner.ready_services(ctx, ("app",), actual, images) == ({"app"} if ready else set())
     if ready:
-        assert runner.wait_services_ready(ctx, ("app",), images) is actual
+        assert runner.verify_services_ready(ctx, ("app",), images) is actual
     else:
         with pytest.raises(ContainerError, match="Service app did not reach"):
-            runner.wait_services_ready(ctx, ("app",), images)
+            runner.verify_services_ready(ctx, ("app",), images)
 
 
 @pytest.mark.parametrize("completed", [False, True])

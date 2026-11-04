@@ -452,7 +452,7 @@ class ComposeOperations:
                 with record_phase(context, "up", logger=manager.logger):
                     batch_attempted = True
                     runner.apply_services(context, selection.services)
-                    observed = runner.wait_services_ready(context, selection.services, target_image_ids)
+                    observed = runner.verify_services_ready(context, selection.services, target_image_ids)
                     model_store.record(selection.services)
                 batch_completed = True
                 running.difference_update(selection.services)

@@ -141,7 +141,7 @@ class Runner:
     def ready_services(self, context, services, state, image_ids):
         return set(self.applied)
 
-    def wait_services_ready(self, context, services, image_ids):
+    def verify_services_ready(self, context, services, image_ids):
         active = {service for service in services if self.wait_service_ready(context, service)}
         return ProjectRuntimeState("test", tuple(SimpleNamespace(
             service=service, state="running", labels={}) for service in active), "docker")

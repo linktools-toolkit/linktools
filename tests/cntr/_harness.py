@@ -222,7 +222,7 @@ def stub_generated_runtime(manager, monkeypatch):
                         ProjectRuntimeState(manager.project_name, (), "docker"))
     monkeypatch.setattr(manager.compose_runner, "wait_service_ready",
                         lambda context, service, **kwargs: True)
-    monkeypatch.setattr(manager.compose_runner, "wait_services_ready",
+    monkeypatch.setattr(manager.compose_runner, "verify_services_ready",
                         lambda context, services, image_ids: ProjectRuntimeState(manager.project_name, tuple(
                             SimpleNamespace(service=name, state="running", labels={}) for name in services), "docker"))
     monkeypatch.setattr(manager.compose_runner, "validate_service", lambda *args, **kwargs:
