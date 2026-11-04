@@ -16,7 +16,6 @@ from pydantic_ai.messages import (
     ModelResponse,
     ToolReturnPart,
     ToolCallPart,
-    RetryPromptPart,
 )
 
 from ..core import (
@@ -2950,12 +2949,13 @@ def _select_message_parts(
     keys = staged_keys or tuple(
         f"tool_result:{part.tool_call_id}"
         if isinstance(part, ToolReturnPart)
-        else f"retry:{part.tool_call_id}"
-        if isinstance(part, RetryPromptPart)
         else f"part:{index}"
         for index, part in enumerate(message.parts)
     )
     by_key = dict(zip(keys, message.parts, strict=True))
+    for part in message.parts:
+        if isinstance(part, ToolReturnPart) and part.outcome == "retried":
+            by_key.setdefault(f"retry:{part.tool_call_id}", part)
     try:
         return replace(message, parts=[by_key[key] for key in selected_keys])
     except KeyError as error:
@@ -2973,7 +2973,7 @@ def _history_parts(
     raw_parts = values[1:] if has_instructions else values
     keys = staged_keys or tuple(
         f"{item.item_kind}:{item.tool_call_id}"
-        if item.tool_call_id is not None and item.item_kind in {"tool_result", "retry"}
+        if item.tool_call_id is not None and item.item_kind == "tool_result"
         else f"part:{index}"
         for index, item in enumerate(raw_parts)
     )
@@ -2986,6 +2986,10 @@ def _history_parts(
     if not selected_keys:
         return values
     by_key = dict(zip(keys, values, strict=True))
+    if isinstance(message, (ModelRequest, ModelResponse)):
+        for part, item in zip(message.parts, values[1:] if has_instructions else values, strict=True):
+            if isinstance(part, ToolReturnPart) and part.outcome == "retried":
+                by_key.setdefault(f"retry:{part.tool_call_id}", item)
     try:
         return tuple(by_key[key] for key in selected_keys)
     except KeyError as error:

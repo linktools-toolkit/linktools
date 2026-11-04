@@ -1,0 +1,7 @@
+{
+  "writer_commit": "8da336b7525a7ae69c434b284355724a95c21b01",
+  "writer_path": "linktools-ai/src/linktools/ai/model/messages.py",
+  "writer_sha256": "a278126873cbbdd056e4f513e43b5ea9dad48b1264d9cfc6aae463ff36d6132b",
+  "sha256": "c67e807b928e037e95bdbe4d3e855265f237194c12d44bca755ddfc7578eaacd",
+  "note": "Captured using the original message writer and PydanticAI 2.64.0. The epoch message shell is the pending-part writer contract."
+}

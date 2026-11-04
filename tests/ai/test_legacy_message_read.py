@@ -3,12 +3,11 @@
 """Frozen filesystem message bytes are read, never rewritten or emitted anew."""
 import hashlib
 import json
-from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from pydantic_ai import PydanticAIDeprecationWarning, RequestUsage, messages as sdk
+from pydantic_ai import RequestUsage, messages as sdk
 
 from linktools.ai.asset import AssetKey, AssetVersionRef
 from linktools.ai.core import canonical_json_bytes
@@ -32,8 +31,7 @@ def _messages():
         media_type='application/pdf', source=CapabilityRef('capability', 'files', 1),
     )
     identity = sdk.InstructionId(sdk.CapabilityInstructionSource('catalog'), name='details')
-    with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated"):
-        retry = sdk.RetryPromptPart('retry', tool_call_id='call', timestamp=_STAMP)
+    retry = sdk.RetryFeedbackPart('retry', retry=sdk.RetryInfo(cause='model_retry'), timestamp=_STAMP)
     return (
         sdk.ModelRequest(parts=[SummaryPromptPart('summary', timestamp=_STAMP),
             sdk.UserPromptPart('text', timestamp=_STAMP)], conversation_id='conversation', timestamp=_STAMP),
@@ -60,16 +58,13 @@ def test_real_legacy_writer_bytes_restore_all_retained_facts_and_keep_raw_archiv
     provenance = json.loads(_FIXTURE.with_suffix('.provenance.json').read_text())
     assert hashlib.sha256(raw).hexdigest() == provenance['sha256']
     expected = _messages()
-    with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated"):
-        restored = decode_model_messages(raw)
+    restored = decode_model_messages(raw)
     assert encode_model_messages(restored) == encode_model_messages(expected)
     for original in json.loads(raw):
         leaf = canonical_json_bytes([original])
-        legacy = any(part["part_kind"] == "retry-prompt" for part in original["parts"])
-        with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated") if legacy else nullcontext():
-            combined, decoded = decode_model_message_payloads((leaf,))
-            assert combined == leaf
-            assert encode_model_messages(decoded) == encode_model_messages(decode_model_messages(leaf))
+        combined, decoded = decode_model_message_payloads((leaf,))
+        assert combined == leaf
+        assert encode_model_messages(decoded) == encode_model_messages(decode_model_messages(leaf))
     current = json.loads(encode_model_messages(restored))
     assert all('agent_conversation_id' not in row and 'conversation_id' in row for row in current)
     assert _FIXTURE.read_bytes() == raw
@@ -80,14 +75,11 @@ def test_legacy_ordinary_content_keeps_its_additive_field_compatibility():
     for item in rows[1]['parts'][2]['content']['items'][:3]:
         item['future_display_hint'] = 'optional'
     raw = canonical_json_bytes(rows)
-    with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated"):
-        restored = decode_model_messages(raw)
+    restored = decode_model_messages(raw)
     assert encode_model_messages(restored) == encode_model_messages(_messages())
     for row in rows:
         leaf = canonical_json_bytes([row])
-        legacy = any(part["part_kind"] == "retry-prompt" for part in row["parts"])
-        with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated") if legacy else nullcontext():
-            combined, _ = decode_model_message_payloads((leaf,))
+        combined, _ = decode_model_message_payloads((leaf,))
         assert combined == leaf
 
 
@@ -106,10 +98,6 @@ def test_legacy_read_rejects_ambiguous_or_corrupt_values(damage):
     elif damage == 'attempts_mapping': rows[2]['failed_attempts'] = {}
     elif damage == 'attempt_dual': rows[2]['failed_attempts'][0]['duration'] = 'PT1S'
     elif damage == 'unknown_field': rows[0]['unknown'] = 'cannot discard'
-    # Third-message corruption is detected after reading the retained retry in the second.
-    reads_retry = damage in {"usage_collision", "attempt_negative", "attempt_overflow",
-                            "attempt_dual", "attempt_pairs", "attempts_mapping"}
-    with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated") if reads_retry else nullcontext():
-        with pytest.raises(AIError) as caught:
-            decode_model_messages(canonical_json_bytes(rows))
+    with pytest.raises(AIError) as caught:
+        decode_model_messages(canonical_json_bytes(rows))
     assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

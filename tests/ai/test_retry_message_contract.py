@@ -3,11 +3,13 @@
 """Retry messages preserve SDK meaning in the owned durable message contract."""
 
 import json
+import warnings
 from datetime import datetime, timezone
 
 import pytest
+from pydantic import TypeAdapter
 from pydantic_ai import PydanticAIDeprecationWarning
-from pydantic_ai.messages import ModelRequest, ModelResponse, NativeToolReturnPart, RetryPromptPart, ToolReturnPart
+from pydantic_ai.messages import ModelRequest, ModelRequestPart, ModelResponse, NativeToolReturnPart, RetryPromptPart, ToolReturnPart
 
 try:
     from pydantic_ai.messages import RetryFeedbackPart, RetryInfo
@@ -16,7 +18,7 @@ except ImportError:
 
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model.messages import decode_model_messages, encode_model_messages, freeze_model_messages
+from linktools.ai.model.messages import decode_model_message_payloads, decode_model_messages, encode_model_messages, freeze_model_messages
 from linktools.ai.persistence._views import project_session_history_message
 
 _STAMP = datetime(2026, 10, 23, tzinfo=timezone.utc)
@@ -64,14 +66,78 @@ def test_tool_return_fields_and_retry_default_round_trip(native: bool) -> None:
 
 
 @pytest.mark.parametrize("content", ("fix output", _ERRORS))
-def test_legacy_retry_prompt_remains_readable_without_reinterpretation(content: object) -> None:
+@pytest.mark.parametrize("tool_name", (None, "lookup"))
+def test_legacy_retry_mapping_reads_as_native_parts_without_warnings(content: object, tool_name: str | None) -> None:
+    part = {"part_kind": "retry-prompt", "content": content, "tool_name": tool_name,
+            "tool_call_id": "call-1", "timestamp": "2026-10-23T00:00:00Z"}
+    raw = _wire(part)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PydanticAIDeprecationWarning)
+        restored, = decode_model_messages(raw)
+        assert freeze_model_messages((restored,)) == (restored,)
+    native = restored.parts[0]
+    if tool_name is None:
+        assert isinstance(native, RetryFeedbackPart)
+        assert native.retry.cause == ("model_retry" if isinstance(content, str) else "validation_error")
+        assert native.content == content
+    else:
+        assert isinstance(native, ToolReturnPart)
+        assert native.tool_name == tool_name and native.tool_call_id == "call-1"
+        assert native.outcome == "retried"
+        if isinstance(content, str):
+            assert native.content == content and native.retry is None
+        else:
+            assert json.loads(json.dumps(native.content)) == json.loads(json.dumps(content))
+            assert native.retry.cause == "validation_error"
+    assert native.timestamp == _STAMP
+    assert json.loads(encode_model_messages((restored,)))[0]["parts"][0]["part_kind"] != "retry-prompt"
+
+
+def test_legacy_validation_uses_native_error_content_without_rewriting_source() -> None:
+    errors = [
+        {"type": "value_error", "loc": [], "msg": "invalid input", "input": {"count": "bad"},
+         "ctx": {"reason": "synthetic validation"}},
+        {"type": "int_parsing", "loc": ["count"], "msg": "expected integer", "input": "bad"},
+    ]
+    part = {"part_kind": "retry-prompt", "content": errors, "tool_name": "lookup",
+            "tool_call_id": "call-1", "timestamp": "2026-10-23T00:00:00Z"}
+    raw = _wire(part)
+    expected = TypeAdapter(ModelRequestPart).validate_python(part)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PydanticAIDeprecationWarning)
+        retained, restored = decode_model_message_payloads((raw,))
+        assert freeze_model_messages(restored) == restored
+    assert retained == raw
+    assert restored[0].parts[0] == expected
+    assert restored[0].parts[0].outcome == "retried"
+    assert restored[0].parts[0].retry.cause == "validation_error"
+
+
+@pytest.mark.parametrize("damage", (None, "tool_call_id", "timestamp"))
+def test_legacy_authoring_part_is_normalized_at_codec_ingress(damage: str | None) -> None:
     with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated"):
-        part = RetryPromptPart(content, tool_name="lookup", tool_call_id="call-1", timestamp=_STAMP)
-    message = ModelRequest(parts=[part], timestamp=_STAMP)
-    with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated"):
-        restored, = decode_model_messages(encode_model_messages((message,)))
-    assert type(restored.parts[0]) is RetryPromptPart
-    assert restored == message
+        part = RetryPromptPart("retry", tool_name="lookup", tool_call_id="call-1", timestamp=_STAMP)
+    if damage is not None:
+        setattr(part, damage, "" if damage == "tool_call_id" else None)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PydanticAIDeprecationWarning)
+        if damage is not None:
+            with pytest.raises((TypeError, ValueError)):
+                freeze_model_messages((ModelRequest(parts=[part]),))
+            return
+        restored, = freeze_model_messages((ModelRequest(parts=[part]),))
+    assert restored.parts[0] == ToolReturnPart("lookup", "retry", tool_call_id="call-1", timestamp=_STAMP, outcome="retried")
+
+
+@pytest.mark.parametrize("field,value", [("unknown", None), ("tool_name", 1), ("tool_call_id", ""),
+                                       ("tool_call_id", None), ("timestamp", None), ("content", 1),
+                                       ("content", [{"type": "error", "loc": [], "msg": 1, "input": None}])])
+def test_legacy_retry_read_rejects_discarded_or_replaced_facts(field: str, value: object) -> None:
+    part = {"part_kind": "retry-prompt", "content": "retry", "tool_name": "lookup",
+            "tool_call_id": "call-1", "timestamp": "2026-10-23T00:00:00Z", field: value}
+    with pytest.raises(AIError) as caught:
+        decode_model_messages(_wire(part))
+    assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 @_NEW_SDK

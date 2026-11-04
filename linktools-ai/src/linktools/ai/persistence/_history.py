@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from linktools.core import environ
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolReturnPart
 
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, StoredPayload, read_object
@@ -397,12 +397,14 @@ class TranscriptRepository:
             return {f"part:{index}": part for index, part in enumerate(message.parts)}
         result: dict[str, object] = {}
         for part in message.parts:
-            kind = "tool_result" if part.part_kind == "tool-return" else "retry" if part.part_kind == "retry-prompt" else None
-            if kind is not None and part.tool_call_id is not None:
-                key = f"{kind}:{part.tool_call_id}"
+            if isinstance(part, ToolReturnPart):
+                key = f"tool_result:{part.tool_call_id}"
                 if key in result:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 result[key] = part
+                if part.outcome == "retried":
+                    # Existing pending facts keep their original key and bytes.
+                    result[f"retry:{part.tool_call_id}"] = part
         return result
 
     async def prepare_observation(
@@ -481,8 +483,8 @@ class TranscriptRepository:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 else:
                     kind, _, call_id = key.partition(":")
-                    expected = "tool-return" if kind == "tool_result" else "retry-prompt"
-                    if not isinstance(pending, ModelRequest) or part.part_kind != expected or part.tool_call_id != call_id:
+                    if (not isinstance(pending, ModelRequest) or not isinstance(part, ToolReturnPart)
+                            or part.tool_call_id != call_id or kind == "retry" and part.outcome != "retried"):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if index < len(previous):
                     existing = previous[index]

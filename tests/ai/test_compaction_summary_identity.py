@@ -5,9 +5,9 @@
 from dataclasses import replace
 
 import pytest
-from pydantic_ai import Agent, PydanticAIDeprecationWarning
+from pydantic_ai import Agent
 from pydantic_ai.messages import (
-    CompactionPart, ModelMessage, ModelRequest, ModelResponse, RetryFeedbackPart, RetryInfo, RetryPromptPart, SystemPromptPart, TextContent,
+    CompactionPart, ModelMessage, ModelRequest, ModelResponse, RetryFeedbackPart, RetryInfo, SystemPromptPart, TextContent,
     TextPart, ToolCallPart, ToolReturnPart, UserPromptPart,
 )
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
@@ -116,8 +116,7 @@ async def test_summary_survives_codec_reinjection_capture_and_repeated_compactio
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("legacy", (False, True), ids=("native-retry", "legacy-retry"))
-async def test_summary_tail_preserves_retry_dependency_occurrences(legacy: bool) -> None:
+async def test_summary_tail_preserves_retry_dependency_occurrences() -> None:
     async def summarize(messages, info):
         return ModelResponse(parts=[TextPart('trusted')])
 
@@ -126,13 +125,8 @@ async def test_summary_tail_preserves_retry_dependency_occurrences(legacy: bool)
     old_call = ModelResponse(parts=[ToolCallPart('fetch', {}, 'reused')])
     old_return = ModelRequest(parts=[ToolReturnPart('fetch', 'old', 'reused')])
     call = ModelResponse(parts=[ToolCallPart('fetch', {}, 'reused')])
-    if legacy:
-        with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated"):
-            retry_part = RetryPromptPart('retry', tool_name='fetch', tool_call_id='reused')
-            plain_part = RetryPromptPart('output invalid', tool_call_id='reused')
-    else:
-        retry_part = ToolReturnPart('fetch', 'retry', tool_call_id='reused', outcome='retried')
-        plain_part = RetryFeedbackPart('output invalid', retry=RetryInfo(cause='model_retry'))
+    retry_part = ToolReturnPart('fetch', 'retry', tool_call_id='reused', outcome='retried')
+    plain_part = RetryFeedbackPart('output invalid', retry=RetryInfo(cause='model_retry'))
     retry = ModelRequest(parts=[retry_part])
     source = [old_call, old_return, ModelRequest(parts=[UserPromptPart('task')]), call, retry]
     original = encode_model_messages(source)
