@@ -280,7 +280,9 @@ Subsequent unchanged runs reuse it.
 Startup does not wait for health checks or one-shot job completion. Compose
 retains dependency start ordering, while execution normalizes dependency conditions
 to `service_started`. `up` returns after detached containers are created and started;
-health and job outcomes are observed separately through status/logs. A failed
+health and job outcomes are observed separately through status/logs. The persisted
+`ct-cntr list` view is a last-observed snapshot, not a live monitor; use
+`ct-cntr status` for current runtime state after a job or service exits. A failed
 container does not block later dependents through a framework readiness loop.
 
 The per-service resolved applied model is the sole recovery authority. Recovery
