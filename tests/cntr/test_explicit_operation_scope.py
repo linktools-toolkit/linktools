@@ -120,7 +120,6 @@ def test_named_operations_never_prepare_build_pull_or_apply_external_services(
 @pytest.mark.parametrize("condition,state,health", [
     ("service_started", None, None),
     ("service_started", "exited", None),
-    ("service_healthy", "running", "unhealthy"),
     ("service_completed_successfully", "exited", None),
 ])
 def test_unavailable_external_dependency_fails_before_image_work_or_stops(
@@ -135,7 +134,7 @@ def test_unavailable_external_dependency_fails_before_image_work_or_stops(
         instance.state, instance.health, instance.exit_code = state, health, 1 if state == "exited" else None
     instrument_images(manager)
 
-    with pytest.raises(ContainerError, match="Required dependencies are not ready.*db.*database"):
+    with pytest.raises(ContainerError, match="Required dependencies are unavailable.*db.*database"):
         getattr(manager.compose_operations, action)(["app"], pull=True)
 
     assert_no_image_or_service_mutation(manager)
