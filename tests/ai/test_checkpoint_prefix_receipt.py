@@ -4,6 +4,7 @@
 
 from contextlib import suppress
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -225,5 +226,33 @@ async def test_warm_checkpoint_reuses_complete_metadata_snapshot(tmp_path, monke
         await archive.prepare_run_checkpoint(run, _checkpoint(3))
         # Body I/O can interleave a publication; cold preparation must recapture.
         assert observed[-1] is None
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_metadata_less_receipt_survives_external_checkpoint_advance(tmp_path: Path, backend: str) -> None:
+    state = Persistence(_storage(backend, tmp_path))
+    await state.initialize(namespace="metadata-less-receipt", tenant_id="tenant")
+    try:
+        run = AgentRunRecord("run")
+        store = state.run_store
+        await store.register_agent_run(run)
+        await store.save_checkpoint(_checkpoint(1))
+        archive = store.read_store(PersistenceDomain.CHECKPOINT)
+        # Standalone publication confirms the prefix without grouped metadata.
+        assert archive._checkpoint_prefix_receipts["run"].records is None
+        # Another legitimate publication advances source without this receipt.
+        second = await archive.relocate_run_checkpoint(run, _checkpoint(2))
+        await archive.materialize_checkpoint(run, second)
+        third, prepared = await archive.prepare_run_checkpoint(run, _checkpoint(3))
+        assert third.transcript_message_count_before == 2
+        await archive.state_store.mutate(lambda transaction: archive.materialize_checkpoint_in_transaction(
+            transaction, run, prepared.checkpoints[0],
+        ))
+        latest = await archive.latest_checkpoint(agent_run_id="run")
+        assert latest.step_index == 3 and len(latest.messages) == 3
+        assert prepared.checkpoints[0].preparation_receipt is None
     finally:
         await state.close()

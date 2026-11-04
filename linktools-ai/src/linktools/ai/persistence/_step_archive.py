@@ -1953,7 +1953,7 @@ class StateStepArchive(AgentRunStore):
             archive=archive,
             observed_records=records,
         )
-        if receipt is not None and records is receipt.records:
+        if receipt is not None and records is not None and records is receipt.records:
             batch = replace(batch, checkpoints=tuple(
                 replace(value, preparation_receipt=receipt) for value in batch.checkpoints
             ))

@@ -6298,10 +6298,25 @@ class LocalExecutionBackend:
                 await self._agent_run_lifecycle.discard_execution_terminal_seal(plan)
             raise
 
-        async def accept(committed: ExecutionTerminalCommitResult) -> None:
+        async def accept(committed: ExecutionTerminalCommitResult) -> bool:
             if committed.execution.execution_id != current.execution_id:
-                self._pending_turns.release(turn)
-                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                # The canonical request belongs to another turn: this exact
+                # source batch did not publish. Keep its local owner until the
+                # stopped worker has released its claim and staging.
+                if plan is not None:
+                    await self._agent_run_lifecycle.discard_execution_terminal_seal(plan)
+                if self._execution_buffer is not None:
+                    self._execution_buffer.reject_source(current.execution_id, payload_ids)
+                turn.committing = False
+                turn.uncertain = False
+                turn.reconcile = None
+                failure = AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                self._pending_turns.fail(turn, failure)
+                if not self.worker_installed(current.execution_id):
+                    self._record_worker_failure(current.execution_id, failure)
+                    cleanup = asyncio.create_task(self._cleanup_failed_pending_turn(turn))
+                    self._track_checkpoint_task(cleanup, "pending_release", current.execution_id)
+                return False
             turn.confirm(committed)
             turn.uncertain = False
             turn.failure = None
@@ -6338,6 +6353,7 @@ class LocalExecutionBackend:
             )
             await self._record_committed_terminal(committed, session_id=current.session_id)
             await self._release_pending_coordination(turn)
+            return True
 
         async def confirm() -> None:
             committed = await self._runtime_commands.read_pending_turn(
@@ -6346,7 +6362,8 @@ class LocalExecutionBackend:
             if committed is None:
                 # Absence does not prove rollback of the original unknown attempt.
                 raise turn.failure or AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
-            if producer_generation is not None and plan is None:
+            if (committed.execution.execution_id == current.execution_id
+                    and producer_generation is not None and plan is None):
                 await self._discard_terminal_producer_tail(
                     committed.execution, agent_run_id=agent_run_id,
                     producer_generation=producer_generation,
@@ -6368,7 +6385,9 @@ class LocalExecutionBackend:
                 execution_projections=() if plan is None else plan.projections,
                 audit_events=pending_audit,
             )
-            await accept(committed)
+            if not await accept(committed):
+                assert turn.failure is not None
+                raise turn.failure
             return committed
 
         task = asyncio.create_task(commit_owned(), name=f"ai-terminal-boundary-{current.execution_id}")
