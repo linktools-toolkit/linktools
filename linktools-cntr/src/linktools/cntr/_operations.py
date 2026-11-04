@@ -452,7 +452,7 @@ class ComposeOperations:
                 with record_phase(context, "up", logger=manager.logger):
                     batch_attempted = True
                     runner.apply_services(context, selection.services)
-                    observed = runner.verify_services_ready(context, selection.services, target_image_ids)
+                    observed = runner.verify_services_started(context, selection.services, target_image_ids)
                     model_store.record(selection.services)
                 batch_completed = True
                 running.difference_update(selection.services)
@@ -484,7 +484,7 @@ class ComposeOperations:
                 try:
                     if batch_attempted and not batch_completed:
                         observed = manager.docker_inspector.get_project_state(selection.project_containers)
-                        confirmed = runner.ready_services(context, selection.services, observed, target_image_ids)
+                        confirmed = runner.started_services(context, selection.services, observed, target_image_ids)
                         for service in confirmed & model_store.changed_services & actual.existing_services:
                             previous_hashes = {item.labels.get("com.docker.compose.config-hash")
                                                for item in actual.service_instances(service)}

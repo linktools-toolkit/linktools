@@ -127,12 +127,12 @@ def test_batch_readiness_requires_expected_image_on_every_regular_replica(observ
     monkeypatch.setattr("time.sleep", lambda delay: pytest.fail("Image mismatch must not poll"))
     images = {"app": "sha256:app"}
     ready = observed_image == "sha256:app"
-    assert runner.ready_services(ctx, ("app",), actual, images) == ({"app"} if ready else set())
+    assert runner.started_services(ctx, ("app",), actual, images) == ({"app"} if ready else set())
     if ready:
-        assert runner.verify_services_ready(ctx, ("app",), images) is actual
+        assert runner.verify_services_started(ctx, ("app",), images) is actual
     else:
         with pytest.raises(ContainerError, match="Service app did not reach"):
-            runner.verify_services_ready(ctx, ("app",), images)
+            runner.verify_services_started(ctx, ("app",), images)
 
 
 @pytest.mark.parametrize("completed", [False, True])

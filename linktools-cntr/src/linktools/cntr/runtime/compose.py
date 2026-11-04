@@ -163,7 +163,7 @@ class ComposeRunner:
         return args
 
     def up_args(self, options: ComposeOptions) -> "list[str]":
-        args: "list[str]" = ["up", "--wait", "--wait-timeout", "300", "--no-build"]
+        args: "list[str]" = ["up", "--detach", "--no-build"]
         args.extend(["--pull", "never"])
         if options.remove_orphans:
             args.append("--remove-orphans")
@@ -379,9 +379,9 @@ class ComposeRunner:
                 service_dependencies(context.compose_model["services"][name]).items()
                 if options.get("condition") == "service_completed_successfully"}
 
-    def ready_services(self, context: "OperationContext", services: "Sequence[str]",
+    def started_services(self, context: "OperationContext", services: "Sequence[str]",
                        state: "ProjectRuntimeState", image_ids: "Mapping[str, str]") -> "set[str]":
-        """Services whose complete runtime replica set satisfies the desired model."""
+        """Services started with the intended image and replica count."""
         definitions = context.compose_model["services"]
         completed = self._completed_services(context, services)
         ready = set()
@@ -394,19 +394,19 @@ class ComposeRunner:
             if service in completed:
                 valid = all(item.state == "exited" and item.exit_code == 0 for item in matches)
             else:
-                valid = all((item.state == "running" and item.health in (None, "healthy")) or
+                valid = all((item.state == "running" and item.health != "unhealthy") or
                             (item.state == "exited" and item.exit_code == 0 and item.health is None)
                             for item in matches)
             if valid:
                 ready.add(service)
         return ready
 
-    def verify_services_ready(self, context: "OperationContext", services: "Sequence[str]",
+    def verify_services_started(self, context: "OperationContext", services: "Sequence[str]",
                               image_ids: "Mapping[str, str]") -> "ProjectRuntimeState":
-        """Validate one observed batch after native Compose readiness completes."""
+        """Validate one observed batch after detached Compose start."""
         from ..errors import ContainerError
         state = self.manager.docker_inspector.get_project_state(context.project_containers, services=services)
-        pending = set(services) - self.ready_services(context, services, state, image_ids)
+        pending = set(services) - self.started_services(context, services, state, image_ids)
         if pending:
             raise ContainerError("Service {} did not reach its desired runtime state".format(
                 ", ".join(sorted(pending))))

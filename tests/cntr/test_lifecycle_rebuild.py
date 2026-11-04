@@ -138,10 +138,10 @@ class Runner:
             if changed or cascade or service not in initial:
                 updated.add(service)
 
-    def ready_services(self, context, services, state, image_ids):
+    def started_services(self, context, services, state, image_ids):
         return set(self.applied)
 
-    def verify_services_ready(self, context, services, image_ids):
+    def verify_services_started(self, context, services, image_ids):
         active = {service for service in services if self.wait_service_ready(context, service)}
         return ProjectRuntimeState("test", tuple(SimpleNamespace(
             service=service, state="running", labels={}) for service in active), "docker")
