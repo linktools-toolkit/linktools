@@ -78,6 +78,17 @@ def test_unhealthy_service_does_not_block_start():
     assert calls == [("app",)]
 
 
+@pytest.mark.parametrize("health", [None, "healthy", "unhealthy"])
+def test_successfully_exited_service_does_not_check_health(health):
+    state = ProjectRuntimeState("test", (SimpleNamespace(
+        service="job", state="exited", health=health, exit_code=0,
+        image_id="sha256:job", labels={}),), "docker")
+    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(
+        get_project_state=lambda containers, services=None: state)))
+    context = SimpleNamespace(project_containers=(), compose_model={"services": {"job": {}}})
+    assert runner.verify_services_started(context, ("job",), {"job": "sha256:job"}) is state
+
+
 @pytest.mark.parametrize(("condition", "state", "health", "exit_code"), [
     ("service_healthy", "running", "starting", None),
     ("service_healthy", "running", "unhealthy", None),
