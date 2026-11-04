@@ -130,6 +130,56 @@ async def test_worker_completion_cleanup_is_owned_until_close(fail: bool) -> Non
 
 
 @pytest.mark.asyncio
+async def test_failed_pending_cleanup_finishes_before_close_reports_worker_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _local_backend(None)
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+    close_started = asyncio.Event()
+    turn = SimpleNamespace(uncertain=False)
+    failure = AIError(ErrorCode.STORAGE_CONFLICT)
+
+    async def cleanup(pending: object, *, forget: bool = False) -> None:
+        assert pending is turn
+        if not forget:
+            cleanup_started.set()
+            await release_cleanup.wait()
+            cleanup_finished.set()
+
+    async def settle_all() -> None:
+        close_started.set()
+
+    async def close_shared() -> None:
+        assert cleanup_finished.is_set()
+
+    async def worker() -> None:
+        raise failure
+
+    monkeypatch.setattr(backend._pending_turns, "get", lambda *_args, **_kwargs: turn)
+    monkeypatch.setattr(backend._pending_turns, "fail", lambda *_args: None)
+    monkeypatch.setattr(backend._pending_turns, "settle_all", settle_all)
+    monkeypatch.setattr(backend, "_cleanup_failed_pending_turn", cleanup)
+    monkeypatch.setattr(backend._live_broker, "close_shared", close_shared)
+    task = asyncio.create_task(worker())
+    backend._tasks["execution"] = task
+    task.add_done_callback(lambda done: backend._task_done("execution", done))
+    await cleanup_started.wait()
+    close = asyncio.create_task(backend.close())
+    try:
+        await close_started.wait()
+        # The close task runs through its first drain before this waiter resumes.
+        assert not close.done()
+    finally:
+        release_cleanup.set()
+        with pytest.raises(AIError) as caught:
+            await close
+        assert caught.value.code is ErrorCode.STORAGE_CONFLICT
+    assert cleanup_finished.is_set()
+
+
+@pytest.mark.asyncio
 async def test_worker_completion_does_not_claim_unrequested_or_held_handoff() -> None:
     gate = HandoffGate[str, None]()
     assert await gate.claim_requested_release("execution") is None
