@@ -392,7 +392,7 @@ class ComposeRunner:
                        state: "ProjectRuntimeState", image_ids: "Mapping[str, str]") -> "set[str]":
         """Services started with the intended image and replica count."""
         definitions = context.compose_model["services"]
-        ready = set()
+        started = set()
         for service in services:
             spec = definitions[service]
             replicas = spec.get("scale", spec.get("deploy", {}).get("replicas", 1))
@@ -403,8 +403,8 @@ class ComposeRunner:
                         (item.state == "exited" and item.exit_code == 0 and item.health is None)
                         for item in matches)
             if valid:
-                ready.add(service)
-        return ready
+                started.add(service)
+        return started
 
     def verify_services_started(self, context: "OperationContext", services: "Sequence[str]",
                               image_ids: "Mapping[str, str]") -> "ProjectRuntimeState":
