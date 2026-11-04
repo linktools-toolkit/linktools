@@ -56,7 +56,7 @@ from pydantic_ai.exceptions import (
     ModelAPIError,
     UnexpectedModelBehavior,
 )
-from pydantic_ai.messages import FunctionToolResultEvent, RetryPromptPart
+from pydantic_ai.messages import FunctionToolResultEvent, ToolReturnPart
 from pydantic_ai.usage import RunUsage, UsageLimits
 
 
@@ -132,8 +132,9 @@ def test_unknown_model_route_has_stable_connection_error() -> None:
 def test_tool_retry_event_uses_stable_retry_code() -> None:
     emission = _map_event(
         FunctionToolResultEvent(
-            part=RetryPromptPart(
+            part=ToolReturnPart(
                 content="retry",
+                outcome="retried",
                 tool_name="tool",
                 tool_call_id="call",
             )

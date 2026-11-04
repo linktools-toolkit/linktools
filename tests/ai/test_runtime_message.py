@@ -13,7 +13,8 @@ from pydantic_ai.messages import (
     BinaryContent,
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
+    RetryFeedbackPart,
+    RetryInfo,
     ThinkingPart,
     ToolCallPart,
     ToolReturnPart,
@@ -94,7 +95,10 @@ def test_model_message_round_trip_preserves_retry_error_details() -> None:
     try:
         Payload(count="invalid")  # type: ignore[arg-type]
     except ValidationError as error:
-        retry = RetryPromptPart.from_error(error)
+        retry = RetryFeedbackPart(
+            error.errors(include_url=False, include_context=False),
+            retry=RetryInfo(cause="validation_error"),
+        )
     else:
         raise AssertionError("expected validation error")
 
@@ -103,7 +107,8 @@ def test_model_message_round_trip_preserves_retry_error_details() -> None:
     )
 
     restored = decoded[0].parts[0]
-    assert isinstance(restored, RetryPromptPart)
+    assert isinstance(restored, RetryFeedbackPart)
+    assert restored.retry == retry.retry
     assert restored.content == retry.content
     assert isinstance(restored.content, list)
     assert isinstance(restored.content[0]["loc"], tuple)

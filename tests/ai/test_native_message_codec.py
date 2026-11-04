@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
-from pydantic_ai import RequestUsage, messages as sdk
+from pydantic_ai import PydanticAIDeprecationWarning, RequestUsage, messages as sdk
 
 from linktools.ai.asset import AssetKey, AssetVersionRef
 from linktools.ai.core import canonical_json_bytes
@@ -89,14 +89,17 @@ def test_summary_reference_retirement_and_tool_values_keep_host_provenance() -> 
     )
     retired = RetiredReferencedContent(reference, "retired attachment")
     binary = sdk.BinaryContent(b"\x00\xff", media_type="image/png")
+    with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated"):
+        retry = sdk.RetryPromptPart("correct output", tool_call_id="retry-fixed", timestamp=_STAMP)
     request = sdk.ModelRequest(parts=[
         SummaryPromptPart("trusted summary", timestamp=_STAMP),
         sdk.UserPromptPart([reference, retired, binary], timestamp=_STAMP),
         sdk.ToolReturnPart("read", [reference, {"ordinary": "value"}],
                            tool_call_id="call-fixed", timestamp=_STAMP),
-        sdk.RetryPromptPart("correct output", tool_call_id="retry-fixed", timestamp=_STAMP),
+        retry,
     ], timestamp=_STAMP)
-    restored, = decode_model_messages(encode_model_messages((request,)))
+    with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated"):
+        restored, = decode_model_messages(encode_model_messages((request,)))
     assert type(restored.parts[0]) is SummaryPromptPart
     assert restored.parts[0] == request.parts[0]
     content = restored.parts[1].content

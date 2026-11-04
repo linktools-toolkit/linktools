@@ -10,7 +10,8 @@ import pytest
 from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
+    RetryFeedbackPart,
+    RetryInfo,
     SystemPromptPart,
     TextPart,
     ToolReturnPart,
@@ -200,7 +201,7 @@ async def _materialize_conversation(
                 SystemPromptPart(content="SECRET SYSTEM INSTRUCTION"),
                 UserPromptPart(content="original prompt"),
                 UserPromptPart(content='Workspace file path: "secret.txt"'),
-                RetryPromptPart(content="INTERNAL RETRY PROMPT"),
+                RetryFeedbackPart(content="INTERNAL RETRY PROMPT", retry=RetryInfo(cause="model_retry")),
                 ToolReturnPart(
                     tool_name="lookup",
                     tool_call_id="tool-1",

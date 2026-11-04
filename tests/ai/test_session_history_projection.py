@@ -6,6 +6,7 @@ from linktools.ai.persistence import Persistence
 from datetime import datetime, timezone
 
 import pytest
+from pydantic_ai import PydanticAIDeprecationWarning
 from linktools.ai.core import (
     HmacCursorSigner,
     canonical_sha256,
@@ -278,47 +279,51 @@ async def test_session_history_uses_projection_v1_mapping_and_empty_strings() ->
             tenant_id="tenant",
             execution_id=agent_run_id,
         )
-        await _materialize(
-            state,
-            agent_run_id,
-            (),
-            messages=[
-                ModelRequest(
-                    parts=[
-                        SystemPromptPart(content="system"),
-                        UserPromptPart(content=""),
-                        UserPromptPart(
-                            content=["", TextContent(content="inline")],
-                        ),
-                        ToolReturnPart(
-                            tool_name="lookup",
-                            tool_call_id="return-1",
-                            content={"ok": True},
-                        ),
-                        RetryPromptPart(content="retry"),
-                    ],
-                    conversation_id=agent_conversation_id,
-                ),
-                ModelResponse(
-                    parts=[
-                        TextPart(content=""),
-                        TextPart(content="answer"),
-                        ToolCallPart(
-                            tool_name="lookup",
-                            tool_call_id="call-1",
-                            args={"query": "value"},
-                        ),
-                    ],
-                    conversation_id=agent_conversation_id,
-                ),
-            ],
-        )
+        with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated"):
+            retry = RetryPromptPart(content="retry")
+        with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated"):
+            await _materialize(
+                state,
+                agent_run_id,
+                (),
+                messages=[
+                    ModelRequest(
+                        parts=[
+                            SystemPromptPart(content="system"),
+                            UserPromptPart(content=""),
+                            UserPromptPart(
+                                content=["", TextContent(content="inline")],
+                            ),
+                            ToolReturnPart(
+                                tool_name="lookup",
+                                tool_call_id="return-1",
+                                content={"ok": True},
+                            ),
+                            retry,
+                        ],
+                        conversation_id=agent_conversation_id,
+                    ),
+                    ModelResponse(
+                        parts=[
+                            TextPart(content=""),
+                            TextPart(content="answer"),
+                            ToolCallPart(
+                                tool_name="lookup",
+                                tool_call_id="call-1",
+                                args={"query": "value"},
+                            ),
+                        ],
+                        conversation_id=agent_conversation_id,
+                    ),
+                ],
+            )
         await _advance(state, None, ConversationCursor(agent_run_id))
 
-        page = await _service(state).history(
-            "session",
-            principal=Principal("owner", "tenant"),
-        )
+        with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated"):
+            page = await _service(state).history(
+                "session",
+                principal=Principal("owner", "tenant"),
+            )
 
         assert [item.item_kind for item in page.items] == [
             "system",

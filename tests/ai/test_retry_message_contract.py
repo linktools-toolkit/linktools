@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timezone
 
 import pytest
+from pydantic_ai import PydanticAIDeprecationWarning
 from pydantic_ai.messages import ModelRequest, ModelResponse, NativeToolReturnPart, RetryPromptPart, ToolReturnPart
 
 try:
@@ -64,9 +65,11 @@ def test_tool_return_fields_and_retry_default_round_trip(native: bool) -> None:
 
 @pytest.mark.parametrize("content", ("fix output", _ERRORS))
 def test_legacy_retry_prompt_remains_readable_without_reinterpretation(content: object) -> None:
-    part = RetryPromptPart(content, tool_name="lookup", tool_call_id="call-1", timestamp=_STAMP)
+    with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated"):
+        part = RetryPromptPart(content, tool_name="lookup", tool_call_id="call-1", timestamp=_STAMP)
     message = ModelRequest(parts=[part], timestamp=_STAMP)
-    restored, = decode_model_messages(encode_model_messages((message,)))
+    with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated"):
+        restored, = decode_model_messages(encode_model_messages((message,)))
     assert type(restored.parts[0]) is RetryPromptPart
     assert restored == message
 

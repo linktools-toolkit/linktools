@@ -5,11 +5,13 @@ from linktools.ai.persistence import Persistence
 """Interrupted tool evidence does not replace a recovered terminal result."""
 from ._runtime_test_helpers import model_features
 
+from contextlib import nullcontext
 from dataclasses import replace
 from functools import partial
 from types import SimpleNamespace
 
 import pytest
+from pydantic_ai import PydanticAIDeprecationWarning
 from pydantic_ai.messages import (
     SYNTHESIZED_TOOL_RETURN_METADATA_KEY,
     ModelRequest,
@@ -42,11 +44,19 @@ from .test_history_request_association import _history
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("pending", (False, True), ids=("completed", "pending"))
-@pytest.mark.parametrize("outcome", ("success", "failed", "retry"))
+@pytest.mark.parametrize("pending,outcome", [
+    pytest.param(pending, outcome, id=f"{outcome}-{'pending' if pending else 'completed'}")
+    for outcome in ("success", "failed", "retry") for pending in (False, True)
+] + [pytest.param(True, "legacy_retry", id="legacy-retry-pending")])
 async def test_recovered_tool_retains_interruptions_and_one_real_result(
     pending: bool, outcome: str,
 ) -> None:
+    legacy = outcome == "legacy_retry"
+
+    def legacy_read():
+        return (pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated")
+                if legacy else nullcontext())
+
     async with _history() as history:
         recorder, = history.recorders
         journal, = history.journals
@@ -86,32 +96,39 @@ async def test_recovered_tool_retains_interruptions_and_one_real_result(
             )
             await recorder.register_agent_run(history.records[0])
 
-        result = (
-            RetryPromptPart("retry result", tool_name="echo", tool_call_id="call")
-            if outcome == "retry" else ToolReturnPart(
-                "echo", "confirmed result", tool_call_id="call", outcome=outcome,
+        if legacy:
+            with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated"):
+                result = RetryPromptPart("retry result", tool_name="echo", tool_call_id="call")
+        else:
+            result = (
+                ToolReturnPart("echo", "retry result", tool_call_id="call", outcome="retried")
+                if outcome == "retry" else ToolReturnPart(
+                    "echo", "confirmed result", tool_call_id="call", outcome=outcome,
+                )
             )
-        )
-        await recorder.record_tool_result_boundary(result, 5)
-        recorder.append_transcript_message(ModelRequest(parts=[result]))
+        with legacy_read():
+            await recorder.record_tool_result_boundary(result, 5)
+        with legacy_read():
+            recorder.append_transcript_message(ModelRequest(parts=[result]))
         history.recorders = (recorder,)
         assert [
             part for message in recorder.transcript_messages() for part in message.parts
             if isinstance(part, (ToolReturnPart, RetryPromptPart))
         ] == [*placeholders, result]
         expected_status = "SUCCEEDED" if outcome == "success" else "FAILED"
-        expected_kind = "tool_result" if outcome != "retry" else "retry"
         for archived in (False, True):
             if archived:
-                await history.archive()
-            page = await history.reader.history(
-                "execution", tenant_id="tenant", cursor=None, limit=20, tool_call_id="call",
-            )
+                with legacy_read():
+                    await history.archive()
+            with legacy_read():
+                page = await history.reader.history(
+                    "execution", tenant_id="tenant", cursor=None, limit=20, tool_call_id="call",
+                )
             assert [(item.message_seq, item.item_kind, item.status) for item in page.items] == [
                 (1, "tool_call", expected_status),
                 (2, "tool_result", "INTERRUPTED"),
                 (3, "tool_result", "INTERRUPTED"),
-                (4, expected_kind, expected_status),
+                (4, "retry" if legacy else "tool_result", expected_status),
             ]
             assert {item.model_request_seq for item in page.items} == {1}
             assert {item.step_index for item in page.items} == {4}
@@ -148,13 +165,17 @@ async def test_recovered_tool_retains_interruptions_and_one_real_result(
         restored = AgentRunRecorder(
             history.state.run_store, execution_id="execution", agent_run_id=recorder.agent_run_id,
         )
-        await restored.register_agent_run(history.records[0])
+        with legacy_read():
+            await restored.register_agent_run(history.records[0])
         before = restored.transcript_messages()
-        await restored.record_tool_result_boundary(replace(result), 6)
-        restored.append_transcript_message(ModelRequest(parts=[replace(result)]))
+        with legacy_read():
+            await restored.record_tool_result_boundary(replace(result), 6)
+        with legacy_read():
+            restored.append_transcript_message(ModelRequest(parts=[replace(result)]))
         assert restored.transcript_messages() == before
-        with pytest.raises(AIError) as raised:
-            await restored.record_tool_result_boundary(replace(result, content="different result"), 6)
+        with legacy_read():
+            with pytest.raises(AIError) as raised:
+                await restored.record_tool_result_boundary(replace(result, content="different result"), 6)
         assert raised.value.code is ErrorCode.STORAGE_CONFLICT
 
 

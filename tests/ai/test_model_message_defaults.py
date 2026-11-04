@@ -4,11 +4,12 @@
 
 import copy
 import json
+from contextlib import nullcontext
 from dataclasses import MISSING, Field, fields
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from pydantic_ai import RequestUsage
+from pydantic_ai import PydanticAIDeprecationWarning, RequestUsage
 from pydantic_ai import messages as sdk
 
 from linktools.ai.core import canonical_json_bytes
@@ -18,6 +19,12 @@ from linktools.ai.model import messages as codec
 _STAMP = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
+def _legacy_retry_message() -> sdk.ModelRequest:
+    with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated"):
+        part = sdk.RetryPromptPart('retry', tool_call_id='call', timestamp=_STAMP)
+    return sdk.ModelRequest(parts=[part], timestamp=_STAMP)
+
+
 def _fixtures():
     yield sdk.ModelRequest(parts=[], timestamp=_STAMP), (), sdk.ModelRequest
     yield sdk.ModelResponse(parts=[], timestamp=_STAMP), (), sdk.ModelResponse
@@ -25,7 +32,7 @@ def _fixtures():
         sdk.SystemPromptPart('system', timestamp=_STAMP),
         codec.SummaryPromptPart('summary', timestamp=_STAMP),
         sdk.UserPromptPart('prompt', timestamp=_STAMP),
-        sdk.RetryPromptPart('retry', tool_call_id='call', timestamp=_STAMP),
+        _legacy_retry_message().parts[0],
         sdk.ToolReturnPart('tool', 'result', tool_call_id='call', timestamp=_STAMP),
         sdk.ToolAvailabilityDeltaPart(tools_added=['tool']),
         sdk.InstructionDeltaPart(id=None, content='content'),
@@ -81,7 +88,9 @@ def test_declared_defaults_apply_only_to_omitted_wire_fields(
     del _at(wire[0], path)[wire_name]
     original = copy.deepcopy(wire)
     before = datetime.now(timezone.utc)
-    restored, = codec.decode_model_messages(canonical_json_bytes(wire))
+    legacy = isinstance(_at(message, path), sdk.RetryPromptPart)
+    with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated") if legacy else nullcontext():
+        restored, = codec.decode_model_messages(canonical_json_bytes(wire))
     after = datetime.now(timezone.utc)
     actual = getattr(_at(restored, path), field.name)
     if field.default is not MISSING:
@@ -91,7 +100,8 @@ def test_declared_defaults_apply_only_to_omitted_wire_fields(
     else:
         assert actual == field.default_factory()
     assert wire == original
-    assert codec.decode_model_messages(codec.encode_model_messages((restored,))) == (restored,)
+    with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated") if legacy else nullcontext():
+        assert codec.decode_model_messages(codec.encode_model_messages((restored,))) == (restored,)
 
 
 @pytest.mark.parametrize('message', [
@@ -99,7 +109,7 @@ def test_declared_defaults_apply_only_to_omitted_wire_fields(
     sdk.ModelResponse(parts=[sdk.NativeToolCallPart('tool', tool_call_id='call')], timestamp=_STAMP),
     sdk.ModelRequest(parts=[sdk.ToolReturnPart('tool', 'done', tool_call_id='call', timestamp=_STAMP)]),
     sdk.ModelResponse(parts=[sdk.NativeToolReturnPart('tool', 'done', tool_call_id='call', timestamp=_STAMP)], timestamp=_STAMP),
-    sdk.ModelRequest(parts=[sdk.RetryPromptPart('retry', tool_call_id='call', timestamp=_STAMP)]),
+    _legacy_retry_message(),
 ])
 def test_durable_tool_identity_is_not_generated_during_decode(message: sdk.ModelMessage) -> None:
     wire = json.loads(codec.encode_model_messages((message,)))
