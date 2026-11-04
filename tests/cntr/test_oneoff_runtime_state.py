@@ -36,32 +36,6 @@ def test_oneoff_is_retained_for_diagnostics_but_excluded_from_service_views():
     assert alone.running_container_names == []
 
 
-@pytest.mark.parametrize("method", ["wait_service_healthy", "wait_service_ready", "wait_service_completed"])
-def test_single_service_wait_ignores_failed_maintenance_container(method):
-    completed = method == "wait_service_completed"
-    regular = instance(state="exited" if completed else "running", exit_code=0 if completed else None)
-    maintenance = instance(oneoff=True, state="exited", health=None, exit_code=1)
-    state = ProjectRuntimeState("test", (regular, maintenance), "docker")
-    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(
-        get_project_state=lambda *args, **kwargs: state)))
-    context = OperationContext(project_containers=(), target_services=("app",),
-                               compose_model={"services": {"app": {}}})
-    getattr(runner, method)(context, "app", timeout=None)
-
-
-@pytest.mark.parametrize("condition", ["service_started", "service_healthy", "service_completed_successfully"])
-def test_recovery_dependency_wait_ignores_oneoff_replicas(condition):
-    completed = condition == "service_completed_successfully"
-    regular = instance(state="exited" if completed else "running", exit_code=0 if completed else None)
-    maintenance = instance(oneoff=True, state="exited", health=None, exit_code=1)
-    state = ProjectRuntimeState("test", (regular, maintenance), "docker")
-    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(
-        get_project_state=lambda *args, **kwargs: state)))
-    model = {"services": {"web": {"depends_on": {"app": {"condition": condition}}}, "app": {}}}
-    context = OperationContext(project_containers=(), target_services=("web", "app"), compose_model=model)
-    runner.wait_service_dependencies(context, "web", model=model)
-
-
 def test_recovery_pins_regular_service_image_instead_of_newer_oneoff(tmp_path):
     documents = []
 

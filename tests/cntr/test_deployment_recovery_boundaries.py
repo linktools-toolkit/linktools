@@ -306,32 +306,26 @@ def test_unknown_untouched_service_does_not_use_pending_dependency(tmp_path):
     assert not any(event[0] in ("restore", "restart") for event in manager.events)
 
 
-@pytest.mark.parametrize("phase", ["apply", "ready"])
-def test_restart_interrupt_restores_pending_services_and_reraises_original(tmp_path, phase):
+def test_restart_interrupt_during_apply_restores_pending_services_and_reraises_original(tmp_path):
     manager = setup_case(tmp_path, [
         ("app", {name: {"image": name + ":new"} for name in ("first", "second", "third")}),
     ], running=("first", "second", "third"))
     interrupt = KeyboardInterrupt()
-    method = "apply_service" if phase == "apply" else "wait_service_ready"
-    original = getattr(manager.compose_runner, method)
+    original = manager.compose_runner.apply_service
 
     def interrupted(context, service, *args, **kwargs):
         if service == "second" and kwargs.get("model") is None:
             raise interrupt
         return original(context, service, *args, **kwargs)
 
-    setattr(manager.compose_runner, method, interrupted)
+    manager.compose_runner.apply_service = interrupted
     with pytest.raises(KeyboardInterrupt) as caught:
         manager.compose_operations.restart(["app"])
     assert caught.value is interrupt
-    expected_restore = [("second",), ("third",)] if phase == "apply" else []
-    # A readiness interruption after native up leaves all observed-ready services applied.
-    assert [event[1] for event in manager.events if event[0] == "restore"] == expected_restore
+    assert [event[1] for event in manager.events if event[0] == "restore"] == [("second",), ("third",)]
     assert manager.running_state.get_persisted() == ["app"]
     snapshots = AppliedServiceModels(manager, manager.model).previous
-    versions = (("first", "new"), ("second", "old"), ("third", "old")) if phase == "apply" else (
-        ("first", "new"), ("second", "new"), ("third", "new"))
-    for name, version in versions:
+    for name, version in (("first", "new"), ("second", "old"), ("third", "old")):
         assert yaml.safe_load(snapshots[name])["services"][name]["image"] == name + ":" + version
 
 
@@ -526,7 +520,6 @@ def test_explicit_recovery_image_ids_do_not_change_initial_running_images(tmp_pa
     runner = ComposeRunner(SimpleNamespace(data_path=tmp_path, project_name="test",
                                             runtime=SimpleNamespace(create_docker_process=process)))
     runner._resolved_model = lambda process: {"services": {"db": {"image": "sha256:old-stopped"}}}
-    runner.wait_service_dependencies = lambda *args, **kwargs: None
     context = SimpleNamespace(initial_runtime_state=ProjectRuntimeState("test", (), "docker"), project_containers=(),
                               is_full_project=False, target_services=("db",))
     runner.apply_saved_services(context, ("db",), {"old.yml": "services: {db: {image: mutable:tag}}"},
@@ -547,7 +540,6 @@ def test_recovery_configuration_explicitly_selects_profiled_service(tmp_path, le
     runner = ComposeRunner(SimpleNamespace(data_path=tmp_path, project_name="test",
                                           runtime=SimpleNamespace(create_docker_process=process)))
     runner._resolved_model = lambda process: model if process.args[-1] == "optional" else {"services": {}}
-    runner.wait_service_dependencies = lambda *args, **kwargs: None
     context = SimpleNamespace(initial_runtime_state=ProjectRuntimeState("test", (
         SimpleNamespace(service="optional", state="running", image_id="sha256:original", labels={}),), "docker"), project_containers=(),
                               service_models=SimpleNamespace(previous={}),
@@ -806,7 +798,7 @@ def test_legacy_stopped_namespace_preflight_follows_newly_captured_models(tmp_pa
 
     manager.compose_runner.saved_service_models = saved_models
     if scope == "provider":
-        with pytest.raises(ContainerError, match="Required dependencies are not ready: vpn"):
+        with pytest.raises(ContainerError, match="Required dependencies are unavailable: vpn"):
             manager.compose_operations.up(["db"])
         assert_no_runtime_changes(manager)
         assert not captured

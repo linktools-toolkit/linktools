@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Native batch scope and authoritative per-service completion evidence."""
+"""Native batch scope and immediate start-state verification."""
 from contextlib import nullcontext
 from copy import deepcopy
 from types import MethodType, SimpleNamespace
@@ -37,7 +37,7 @@ def test_native_batch_keeps_selected_edges_without_python_service_loop():
     runner = ComposeRunner(SimpleNamespace(runtime=SimpleNamespace(create_docker_process=process)))
     context = SimpleNamespace(is_full_project=False, target_services=("db", "app"), compose_model={"services": {
         "db": {}, "app": {"depends_on": {"db": {"condition": "service_healthy"}}}}})
-    runner._model_args = lambda ctx: nullcontext(["compose"])
+    runner._model_args = lambda ctx, model=None: nullcontext(["compose"])
     runner.apply_services(context, ("db", "app"))
     assert calls == [("compose", "up", "--detach", "--no-build", "--pull", "never", "--no-deps", "db", "app")]
     assert context.compose_model["services"]["app"]["depends_on"]["db"]["condition"] == "service_healthy"
@@ -45,45 +45,23 @@ def test_native_batch_keeps_selected_edges_without_python_service_loop():
 
 @pytest.mark.parametrize("observed", [[], [instance("app")],
     [instance("app"), instance("app", image="sha256:old")],
-    [instance("app"), instance("app", health="unhealthy")]])
-def test_batch_rejects_incomplete_replicas_wrong_images_and_unhealthy_instances(observed):
+    [instance("app"), instance("app", image="sha256:old")]])
+def test_batch_rejects_incomplete_replicas_and_wrong_images(observed):
     runner, context, queries = readiness_case({"app": {"deploy": {"replicas": 2}}}, [observed])
     with pytest.raises(ContainerError, match="Service app did not reach"):
         runner.verify_services_started(context, ("app",), {"app": "sha256:target"})
     assert len(queries) == 1
 
 
-@pytest.mark.parametrize("health", [None, "unhealthy"])
-def test_batch_verification_does_not_poll_for_unfinished_jobs(health):
-    specs = {"job": {"scale": 2}, "app": {"depends_on": {
+def test_completed_success_dependency_does_not_wait_for_job_exit():
+    specs = {"job": {"scale": 1}, "app": {"depends_on": {
         "job": {"condition": "service_completed_successfully"}}}}
-    snapshots = [[instance("job", state="exited", code=0, health=health),
-                  instance("job", health=health), instance("app")]]
-    runner, context, queries = readiness_case(specs, snapshots)
-    with pytest.raises(ContainerError, match="Service job did not reach"):
-        runner.verify_services_started(context, ("job", "app"), {"job": "sha256:target", "app": "sha256:target"})
+    runner, context, queries = readiness_case(
+        specs, [[instance("job", state="running"), instance("app")]])
+    result = runner.verify_services_started(
+        context, ("job", "app"), {"job": "sha256:target", "app": "sha256:target"})
+    assert result.running_services == {"job", "app"}
     assert queries == [("job", "app")]
-
-
-@pytest.mark.parametrize("health", [None, "unhealthy"])
-def test_batch_verification_accepts_completed_jobs(health):
-    specs = {"job": {"scale": 2}, "app": {"depends_on": {
-        "job": {"condition": "service_completed_successfully"}}}}
-    snapshots = [[instance("job", state="exited", code=0, health=health),
-                  instance("job", state="exited", code=0, health=health), instance("app")]]
-    runner, context, queries = readiness_case(specs, snapshots)
-    result = runner.verify_services_started(context, ("job", "app"), {"job": "sha256:target", "app": "sha256:target"})
-    assert result.running_services == {"app"}
-    assert queries == [("job", "app")]
-
-
-def test_batch_accepts_starting_health_without_polling(monkeypatch):
-    runner, context, queries = readiness_case({"app": {}},
-                                              [[instance("app", health="starting")]])
-    monkeypatch.setattr("time.sleep", lambda _: pytest.fail("Detached up must not poll for health"))
-    result = runner.verify_services_started(context, ("app",), {"app": "sha256:target"})
-    assert result.running_services == {"app"}
-    assert queries == [("app",)]
 
 
 def test_zero_replicas_requires_observed_removal():
@@ -114,7 +92,6 @@ def test_partial_batch_failure_preserves_successful_sibling_but_restores_mixed_c
         raise ContainerError("native partial failure")
     runner.apply_services = apply
     runner.started_services = MethodType(ComposeRunner.started_services, runner)
-    runner._completed_services = MethodType(ComposeRunner._completed_services, runner)
     with pytest.raises(ContainerError, match="^native partial failure$"):
         manager.compose_operations.up()
     assert [event[1] for event in manager.events if event[0] == "restore"] == [("mixed",)]

@@ -272,10 +272,11 @@ replacing renewed certificates with its initial image seed.
 An existing image without the matching automatic label may require one rebuild.
 Subsequent unchanged runs reuse it.
 
-Readiness follows effective Docker health checks and Compose dependency
-conditions. Successful finite jobs are recorded as applied, not running.
-Dependency/job readiness has no newly imposed fixed task deadline. A failure
-blocks subsequent dependents.
+Startup does not wait for health checks or one-shot job completion. Compose
+retains dependency start ordering, while execution normalizes dependency conditions
+to `service_started`. `up` returns after detached containers are created and started;
+health and job outcomes are observed separately through status/logs. A failed
+container does not block later dependents through a framework readiness loop.
 
 The per-service resolved applied model is the sole recovery authority. Recovery
 pins the pre-operation image ID and restores failed or explicitly stopped

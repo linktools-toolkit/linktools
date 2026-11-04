@@ -31,7 +31,7 @@ def test_partial_start_diagnoses_missing_provider_before_mutation(tmp_path, acti
         ("db", {"db": {"image": "db:new"}}),
     ])
     capture_warnings(manager)
-    with pytest.raises(ContainerError, match="Required dependencies are not ready: db.*containers: db"):
+    with pytest.raises(ContainerError, match="Required dependencies are unavailable: db.*containers: db"):
         getattr(manager.compose_operations, action)(["app"])
     assert_no_runtime_changes(manager)
     assert not warnings(manager)
@@ -62,7 +62,7 @@ def test_partial_up_diagnoses_missing_provider_before_planning_external_build(tm
 
     manager.image_preparer.plan = unexpected_image_plan
     capture_warnings(manager)
-    with pytest.raises(ContainerError, match="Required dependencies are not ready: database.*containers: storage"):
+    with pytest.raises(ContainerError, match="Required dependencies are unavailable: database.*containers: storage"):
         manager.compose_operations.up(["app"], pull=pull)
     assert_no_runtime_changes(manager)
     assert not warnings(manager)
@@ -194,9 +194,8 @@ def test_zero_scale_absent_provider_requires_explicit_selection(tmp_path, names)
         ("db", {"db": {"image": "db:new", "scale": 0}}),
     ])
     capture_warnings(manager)
-    manager.compose_runner.wait_service_ready = lambda context, service, model=None: service != "db"
     if names:
-        with pytest.raises(ContainerError, match="Required dependencies are not ready: db"):
+        with pytest.raises(ContainerError, match="Required dependencies are unavailable: db"):
             manager.compose_operations.up(names)
         assert_no_runtime_changes(manager)
     else:

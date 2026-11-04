@@ -142,7 +142,7 @@ class Runner:
         return set(self.applied)
 
     def verify_services_started(self, context, services, image_ids):
-        active = {service for service in services if self.wait_service_ready(context, service)}
+        active = self.started_services(context, services, None, image_ids)
         return ProjectRuntimeState("test", tuple(SimpleNamespace(
             service=service, state="running", labels={}) for service in active), "docker")
 
@@ -150,10 +150,6 @@ class Runner:
         self.manager.events.append(("restart", service))
         if self.fail == service:
             raise ContainerError("restart failed " + service)
-
-    def wait_service_ready(self, context, service, model=None):
-        self.manager.events.append(("ready", service))
-        return True
 
     def stop(self, context, services):
         self.manager.events.append(("stop", tuple(services)))
@@ -336,43 +332,10 @@ def test_real_compose_cycle_is_rejected_without_bootstrap(tmp_path):
 
 def test_completed_job_not_marked_as_running(tmp_path):
     manager = setup_case(tmp_path, [("job", {"job": {"image": "job:new"}})])
-    manager.compose_runner.wait_service_ready = lambda *args, **kwargs: False
+    manager.compose_runner.started_services = lambda *args, **kwargs: set()
     manager.compose_operations.up(["job"])
     assert manager.running_state.get_persisted() == []
     assert "job" in AppliedServiceModels(manager, manager.model).previous
-
-
-@pytest.mark.parametrize("state,health,code,expected", [
-    ("running", None, None, True), ("running", "healthy", None, True),
-    ("exited", None, 0, False), ("exited", None, 1, "error"),
-    ("running", "unhealthy", None, "error"), ("exited", "healthy", 0, "error"),
-])
-def test_effective_health_and_job_readiness(state, health, code, expected):
-    actual = ProjectRuntimeState(project="test", backend="docker", services=(SimpleNamespace(service="app", state=state, health=health, exit_code=code, labels={}),))
-    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda c, services=None: actual)))
-    ctx = OperationContext(project_containers=[], target_services=("app",), compose_model={"services": {"app": {}}})
-    if expected == "error":
-        with pytest.raises(ContainerError, match="failed to become ready"):
-            runner.wait_service_ready(ctx, "app", timeout=0)
-    else:
-        assert runner.wait_service_ready(ctx, "app", timeout=0) is expected
-
-
-def test_explicit_completed_dependency_requires_completion():
-    actual = ProjectRuntimeState(project="test", backend="docker", services=(SimpleNamespace(service="migrate", state="running", health=None, exit_code=None, labels={}),))
-    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda c, services=None: actual)))
-    ctx = OperationContext(project_containers=[], target_services=("migrate", "web"), compose_model={"services": {
-        "migrate": {}, "web": {"depends_on": {"migrate": {"condition": "service_completed_successfully"}}}}})
-    with pytest.raises(ContainerError, match="did not complete successfully"):
-        runner.wait_service_ready(ctx, "migrate", timeout=0)
-
-
-def test_unselected_completed_dependency_does_not_change_selected_service_policy():
-    actual = ProjectRuntimeState(project="test", backend="docker", services=(SimpleNamespace(service="app", state="running", health=None, exit_code=None, labels={}),))
-    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda c, services=None: actual)))
-    ctx = OperationContext(project_containers=[], target_services=("app",), compose_model={"services": {
-        "app": {}, "unrelated": {"depends_on": {"app": {"condition": "service_completed_successfully"}}}}})
-    assert runner.wait_service_ready(ctx, "app", timeout=0)
 
 
 def test_restore_pins_original_image_and_does_not_inject_generation_label(tmp_path):
@@ -387,7 +350,6 @@ def test_restore_pins_original_image_and_does_not_inject_generation_label(tmp_pa
     manager = SimpleNamespace(data_path=tmp_path, project_name="test", runtime=SimpleNamespace(create_docker_process=process))
     runner = ComposeRunner(manager)
     runner._resolved_model = lambda process: {"services": {"app": {"image": "sha256:old"}}}
-    runner.wait_service_dependencies = lambda *args, **kwargs: None
     ctx = OperationContext(project_containers=[SimpleNamespace(name="app", services={"app": {}})])
     ctx.initial_runtime_state = ProjectRuntimeState("test", (
         SimpleNamespace(service="app", state="running", image_id="sha256:old", labels={}),), "docker")
@@ -419,25 +381,6 @@ def test_declared_running_consumer_prepares_before_checks(tmp_path):
     manager.compose_operations.up(["app"])
     assert ("prepare", "nav") not in manager.events
     assert [event[1] for event in manager.events if event[0] == "apply"] == ["app"]
-
-
-def test_completed_service_uses_compose_conditions_without_new_task_deadline(monkeypatch):
-    observations, sleeps = [], []
-
-    def inspect(containers, services=None):
-        observations.append(services)
-        state = "running" if len(observations) == 1 else "exited"
-        return ProjectRuntimeState("test", (SimpleNamespace(
-            service="job", state=state, health=None, exit_code=0, labels={}),), "docker")
-
-    monkeypatch.setattr("time.monotonic", lambda: pytest.fail("Completion must not add a task deadline"))
-    monkeypatch.setattr("time.sleep", lambda delay: sleeps.append(delay))
-    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=inspect)))
-    ctx = OperationContext(target_services=("job", "web"), compose_model={"services": {
-        "job": {}, "web": {"depends_on": {"job": {"condition": "service_completed_successfully"}}}}})
-    assert runner.wait_service_ready(ctx, "job") is False
-    assert observations == [("job",), ("job",)]
-    assert sleeps == [0.5]
 
 
 def test_hook_cannot_change_operation_scope(tmp_path):

@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Service priority never overrides dependencies or their readiness conditions."""
+"""Service priority never overrides dependency start order."""
 from types import SimpleNamespace
 from contextlib import nullcontext
 
-import pytest
 
-from linktools.cntr import BaseContainer, ContainerError
+from linktools.cntr import BaseContainer
 from linktools.cntr._operations import ComposeOperations, ComposeSelection
-from linktools.cntr.runtime.inspect import ProjectRuntimeState
-from linktools.cntr.runtime.compose import ComposeRunner, order_services
+from linktools.cntr.runtime.compose import ComposeRunner, order_services, _startup_model
 
 
 class Container(BaseContainer):
@@ -66,84 +64,30 @@ def test_explicit_co_selection_orders_only_native_dependency_edges():
     assert order_services((nginx, provider), ("nginx", "provider")) == ("nginx", "provider")
 
 
-@pytest.mark.parametrize("condition", ["service_healthy", "service_completed_successfully"])
-def test_apply_service_always_waits_for_dependency_before_start(condition):
-    calls = []
-    process = SimpleNamespace(check_call=lambda: calls.append("apply"))
-    state = ProjectRuntimeState(project="test", backend="docker", services=(SimpleNamespace(
-        service="provider", state="running" if condition == "service_healthy" else "exited",
-        health="healthy", exit_code=0, labels={}),))
 
-    def inspect(containers, services=None):
-        calls.append(("inspect", services))
-        return state
 
-    manager = SimpleNamespace(runtime=SimpleNamespace(create_docker_process=lambda *a, **kw: process),
-                              docker_inspector=SimpleNamespace(get_project_state=inspect))
-    runner = ComposeRunner(manager)
-    runner._model_args = lambda context: nullcontext(["compose"])
-    context = SimpleNamespace(project_containers=(), is_full_project=False, target_services=("app",), compose_model={"services": {
-        "app": {"depends_on": {"provider": {"condition": condition}}}}})
+
+def test_startup_model_keeps_order_and_restart_flags_without_health_or_job_waits():
+    model = {"services": {"db": {}, "seed": {}, "app": {"depends_on": {
+        "db": {"condition": "service_healthy", "restart": True},
+        "seed": {"condition": "service_completed_successfully"},
+    }}}}
+    result = _startup_model(model)
+    assert result["services"]["app"]["depends_on"] == {
+        "db": {"condition": "service_started", "restart": True},
+        "seed": {"condition": "service_started"},
+    }
+    assert model["services"]["app"]["depends_on"]["db"]["condition"] == "service_healthy"
+
+
+def test_apply_service_does_not_query_dependencies_before_start():
+    calls, models = [], []
+    runner = ComposeRunner(SimpleNamespace(runtime=SimpleNamespace(create_docker_process=lambda *args, **kwargs:
+        SimpleNamespace(check_call=lambda: calls.append(args) or 0))))
+    runner._model_args = lambda context, model=None: (models.append(model) or nullcontext(["compose"]))
+    context = SimpleNamespace(project_containers=(), is_full_project=False, target_services=("app",),
+        compose_model={"services": {"app": {"depends_on": {
+            "db": {"condition": "service_healthy"}}}}})
     runner.apply_service(context, "app")
-    assert calls == [("inspect", ("provider",)), "apply"]
-
-
-@pytest.mark.parametrize("code", [0, 1, None])
-def test_completed_dependency_requires_observed_successful_exit(code):
-    state = ProjectRuntimeState(project="test", backend="docker", services=(SimpleNamespace(service="job", state="exited", exit_code=code, labels={}),))
-    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda cs, services=None: state)))
-    context = SimpleNamespace(project_containers=())
-    if code == 0:
-        runner.wait_service_completed(context, "job", timeout=0)
-    else:
-        with pytest.raises(ContainerError, match="failed"):
-            runner.wait_service_completed(context, "job", timeout=0)
-
-
-def test_running_dependency_is_not_completed():
-    state = ProjectRuntimeState(project="test", backend="docker", services=(SimpleNamespace(service="job", state="running", exit_code=0, labels={}),))
-    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda cs, services=None: state)))
-    with pytest.raises(ContainerError, match="did not complete"):
-        runner.wait_service_completed(SimpleNamespace(project_containers=()), "job", timeout=0)
-
-
-
-def test_started_dependency_does_not_require_one_shot_service_to_keep_running():
-    calls = []
-    process = SimpleNamespace(check_call=lambda: calls.append("apply"))
-    runner = ComposeRunner(SimpleNamespace(runtime=SimpleNamespace(
-        create_docker_process=lambda *args, **kwargs: process)))
-    runner._model_args = lambda context: nullcontext(["compose"])
-    context = SimpleNamespace(project_containers=(), is_full_project=False, target_services=("app",), compose_model={"services": {
-        "app": {"depends_on": ["job"]}}})
-    runner.apply_service(context, "app")
-    assert calls == ["apply"]
-
-
-@pytest.mark.parametrize("scale", [{"scale": 0}, {"deploy": {"replicas": 0}}])
-def test_zero_scale_service_reports_no_running_instances(scale):
-    def unexpected(*args, **kwargs):
-        raise AssertionError("zero replicas must not wait for a container")
-    runner = ComposeRunner(SimpleNamespace(
-        docker_inspector=SimpleNamespace(get_project_state=unexpected)))
-    context = SimpleNamespace(project_containers=(), target_services=("job", "web"),
-                              compose_model={"services": {
-                                  "job": scale,
-                                  "web": {"depends_on": {"job": {"condition": "service_completed_successfully"}}}}})
-    assert runner.wait_service_ready(context, "job") is False
-
-
-@pytest.mark.parametrize("scale", [{"scale": 0}, {"deploy": {"replicas": 0}}])
-@pytest.mark.parametrize("condition", ["service_started", "service_healthy", "service_completed_successfully"])
-@pytest.mark.parametrize("restored", [False, True])
-def test_zero_scale_dependency_is_not_waited_for(scale, condition, restored):
-    def unexpected(*args, **kwargs):
-        raise AssertionError("Compose skips readiness for zero-replica dependencies")
-    runner = ComposeRunner(SimpleNamespace(
-        docker_inspector=SimpleNamespace(get_project_state=unexpected)))
-    runner.wait_service_healthy = unexpected
-    runner.wait_service_completed = unexpected
-    model = {"services": {"dependency": scale,
-                          "app": {"depends_on": {"dependency": {"condition": condition}}}}}
-    context = SimpleNamespace(project_containers=(), target_services=("dependency", "app"), compose_model=model)
-    runner.wait_service_dependencies(context, "app", model=model if restored else None)
+    assert calls == [("compose", "up", "--detach", "--no-build", "--pull", "never", "--no-deps", "app")]
+    assert models[0]["services"]["app"]["depends_on"]["db"]["condition"] == "service_started"
