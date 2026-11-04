@@ -441,7 +441,7 @@ async def test_unselected_bad_attachment_does_not_block_current_window_or_direct
 async def test_current_window_rechecks_sources_before_returning_after_concurrent_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str,
 ) -> None:
-    async with completed(tmp_path) as (evaluations, storage, run, _scorer, policy):
+    async with completed(tmp_path, count=1) as (evaluations, storage, run, _scorer, policy):
         await evaluations.close()
         reference = await _add_attachment(storage, run.experiment_id, 0)
         objects = storage.object_store(PersistenceDomain.EVALUATION)
