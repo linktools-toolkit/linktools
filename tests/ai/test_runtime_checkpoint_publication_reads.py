@@ -357,3 +357,125 @@ async def test_non_normal_commit_cannot_authorize_a_stale_cached_baseline(tmp_pa
                 ))
             assert conflict.value.code is ErrorCode.STORAGE_CONFLICT
             assert await _snapshot(archive.state_store) == before
+
+
+async def test_checkpoint_readback_uses_actual_committed_sequence(tmp_path, monkeypatch):
+    async with _producer(tmp_path, "sqlite") as (state, store, repository, _execution):
+        archive = store.read_store(PersistenceDomain.CHECKPOINT)
+        prepare = store.checkpoint_persistence.prepare_checkpoint
+        mutate = repository.state_store.storage_group.mutate
+        verify = archive.verify_checkpoint_range
+        verified = []
+        inserted = []
+        target = _checkpoint(0)
+
+        async def prepare_then_append(*args, **kwargs):
+            result = await prepare(*args, **kwargs)
+            if not inserted:
+                inserted.append(True)
+                await archive.materialize_checkpoint(args[1], replace(target, state="interrupted"))
+            return result
+
+        async def lose_reply(stores, callback):
+            result = await mutate(stores, callback)
+            if "_save_checkpoint" in callback.__qualname__:
+                raise OSError("lost commit reply after sequence changed")
+            return result
+
+        async def track_verification(**kwargs):
+            verified.append(kwargs["after_sequence"])
+            return await verify(**kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(store.checkpoint_persistence, "prepare_checkpoint", prepare_then_append)
+            patch.setattr(repository.state_store.storage_group, "mutate", lose_reply)
+            patch.setattr(archive, "verify_checkpoint_range", track_verification)
+            await store.save_checkpoint(target, execution_id="execution", producer_generation=1)
+        assert verified == [1]
+        assert await archive.checkpoint_count(agent_run_id="run") == 2
+        assert (await archive.latest_checkpoint(agent_run_id="run")).state == "complete"
+
+
+async def test_checkpoint_readback_keeps_exact_deduplicated_fact_position(tmp_path, monkeypatch):
+    async with _producer(tmp_path, "sqlite") as (state, store, repository, _execution):
+        archive = store.read_store(PersistenceDomain.CHECKPOINT)
+        run = await store.get_agent_run(agent_run_id="run")
+        target = _checkpoint(0)
+        await archive.materialize_checkpoint(run, target)
+        other = (await archive.prepare_checkpoints(run, (replace(target, state="interrupted"),))).checkpoints[0]
+        materialize = archive.materialize_checkpoint_in_transaction
+        mutate = repository.state_store.storage_group.mutate
+        verify = archive.verify_checkpoint_range
+        verified = []
+
+        async def materialize_then_append(tx, owner, prepared, **kwargs):
+            position = await materialize(tx, owner, prepared, **kwargs)
+            await materialize(tx, owner, other)
+            return position
+
+        async def lose_reply(stores, callback):
+            result = await mutate(stores, callback)
+            if "_save_checkpoint" in callback.__qualname__:
+                raise OSError("lost deduplicated commit reply")
+            return result
+
+        async def track_verification(**kwargs):
+            verified.append(kwargs["after_sequence"])
+            return await verify(**kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(archive, "materialize_checkpoint_in_transaction", materialize_then_append)
+            patch.setattr(repository.state_store.storage_group, "mutate", lose_reply)
+            patch.setattr(archive, "verify_checkpoint_range", track_verification)
+            await store.save_checkpoint(target, execution_id="execution", producer_generation=1)
+        assert verified == [0]
+        assert await archive.checkpoint_count(agent_run_id="run") == 2
+
+
+async def test_legacy_custom_materialization_keeps_prepared_readback_position(tmp_path, monkeypatch):
+    from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
+
+    async with _producer(tmp_path, "sqlite") as (state, store, repository, _execution):
+        original = store.read_store(PersistenceDomain.CHECKPOINT)
+        positions = []
+        proofs = []
+
+        class CustomArchive(ModelInteractionStateStepArchive):
+            async def capture_checkpoint_progress(self, **kwargs):
+                progress = await super().capture_checkpoint_progress(**kwargs)
+                positions.append(progress[0])
+                return progress
+
+            async def materialize_checkpoint_in_transaction(self, tx, run, checkpoint, **kwargs):
+                await super().materialize_checkpoint_in_transaction(tx, run, checkpoint, **kwargs)
+                await super().materialize_checkpoint_in_transaction(tx, run, self.following)
+                # Existing extensions need not adopt the new optional result.
+
+            async def verify_checkpoint_range(self, **kwargs):
+                proofs.append(kwargs["after_sequence"])
+                return await super().verify_checkpoint_range(**kwargs)
+
+        custom = CustomArchive(original.state_store, object_store=None, namespace="checkpoint-publication",
+                               tenant_id="tenant", runtime_domain=PersistenceDomain.CHECKPOINT)
+        store._archives[PersistenceDomain.CHECKPOINT] = custom
+        try:
+            run = await store.get_agent_run(agent_run_id="run")
+            target = _checkpoint(0)
+            custom.following = (await custom.prepare_checkpoints(run, (replace(target, state="interrupted"),))).checkpoints[0]
+            mutate = repository.state_store.storage_group.mutate
+
+            async def lose_reply(stores, callback):
+                result = await mutate(stores, callback)
+                if "_save_checkpoint" in callback.__qualname__:
+                    raise OSError("custom commit acknowledgement lost")
+                return result
+
+            with monkeypatch.context() as patch:
+                patch.setattr(repository.state_store.storage_group, "mutate", lose_reply)
+                await store.save_checkpoint(target, execution_id="execution", producer_generation=1)
+            assert positions == [1]
+            assert proofs == [0]
+            assert await custom.checkpoint_count(agent_run_id="run") == 2
+        finally:
+            store._archives[PersistenceDomain.CHECKPOINT] = original
+            await custom.close()

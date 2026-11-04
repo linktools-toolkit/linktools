@@ -135,7 +135,7 @@ async def test_recovery_preparation_bounds_metadata_read_transactions(tmp_path: 
         finally:
             event.remove(engine, "begin", begin)
         assert prepared.stored.step_index == checkpoint.step_index
-        assert interactions == () and sequence == 1
+        assert interactions == () and sequence is None
         assert len(begins) <= 3
     finally:
         await state.close()
@@ -213,6 +213,6 @@ async def test_recovery_metadata_cancellation_releases_scope(
         assert active_state_scope() is None
         monkeypatch.setattr(archive, "model_interaction_count", count)
         _, interactions, sequence = await state.run_store.checkpoint_persistence.prepare_checkpoint(archive, run, checkpoint, ())
-        assert interactions == () and sequence == 1
+        assert interactions == () and sequence is None
     finally:
         await state.close()

@@ -2748,7 +2748,7 @@ class StateStepArchive(AgentRunStore):
         *,
         execution_id: str | None = None,
         history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
-    ) -> None:
+    ) -> int:
         if not isinstance(checkpoint, PreparedAgentRunCheckpoint):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         supplied_history_head_guard = history_head_guard is not None
@@ -2770,11 +2770,9 @@ class StateStepArchive(AgentRunStore):
         existing = () if created else await transaction.list_facts(
             FactQuery(stream, latest=True)
         )
-        if any(
-            fact.data == data and fact.state == checkpoint.stored.state
-            for fact in existing
-        ):
-            return
+        for fact in existing:
+            if fact.data == data and fact.state == checkpoint.stored.state:
+                return fact.sequence
         receipt = checkpoint.preparation_receipt
         if receipt is not None:
             current = await transaction.get_records(tuple(receipt.records))
@@ -2812,11 +2810,14 @@ class StateStepArchive(AgentRunStore):
                 transaction, self._sequence(run.agent_run_id, "checkpoint"), 1,
             ))[0]
             await _insert_facts(transaction, (replace(checkpoint_fact, sequence=sequence),))
+        else:
+            sequence = await self.checkpoint_count(agent_run_id=run.agent_run_id)
         if history_head_guard is not None and not supplied_history_head_guard:
             await self._advance_execution_history_head_in_transaction(
                 transaction,
                 history_head_guard,
             )
+        return sequence
 
     async def materialize_checkpoint_in_transaction(
         self,
@@ -2826,11 +2827,12 @@ class StateStepArchive(AgentRunStore):
         *,
         execution_id: str | None = None,
         history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
-    ) -> None:
+    ) -> int | None:
+        """Materialize and return its exact position; legacy overrides may return None."""
         require_no_run_history_lock(
             "StateStepArchive.materialize_checkpoint_in_transaction"
         )
-        await self._materialize_checkpoint_in_transaction(
+        return await self._materialize_checkpoint_in_transaction(
             transaction,
             run,
             checkpoint,

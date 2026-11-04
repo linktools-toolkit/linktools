@@ -482,7 +482,7 @@ class RuntimeAgentRunStore(AgentRunStore):
 
             prepared_interactions: tuple[ModelInteractionRecord, ...] = ()
             prepared_checkpoint: PreparedAgentRunCheckpoint | None = None
-            prepared_sequence = 0
+            published_sequence: int | None = None
             cancellation_requested = False
             committed_checkpoint_records: Mapping[bytes, StoredRecord] | None = None
 
@@ -491,18 +491,22 @@ class RuntimeAgentRunStore(AgentRunStore):
                 target_agent_run: AgentRunRecord = recovery_run,
                 target_checkpoint: AgentRunCheckpoint = checkpoint,
             ) -> None:
-                nonlocal prepared_interactions, prepared_checkpoint, prepared_sequence, cancellation_requested
+                nonlocal prepared_interactions, prepared_checkpoint, published_sequence, cancellation_requested
                 nonlocal committed_checkpoint_records
                 committed_checkpoint_records = None
+                published_sequence = None
                 if isinstance(target_recovery, StateStepArchive):
-                    prepared_checkpoint, prepared_interactions, prepared_sequence = await self.checkpoint_persistence.prepare_checkpoint(
+                    prepared_checkpoint, prepared_interactions, published_sequence = await self.checkpoint_persistence.prepare_checkpoint(
                         target_recovery, target_agent_run, target_checkpoint, recovery_interactions_snapshot,
                     )
                     async def commit(transaction: StateTransaction) -> None:
+                        nonlocal published_sequence
                         await target_recovery.transcript_repository.publish_archive(prepared_checkpoint.archive)
-                        await target_recovery.materialize_checkpoint_in_transaction(
+                        sequence = await target_recovery.materialize_checkpoint_in_transaction(
                             transaction, target_agent_run, prepared_checkpoint,
                         )
+                        if sequence is not None:
+                            published_sequence = sequence
                         if prepared_interactions:
                             await target_recovery.sync_projection_in_transaction(
                                 transaction, target_agent_run, events=(), checkpoints=(),
@@ -563,10 +567,15 @@ class RuntimeAgentRunStore(AgentRunStore):
                         agent_run_id=target_checkpoint.agent_run_id
                     )
                     if isinstance(target_recovery, StateStepArchive):
-                        checkpoint_visible = prepared_checkpoint is not None and (
+                        sequence = published_sequence
+                        if sequence is None and prepared_checkpoint is not None:
+                            sequence, _ = await target_recovery.capture_checkpoint_progress(
+                                agent_run_id=target_checkpoint.agent_run_id, checkpoint=prepared_checkpoint,
+                            )
+                        checkpoint_visible = prepared_checkpoint is not None and sequence is not None and (
                             await target_recovery.verify_checkpoint_range(
                                 agent_run_id=target_checkpoint.agent_run_id,
-                                after_sequence=prepared_sequence - 1,
+                                after_sequence=sequence - 1,
                                 checkpoints=(prepared_checkpoint,),
                             )
                         )

@@ -5,6 +5,7 @@
 from collections.abc import Callable, Sequence
 
 from ..errors import AIError, ErrorCode
+from ._model_interaction_store import ModelInteractionStateStepArchive
 from ._model_interaction import StagedModelInteraction
 from ._archive import PreparedArchive
 from .contracts import ModelInteractionRecord
@@ -34,12 +35,20 @@ class CheckpointPersistence:
         self, archive: StateStepArchive, run: AgentRunRecord,
         checkpoint: AgentRunCheckpoint,
         captured_interactions: Sequence[StagedModelInteraction] | None = None,
-    ) -> tuple[PreparedAgentRunCheckpoint, tuple[ModelInteractionRecord, ...], int]:
+    ) -> tuple[PreparedAgentRunCheckpoint, tuple[ModelInteractionRecord, ...], int | None]:
         checkpoint, batch = await archive.prepare_run_checkpoint(run, checkpoint)
         prepared = batch.checkpoints[0]
-        sequence, high_water = await archive.capture_checkpoint_progress(
-            agent_run_id=run.agent_run_id, checkpoint=prepared,
-        )
+        # Canonical materialization returns its exact durable position. Preserve
+        # custom progress hooks for extensions that still return no position.
+        sequence = None
+        if type(archive) is ModelInteractionStateStepArchive:
+            high_water = await archive.state_store.read(
+                lambda _transaction: archive.model_interaction_count(agent_run_id=run.agent_run_id),
+            )
+        else:
+            sequence, high_water = await archive.capture_checkpoint_progress(
+                agent_run_id=run.agent_run_id, checkpoint=prepared,
+            )
         if captured_interactions is None:
             staged = await self.terminal_staged_interactions(
                 agent_run_id=run.agent_run_id, after_model_request_seq=high_water,
