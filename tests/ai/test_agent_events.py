@@ -3,14 +3,12 @@
 """Agent stream event mapping and native capability checks."""
 
 import pytest
-from pydantic_ai import PydanticAIDeprecationWarning
 from pydantic_ai.capabilities import ProcessEventStream, Thinking
 from pydantic_ai.messages import (
     FunctionToolResultEvent,
     PartDeltaEvent,
     PartEndEvent,
     PartStartEvent,
-    RetryPromptPart,
     TextPart,
     TextPartDelta,
     ThinkingPart,
@@ -68,13 +66,8 @@ def test_tool_result_uses_model_visible_content_digest() -> None:
     )
 
 
-@pytest.mark.parametrize("legacy", (False, True), ids=("tool-return", "legacy-retry-prompt"))
-def test_tool_retry_boundary_carries_error_code(legacy: bool) -> None:
-    if legacy:
-        with pytest.warns(PydanticAIDeprecationWarning, match=r"`RetryPromptPart` is deprecated"):
-            part = RetryPromptPart("retry", tool_name="tool", tool_call_id="call-1")
-    else:
-        part = ToolReturnPart("tool", "retry", tool_call_id="call-1", outcome="retried")
+def test_tool_retry_boundary_carries_error_code() -> None:
+    part = ToolReturnPart("tool", "retry", tool_call_id="call-1", outcome="retried")
     event = FunctionToolResultEvent(part=part)
 
     assert _map_event(event) == DurableBoundary(

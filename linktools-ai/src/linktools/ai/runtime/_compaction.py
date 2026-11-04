@@ -19,7 +19,6 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
     SystemPromptPart,
     ToolCallPart,
     ToolReturnPart,
@@ -130,9 +129,7 @@ def _dependency_safe_tail(messages: Sequence[ModelMessage], keep: int) -> int:
         for part in message.parts:
             if isinstance(part, ToolCallPart):
                 calls[part.tool_call_id] = index
-            elif isinstance(part, ToolReturnPart) or (
-                isinstance(part, RetryPromptPart) and part.tool_name is not None
-            ):
+            elif isinstance(part, ToolReturnPart):
                 if part.tool_call_id not in calls:
                     orphans.add(index)
                 else:

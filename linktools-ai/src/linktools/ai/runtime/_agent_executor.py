@@ -47,7 +47,6 @@ from pydantic_ai.messages import (
     PartDeltaEvent,
     PartEndEvent,
     PartStartEvent,
-    RetryPromptPart,
     TextPart,
     TextPartDelta,
     ThinkingPart,
@@ -1426,9 +1425,7 @@ def _map_event(event: object) -> "AgentEmission | None":
         )
     if isinstance(event, FunctionToolResultEvent):
         part = event.part
-        if isinstance(part, RetryPromptPart) or (
-            isinstance(part, ToolReturnPart) and part.outcome == "retried"
-        ):
+        if isinstance(part, ToolReturnPart) and part.outcome == "retried":
             return DurableBoundary(
                 ExecutionEventType.TOOL_CALL_FINISHED,
                 {

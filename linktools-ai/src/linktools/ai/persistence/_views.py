@@ -17,7 +17,6 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
     SystemPromptPart,
     TextContent,
     TextPart,
@@ -114,16 +113,6 @@ def _projected_parts(
                 (
                     "tool_result",
                     _tool_content(part, payload),
-                    part.tool_name,
-                    part.tool_call_id,
-                )
-            )
-            continue
-        if isinstance(part, RetryPromptPart):
-            values.append(
-                (
-                    "retry",
-                    _payload_content(payload),
                     part.tool_name,
                     part.tool_call_id,
                 )

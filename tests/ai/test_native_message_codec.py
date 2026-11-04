@@ -89,12 +89,13 @@ def test_summary_reference_retirement_and_tool_values_keep_host_provenance() -> 
     )
     retired = RetiredReferencedContent(reference, "retired attachment")
     binary = sdk.BinaryContent(b"\x00\xff", media_type="image/png")
+    retry = sdk.RetryFeedbackPart("correct output", retry=sdk.RetryInfo(cause="model_retry"), timestamp=_STAMP)
     request = sdk.ModelRequest(parts=[
         SummaryPromptPart("trusted summary", timestamp=_STAMP),
         sdk.UserPromptPart([reference, retired, binary], timestamp=_STAMP),
         sdk.ToolReturnPart("read", [reference, {"ordinary": "value"}],
                            tool_call_id="call-fixed", timestamp=_STAMP),
-        sdk.RetryPromptPart("correct output", tool_call_id="retry-fixed", timestamp=_STAMP),
+        retry,
     ], timestamp=_STAMP)
     restored, = decode_model_messages(encode_model_messages((request,)))
     assert type(restored.parts[0]) is SummaryPromptPart
@@ -106,7 +107,7 @@ def test_summary_reference_retirement_and_tool_values_keep_host_provenance() -> 
         binary.data, binary.media_type, binary.identifier,
     )
     assert restored.parts[2] == request.parts[2]
-    assert type(restored.parts[3]) is sdk.RetryPromptPart
+    assert type(restored.parts[3]) is sdk.RetryFeedbackPart
     assert restored.parts[3] == request.parts[3]
 
 

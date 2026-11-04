@@ -24,7 +24,8 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
+    RetryFeedbackPart,
+    RetryInfo,
     SystemPromptPart,
     TextPart,
     ThinkingPart,
@@ -151,7 +152,7 @@ async def test_history_response_and_tool_result_keep_origin_after_archive() -> N
         recorder.stage_tool_result(result)
         await recorder.record_tool_result_boundary(result, 4)
         recorder.append_transcript_message(ModelRequest(parts=[
-            result, RetryPromptPart("validate the output"),
+            result, RetryFeedbackPart("validate the output", retry=RetryInfo(cause="model_retry")),
         ]))
         await recorder.commit_history_boundary()
         live = await history.reader.history(
@@ -206,7 +207,7 @@ async def test_history_same_step_requests_use_actual_response_slots(
             include_observation=False,
         )
         if preceding_request == "output_retry":
-            recorder.append_transcript_message(ModelRequest(parts=[RetryPromptPart("try again")]))
+            recorder.append_transcript_message(ModelRequest(parts=[RetryFeedbackPart("try again", retry=RetryInfo(cause="model_retry"))]))
         else:
             assert len(recorder.transcript_messages()) == 1
         second = journal.begin(5, output_retry_index=1 if preceding_request == "output_retry" else None)

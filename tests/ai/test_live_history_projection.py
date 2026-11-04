@@ -13,7 +13,6 @@ from functools import partial
 import pytest
 from pydantic_ai.messages import (
     ModelResponse,
-    RetryPromptPart,
     ToolCallPart,
     ToolReturnPart,
 )
@@ -95,8 +94,8 @@ async def test_same_call_id_is_scoped_to_run_and_has_no_invented_result(
                 )
             else:
                 result = (
-                    RetryPromptPart(
-                        "retry this", tool_name="echo", tool_call_id="same-call"
+                    ToolReturnPart(
+                        "echo", "retry this", tool_call_id="same-call", outcome="retried"
                     )
                     if outcome == "retry"
                     else ToolReturnPart(
@@ -124,9 +123,7 @@ async def test_same_call_id_is_scoped_to_run_and_has_no_invented_result(
             )
             assert len(page.items) == (1 if outcome == "cancelled" else 2)
             if outcome != "cancelled":
-                assert page.items[1].item_kind == (
-                    "retry" if outcome == "retry" else "tool_result"
-                )
+                assert page.items[1].item_kind == "tool_result"
                 assert page.items[1].content == (
                     "retry this" if outcome == "retry" else None
                 )

@@ -27,7 +27,8 @@ from linktools.ai.persistence.contracts import ConversationCursor, SessionRecord
 from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
+    RetryFeedbackPart,
+    RetryInfo,
     SystemPromptPart,
     TextContent,
     TextPart,
@@ -278,6 +279,7 @@ async def test_session_history_uses_projection_v1_mapping_and_empty_strings() ->
             tenant_id="tenant",
             execution_id=agent_run_id,
         )
+        retry = RetryFeedbackPart(content="retry", retry=RetryInfo(cause="model_retry"))
         await _materialize(
             state,
             agent_run_id,
@@ -295,7 +297,7 @@ async def test_session_history_uses_projection_v1_mapping_and_empty_strings() ->
                             tool_call_id="return-1",
                             content={"ok": True},
                         ),
-                        RetryPromptPart(content="retry"),
+                        retry,
                     ],
                     conversation_id=agent_conversation_id,
                 ),
@@ -325,7 +327,7 @@ async def test_session_history_uses_projection_v1_mapping_and_empty_strings() ->
             "user",
             "user",
             "tool_result",
-            "retry",
+            "retry-feedback",
             "assistant",
             "assistant",
             "tool_call",
@@ -335,11 +337,14 @@ async def test_session_history_uses_projection_v1_mapping_and_empty_strings() ->
             "",
             ["", "inline"],
             {"ok": True},
-            "retry",
+            page.items[4].content,
             "",
             "answer",
             {"query": "value"},
         ]
+        assert page.items[4].content["content"] == "retry"
+        assert page.items[4].content["retry"]["cause"] == "model_retry"
+        assert page.items[4].tool_call_id is None
         assert page.items[3].tool_name == "lookup"
         assert page.items[3].tool_call_id == "return-1"
         assert page.items[7].tool_name == "lookup"

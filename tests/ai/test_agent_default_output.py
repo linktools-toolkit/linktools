@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
-from pydantic_ai.messages import ModelMessage, ModelResponse, RetryPromptPart, TextPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo
 
 from linktools.ai.agent import AgentBindingContract, AgentCompiler, AssistantTextOutput, OutputBinding, bind_output
@@ -165,7 +165,7 @@ async def test_root_and_task_defaults_use_native_schema_correction(tmp_path: Pat
             retries = [part for message in messages for part in message.parts if is_tool_retry(part)]
             if retries:
                 part = retries[-1]
-                feedback.append(part.model_response() if isinstance(part, RetryPromptPart) else part.model_response_str())
+                feedback.append(part.model_response_str())
             value = {"count": 3 if retries else "invalid-count"}
         return ModelResponse(parts=[ToolCallPart(output.name, value)])
 

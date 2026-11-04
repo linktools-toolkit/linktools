@@ -16,7 +16,6 @@ from pydantic_ai.messages import (
     ModelResponse,
     ToolReturnPart,
     ToolCallPart,
-    RetryPromptPart,
 )
 
 from ..core import (
@@ -2950,8 +2949,6 @@ def _select_message_parts(
     keys = staged_keys or tuple(
         f"tool_result:{part.tool_call_id}"
         if isinstance(part, ToolReturnPart)
-        else f"retry:{part.tool_call_id}"
-        if isinstance(part, RetryPromptPart)
         else f"part:{index}"
         for index, part in enumerate(message.parts)
     )
@@ -2973,7 +2970,7 @@ def _history_parts(
     raw_parts = values[1:] if has_instructions else values
     keys = staged_keys or tuple(
         f"{item.item_kind}:{item.tool_call_id}"
-        if item.tool_call_id is not None and item.item_kind in {"tool_result", "retry"}
+        if item.tool_call_id is not None and item.item_kind == "tool_result"
         else f"part:{index}"
         for index, item in enumerate(raw_parts)
     )

@@ -1623,7 +1623,7 @@ class LocalExecutionBackend:
                 if self._execution_buffer is not None:
                     self._execution_buffer.discard(execution_id)
                 cleanup = asyncio.create_task(self._cleanup_failed_pending_turn(turn))
-                self._track_checkpoint_task(cleanup, "pending_release", execution_id)
+                self._track_checkpoint_task(cleanup, "pending_release")
         self._live_broker.complete(execution_id)
 
     async def _complete_worker_handoff(

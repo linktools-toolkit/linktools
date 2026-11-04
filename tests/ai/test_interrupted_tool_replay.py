@@ -14,7 +14,6 @@ from pydantic_ai.messages import (
     SYNTHESIZED_TOOL_RETURN_METADATA_KEY,
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
     ToolCallPart,
     ToolReturnPart,
 )
@@ -42,8 +41,10 @@ from .test_history_request_association import _history
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("pending", (False, True), ids=("completed", "pending"))
-@pytest.mark.parametrize("outcome", ("success", "failed", "retry"))
+@pytest.mark.parametrize("pending,outcome", [
+    pytest.param(pending, outcome, id=f"{outcome}-{'pending' if pending else 'completed'}")
+    for outcome in ("success", "failed", "retry") for pending in (False, True)
+])
 async def test_recovered_tool_retains_interruptions_and_one_real_result(
     pending: bool, outcome: str,
 ) -> None:
@@ -87,7 +88,7 @@ async def test_recovered_tool_retains_interruptions_and_one_real_result(
             await recorder.register_agent_run(history.records[0])
 
         result = (
-            RetryPromptPart("retry result", tool_name="echo", tool_call_id="call")
+            ToolReturnPart("echo", "retry result", tool_call_id="call", outcome="retried")
             if outcome == "retry" else ToolReturnPart(
                 "echo", "confirmed result", tool_call_id="call", outcome=outcome,
             )
@@ -97,10 +98,9 @@ async def test_recovered_tool_retains_interruptions_and_one_real_result(
         history.recorders = (recorder,)
         assert [
             part for message in recorder.transcript_messages() for part in message.parts
-            if isinstance(part, (ToolReturnPart, RetryPromptPart))
+            if isinstance(part, ToolReturnPart)
         ] == [*placeholders, result]
         expected_status = "SUCCEEDED" if outcome == "success" else "FAILED"
-        expected_kind = "tool_result" if outcome != "retry" else "retry"
         for archived in (False, True):
             if archived:
                 await history.archive()
@@ -111,7 +111,7 @@ async def test_recovered_tool_retains_interruptions_and_one_real_result(
                 (1, "tool_call", expected_status),
                 (2, "tool_result", "INTERRUPTED"),
                 (3, "tool_result", "INTERRUPTED"),
-                (4, expected_kind, expected_status),
+                (4, "tool_result", expected_status),
             ]
             assert {item.model_request_seq for item in page.items} == {1}
             assert {item.step_index for item in page.items} == {4}

@@ -19,7 +19,7 @@ from typing import get_args
 from pydantic_ai.messages import (
     BinaryContent, FilePart, InstructionBaselinePart, InstructionDeltaPart, InstructionDigest,
     InstructionId, InstructionPart, SerializedInstructionId, ModelMessage, ModelMessagesTypeAdapter, ModelRequest,
-    ModelRequestAttempt, ModelResponse, NativeToolReturnPart, RetryPromptPart,
+    ModelRequestAttempt, ModelResponse, NativeToolReturnPart,
     SpeechPart, SystemPromptPart, TextContent, ToolReturnPart, UserContent, UserPromptPart,
 )
 
@@ -44,14 +44,13 @@ from ._tool_return_codec import decode_tool_return_content, encode_tool_return_c
 _MESSAGE_VERSION = 1
 _HOST_CONTENT = "linktools-content"
 _SUMMARY_KIND = "runtime-summary-prompt"
-_RETRY_ADAPTER = TypeAdapter(RetryPromptPart)
 _USAGE_ADAPTER = TypeAdapter(RequestUsage)
 _USER_CONTENT_ADAPTER = TypeAdapter(UserContent)
 _DURATION_ADAPTER = TypeAdapter(timedelta)
 _INSTRUCTION_ID_ADAPTER = TypeAdapter(SerializedInstructionId)
 _USAGE_TOKEN_FIELDS = tuple(field.name for field in fields(RequestUsage) if field.name.endswith("_tokens"))
 _CORRELATED_PARTS = frozenset({
-    "tool-call", "builtin-tool-call", "tool-return", "builtin-tool-return", "retry-prompt",
+    "tool-call", "builtin-tool-call", "tool-return", "builtin-tool-return",
 })
 
 
@@ -478,12 +477,7 @@ def _encode_messages(messages: Sequence[ModelMessage]) -> list[JsonValue]:
             message = project_model_response_attempts(message)
         parts = []
         for pi, part in enumerate(message.parts):
-            if isinstance(part, RetryPromptPart):
-                # The native union upgrades this supported authoring type to retry feedback,
-                # losing its tool correlation. Its own adapter retains the recorded fact.
-                parts.append(UserPromptPart("", timestamp=part.timestamp))
-                patches.append((mi, pi, "retry", _dump_native(_RETRY_ADAPTER, part)))
-            elif ModelSettingsDeltaPart is not None and isinstance(part, ModelSettingsDeltaPart):
+            if ModelSettingsDeltaPart is not None and isinstance(part, ModelSettingsDeltaPart):
                 settings = _recorded_settings(part.settings)
                 parts.append(replace(part, settings={}))
                 patches.append((mi, pi, "settings", settings))
@@ -502,7 +496,7 @@ def _encode_messages(messages: Sequence[ModelMessage]) -> list[JsonValue]:
                         content.append(item)
                 parts.append(replace(part, content=content))
             elif isinstance(part, (ToolReturnPart, NativeToolReturnPart)):
-                patches.append((mi, pi, "tool", (encode_tool_return_content(part.content), part.tool_kind)))
+                patches.append((mi, pi, "tool", (encode_tool_return_content(part.content), part.tool_kind, part)))
                 # The content owner preserves host references and snapshots. Native kind
                 # promotion happens against restored content, never its JSON placeholder.
                 parts.append(_tool_return_with_content(part, "", None))
@@ -514,14 +508,12 @@ def _encode_messages(messages: Sequence[ModelMessage]) -> list[JsonValue]:
         part = wire[mi]["parts"][pi]
         if target == "summary":
             part["part_kind"] = _SUMMARY_KIND
-        elif target == "retry":
-            wire[mi]["parts"][pi] = value
         elif target == "settings":
             part["settings"] = value
         elif target == "tool":
-            original = messages[mi].parts[pi]
-            _tool_return_with_content(original, original.content, original.tool_kind)
-            part["content"], part["tool_kind"] = value
+            content, tool_kind, original = value
+            _tool_return_with_content(original, original.content, tool_kind)
+            part["content"], part["tool_kind"] = content, tool_kind
         else:
             part["content"][target] = value
     for message, original in zip(wire, lowered):
@@ -657,12 +649,7 @@ def _decode_message(value: object) -> ModelMessage:
                     raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if kind in _CORRELATED_PARTS and "tool_call_id" not in part:
             raise ValueError("durable tool correlation is required")
-        if kind == "retry-prompt":
-            restored = _RETRY_ADAPTER.validate_python(part)
-            _require_preserved_fields(part, _RETRY_ADAPTER.dump_python(restored, mode="json", warnings="error"))
-            patches.append((pi, "retry", restored))
-            wire["parts"][pi] = {"part_kind": "user-prompt", "content": ""}
-        elif kind == "model-settings-delta":
+        if kind == "model-settings-delta":
             patches.append((pi, "settings", _recorded_settings(part["settings"])))
             part["settings"] = {}
         elif kind == _SUMMARY_KIND:
@@ -699,8 +686,6 @@ def _decode_message(value: object) -> ModelMessage:
             message.parts[pi] = SummaryPromptPart(**{
                 field.name: getattr(part, field.name) for field in fields(SystemPromptPart) if field.init
             })
-        elif target == "retry":
-            message.parts[pi] = restored
         elif target == "settings":
             part.settings = restored
         elif target == "tool":

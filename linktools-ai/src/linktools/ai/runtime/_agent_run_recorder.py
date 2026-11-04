@@ -19,7 +19,6 @@ from pydantic_ai.messages import (
     ModelResponse,
     ToolCallPart,
     ToolReturnPart,
-    RetryPromptPart,
     ModelResponsePart,
     ModelResponsePartDelta,
 )
@@ -90,7 +89,7 @@ class AgentRunRecorder:
         self._next_event_index = 0
         self._tool_events: dict[str, set[str]] = {}
         self._tool_execution_metadata: dict[str, tuple[dict[str, str], str | None]] = {}
-        self._tool_results: dict[str, ToolReturnPart | RetryPromptPart] = {}
+        self._tool_results: dict[str, ToolReturnPart] = {}
         self._restored_tool_results: set[str] = set()
         self._restored_tool_calls: dict[str, ToolCallPart] = {}
         self._restored_pending = False
@@ -165,7 +164,7 @@ class AgentRunRecorder:
             part.tool_call_id
             for message in self._transcript_messages
             for part in message.parts
-            if isinstance(part, (ToolReturnPart, RetryPromptPart)) and part.tool_call_id
+            if isinstance(part, ToolReturnPart) and part.tool_call_id
             and not self._is_interrupted_tool_placeholder(part)
         }
         for message in (*self._transcript_messages, *self._pending_parts.values()):
@@ -175,7 +174,7 @@ class AgentRunRecorder:
                     if previous_call is not None and not self._same_tool_call(previous_call, part):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     self._restored_tool_calls[part.tool_call_id] = part
-                if (isinstance(part, (ToolReturnPart, RetryPromptPart)) and part.tool_call_id
+                if (isinstance(part, ToolReturnPart) and part.tool_call_id
                         and not self._is_interrupted_tool_placeholder(part)):
                     previous_result = self._tool_results.get(part.tool_call_id)
                     if previous_result is not None and not self._same_tool_result(previous_result, part):
@@ -301,9 +300,9 @@ class AgentRunRecorder:
             parts = {f"part:{index}": part for index, part in enumerate(message.parts)}
         else:
             parts = {
-                f"{'tool_result' if isinstance(part, ToolReturnPart) else 'retry'}:{part.tool_call_id}": part
+                f"tool_result:{part.tool_call_id}": part
                 for part in message.parts
-                if isinstance(part, (ToolReturnPart, RetryPromptPart))
+                if isinstance(part, ToolReturnPart)
             }
         return all(
             type(pending) is type(message)
@@ -316,7 +315,7 @@ class AgentRunRecorder:
         if isinstance(frozen, ModelRequest):
             parts = []
             for part in frozen.parts:
-                if (isinstance(part, (ToolReturnPart, RetryPromptPart)) and part.tool_call_id
+                if (isinstance(part, ToolReturnPart) and part.tool_call_id
                         and not self._is_interrupted_tool_placeholder(part)):
                     previous = self._tool_results.get(part.tool_call_id)
                     if previous is not None:
@@ -337,7 +336,7 @@ class AgentRunRecorder:
         ):
             self.finish_transcript(interrupted=True)
         for part in frozen.parts:
-            if (isinstance(part, (ToolReturnPart, RetryPromptPart)) and part.tool_call_id
+            if (isinstance(part, ToolReturnPart) and part.tool_call_id
                     and not self._is_interrupted_tool_placeholder(part)):
                 previous = self._tool_results.get(part.tool_call_id)
                 if previous is not None and not self._same_tool_result(previous, part):
@@ -387,7 +386,7 @@ class AgentRunRecorder:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._pending_parts[key] = replace(pending, parts=[delta.apply(pending.parts[0])])
 
-    def stage_tool_result(self, part: ToolReturnPart | RetryPromptPart) -> None:
+    def stage_tool_result(self, part: ToolReturnPart) -> None:
         pending = self._pending_parts.get(f"tool_result:{part.tool_call_id}")
         if pending is not None:
             previous = pending.parts[0]
@@ -397,8 +396,8 @@ class AgentRunRecorder:
                 else:
                     self.finish_transcript(interrupted=True)
         # Each result is complete even while sibling calls are still running.
-        kind = "tool_result" if isinstance(part, ToolReturnPart) else "retry"
-        self._pending_parts[f"{kind}:{part.tool_call_id}"] = freeze_model_messages(
+        key = f"tool_result:{part.tool_call_id}"
+        self._pending_parts[key] = freeze_model_messages(
             (ModelRequest(parts=[part]),)
         )[0]
         self._stage_transcript()
@@ -417,7 +416,7 @@ class AgentRunRecorder:
         self._tool_execution_metadata[tool_call_id] = (dict(metadata), error)
 
     async def record_tool_start(
-        self, part: ToolCallPart | ToolReturnPart | RetryPromptPart, step_index: int
+        self, part: ToolCallPart | ToolReturnPart, step_index: int
     ) -> None:
         if "TOOL_CALL_STARTED" in self._tool_events.get(part.tool_call_id, ()):
             return
@@ -437,7 +436,7 @@ class AgentRunRecorder:
         await self.commit_history_boundary()
 
     async def record_tool_result_boundary(
-        self, part: ToolReturnPart | RetryPromptPart, step_index: int
+        self, part: ToolReturnPart, step_index: int
     ) -> None:
         interrupted = await await_request_handoff(
             self._record_tool_result_boundary(part, step_index)
@@ -450,8 +449,8 @@ class AgentRunRecorder:
 
     def _same_tool_result(
         self,
-        previous: ToolReturnPart | RetryPromptPart,
-        current: ToolReturnPart | RetryPromptPart,
+        previous: ToolReturnPart,
+        current: ToolReturnPart,
     ) -> bool:
         return type(previous) is type(current) and previous == replace(
             current, timestamp=previous.timestamp,
@@ -466,7 +465,7 @@ class AgentRunRecorder:
         )
 
     async def _record_tool_result_boundary(
-        self, part: ToolReturnPart | RetryPromptPart, step_index: int
+        self, part: ToolReturnPart, step_index: int
     ) -> None:
         if self._is_interrupted_tool_placeholder(part):
             self.stage_tool_result(part)
@@ -552,7 +551,7 @@ class AgentRunRecorder:
             if restored:
                 self._restored_tool_results.update(
                     part.tool_call_id for part in parts
-                    if isinstance(part, (ToolReturnPart, RetryPromptPart)) and part.tool_call_id
+                    if isinstance(part, ToolReturnPart) and part.tool_call_id
                     and not self._is_interrupted_tool_placeholder(part)
                 )
 

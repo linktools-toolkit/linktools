@@ -217,9 +217,8 @@ page = await runtime.executions.history(
 
 The result has the same `ExecutionHistoryItem` shapes as unfiltered history:
 `tool_call` contains the model's arguments, `tool_result` contains the returned
-content, and `retry` contains a legacy SDK retry prompt. On SDKs with native
-retry feedback, a tool retry remains a `tool_result` with a failed status, not a
-successful result; its original `ToolReturnPart` has `outcome="retried"` and
+content. A tool retry is a `tool_result` with a failed status, not a
+successful result; its `ToolReturnPart` has `outcome="retried"` and
 optional `retry` information. Non-tool output feedback has item kind
 `retry-feedback`, without a fabricated tool name or call ID. Its content
 includes the feedback and retry cause, attempt and maximum retry count.
@@ -228,13 +227,9 @@ post-validation parameters or a separate external-effect ledger. A call can be
 visible before any result exists. A failed or cancelled call without a returned
 part does not acquire a fabricated result.
 
-The durable message codec preserves both the legacy retry prompt and the native
-feedback/tool-return shapes. Native retry information is retained through
-checkpoints and history, including explicit unknown (`None`) retry budgets.
-Ordinary tool returns without retry information keep their existing encoding.
-Reading native retry semantics on an older SDK that cannot represent them fails
-with `STORAGE_VERSION_UNSUPPORTED`, rather than silently translating or dropping
-the feedback. These additive message fields do not change the format version.
+Writes and checkpoints use native retry shapes, including explicit unknown
+(`None`) retry budgets. Ordinary tool returns without retry information keep
+their existing encoding. These message semantics do not change the format version.
 
 An empty page means no matching committed fact is currently available. During
 an active run it does not prove that a live-observed request or call is absent.
@@ -826,9 +821,9 @@ facts must not be silently discarded or coerced. Provider usage extensions remai
 open data, not a way to replace standard usage fields.
 
 Thin owned extensions retain Runtime summary provenance, Asset reference and
-retirement descriptors, portable tool-return values, open recorded settings, and
-supported `RetryPromptPart` tool correlation that the native union otherwise
-upgrades to feedback. These are not new public authoring parameters. Native
+retirement descriptors, portable tool-return values, and open recorded settings.
+Legacy retries use the native SDK union, retaining tool correlation for tool-bound
+returns and keeping output feedback separate. These are not new public authoring parameters. Native
 validation is supplemented only for durable facts its authoring dataclasses do
 not enforce, such as nonnegative usage/durations and valid instruction digests.
 An omitted clock factory runs at read time; it is not proof of a historical
