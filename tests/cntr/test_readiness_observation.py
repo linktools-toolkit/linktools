@@ -66,7 +66,7 @@ def test_started_service_does_not_wait_for_health(state, health):
     assert calls == [("app",)]
 
 
-def test_explicitly_unhealthy_service_is_reported_without_retry():
+def test_unhealthy_service_does_not_block_start():
     state = ProjectRuntimeState("test", (SimpleNamespace(
         service="app", state="running", health="unhealthy", exit_code=None,
         image_id="sha256:app", labels={}),), "docker")
@@ -74,8 +74,7 @@ def test_explicitly_unhealthy_service_is_reported_without_retry():
     runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(
         get_project_state=lambda containers, services=None: calls.append(services) or state)))
     context = SimpleNamespace(project_containers=(), compose_model={"services": {"app": {}}})
-    with pytest.raises(ContainerError, match="Service app did not reach"):
-        runner.verify_services_started(context, ("app",), {"app": "sha256:app"})
+    assert runner.verify_services_started(context, ("app",), {"app": "sha256:app"}) is state
     assert calls == [("app",)]
 
 
