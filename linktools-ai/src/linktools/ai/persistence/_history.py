@@ -1747,7 +1747,7 @@ class TranscriptRepository:
             if stop_at > head.message_count:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return tuple(() for _window in windows)
-        read_from = stop_at if empty else min(start for start, _ in windows)
+        read_from = stop_at if empty else min(start for start, end in windows if start < end)
         facts = await self._store.read(
             lambda transaction: self._read_range_start(
                 transaction, owner_id, start=read_from, end=stop_at,
@@ -1756,7 +1756,9 @@ class TranscriptRepository:
         )
         if empty:
             return tuple(() for _window in windows)
+        stop_at = max(end for start, end in windows if start < end)
         values: list[list[ModelMessage]] = [[] for _ in windows]
+        attempted_seek: int | None = None
         while True:
             if not facts:
                 break
@@ -1768,7 +1770,7 @@ class TranscriptRepository:
                 chunk_start = chunk.first_message_index
                 chunk_end = chunk_start + chunk.message_count
                 for index, (start, end) in enumerate(windows):
-                    if chunk_start < end and chunk_end > start:
+                    if start < end and chunk_start < end and chunk_end > start:
                         requests.append((chunk, max(start - chunk_start, 0), min(end - chunk_start, chunk.message_count)))
                         targets.append(index)
             for index, messages in zip(targets, await self._decode_chunk_ranges(requests), strict=True):
@@ -1777,15 +1779,26 @@ class TranscriptRepository:
                 break
             if len(facts) < _TRANSCRIPT_PAGE_SIZE:
                 break
-            facts = await self._store.read(
-                lambda transaction, sequence=after_sequence: transaction.list_facts(
-                    FactQuery(
-                        self._transcript_stream(owner_id),
-                        after_sequence=sequence,
-                        limit=_TRANSCRIPT_PAGE_SIZE,
-                    )
-                )
-            )
+            chunk_end = chunks[-1].first_message_index + chunks[-1].message_count
+            next_start = min(start for start, end in windows if start < end and end > chunk_end)
+
+            seek_start = None
+            if next_start - chunk_end >= _TRANSCRIPT_SEEK_BLOCK and next_start != attempted_seek:
+                seek_start = attempted_seek = next_start
+
+            async def read_next(transaction: StateTransaction) -> tuple[StoredFact, ...]:
+                sequence = after_sequence
+                if seek_start is not None:
+                    seek = await self._seek_fact_sequence(transaction, owner_id, seek_start)
+                    if seek is not None:
+                        sequence = max(sequence, seek)
+                return tuple(await transaction.list_facts(FactQuery(
+                    self._transcript_stream(owner_id),
+                    after_sequence=sequence,
+                    limit=_TRANSCRIPT_PAGE_SIZE,
+                )))
+
+            facts = await self._store.read(read_next)
         return self._validate_spans(
             windows,
             tuple(tuple(value) for value in values),
