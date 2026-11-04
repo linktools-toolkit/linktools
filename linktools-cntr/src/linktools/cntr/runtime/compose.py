@@ -400,7 +400,7 @@ class ComposeRunner:
             if len(matches) != replicas or any(item.image_id != image_ids[service] for item in matches):
                 continue
             valid = all(item.state in ("running", "restarting") or
-                        (item.state == "exited" and item.exit_code == 0 and item.health is None)
+                        (item.state == "exited" and item.exit_code == 0)
                         for item in matches)
             if valid:
                 started.add(service)
