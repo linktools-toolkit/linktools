@@ -24,8 +24,6 @@ def _neutralize_runtime(manager, monkeypatch):
                         lambda selection, **kwargs: selection)
     monkeypatch.setattr(manager.compose_runner, "apply_services",
                         lambda context, services: None)
-    monkeypatch.setattr(manager.compose_runner, "wait_service_ready",
-                        lambda context, service, **kwargs: True)
     monkeypatch.setattr(manager.image_preparer, "image_id",
                         lambda image: "sha256:fixture-image")
 

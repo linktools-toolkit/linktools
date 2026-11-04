@@ -781,7 +781,7 @@ def test_up_discovers_runtime_without_compose_ps(tmp_path, count):
 
     manager.structured_runner = SimpleNamespace(execute_text=execute_text, execute_json=execute_json)
     manager.docker_inspector = DockerInspector(manager)
-    manager.compose_runner.wait_services_ready = ComposeRunner(manager).wait_services_ready
+    manager.compose_runner.verify_services_started = ComposeRunner(manager).verify_services_started
 
     manager.compose_operations.up(["app"])
 

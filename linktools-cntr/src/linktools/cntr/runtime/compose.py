@@ -61,6 +61,23 @@ def service_dependencies(spec: "dict[str, Any]") -> "dict[str, dict[str, Any]]":
     return result
 
 
+def _startup_model(model: "dict[str, Any]") -> "dict[str, Any]":
+    """Keep dependency start order without health or job-completion waits."""
+    result = dict(model)
+    result["services"] = {}
+    for name, specification in model["services"].items():
+        service = dict(specification)
+        dependencies = service.get("depends_on")
+        if isinstance(dependencies, dict):
+            service["depends_on"] = {
+                dependency: dict(options, condition="service_started") if isinstance(options, dict)
+                else {"condition": "service_started"}
+                for dependency, options in dependencies.items()
+            }
+        result["services"][name] = service
+    return result
+
+
 def order_services(containers: "Iterable[BaseContainer]", services: "Iterable[str]",
                    model: "dict[str, Any] | None" = None) -> "tuple[str, ...]":
     """Order real Compose dependencies; container grouping adds no start edge."""
@@ -357,74 +374,48 @@ class ComposeRunner:
 
     def apply_service(self, context: "OperationContext", service: str, recreate: bool = False) -> int:
         self._require_scope(context, (service,))
-        self.wait_service_dependencies(context, service)
-        with self._model_args(context) as args:
+        model = _startup_model(context.compose_model)
+        with self._model_args(context, model=model) as args:
             return self.manager.runtime.create_docker_process(
                 *args, *self.apply_service_args(service, recreate, context.is_full_project)).check_call()
     def apply_services(self, context: "OperationContext", services: "Sequence[str]") -> int:
         """Apply the exact selection together, preserving native dependency ordering."""
         self._require_scope(context, services)
-        selected = set(services)
-        for service in services:
-            if set(service_dependencies(context.compose_model["services"][service])) - selected:
-                self.wait_service_dependencies(context, service, skip_services=selected)
-        # Compose retains edges between explicitly selected services with --no-deps.
-        # Unselected optional providers must not receive their pending configuration.
+        # Compose retains dependency start order between explicitly selected services.
+        # Readiness conditions are reduced to service_started in the execution model.
         args = self.apply_services_args(services, remove_orphans=context.is_full_project)
-        with self._model_args(context) as prefix:
+        model = _startup_model(context.compose_model)
+        with self._model_args(context, model=model) as prefix:
             return self.manager.runtime.create_docker_process(*prefix, *args).check_call()
 
-    def _completed_services(self, context: "OperationContext", services: "Sequence[str]") -> "set[str]":
-        return {dependency for name in services for dependency, options in
-                service_dependencies(context.compose_model["services"][name]).items()
-                if options.get("condition") == "service_completed_successfully"}
-
-    def ready_services(self, context: "OperationContext", services: "Sequence[str]",
+    def started_services(self, context: "OperationContext", services: "Sequence[str]",
                        state: "ProjectRuntimeState", image_ids: "Mapping[str, str]") -> "set[str]":
-        """Services whose complete runtime replica set satisfies the desired model."""
+        """Services started with the intended image and replica count."""
         definitions = context.compose_model["services"]
-        completed = self._completed_services(context, services)
-        ready = set()
+        started = set()
         for service in services:
             spec = definitions[service]
             replicas = spec.get("scale", spec.get("deploy", {}).get("replicas", 1))
             matches = state.service_instances(service)
             if len(matches) != replicas or any(item.image_id != image_ids[service] for item in matches):
                 continue
-            if service in completed:
-                valid = all(item.state == "exited" and item.exit_code == 0 for item in matches)
-            else:
-                valid = all((item.state == "running" and item.health in (None, "healthy")) or
-                            (item.state == "exited" and item.exit_code == 0 and item.health is None)
-                            for item in matches)
+            valid = all(item.state in ("running", "restarting") or
+                        (item.state == "exited" and item.exit_code == 0)
+                        for item in matches)
             if valid:
-                ready.add(service)
-        return ready
+                started.add(service)
+        return started
 
-    def wait_services_ready(self, context: "OperationContext", services: "Sequence[str]",
-                            image_ids: "Mapping[str, str]") -> "ProjectRuntimeState":
-        """Observe the whole batch once per readiness polling interval."""
-        import time
+    def verify_services_started(self, context: "OperationContext", services: "Sequence[str]",
+                              image_ids: "Mapping[str, str]") -> "ProjectRuntimeState":
+        """Validate one observed batch after detached Compose start."""
         from ..errors import ContainerError
-        completed = self._completed_services(context, services)
-        while True:
-            state = self.manager.docker_inspector.get_project_state(context.project_containers, services=services)
-            pending = set(services) - self.ready_services(context, services, state, image_ids)
-            if not pending:
-                return state
-            for service in pending:
-                matches = state.service_instances(service)
-                spec = context.compose_model["services"][service]
-                if not matches or any((item.state not in ("running", "restarting") and not
-                                       (item.state == "exited" and item.exit_code == 0 and
-                                        (service in completed or item.health is None))) or
-                                      (service not in completed and item.health == "unhealthy") or item.image_id != image_ids[service]
-                                      for item in matches):
-                    raise ContainerError("Service {} did not reach its desired runtime state".format(service))
-                replicas = spec.get("scale", spec.get("deploy", {}).get("replicas", 1))
-                if len(matches) != replicas:
-                    raise ContainerError("Service {} did not reach its desired replica count".format(service))
-            time.sleep(0.5)
+        state = self.manager.docker_inspector.get_project_state(context.project_containers, services=services)
+        pending = set(services) - self.started_services(context, services, state, image_ids)
+        if pending:
+            raise ContainerError("Service {} did not reach its desired runtime state".format(
+                ", ".join(sorted(pending))))
+        return state
 
     def restart_service(self, context: "OperationContext", service: str,
                         model: "dict[str, Any] | None" = None) -> int:
@@ -439,132 +430,6 @@ class ComposeRunner:
         return self.manager.structured_runner.execute(
             self.manager.runtime.create_docker_compose_process(
                 context.project_containers, "exec", "-T", service, *command, capture_output=True), check=check)
-
-    @staticmethod
-    def _service_healthy(matches, service, fail_unavailable):
-        from ..errors import ContainerError
-        if matches and all(item.state == "running" and item.health == "healthy" for item in matches):
-            return True
-        if fail_unavailable:
-            if not matches:
-                raise ContainerError("Dependency service {} is unavailable".format(service))
-            if any(item.state not in ("running", "restarting") for item in matches):
-                raise ContainerError("Dependency service {} is not running".format(service))
-            if any(item.health is None for item in matches):
-                raise ContainerError("Dependency service {} has no healthcheck".format(service))
-            if any(item.health == "unhealthy" for item in matches):
-                raise ContainerError("Dependency service {} is unhealthy".format(service))
-        return False
-
-    @staticmethod
-    def _service_completed(matches, service, fail_unavailable):
-        from ..errors import ContainerError
-        if any(item.state == "dead" or
-               (item.state == "exited" and item.exit_code != 0) for item in matches):
-            raise ContainerError("Dependency service {} failed".format(service))
-        if matches and all(item.state == "exited" and item.exit_code == 0 for item in matches):
-            return True
-        if fail_unavailable and (not matches or any(
-                item.state not in ("running", "restarting", "exited") for item in matches)):
-            raise ContainerError("Dependency service {} is unavailable".format(service))
-        return False
-
-    def wait_service_healthy(self, context: "OperationContext", service: str,
-                             timeout: "int | None" = 30) -> None:
-        import time
-        from ..errors import ContainerError
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
-            state = self.manager.docker_inspector.get_project_state(context.project_containers, services=(service,))
-            matches = state.service_instances(service)
-            if self._service_healthy(matches, service, timeout is None):
-                return
-            if deadline is not None and time.monotonic() >= deadline:
-                raise ContainerError("Service {} did not become healthy".format(service))
-            time.sleep(0.5)
-
-    @staticmethod
-    def _is_scaled_to_zero(spec: "Mapping[str, Any]") -> bool:
-        return spec.get("scale") == 0 or spec.get("deploy", {}).get("replicas") == 0
-
-    def wait_service_dependencies(self, context: "OperationContext", service: str,
-                                  model: "dict[str, Any] | None" = None,
-                                  skip_services: "Iterable[str]" = ()) -> None:
-        """Share one observation within a wait phase, refreshing after every sleep."""
-        import time
-        from ..errors import ContainerError
-        restored = model is not None
-        if model is None:
-            model = getattr(context, "compose_model", None) or self.final_model(context)
-        dependencies = {name: options for name, options in service_dependencies(model["services"][service]).items()
-                        if name not in skip_services and not self._is_scaled_to_zero(model["services"].get(name, {}))}
-        observed = None
-
-        def matches_for(dependency):
-            nonlocal observed
-            if observed is None:
-                observed = self.manager.docker_inspector.get_project_state(
-                    context.project_containers, services=tuple(dependencies))
-            return observed.service_instances(dependency)
-
-        for dependency, options in dependencies.items():
-            condition = options.get("condition", "service_started")
-            if (options.get("required", True) is False and
-                    dependency not in (getattr(context, "target_services", None) or ())):
-                matches = matches_for(dependency)
-                available = any(
-                    item.state in ("running", "restarting") or
-                    (condition == "service_completed_successfully" and
-                     item.state == "exited" and item.exit_code == 0)
-                    for item in matches)
-                if not available:
-                    self.manager.logger.warning("Optional Compose dependency %s is unavailable", dependency)
-                    continue
-            if condition not in ("service_healthy", "service_completed_successfully", "service_started"):
-                raise ContainerError("Unsupported Compose dependency condition: " + str(condition))
-            if condition == "service_started" and not restored:
-                # Normal application already acknowledged each ordered `up`.
-                continue
-            while True:
-                matches = matches_for(dependency)
-                try:
-                    if condition == "service_healthy":
-                        ready = self._service_healthy(matches, dependency, True)
-                    elif condition == "service_completed_successfully":
-                        ready = self._service_completed(matches, dependency, True)
-                    else:
-                        # Rollback does not start dependencies outside its restore set.
-                        if not matches or any(not (item.state == "running" or
-                                (item.state == "exited" and item.exit_code == 0)) for item in matches):
-                            raise ContainerError("Dependency service {} is unavailable".format(dependency))
-                        ready = True
-                except ContainerError:
-                    unavailable = not matches or any(
-                        item.state not in ("running", "restarting") or
-                        (condition == "service_healthy" and item.health in (None, "unhealthy"))
-                        for item in matches)
-                    if options.get("required", True) is False and unavailable:
-                        self.manager.logger.warning("Optional Compose dependency %s is not ready", dependency)
-                        break
-                    raise
-                if ready:
-                    break
-                time.sleep(0.5)
-                observed = None
-
-    def wait_service_completed(self, context: "OperationContext", service: str,
-                               timeout: "int | None" = 30) -> None:
-        import time
-        from ..errors import ContainerError
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
-            state = self.manager.docker_inspector.get_project_state(context.project_containers, services=(service,))
-            matches = state.service_instances(service)
-            if self._service_completed(matches, service, timeout is None):
-                return
-            if deadline is not None and time.monotonic() >= deadline:
-                raise ContainerError("Service {} did not complete successfully".format(service))
-            time.sleep(0.5)
 
     @contextmanager
     def _saved_compose_args(self, context: "OperationContext",
@@ -702,9 +567,10 @@ class ComposeRunner:
         with self._saved_compose_args(context, contents) as args:
             model = self._resolved_model(self.manager.runtime.create_docker_process(
                 *args, *self.config_args(services=services, output_format="json"), capture_output=True))
-            specifications = {service: model["services"][service] for service in services}
+        specifications = {service: model["services"][service] for service in services}
+        model = _startup_model(model)
+        with self._saved_compose_args(context, (yaml.safe_dump(model, sort_keys=True),)) as args:
             for service in order_service_subset(context.project_containers, specifications):
-                self.wait_service_dependencies(context, service, model=model)
                 self.manager.runtime.create_docker_process(
                     *args, *self.apply_service_args(service, recreate=True)).check_call()
 
@@ -728,38 +594,3 @@ class ComposeRunner:
         with self._saved_compose_args(context, (yaml.safe_dump(model, sort_keys=True),)) as args:
             yield args
 
-    def wait_service_ready(self, context: "OperationContext", service: str,
-                           model: "dict[str, Any] | None" = None, timeout: "int | None" = None) -> bool:
-        """Confirm readiness; return whether any instance remains running."""
-        import time
-        from ..errors import ContainerError
-        if model is None:
-            model = context.compose_model
-        if self._is_scaled_to_zero(model["services"][service]):
-            return False
-        completed = any(
-            service_dependencies(spec).get(service, {}).get("condition") == "service_completed_successfully"
-            for name, spec in model["services"].items()
-            if context.target_services is None or name in context.target_services)
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
-            actual = self.manager.docker_inspector.get_project_state(context.project_containers, services=(service,))
-            matches = actual.service_instances(service)
-            if completed:
-                if self._service_completed(matches, service, timeout is None):
-                    return False
-            elif matches and all(
-                    (item.state == "running" and item.health in (None, "healthy")) or
-                    (item.state == "exited" and item.exit_code == 0 and item.health is None)
-                    for item in matches):
-                return any(item.state == "running" for item in matches)
-            if not completed and any(item.state in ("dead", "exited") or item.health == "unhealthy" for item in matches):
-                raise ContainerError("Service {} failed to become ready".format(service))
-            if timeout is None and (not matches or any(
-                    item.state not in ("running", "restarting", "exited") for item in matches)):
-                raise ContainerError("Service {} is unavailable".format(service))
-            if deadline is not None and time.monotonic() >= deadline:
-                if completed:
-                    raise ContainerError("Service {} did not complete successfully".format(service))
-                raise ContainerError("Service {} did not become ready".format(service))
-            time.sleep(0.5)

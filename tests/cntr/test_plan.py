@@ -106,6 +106,12 @@ def test_plan_up_partial_matches_real_selection(fresh_manager):
     assert set(plan.services) == set(selection.services)
 
 
+def test_plan_describes_non_blocking_startup_semantics(fresh_manager):
+    plan = fresh_manager.planner.plan("up", names=["portainer"])
+    assert any("Startup does not wait for health checks or job completion" in warning
+               for warning in plan.warnings)
+
+
 def test_plan_restart_includes_stop_and_up(fresh_manager):
     plan = fresh_manager.planner.plan("restart", names=["portainer"])
     assert plan.commands[0].phase == "stop"

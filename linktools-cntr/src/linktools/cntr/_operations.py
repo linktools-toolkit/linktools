@@ -452,7 +452,7 @@ class ComposeOperations:
                 with record_phase(context, "up", logger=manager.logger):
                     batch_attempted = True
                     runner.apply_services(context, selection.services)
-                    observed = runner.wait_services_ready(context, selection.services, target_image_ids)
+                    observed = runner.verify_services_started(context, selection.services, target_image_ids)
                     model_store.record(selection.services)
                 batch_completed = True
                 running.difference_update(selection.services)
@@ -478,19 +478,18 @@ class ComposeOperations:
                         else:
                             warn_collateral(service, "restart", "a declared dependency was updated")
                             runner.restart_service(context, service, model=previous_model)
-                        runner.wait_service_ready(context, service, model=previous_model)
                     failed.clear()
             except (Exception, KeyboardInterrupt) as error:
                 try:
                     if batch_attempted and not batch_completed:
                         observed = manager.docker_inspector.get_project_state(selection.project_containers)
-                        confirmed = runner.ready_services(context, selection.services, observed, target_image_ids)
+                        confirmed = runner.started_services(context, selection.services, observed, target_image_ids)
                         for service in confirmed & model_store.changed_services & actual.existing_services:
                             previous_hashes = {item.labels.get("com.docker.compose.config-hash")
                                                for item in actual.service_instances(service)}
                             current_hashes = {item.labels.get("com.docker.compose.config-hash")
                                               for item in observed.service_instances(service)}
-                            # A ready old container is not evidence that a failed batch applied new configuration.
+                            # An old container is not evidence that a failed batch applied new configuration.
                             if None in current_hashes or current_hashes & previous_hashes:
                                 confirmed.discard(service)
                         model_store.record(tuple(service for service in selection.services if service in confirmed))
@@ -604,11 +603,7 @@ class ComposeOperations:
                                 else:
                                     warn_collateral(service, "restart", "deployment recovery changed a declared dependency")
                                     runner.restart_service(context, service, model=models[service])
-                                active = runner.wait_service_ready(context, service, model=models[service])
-                                if active:
-                                    running.add(service)
-                                else:
-                                    running.discard(service)
+                                running.add(service)
                                 touched.add(service)
                                 if service in owners:
                                     self._update_running_state(context, running, owners[service])
@@ -678,31 +673,28 @@ class ComposeOperations:
                 if name not in installed:
                     raise ContainerError("Required dependency {!r} is not installed".format(name))
                 for service in installed[name].services:
-                    required.setdefault(service, [])
+                    required.setdefault(service, set()).add("service_started")
         owners = service_owners(selection.project_containers)
         definitions = model["services"] if model is not None else {
             name: authors[-1].services[name] for name, authors in owners.items()}
         for service in selection.services:
             for name, options in service_dependencies(definitions[service]).items():
                 if options.get("required", True):
-                    required.setdefault(name, []).append(options.get("condition", "service_started"))
+                    required.setdefault(name, set()).add(options.get("condition", "service_started"))
         unavailable = set()
-        for service in set(required) - selected:
+        for service, conditions in required.items():
+            if service in selected:
+                continue
             instances = actual.service_instances(service)
-            conditions = required[service] or ["service_started"]
-            for condition in conditions:
-                if condition == "service_completed_successfully":
-                    ready = instances and all(item.state == "exited" and item.exit_code == 0 for item in instances)
-                elif condition == "service_healthy":
-                    ready = instances and all(item.state == "running" and item.health == "healthy" for item in instances)
-                elif condition == "service_started":
-                    ready = instances and all(item.state == "running" for item in instances)
-                else:
-                    raise ContainerError("Unsupported Compose dependency condition: " + str(condition))
-                if not ready:
-                    unavailable.add(service)
+            completed_only = conditions and conditions <= {"service_completed_successfully"}
+            available = instances and all(
+                item.state in ("running", "restarting") or
+                (completed_only and item.state == "exited" and item.exit_code == 0)
+                for item in instances)
+            if not available:
+                unavailable.add(service)
         if unavailable:
-            self._scope_error("Required dependencies are not ready", unavailable, selection)
+            self._scope_error("Required dependencies are unavailable", unavailable, selection)
 
     def _check_external_dependents(self, context, selection: ComposeSelection) -> None:
         selected = set(selection.services)
