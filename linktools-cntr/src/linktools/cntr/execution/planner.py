@@ -126,9 +126,10 @@ class ExecutionPlanner:
                             "are omitted until native Compose configuration is available.")
         if action in ("up", "restart"):
             warnings.append("Named operations initialize and refresh images only for explicitly selected containers. "
-                            "Required external "
-                            "dependencies must already be ready; dependent services requiring a joint operation "
-                            "must be explicitly selected. Full-project operations include their requirements. "
+                            "Required external dependencies must already be running/restarting, or successfully "
+                            "exited when completion is the only declared condition. Startup does not wait for "
+                            "health checks or job completion. Dependent services requiring a joint operation must "
+                            "be explicitly selected. Full-project operations include their requirements. "
                             "Changed generated mounts may also apply related running consumers; stopped consumers stay stopped. "
                             "Ordinary configuration "
                             "updates do not invoke a container-specific reload lifecycle. Preparation, image "
