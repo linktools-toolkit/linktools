@@ -7,25 +7,25 @@ import asyncio
 import pytest
 from pydantic_ai.mcp import MCPToolset
 
+from linktools.ai.capability.mcp import MCPToolset as CapabilityMCPToolset
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_executor import _with_cleanup_diagnostic
 from linktools.ai.runtime._mcp import (
     _MCPCapability,
-    _MCPDiscoveryToolset,
     close_mcp_resources,
 )
 from linktools.ai.runtime._mcp_transport import _create_mcp_transport
 from linktools.ai.spec import MCPServerSpec
 
 
-def _discovery() -> _MCPDiscoveryToolset:
+def _discovery() -> CapabilityMCPToolset:
     server = MCPServerSpec(
         "remote", transport="streamable-http", url="https://example.invalid/mcp",
     )
     transport = _create_mcp_transport(
         server, workspace_backend=None, host_cwd=None,
     )
-    return _MCPDiscoveryToolset(transport, server=server)
+    return CapabilityMCPToolset(transport, server=server)
 
 
 @pytest.mark.asyncio
@@ -257,3 +257,39 @@ async def test_asset_cleanup_fault_survives_safe_primary_error_serialization() -
     result = _with_cleanup_diagnostic(primary, primary).to_safe_error(operation_id="run")
     assert result.code == ErrorCode.TOOL_EFFECT_UNKNOWN.value
     assert result.safe_details == {"secondary_error_code": ErrorCode.STORAGE_UNAVAILABLE.value}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prior_exit_failure", (False, True))
+async def test_public_final_cleanup_preserves_cancellation_and_retry(
+    monkeypatch: pytest.MonkeyPatch, prior_exit_failure: bool,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    tools = _discovery()
+    if prior_exit_failure:
+        async def fail_exit(self: MCPToolset, *args: object) -> None:
+            raise OSError("private endpoint")
+
+        monkeypatch.setattr(MCPToolset, "__aexit__", fail_exit)
+        await tools.__aexit__(None, None, None)
+    cancelled = asyncio.CancelledError()
+    close = AsyncMock(side_effect=cancelled)
+    monkeypatch.setattr(tools.client, "close", close)
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await tools.close_resources()
+    assert raised.value is cancelled
+    if prior_exit_failure:
+        assert isinstance(raised.value.__cause__, AIError)
+        assert raised.value.__cause__.code is ErrorCode.MCP_CLEANUP_FAILED
+        assert "private endpoint" not in str(raised.value.__cause__)
+    else:
+        assert raised.value.__cause__ is None
+    close.side_effect = None
+    if prior_exit_failure:
+        with pytest.raises(AIError) as retry:
+            await tools.close_resources()
+        assert retry.value is cancelled.__cause__
+    else:
+        await tools.close_resources()
+    assert close.await_count == 2
