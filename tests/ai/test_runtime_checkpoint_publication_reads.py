@@ -479,3 +479,50 @@ async def test_legacy_custom_materialization_keeps_prepared_readback_position(tm
         finally:
             store._archives[PersistenceDomain.CHECKPOINT] = original
             await custom.close()
+
+
+async def test_custom_publication_key_plan_keeps_its_existing_signature(tmp_path):
+    from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
+
+    async with _producer(tmp_path, "sqlite") as (state, store, _repository, _execution):
+        original = store.read_store(PersistenceDomain.CHECKPOINT)
+        calls = []
+
+        class CustomArchive(ModelInteractionStateStepArchive):
+            async def checkpoint_publication_record_keys(self, run, checkpoint):
+                calls.append(checkpoint.stored.step_index)
+                return await super().checkpoint_publication_record_keys(run, checkpoint)
+
+        custom = CustomArchive(original.state_store, object_store=None, namespace="checkpoint-publication",
+                               tenant_id="tenant", runtime_domain=PersistenceDomain.CHECKPOINT)
+        store._archives[PersistenceDomain.CHECKPOINT] = custom
+        try:
+            await store.save_checkpoint(_checkpoint(1), execution_id="execution", producer_generation=1)
+            assert calls == [1]
+        finally:
+            store._archives[PersistenceDomain.CHECKPOINT] = original
+            await custom.close()
+
+
+@pytest.mark.parametrize("cancelled", (False, True))
+async def test_interaction_prefetch_preserves_producer_and_validation_order(tmp_path, monkeypatch, cancelled):
+    async with _producer(tmp_path, "sqlite") as (state, store, repository, execution):
+        archive = store.read_store(PersistenceDomain.CHECKPOINT)
+        prepare = store.checkpoint_persistence.prepare_checkpoint
+
+        async def invalid_interactions(*args, **kwargs):
+            checkpoint, _interactions, sequence = await prepare(*args, **kwargs)
+            return checkpoint, (object(),), sequence
+
+        if cancelled:
+            await repository.compare_and_swap("execution", tenant_id="tenant", expected_revision=1,
+                next_record=replace(execution, revision=2, status=ExecutionStatus.CANCELLING))
+        before = await _snapshot(archive.state_store)
+        with monkeypatch.context() as patch:
+            patch.setattr(store.checkpoint_persistence, "prepare_checkpoint", invalid_interactions)
+            with pytest.raises(AIError) as raised:
+                await store.save_checkpoint(_checkpoint(0), execution_id="execution", producer_generation=1)
+        assert raised.value.code is (ErrorCode.EXECUTION_CANCELLED if cancelled else ErrorCode.INTERNAL_ERROR)
+        if not cancelled:
+            assert isinstance(raised.value.__cause__, TypeError)
+        assert await _snapshot(archive.state_store) == before

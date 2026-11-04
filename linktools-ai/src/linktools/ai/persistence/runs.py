@@ -518,6 +518,9 @@ class RuntimeAgentRunStore(AgentRunStore):
                         if isinstance(execution.state_store.storage_group, GroupRecordReader):
                             publication_records = await target_recovery.checkpoint_publication_record_keys(
                                 target_agent_run, prepared_checkpoint,
+                                **({"interactions": prepared_interactions}
+                                   if type(target_recovery).checkpoint_publication_record_keys
+                                   is ModelInteractionStateStepArchive.checkpoint_publication_record_keys else {}),
                             )
                             stores = tuple(dict.fromkeys((*stores, *publication_records)))
 

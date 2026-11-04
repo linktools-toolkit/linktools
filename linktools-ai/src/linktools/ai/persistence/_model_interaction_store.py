@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from pydantic_ai.messages import ModelMessage
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload
@@ -40,6 +40,7 @@ from ._archive import PreparedArchive
 from .state import (
     RecordQuery,
     RecordReplacement,
+    StateStore,
     StateTransaction,
     StoredRecord,
     record_key_digest,
@@ -219,6 +220,19 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             "model_interaction",
             [agent_run_id, model_request_seq],
         )
+
+    async def checkpoint_publication_record_keys(
+        self, run: AgentRunRecord, checkpoint: PreparedAgentRunCheckpoint,
+        *, interactions: Sequence[ModelInteractionRecord] = (),
+    ) -> Mapping[StateStore, tuple[bytes, ...]]:
+        keys = dict(await super().checkpoint_publication_record_keys(run, checkpoint))
+        if all(isinstance(value, ModelInteractionRecord) and value.agent_run_id == run.agent_run_id
+               for value in interactions):
+            keys[self.state_store] = tuple(dict.fromkeys((
+                *keys.get(self.state_store, ()),
+                *(self._interaction_key(value.agent_run_id, value.model_request_seq) for value in interactions),
+            )))
+        return keys
 
     async def capture_checkpoint_progress(
         self, *, agent_run_id: str, checkpoint: PreparedAgentRunCheckpoint,
