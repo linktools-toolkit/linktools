@@ -179,7 +179,7 @@ async def test_fixture_catalog_and_repeated_calls_stay_offline_and_preserve_effe
         raise AssertionError("fixture must not enter a live MCP connection")
 
     monkeypatch.setattr(MCPToolset, "__aenter__", forbidden_enter)
-    for name in ("_create_mcp_transport", "_MCPDiscoveryToolset", "_mcp_execution_policy"):
+    for name in ("_create_mcp_transport", "MCPToolset", "_mcp_execution_policy"):
         monkeypatch.setattr(f"linktools.ai.runtime._mcp.{name}", forbidden)
     payload = _manifest()
     extra = copy.deepcopy(payload["servers"][0]["tools"][0])
@@ -387,7 +387,7 @@ async def test_native_runtime_consumes_fixture_with_captured_effect_policy(
         assert not servers
         return await prepare_mcp_projections(servers, *args, **kwargs)
 
-    for name in ("_create_mcp_transport", "_MCPDiscoveryToolset"):
+    for name in ("_create_mcp_transport", "MCPToolset"):
         monkeypatch.setattr(f"linktools.ai.runtime._mcp.{name}", forbidden_transport)
     monkeypatch.setattr(MCPToolset, "__aenter__", forbidden_live_path)
     monkeypatch.setattr(WorkspaceResource, "from_asset_versions", forbidden_live_path)

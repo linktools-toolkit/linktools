@@ -76,7 +76,7 @@ def _runner(execution: _Execution) -> AgentTaskRunner:
 
     runner._inspect_execution = inspect
     runner._get_execution = get
-    runner._record_invocation = None
+    runner._record_invocation = AsyncMock()
     return runner
 
 

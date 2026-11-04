@@ -12,8 +12,8 @@ from mcp.types import (
 )
 from pydantic_ai.tools import ToolDefinition
 
+from linktools.ai.capability.mcp import MCPToolset as CapabilityMCPToolset
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._mcp import _MCPDiscoveryToolset
 from linktools.ai.runtime._tool_boundary import ManagedToolDescriptor
 from linktools.ai.spec import MCPServerSpec
 
@@ -42,7 +42,7 @@ async def test_mcp_client_failures_do_not_claim_known_no_effect(
     }
     error = errors[failure]
     calls = 0
-    toolset = _MCPDiscoveryToolset(
+    toolset = CapabilityMCPToolset(
         StdioTransport(command="unused-in-memory-client", args=[]),
         server=MCPServerSpec("effect-boundary", "in-memory"),
     )
@@ -98,7 +98,7 @@ async def test_mcp_client_failures_do_not_claim_known_no_effect(
 
 
 def _schema_tool(schema: dict[str, Any]) -> Any:
-    toolset = _MCPDiscoveryToolset(
+    toolset = CapabilityMCPToolset(
         StdioTransport(command="unused-in-memory-client", args=[]),
         server=MCPServerSpec("schema-boundary", "in-memory"),
     )
@@ -187,7 +187,7 @@ async def test_mcp_schema_feedback_precedes_dispatch_and_obeys_retry_budget(
 
     from linktools.ai.capability import PydanticToolControlCapability
 
-    toolset = _MCPDiscoveryToolset(
+    toolset = CapabilityMCPToolset(
         StdioTransport(command="unused-in-memory-client", args=[]),
         server=MCPServerSpec("schema-agent", "in-memory"),
     )

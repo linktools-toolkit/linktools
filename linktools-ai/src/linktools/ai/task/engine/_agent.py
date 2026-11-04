@@ -3,13 +3,15 @@
 """Agent execution adapter for TaskGraph nodes."""
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from linktools.core import environ
 
-from ...agent import AgentBindingContract
+from pydantic import BaseModel
+
+from ...agent import AgentBindingContract, OutputBinding, restore_output
 from ...core import (
     ImmutableJsonMapping,
     ExecutionStatus,
@@ -34,12 +36,10 @@ from ...task import (
     TaskResultRef,
 )
 from ...inputs import decode_task_prompt_draft, merge_captured_input_files, task_prompt_draft
-from ...execution import StoredUserInput
-from ...persistence.contracts import TaskPreparedInputRecord
+from ...execution import ExecutionInputContext, StoredUserInput
 from ...persistence.codec import encode_domain
 from ...inputs import (
     AgentTaskInput,
-    AgentTaskInputBuilder,
     AgentTaskInputContext,
     AgentTaskContextError,
 )
@@ -49,7 +49,10 @@ if TYPE_CHECKING:
     from ...inputs import ExecutionInputMaterializer
     from ...runtime.agent_execution import AgentExecutionPort
     from ...core import RunBudget
-    from ...execution import ExecutionView
+    from ...execution import Execution, ExecutionView
+    from ...persistence import Persistence
+    from ...persistence.contracts import TaskAdmissionRepository, BudgetRepository
+    from ._runner import TaskNodeExecutor
 
 
 AppT = TypeVar("AppT")
@@ -72,63 +75,183 @@ class AgentTaskRunner(Generic[AppT]):
 
     def __init__(
         self,
+        task: Task[AppT],
         *,
-        id: str,
-        revision: int,
-        persistence_owner: object,
-        agent_id: str,
-        agent_revision: int,
-        input_mode: str,
-        planning_default: bool,
-        thinking_default: ThinkingValue,
-        binding_contract: Mapping[str, JsonValue],
-        build_input: AgentTaskInputBuilder | None,
-        start_execution: Callable[..., Awaitable[object]],
-        get_execution: Callable[[str, Principal], Awaitable[object]],
-        acquire_execution_hold: Callable[[str, Principal, str], Awaitable[None]],
-        result_reader: Callable[[TaskNodeInvocation, str], Awaitable[JsonValue]],
-        result_ref_reader: Callable[[TaskNodeInvocation, str], Awaitable[TaskResultRef]],
-        get_prepared_input: Callable[
-            [TaskNodeInvocation], Awaitable[TaskPreparedInputRecord | None]
-        ],
-        publish_prepared_input: Callable[..., Awaitable[TaskPreparedInputRecord]],
-        store_prepared_prompt: Callable[..., Awaitable[StoredUserInput]],
-        restore_prepared_prompt: Callable[
-            [StoredUserInput], Awaitable[CanonicalUserInput]
-        ],
-        record_invocation: Callable[[str, TaskNodeInvocation], Awaitable[None]] | None = None,
-        inspect_execution: Callable[[str, Principal], Awaitable["ExecutionView"]] | None = None,
-        execution_port: "AgentExecutionPort[AppT] | None" = None,
+        port: "AgentExecutionPort[AppT]",
+        persistence: "Persistence",
+        task_admissions: "TaskAdmissionRepository | None",
+        budgets: "BudgetRepository | None",
+        materializer: "ExecutionInputMaterializer",
+        node_executor: Callable[[], "TaskNodeExecutor[AppT]"],
+        execution_ports: dict[str, "AgentExecutionPort[AppT]"],
     ) -> None:
-        if input_mode not in {"literal", "projected"}:
-            raise ValueError("Agent Task input mode is invalid")
-        if (input_mode == "projected") != (build_input is not None):
-            raise ValueError("Agent Task input callback does not match input mode")
-        self.id = id
-        self.revision = revision
-        self._persistence_owner = persistence_owner
-        self._agent_id = agent_id
-        self._agent_revision = agent_revision
-        self.input_mode = input_mode
-        self._planning_default = planning_default
-        self._thinking_default = thinking_default
-        self._binding_contract = ImmutableJsonMapping(binding_contract)
-        self._binding_digest = AgentBindingContract.from_payload(
-            self._binding_contract
-        ).binding_digest
-        self._build_input = build_input
-        self._start_execution = start_execution
-        self._record_invocation = record_invocation
-        self._get_execution = get_execution
-        self._acquire_execution_hold = acquire_execution_hold
-        self._result_reader = result_reader
-        self._result_ref_reader = result_ref_reader
-        self._get_prepared_input = get_prepared_input
-        self._publish_prepared_input = publish_prepared_input
-        self._store_prepared_prompt = store_prepared_prompt
-        self._restore_prepared_prompt = restore_prepared_prompt
-        self._inspect_execution = inspect_execution
-        self.execution_port = execution_port
+        self.id = task.id
+        self.revision = task.revision
+        self._persistence_owner = persistence
+        compiled, binding_contract = port.compiled, port.binding_contract
+        self._agent_binding = binding_contract
+        self._task_admissions = task_admissions
+        self._budgets = budgets
+        self._agent_id = compiled.spec.id
+        self._agent_revision = compiled.spec.revision
+        self.input_mode = "projected" if task.build_input is not None else "literal"
+        self._planning_default = compiled.spec.planning
+        self._thinking_default = compiled.spec.thinking
+        self._binding_contract = ImmutableJsonMapping(binding_contract.to_payload())
+        self._binding_digest = AgentBindingContract.from_payload(self._binding_contract).binding_digest
+        self._build_input = task.build_input
+        self.execution_port = port
+        self._materializer = materializer
+        self._node_executor = node_executor
+        self._execution_ports = execution_ports
+
+    @classmethod
+    def from_task(
+        cls,
+        task: Task[AppT],
+        *,
+        persistence: "Persistence",
+        task_admissions: "TaskAdmissionRepository | None",
+        budgets: "BudgetRepository | None",
+        materializer: "ExecutionInputMaterializer",
+        node_executor: Callable[[], "TaskNodeExecutor[AppT]"],
+        execution_ports: dict[str, "AgentExecutionPort[AppT]"],
+    ) -> Task[AppT]:
+        """Bind an Agent node without transferring its producer's ownership.
+
+        The node executor is resolved lazily because it consumes these bound
+        Task definitions during construction.
+        """
+        port = task.agent_execution
+        if port is None:
+            if isinstance(task.runner, AgentTaskRunner):
+                task.runner.validate_binding(persistence, task)
+            elif task.contract.get("type") == "agent":
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            return task
+        if port.persistence is not persistence:
+            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+        port.operations.ensure_open()
+        runner = cls(
+            task, port=port, persistence=persistence, materializer=materializer,
+            task_admissions=task_admissions, budgets=budgets,
+            node_executor=node_executor, execution_ports=execution_ports,
+        )
+        binding_contract = runner._agent_binding
+        input_mode = runner.input_mode
+        contract: dict[str, JsonValue] = {
+            "version": 1,
+            "type": "agent",
+            "effect_policy": "none",
+            "output_contract": {"kind": "json"},
+            "reconcile": False,
+            "config": {
+                "agent_id": runner._agent_id,
+                "agent_revision": runner._agent_revision,
+                "binding_contract": binding_contract.to_payload(),
+                "input_mode": input_mode,
+            },
+        }
+        if dict(task.contract) != contract:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        return Task.from_runner(
+            task.id,
+            runner,
+            revision=task.revision,
+            contract=contract,
+        )
+
+
+    async def _start_execution(
+        self,
+        invocation: TaskNodeInvocation,
+        prompt: CanonicalUserInput,
+        *,
+        files: Sequence[str],
+        session_id: str | None,
+        planning: bool,
+        thinking: ThinkingValue,
+        idempotency_key: str,
+        dependency_hold_id: str,
+    ) -> "Execution[AppT]":
+        output_type: type[BaseModel] | OutputBinding | None = (
+            invocation.node.output_type
+        )
+        if output_type is None and invocation.node.output_contract is not None:
+            output_contract = invocation.node.output_contract
+            mode = output_contract.get("mode")
+            schema = output_contract.get("schema")
+            if mode is not None and schema is not None:
+                output_type = restore_output(mode, schema)
+        if not isinstance(output_type, OutputBinding) and (
+            not isinstance(output_type, type)
+            or not issubclass(output_type, BaseModel)
+        ):
+            output_type = restore_output(self._agent_binding.output_mode, self._agent_binding.output_schema)
+        admissions = self._task_admissions
+        if admissions is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        admission = await admissions.get(
+            invocation.graph_id, tenant_id=invocation.principal.tenant_id,
+        )
+        if admission is None or admission.graph_id != invocation.graph_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if admission.budget_scope_id is not None:
+            if self._budgets is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            usage = await self._budgets.read(admission.budget_scope_id)
+            if usage.limits != admission.budget:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        execution = await self.execution_port.start(
+            prompt,
+            files=files,
+            output=output_type,
+            principal=invocation.principal,
+            session_id=session_id,
+            idempotency_key=idempotency_key,
+            mode="run",
+            planning=planning,
+            thinking=thinking,
+            correlation=invocation.correlation,
+            dependency_hold_id=dependency_hold_id,
+            budget_scope_id=admission.budget_scope_id,
+            requires_task_invocation_capture=True,
+            input_context=None if invocation.node.input.get("capture_context") is None else ExecutionInputContext.from_payload(invocation.node.input["capture_context"]),
+        )
+        self._execution_ports[execution.execution_id] = self.execution_port
+        return execution
+
+    async def _record_invocation(self, execution_id: str, invocation: TaskNodeInvocation) -> None:
+        if self.execution_port.captures is not None:
+            await self.execution_port.captures.record_invocation(execution_id, invocation)
+
+    async def _get_execution(
+        self, execution_id: str,
+        principal: Principal,
+    ) -> "Execution[AppT]":
+        self._execution_ports[execution_id] = self.execution_port
+        return await self.execution_port.get(execution_id, principal)
+
+    async def _acquire_execution_hold(
+        self, execution_id: str,
+        principal: Principal,
+        hold_id: str,
+    ) -> None:
+        await self.execution_port.service.acquire_dependency_hold(
+            execution_id,
+            tenant_id=principal.tenant_id,
+            hold_id=hold_id,
+        )
+
+    async def _store_prepared_prompt(
+        self, value: CanonicalUserInput, *, files: Sequence[str], tenant_id: str,
+    ) -> StoredUserInput:
+        content = await self.execution_port.materialize_input(value, files)
+        return await self._materializer.store(content, tenant_id=tenant_id)
+
+
+    async def _inspect_execution(self, execution_id: str, principal: Principal) -> "ExecutionView":
+        return await self.execution_port.service.inspect(execution_id, principal=principal)
 
     async def bind_existing_execution(self, execution_id: str, principal: Principal) -> None:
         await self._get_execution(execution_id, principal)
@@ -260,7 +383,7 @@ class AgentTaskRunner(Generic[AppT]):
             else:
                 if not isinstance(task_input.stored_prompt, StoredUserInput):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                prompt = await self._restore_prepared_prompt(task_input.stored_prompt)
+                prompt = await self._node_executor().restore_prepared_agent_prompt(task_input.stored_prompt)
                 files = ()
             prompt = _append_captured_files(prompt, task_input)
         else:
@@ -274,13 +397,13 @@ class AgentTaskRunner(Generic[AppT]):
                 task_revision=self.revision,
                 binding_digest=self._binding_digest,
             )
-            prepared = await self._get_prepared_input(invocation)
+            prepared = await self._node_executor().get_prepared_agent_input(invocation)
             if prepared is not None and prepared.input_identity != input_identity:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if invocation.execution_id is not None and prepared is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if prepared is not None:
-                prompt = await self._restore_prepared_prompt(
+                prompt = await self._node_executor().restore_prepared_agent_prompt(
                     prepared.stored_user_input
                 )
                 files = ()
@@ -307,8 +430,8 @@ class AgentTaskRunner(Generic[AppT]):
                 context = AgentTaskInputContext(
                     invocation,
                     task_input,
-                    lambda name: self._result_reader(invocation, name),
-                    lambda name: self._result_ref_reader(invocation, name),
+                    lambda name: self._node_executor().read_input_result(invocation, name),
+                    lambda name: self._node_executor().read_input_result_ref(invocation, name),
                 )
                 try:
                     projected = await callback(context)
@@ -338,7 +461,7 @@ class AgentTaskRunner(Generic[AppT]):
                     files=task_input.files,
                     tenant_id=invocation.principal.tenant_id,
                 )
-                prompt = await self._restore_prepared_prompt(stored)
+                prompt = await self._node_executor().restore_prepared_agent_prompt(stored)
                 final_input_digest = _prepared_agent_input_digest(prompt, stored)
                 request_identity = _agent_task_request_identity(
                     invocation,
@@ -350,7 +473,7 @@ class AgentTaskRunner(Generic[AppT]):
                     self.revision,
                     self._binding_digest,
                 )
-                prepared = await self._publish_prepared_input(
+                prepared = await self._node_executor().publish_prepared_agent_input(
                     invocation,
                     input_identity=input_identity,
                     source_refs=context.source_refs,
@@ -364,7 +487,7 @@ class AgentTaskRunner(Generic[AppT]):
                     or prepared.request_identity != request_identity
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                prompt = await self._restore_prepared_prompt(
+                prompt = await self._node_executor().restore_prepared_agent_prompt(
                     prepared.stored_user_input
                 )
                 files = ()
@@ -489,8 +612,6 @@ class AgentTaskRunner(Generic[AppT]):
     async def _capture_invocation(
         self, execution: object, execution_id: str, invocation: TaskNodeInvocation,
     ) -> None:
-        if self._record_invocation is None:
-            return
         try:
             await self._record_invocation(execution_id, invocation)
         except BaseException:
@@ -536,10 +657,6 @@ class AgentTaskRunner(Generic[AppT]):
     ) -> object:
         inspect = self._inspect_execution
         timeout = invocation.node.timeout_seconds
-        if inspect is None:
-            if timeout is not None:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            return (await execution.wait()).result
         view = None
         if timeout is not None:
             view = await inspect(execution_id, invocation.principal)
@@ -586,8 +703,6 @@ class AgentTaskRunner(Generic[AppT]):
             except Exception as error:
                 cancel_error = error
             inspect = self._inspect_execution
-            if inspect is None:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             try:
                 view = await inspect(execution_id, invocation.principal)
                 if view.status not in {

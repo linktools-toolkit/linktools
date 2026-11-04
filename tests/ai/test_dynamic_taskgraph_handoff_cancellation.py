@@ -3,6 +3,7 @@
 """Cancellation behavior for Runtime-owned Agent Task runners."""
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -72,26 +73,19 @@ async def test_cancelled_wait_leaves_handed_off_execution_for_graph_recovery() -
         output_schema={},
     )
     runner = AgentTaskRunner(
-        id="agent-task",
-        revision=1,
-        persistence_owner=object(),
-        agent_id="agent",
-        agent_revision=1,
-        input_mode="literal",
-        planning_default=False,
-        thinking_default=False,
-        binding_contract=binding.to_payload(),
-        build_input=None,
-        start_execution=start_execution,
-        get_execution=unused,
-        acquire_execution_hold=hold,
-        result_reader=unused,
-        result_ref_reader=unused,
-        get_prepared_input=unused,
-        publish_prepared_input=unused,
-        store_prepared_prompt=unused,
-        restore_prepared_prompt=unused,
+        SimpleNamespace(id="agent-task", revision=1, build_input=None),
+        port=SimpleNamespace(
+            compiled=SimpleNamespace(spec=binding.agent_spec),
+            binding_contract=binding, captures=None,
+        ),
+        persistence=SimpleNamespace(
+            task=SimpleNamespace(admissions=None), execution=SimpleNamespace(budgets=None),
+        ), materializer=None, task_admissions=None, budgets=None,
+        node_executor=lambda: None, execution_ports={},
     )
+    runner._start_execution = start_execution
+    runner._get_execution = unused
+    runner._acquire_execution_hold = hold
     invocation = TaskNodeInvocation(
         node=TaskNode(
             "node",
@@ -159,26 +153,19 @@ async def test_cancelled_start_defers_binding_to_idempotent_recovery() -> None:
         output_schema={},
     )
     runner = AgentTaskRunner(
-        id="agent-task",
-        revision=1,
-        persistence_owner=object(),
-        agent_id="agent",
-        agent_revision=1,
-        input_mode="literal",
-        planning_default=False,
-        thinking_default=False,
-        binding_contract=binding.to_payload(),
-        build_input=None,
-        start_execution=start_execution,
-        get_execution=unused,
-        acquire_execution_hold=hold,
-        result_reader=unused,
-        result_ref_reader=unused,
-        get_prepared_input=unused,
-        publish_prepared_input=unused,
-        store_prepared_prompt=unused,
-        restore_prepared_prompt=unused,
+        SimpleNamespace(id="agent-task", revision=1, build_input=None),
+        port=SimpleNamespace(
+            compiled=SimpleNamespace(spec=binding.agent_spec),
+            binding_contract=binding, captures=None,
+        ),
+        persistence=SimpleNamespace(
+            task=SimpleNamespace(admissions=None), execution=SimpleNamespace(budgets=None),
+        ), materializer=None, task_admissions=None, budgets=None,
+        node_executor=lambda: None, execution_ports={},
     )
+    runner._start_execution = start_execution
+    runner._get_execution = unused
+    runner._acquire_execution_hold = hold
     invocation = TaskNodeInvocation(
         node=TaskNode(
             "node",
@@ -284,26 +271,19 @@ async def test_cancelled_handoff_keeps_hold_until_recovery_rebinds() -> None:
         output_schema={},
     )
     runner = AgentTaskRunner(
-        id="agent-task",
-        revision=1,
-        persistence_owner=object(),
-        agent_id="agent",
-        agent_revision=1,
-        input_mode="literal",
-        planning_default=False,
-        thinking_default=False,
-        binding_contract=binding.to_payload(),
-        build_input=None,
-        start_execution=start_execution,
-        get_execution=get_execution,
-        acquire_execution_hold=acquire_hold,
-        result_reader=unused,
-        result_ref_reader=unused,
-        get_prepared_input=unused,
-        publish_prepared_input=unused,
-        store_prepared_prompt=unused,
-        restore_prepared_prompt=unused,
+        SimpleNamespace(id="agent-task", revision=1, build_input=None),
+        port=SimpleNamespace(
+            compiled=SimpleNamespace(spec=binding.agent_spec),
+            binding_contract=binding, captures=None,
+        ),
+        persistence=SimpleNamespace(
+            task=SimpleNamespace(admissions=None), execution=SimpleNamespace(budgets=None),
+        ), materializer=None, task_admissions=None, budgets=None,
+        node_executor=lambda: None, execution_ports={},
     )
+    runner._start_execution = start_execution
+    runner._get_execution = get_execution
+    runner._acquire_execution_hold = acquire_hold
     node = TaskNode(
         "node",
         input=dict(AgentTaskInput("prompt", planning=False, thinking=False)),

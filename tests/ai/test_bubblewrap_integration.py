@@ -21,9 +21,9 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
+from linktools.ai.capability.mcp import MCPToolset as CapabilityMCPToolset
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._mcp import (
-    _MCPDiscoveryToolset,
     _MCPModelToolset,
     _model_tool_name,
 )
@@ -258,7 +258,7 @@ def _runtime_mcp_client(
     server_id = "security/audit"
     from linktools.ai.spec import MCPServerSpec
 
-    discovery = _MCPDiscoveryToolset(
+    discovery = CapabilityMCPToolset(
         transport,
         server=MCPServerSpec(server_id, "python", init_timeout=init_timeout),
     )
