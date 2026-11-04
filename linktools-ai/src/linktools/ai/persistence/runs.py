@@ -70,7 +70,7 @@ from ._step_archive import (
     _sync_projection,
 )
 from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent, AgentRunStore
-from .state import StateGroupTransaction, StateTransaction
+from .state import GroupRecordReader, StateGroupTransaction, StateTransaction
 
 if TYPE_CHECKING:
     from .capabilities import RuntimeCapabilityWrites
@@ -506,6 +506,14 @@ class RuntimeAgentRunStore(AgentRunStore):
                                 interactions=prepared_interactions,
                             )
                     if execution is not None:
+                        stores = (execution.state_store, target_recovery.state_store)
+                        publication_records = {}
+                        if isinstance(execution.state_store.storage_group, GroupRecordReader):
+                            publication_records = await target_recovery.checkpoint_publication_record_keys(
+                                target_agent_run, prepared_checkpoint,
+                            )
+                            stores = tuple(dict.fromkeys((*stores, *publication_records)))
+
                         async def guarded_commit(group: StateGroupTransaction) -> None:
                             nonlocal cancellation_requested
                             try:
@@ -518,10 +526,12 @@ class RuntimeAgentRunStore(AgentRunStore):
                                 if error.code is ErrorCode.EXECUTION_CANCELLED:
                                     cancellation_requested = True
                                 raise
+                            if publication_records and isinstance(group, GroupRecordReader):
+                                await group.get_records(publication_records)
                             await commit(group.transaction(target_recovery.state_store))
 
                         await execution.state_store.storage_group.mutate(
-                            (execution.state_store, target_recovery.state_store), guarded_commit,
+                            stores, guarded_commit,
                         )
                     else:
                         await target_recovery.state_store.mutate(commit)
