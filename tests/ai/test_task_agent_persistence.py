@@ -12,7 +12,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCall
 from pydantic_ai.models.function import AgentInfo
 
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import TaskStatus
+from linktools.ai.core import ExecutionStatus, TaskStatus
 from linktools.ai.capability import TraceCapability
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
@@ -116,14 +116,14 @@ async def test_delegated_guarantees_follow_frozen_parent_after_defaults_change(
     tmp_path, monkeypatch: pytest.MonkeyPatch, restart: bool, trace: bool,
 ) -> None:
     entered = {prompt: asyncio.Event() for prompt in ("root", "child", "grandchild")}
-    release = asyncio.Event()
+    release = {prompt: asyncio.Event() for prompt in entered}
 
     async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         del info
         prompt = next(part.content for message in reversed(messages) for part in message.parts
                       if isinstance(part, UserPromptPart))
         entered[prompt].set()
-        await release.wait()
+        await release[prompt].wait()
         return ModelResponse(parts=[TextPart(prompt)])
 
     def capabilities(with_guarantees: bool) -> RuntimeFeatures[None]:
@@ -156,13 +156,17 @@ async def test_delegated_guarantees_follow_frozen_parent_after_defaults_change(
                     record = await owner._state.execution.executions.get(execution_id, tenant_id=owner.tenant_id)
                     assert record is not None
                     assert (record.restart_checkpoints, record.durable_trace) == (restart, trace)
-                release.set()
-                for execution_id in (child_id, grandchild_id):
+                # Private admission does not make a parent await its child.
+                # Finish leaves first so a parent cannot stop a live child turn.
+                for prompt, execution_id in (("grandchild", grandchild_id), ("child", child_id),
+                                             ("root", root.execution_id)):
+                    release[prompt].set()
                     execution = await owner.executions.get(execution_id)
-                    await execution.wait(timeout_seconds=10)
-                await root.wait(timeout_seconds=10)
+                    result = (await execution.wait(timeout_seconds=10)).result
+                    assert result.status is ExecutionStatus.SUCCEEDED
         finally:
-            release.set()
+            for event in release.values():
+                event.set()
     reopened_storage = PersistenceStorage.sqlite(database)
     async with Persistence.open('inheritance', storage=reopened_storage) as persistence_155, Runtime.attach(persistence=persistence_155, features=model_features(models, capabilities(False))) as reopened:
         for execution_id in identities:
