@@ -2131,7 +2131,7 @@ class _SqlTransaction:
     def _record_identity_conditions(
         self, table: "Table", values: Mapping[str, object],
     ) -> tuple["ColumnElement[bool]", ...]:
-        from sqlalchemy import cast
+        from sqlalchemy import cast, type_coerce
         from sqlalchemy.dialects.mysql import BINARY
 
         conditions = []
@@ -2140,7 +2140,8 @@ class _SqlTransaction:
             # MySQL text equality may ignore case or trailing spaces even when
             # the in-memory identity contract distinguishes those values.
             if self._context.dialect.name == "mysql" and name in ("kind", "sort_key"):
-                column = cast(column, BINARY)
+                # SQL compares bytes; Python parameters remain text, not BLOBs.
+                column = type_coerce(cast(column, BINARY), column.type)
             conditions.append(column.is_not_distinct_from(values[name]))
         return tuple(conditions)
 

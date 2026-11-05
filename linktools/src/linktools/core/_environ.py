@@ -381,12 +381,12 @@ class BaseEnviron(abc.ABC):
 
     @cached_property(lock=True)
     def logging(self) -> "LoggingManager":
-        """The :class:`LoggingManager` owning redaction, context and levels.
+        """The :class:`LoggingManager` owning context, handlers and levels.
 
         Returns:
             LoggingManager: The operation result.
 
-        Constructing it is side-effect free; redaction is installed lazily on
+        Constructing it is side-effect free; log context is installed lazily on
         the first ``get_logger``/``bootstrap``/``configure`` call.
         """
         from ._logging import LoggingManager
@@ -394,7 +394,7 @@ class BaseEnviron(abc.ABC):
         return LoggingManager(self)
 
     def get_logger(self, name: "str | None" = None) -> "logging.Logger":
-        """Return a named logger with redaction active.
+        """Return a named logger with the environment's context.
 
         Avoids double-prefixing: if ``name`` already starts with the environment
         name (e.g. ``linktools.ssh``), it is used as-is.

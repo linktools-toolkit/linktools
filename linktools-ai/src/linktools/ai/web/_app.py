@@ -24,7 +24,7 @@ from ..errors import AIError, ErrorCode, ErrorDiagnostics, ObservationError
 from ..model import ModelClientRequest, ModelClientResponse
 from ..observe import MetricAggregation, MetricQuery, Metrics, MetricWindow, RuntimeMetricsStatus
 from ..history import History
-from ..execution import CreateSessionRequest, ExecutionStreamEvent, ListExecutionRequest, ListSessionRequest, TaskModelProjection, ToolEffectApplied, ToolEffectFailed, ToolEffectNotApplied
+from ..execution import CreateSessionRequest, ListExecutionRequest, ListSessionRequest, TaskModelProjection, ToolEffectApplied, ToolEffectFailed, ToolEffectNotApplied
 from ..runtime import Runtime
 
 if TYPE_CHECKING:
@@ -47,7 +47,7 @@ _HEADERS = {
 }
 
 
-def _wire(value: object, *, diagnostic: bool = False) -> object:
+def _wire(value: object) -> object:
     if isinstance(value, RuntimeMetricsStatus):
         return {
             "recorders": _wire(value.recorders),
@@ -64,7 +64,7 @@ def _wire(value: object, *, diagnostic: bool = False) -> object:
             "failure_codes": _wire(value.failure_codes),
         }
     if isinstance(value, ErrorDiagnostics):
-        return _wire(value.to_payload(), diagnostic=True)
+        return _wire(value.to_payload())
     if isinstance(value, (ModelClientRequest, ModelClientResponse)):
         result = {field.name: _wire(getattr(value, field.name)) for field in fields(value) if field.name != "body"}
         result["body"] = None if value.body is None else base64.b64encode(value.body).decode("ascii")
@@ -74,22 +74,15 @@ def _wire(value: object, *, diagnostic: bool = False) -> object:
         return result
     if is_dataclass(value) and not isinstance(value, type):
         result = {field.name: _wire(getattr(value, field.name)) for field in fields(value)}
-        if isinstance(value, ExecutionStreamEvent):
-            payload = result["payload"]
-            if isinstance(payload, dict) and isinstance(payload.get("error_diagnostics"), dict):
-                # Historical events are plain JSON, not newly constructed diagnostics.
-                payload["error_diagnostics"] = _wire(payload["error_diagnostics"], diagnostic=True)
         return result
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, Mapping):
-        return {str(key): _wire(item, diagnostic=diagnostic) for key, item in value.items()}
+        return {str(key): _wire(item) for key, item in value.items()}
     if isinstance(value, (tuple, list)):
-        return [_wire(item, diagnostic=diagnostic) for item in value]
-    if diagnostic and isinstance(value, str):
-        return environ.logging.redact(value)
+        return [_wire(item) for item in value]
     return value
 
 

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from linktools.ai.persistence import Persistence
-"""Complete, secret-safe failure capture and durable public reads."""
+"""Complete, original-text failure capture and durable public reads."""
 
 import json
 import sys
@@ -13,8 +13,6 @@ import pytest
 from httpx2 import RemoteProtocolError
 from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.models.function import FunctionModel
-from linktools.core import environ
-from linktools.core._logging import LoggingManager
 
 from linktools.ai.core import ExecutionEventType, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode, ErrorDiagnostics
@@ -30,7 +28,7 @@ from ._runtime_test_helpers import model_features
 def _raised_failure() -> BaseException:
     try:
         try:
-            raise RemoteProtocolError("incomplete chunked read " + "x" * 5000 + " END_TRANSPORT")
+            raise RemoteProtocolError("incomplete chunked read " + "x" * 5000 + " api_key=synthetic-provider-token END_TRANSPORT")
         except RemoteProtocolError as cause:
             raise ModelAPIError("test-model", "model connection failed") from cause
     except ModelAPIError as error:
@@ -86,7 +84,7 @@ def test_group_traceback_does_not_apply_display_width_or_depth_limits() -> None:
     assert "max_group_depth" not in diagnostics.traceback
 
 
-def test_diagnostics_filter_constructor_and_collected_nested_secrets() -> None:
+def test_diagnostics_preserve_constructor_and_collected_original_text() -> None:
     body = {
         "headers": [["Authorization", "Bearer raw-header-secret"], {"name": "Cookie", "value": "session=raw-cookie-secret"}],
         "url": "https://user:raw-url-secret@host/path?api%5Fkey=raw-query-secret&status=502",
@@ -96,22 +94,22 @@ def test_diagnostics_filter_constructor_and_collected_nested_secrets() -> None:
     diagnostics = ErrorDiagnostics.from_exception(RuntimeError(json.dumps(body)))
     rendered = repr(diagnostics)
     for secret in ["raw-header-secret", "raw-cookie-secret", "raw-url-secret", "raw-query-secret", "raw-json-secret"]:
-        assert secret not in rendered
+        assert secret in rendered
     assert "END_DIAGNOSTIC" in diagnostics.exception_chain[0]["exception_message"]
     assert "END_DIAGNOSTIC" in diagnostics.traceback
     direct = ErrorDiagnostics("Failure", "api_key=manual-secret", "a" * 64, traceback="Authorization: Bearer stack-secret")
-    assert "manual-secret" not in repr(direct)
-    assert "stack-secret" not in repr(direct)
+    assert "manual-secret" in repr(direct)
+    assert "stack-secret" in repr(direct)
+    assert decode_domain(encode_domain(direct), ErrorDiagnostics) == direct
 
 
-def test_diagnostic_summary_redacts_secrets_before_display_truncation(monkeypatch: pytest.MonkeyPatch) -> None:
-    manager = LoggingManager()
-    secret = "sensitive-marker-1234567890"
-    manager.register_secret(secret)
-    monkeypatch.setattr(environ.logging, "redact", manager.redact)
-    diagnostics = ErrorDiagnostics.from_exception(RuntimeError("x" * 2040 + secret))
-    assert diagnostics.exception_message == "x" * 2040 + "***"
-    assert "sensitive" not in repr(diagnostics)
+def test_diagnostic_summary_bounds_original_text_without_truncating_chain() -> None:
+    message = "x" * 2040 + "synthetic-marker-1234567890"
+    diagnostics = ErrorDiagnostics.from_exception(RuntimeError(message))
+    assert diagnostics.exception_message == message[:2048]
+    assert diagnostics.exception_chain[0]["exception_message"] == message
+    assert message in diagnostics.traceback
+    assert decode_domain(encode_domain(diagnostics), ErrorDiagnostics) == diagnostics
 
 
 def test_optional_diagnostics_round_trip_and_prior_records_remain_unknown() -> None:
@@ -161,6 +159,7 @@ async def test_actual_failure_full_diagnostics_survive_close_and_public_reopen(t
         diagnostics = result.error_diagnostics
         assert diagnostics.exception_chain[-1]["exception_type"] == "RemoteProtocolError"
         assert "END_TRANSPORT" in diagnostics.traceback
+        assert "api_key=synthetic-provider-token" in diagnostics.traceback
         events = await runtime.events.list(result.execution_id, principal=runtime.default_principal, limit=100)
         terminal = next(event for event in events.items if event.event_type == ExecutionEventType.EXECUTION_FAILED)
         assert terminal.payload["error_diagnostics"]["traceback"] == diagnostics.traceback

@@ -157,15 +157,31 @@ async def test_known_record_writes_execute_no_select_and_compile_for_mysql(
                    and "storage_revision" in sql and "RETURNING" not in sql for sql in mysql_updates[1:])
 
 
-async def test_mysql_identity_conditions_are_byte_exact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("bound", (False, True), ids=("literal", "executemany-bind"))
+async def test_mysql_identity_conditions_compare_bytes_and_bind_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bound: bool,
+) -> None:
+    from sqlalchemy import bindparam
+    from sqlalchemy.dialects.mysql.asyncmy import dialect
+
+    compiler_dialect = dialect(dbapi=dialect.import_dbapi())
+    values = {"scope_digest": None, "parent_digest": None, "kind": "probe 測🙂 ", "sort_key": "0001 測🙂 "}
     async with _database(tmp_path / "compile.db") as (_, store, _):
         async def inspect(tx: StateTransaction) -> None:
             with monkeypatch.context() as patch:
                 patch.setattr(SQLiteDialect, "name", property(lambda self: "mysql"))
                 conditions = tx._record_identity_conditions(tx._table("ai_state_records"), {
-                    "scope_digest": None, "parent_digest": None, "kind": "probe ", "sort_key": "0001 ",
+                    name: bindparam(name) if bound else value for name, value in values.items()
                 })
-                sql = " AND ".join(str(condition.compile(dialect=mysql.dialect())) for condition in conditions)
+                compiled = [condition.compile(dialect=compiler_dialect) for condition in conditions]
+                sql = " AND ".join(str(condition) for condition in compiled)
                 assert "CAST(ai_state_records.kind AS BINARY) <=>" in sql
                 assert "CAST(ai_state_records.sort_key AS BINARY) <=>" in sql
+                processed = []
+                for condition in compiled:
+                    parameters = condition.construct_params(values if bound else None)
+                    for name, value in parameters.items():
+                        processor = condition._bind_processors.get(name)
+                        processed.append(processor(value) if processor is not None else value)
+                assert [value for value in processed if value is not None] == [values["kind"], values["sort_key"]]
         await store.mutate(inspect)

@@ -155,7 +155,7 @@ of HTTP body capture. It belongs to that exact dispatch, not another request or
 the execution as a whole. `started_at` is UTC; `*_ns` observations are monotonic
 elapsed nanoseconds from that attempt's start. The mapping can include header,
 first/last chunk and close timings, received byte/chunk counts, HTTP version and a
-sanitized protocol request ID, transport read/close errors, and separate `sdk_*`
+bounded, syntax-validated protocol request ID, transport read/close errors, and separate `sdk_*`
 stream entry, exhaustion, cancellation and cleanup observations. Error observations
 contain qualified exception types, not exception text or headers. Missing keys
 mean unobserved; buffered responses do not invent stream chunk timings. See
@@ -187,12 +187,13 @@ Provider failures for recoverable reference inputs also omit arbitrary exception
 messages, notes and source lines, since an SDK or server can echo the temporary
 file body. Their optional `content_omission_reason` identifies that policy.
 Exception types, relationships and frame locations remain available without locals.
-This does not weaken ordinary credential-redacted diagnostics or fabricate absent
-content for older records.
+Ordinary diagnostics retain original exception text; omission does not fabricate
+absent content for older records.
 
-Collection uses the shared credential redactor before persistence, including the
-bounded summary. It does not retain arbitrary exception attributes, connection
-headers or local variables. Existing access, retention and deletion rules apply;
+Collection preserves original exception text before persistence, including the
+bounded summary. Text already present in exceptions may include credentials. It
+does not separately collect arbitrary exception attributes, connection headers or
+local variables. Existing access, retention and deletion rules apply;
 complete diagnostics are not automatically safe for publication outside that scope.
 Terminal failure events, retained results and reopened history use the same
 diagnostic projection. Optional fields absent from older records remain absent or

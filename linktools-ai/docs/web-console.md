@@ -14,8 +14,8 @@ ai-web --project /path/to/project --model your-model
 python -m linktools ai web --project /path/to/project --model your-model
 ```
 
-The execution stack requires Python >= 3.11, `pydantic-ai-slim>=2.61.0,<3.0.0`
-and `pydantic-ai-harness>=0.61.0`. Harness selects its matching SDK version.
+The execution stack requires Python >= 3.11, `pydantic-ai-slim>=2.66.0`
+and `pydantic-ai-harness>=0.66.0`. Harness selects its matching SDK version.
 After updating the checkout, rerun the install command in the same virtual environment as
 `ai-web`; an existing editable install does not refresh dependency metadata
 until it is installed again. `--help` only exercises lightweight CLI discovery.
@@ -238,7 +238,8 @@ The former viewers had no filter or export flags. Their optional session or
 execution IDs, required trace execution ID, and optional metric name map to the
 controls below. `ai-run --json` remains available, alongside final-result JSON
 download in the execution inspector. Full public records can be expanded in
-place; diagnostic exception messages remain redacted to protect credentials.
+place; diagnostic exception messages retain their original text, including any
+credentials present in the exception. Restrict access and retention accordingly.
 
 | Command capability | Console surface | Runtime source |
 | --- | --- | --- |
@@ -457,7 +458,7 @@ opaque IDs containing slashes, Unicode, query delimiters or dot segments keep
 their exact Runtime meaning.
 
 The Web regression tests cover the cross-site-fetch and mutation-header boundaries, remote-peer rejection,
-secret-safe diagnostics, real session/execution idempotency, history cursor
+original-text diagnostics, real session/execution idempotency, history cursor
 paging and content opt-in, trace/model/result/metric parity, session revision
 conflicts, fork/close, read-only reopen without models, SSE cursor replay and
 observer disconnect without cancellation. Cross-process HTTP tests also cover

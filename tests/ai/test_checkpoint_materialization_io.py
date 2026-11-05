@@ -17,7 +17,7 @@ from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence._sql import _SqlTransaction
 from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
-from linktools.ai.persistence.state import FactQuery, StoredFact
+from linktools.ai.persistence.state import FactQuery, StoredFact, StoredRecord
 from .test_checkpoint_metadata_snapshot_io import _trace_archive
 
 
@@ -59,7 +59,7 @@ async def test_checkpoint_materialization_skips_fresh_fact_read_and_verifies_rep
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("_server", ("postgresql",), indirect=True)
-async def test_checkpoint_owner_fences_commit_after_absent_fact_read(
+async def test_checkpoint_publication_fences_concurrent_execution_writers(
     _server: tuple[str, list[str]], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, command = _server
@@ -75,9 +75,12 @@ async def test_checkpoint_owner_fences_commit_after_absent_fact_read(
     checkpoint = AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0)
     await archive.register_agent_run(run, execution_id="execution")
     observed = asyncio.Event()
+    competing = asyncio.Event()
     release = asyncio.Event()
     original = _SqlTransaction.list_facts
+    original_guard = _SqlTransaction.guard_record
     first: asyncio.Task[None] | None = None
+    second: asyncio.Task[None] | None = None
 
     async def pause_after_absent_fact(
         transaction: _SqlTransaction, query: FactQuery,
@@ -89,14 +92,28 @@ async def test_checkpoint_owner_fences_commit_after_absent_fact_read(
             await release.wait()
         return result
 
+    async def observe_competing_guard(
+        transaction: _SqlTransaction, key: bytes, *, expected_storage_revision: int,
+    ) -> StoredRecord | None:
+        if asyncio.current_task() is second:
+            competing.set()
+        return await original_guard(
+            transaction, key, expected_storage_revision=expected_storage_revision,
+        )
+
     monkeypatch.setattr(_SqlTransaction, "list_facts", pause_after_absent_fact)
+    monkeypatch.setattr(_SqlTransaction, "guard_record", observe_competing_guard)
     try:
         first = asyncio.create_task(archive.materialize_checkpoint(run, checkpoint, execution_id="execution"))
         await asyncio.wait_for(observed.wait(), 5)
-        await archive.materialize_checkpoint(run, checkpoint, execution_id="execution")
+        second = asyncio.create_task(archive.materialize_checkpoint(run, checkpoint, execution_id="execution"))
+        await asyncio.wait_for(competing.wait(), 5)
+        # The first writer already holds the execution CAS row lock. Let it
+        # commit before awaiting the competing writer's stale-revision conflict.
         release.set()
+        await asyncio.wait_for(first, 5)
         with pytest.raises(AIError) as raised:
-            await asyncio.wait_for(first, 5)
+            await asyncio.wait_for(second, 5)
         assert raised.value.code is ErrorCode.STORAGE_CONFLICT
         await archive.materialize_checkpoint(run, checkpoint, execution_id="execution")
         assert await archive.checkpoint_count(agent_run_id="run") == 1
@@ -104,9 +121,11 @@ async def test_checkpoint_owner_fences_commit_after_absent_fact_read(
         assert latest is not None and latest.messages == [] and latest.step_index == 1
     finally:
         release.set()
-        if first is not None and not first.done():
-            first.cancel()
-            await asyncio.gather(first, return_exceptions=True)
+        tasks = [task for task in (first, second) if task is not None]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await state.close()
         await engine.dispose()
 

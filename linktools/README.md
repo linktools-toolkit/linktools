@@ -110,6 +110,8 @@ logger = environ.get_logger(__name__)
 environ.clean_temp_files(days=7)
 ```
 
+日志保留调用方提供的原始消息、格式参数和异常内容，不自动替换其中的文本。`LoggingManager` 负责日志上下文、级别和输出目标；需要限制内容时由调用方在写入前决定。
+
 ### config — 配置管理
 
 多层配置系统，优先级：环境变量 > 缓存 > 私有配置 > 全局配置 > 默认值：

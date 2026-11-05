@@ -8,7 +8,6 @@ from datetime import datetime
 import httpx2
 import pytest
 
-from linktools.core import environ
 from linktools.ai.model import ModelClientRequest, ModelClientRequestRecorder
 from linktools.ai.model._http import capture_request, capture_response
 
@@ -106,10 +105,8 @@ async def test_consumer_injected_error_is_not_a_transport_read_failure(consumer_
 ])
 @pytest.mark.parametrize("request_id", ["req_123-abc", "bad value", "x" * 129, "known-private-secret"])
 async def test_request_id_is_protocol_scoped_and_bounded_without_buffered_chunk_facts(
-    monkeypatch: pytest.MonkeyPatch, path: str, header: str, request_id: str,
+    path: str, header: str, request_id: str,
 ) -> None:
-    redact = environ.logging.redact
-    monkeypatch.setattr(environ.logging, "redact", lambda text: redact(text).replace("known-private-secret", "***"))
     async with httpx2.AsyncClient(
         transport=httpx2.MockTransport(lambda request: httpx2.Response(
             200, json={"private": "unrecorded"}, headers={header: request_id, "x-secret": "not-retained"},
@@ -120,7 +117,7 @@ async def test_request_id_is_protocol_scoped_and_bounded_without_buffered_chunk_
         with ModelClientRequestRecorder() as recorder:
             await client.post(f"https://model.invalid/{path}", json={"input": "hello"})
     diagnostics = recorder.requests[0].diagnostics
-    assert diagnostics.get("request_id") == (request_id if request_id == "req_123-abc" else None)
+    assert diagnostics.get("request_id") == (request_id if request_id in {"req_123-abc", "known-private-secret"} else None)
     assert diagnostics["http_version"] == "HTTP/2"
     assert "first_chunk_ns" not in diagnostics and "received_bytes" not in diagnostics
     assert "protocol_terminal" not in diagnostics and "not-retained" not in str(dict(diagnostics))

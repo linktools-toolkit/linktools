@@ -737,7 +737,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 "finished_at": None if attempt.finished_at is None else attempt.finished_at.isoformat(),
                 "duration_ns": attempt.duration_ns,
                 "error_code": None if attempt.error is None else _model_error_code(attempt.error),
-                "error_type": None if attempt.error is None else environ.logging.redact(
+                "error_type": None if attempt.error is None else (
                     f"{type(attempt.error).__module__}.{type(attempt.error).__qualname__}"),
                 "usage": _event_usage(None, usage=attempt.usage),
             }

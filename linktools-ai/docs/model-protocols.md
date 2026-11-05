@@ -1,7 +1,7 @@
 # Model protocols and readable traces
 
-Use Python >= 3.11 with `pydantic-ai-slim>=2.61.0,<3.0.0` and
-`pydantic-ai-harness>=0.61.0`; Harness requires its matching SDK version.
+Use Python >= 3.11 with `pydantic-ai-slim>=2.66.0` and
+`pydantic-ai-harness>=0.66.0`; Harness requires its matching SDK version.
 These minimum versions provide the native Thinking semantics used here, including
 `"max"`; no LinkTools provider capability table substitutes for SDK behavior.
 The `evaluation` extra uses the SDK's `evals` extra to select the matching evaluation package.
@@ -314,8 +314,9 @@ do not assume an arbitrary custom binding returning a bare or wrapped SDK
 Fallback attempts remain distinct from logical model requests and physical HTTP
 `client_requests`. When the SDK exposes failed-attempt facts, Runtime retains their
 order, available timing, diagnostics and usage through the existing model-history
-and interaction projection, subject to the existing redaction and content-omission
-policy. If all candidates fail, available facts are also exposed through the
+and interaction projection, subject to the existing content-omission policy.
+Retained diagnostic text is not automatically redacted. If all candidates fail,
+available facts are also exposed through the
 execution result's `safe_error_details["failed_attempts"]`. Missing facts do not
 acquire synthetic attempts, timestamps or zero-valued usage. Reported attempt usage is an
 observed subtotal only: missing usage remains unknown, so even a recorded subtotal

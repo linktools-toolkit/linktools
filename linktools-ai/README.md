@@ -1705,7 +1705,7 @@ result.safe_error_details
 result.error_diagnostics
 ```
 
-`error_code` remains the stable machine-readable classification used by Runtime control flow. `safe_error_details` remains the redacted/safe mapping for ordinary application handling. A failed execution may additionally expose `error_diagnostics` with:
+`error_code` remains the stable machine-readable classification used by Runtime control flow. `safe_error_details` remains the stable, explicitly selected mapping for ordinary application handling; it is not an automatically filtered copy of exception text. A failed execution may additionally expose `error_diagnostics` with:
 
 - `exception_type`: original exception class name, at most 256 Unicode code points;
 - `exception_message`: `str(original_exception)`, at most 2048 Unicode code points;
@@ -1743,10 +1743,10 @@ for example `linktools.ai.asset`, `linktools.ai.model`, `linktools.ai.spec`,
 Other package contracts include `AgentSpecAdapter`, `SkillSpecAdapter`, `MCPServerSpecAdapter`, `AgentDeclarationLoader`,
 MCP selector helpers, `WorkspaceToolDeclaration`, and the
 optional stdio sandbox protocols. `ErrorDiagnostics` is available from
-`linktools.ai.errors`; its `to_payload()` includes collected sanitized exception
-chains and stack traces without display truncation. See
+`linktools.ai.errors`; its `to_payload()` includes collected original exception
+chains and stack traces without display truncation or automatic redaction. See
 [complete failure diagnostics](docs/runtime-history.md#read-complete-failure-diagnostics)
-for authoritative reads, unknown historical fields and credential filtering.
+for authoritative reads, unknown historical fields and content-omission policies.
 
 Private modules prefixed with `_` are implementation details. Downstream applications should not import Runtime execution infrastructure, state repository internals, or private compiler helpers directly.
 

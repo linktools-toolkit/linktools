@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Literal, TypeAlias
 
-from linktools.core import environ
 from linktools.errors import Error
 
 if sys.version_info < (3, 11):
@@ -249,7 +248,8 @@ class ErrorDiagnostics:
     The original three fields remain the bounded summary. ``exception_chain``
     retains full messages along the visible cause/context and group graph,
     outermost first; repeated objects reference their first path instead of
-    duplicating content. ``traceback`` also includes exception notes.
+    duplicating content. ``traceback`` also includes exception notes. Original
+    text is not automatically redacted and may contain sensitive content.
     Missing optional values mean they were not collected, not an empty failure.
     With ``content_omission_reason``, messages and notes are never inspected;
     the chain retains exception types, relationships and group paths while the
@@ -282,7 +282,6 @@ class ErrorDiagnostics:
         if self.content_omission_reason is not None:
             if not isinstance(self.content_omission_reason, str) or not self.content_omission_reason.strip():
                 raise ValueError("diagnostic content omission reason must be a nonempty string or null")
-            object.__setattr__(self, "content_omission_reason", environ.logging.redact(self.content_omission_reason))
         if self.exception_chain is not None:
             if not isinstance(self.exception_chain, tuple):
                 raise TypeError("diagnostic exception chain must be a tuple or null")
@@ -295,14 +294,8 @@ class ErrorDiagnostics:
                     or not all(isinstance(value, str) for value in cause.values())
                 ):
                     raise ValueError("diagnostic exception chain entry is invalid")
-                chain.append({
-                    name: environ.logging.redact(value) for name, value in cause.items()
-                })
+                chain.append(dict(cause))
             object.__setattr__(self, "exception_chain", tuple(chain))
-        object.__setattr__(self, "exception_type", environ.logging.redact(self.exception_type))
-        object.__setattr__(self, "exception_message", environ.logging.redact(self.exception_message))
-        if self.traceback is not None:
-            object.__setattr__(self, "traceback", environ.logging.redact(self.traceback))
 
     def to_payload(self) -> "dict[str, _SafeJsonValue]":
         """Return all collected diagnostics as JSON, without display limits."""
@@ -332,7 +325,6 @@ class ErrorDiagnostics:
         if content_omission_reason is not None:
             if not isinstance(content_omission_reason, str) or not content_omission_reason.strip():
                 raise ValueError("diagnostic content omission reason must be a nonempty string or null")
-            content_omission_reason = environ.logging.redact(content_omission_reason)
         omitted = f"[content omitted: {content_omission_reason}]"
         chain: list[Mapping[str, str]] = []
         stack: list[str] = (
@@ -411,17 +403,16 @@ class ErrorDiagnostics:
                 pending.append(("context" if path == "root" else f"{path}.context", "context", current.__context__))
         exception_type = type(error).__name__
         exception_message = chain[0]["exception_message"]
-        stack_text = environ.logging.redact("".join(stack))
+        stack_text = "".join(stack)
         digest_fields = {
             "exception_type": exception_type,
             "exception_message": exception_message,
         }
         if content_omission_reason is not None:
-            digest_fields["exception_type"] = environ.logging.redact(exception_type)
             digest_fields["traceback"] = stack_text
         return cls(
-            environ.logging.redact(exception_type)[:_DIAGNOSTIC_EXCEPTION_TYPE_MAX_LENGTH],
-            environ.logging.redact(exception_message)[:_DIAGNOSTIC_EXCEPTION_MESSAGE_MAX_LENGTH],
+            exception_type[:_DIAGNOSTIC_EXCEPTION_TYPE_MAX_LENGTH],
+            exception_message[:_DIAGNOSTIC_EXCEPTION_MESSAGE_MAX_LENGTH],
             _cause_digest(digest_fields),
             exception_chain=tuple(chain),
             traceback=stack_text,

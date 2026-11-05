@@ -1,16 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""`ct-cntr config set/get/list` must never default-print a
-``ConfigField(secret=True)`` value, and must not rely on the field's NAME
-happening to match the logger's own key-pattern heuristic to do so.
-
-Regression: `on_command_set`/`on_command_get` printed/logged the resolved
-value directly with no field-aware redaction at all -- only the logger's
-automatic pattern-based masking (triggered by names containing e.g.
-PASSWORD/SECRET/TOKEN) stood between a secret field and the terminal. A
-field explicitly marked ``secret=True`` but with an innocuous name (e.g.
-CREDENTIAL) was never masked by `set`/`get` at all.
-"""
+"""Config set/get/list apply the explicit ConfigField.secret display policy."""
 import linktools.cntr.commands._shared as cntr_shared
 from linktools.cntr.commands.config import ConfigCommand
 from linktools.core import ConfigField

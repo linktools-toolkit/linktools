@@ -101,7 +101,7 @@ def test_chain_beyond_recursion_limit_keeps_the_last_cause() -> None:
 
 
 @pytest.mark.skipif(sys.version_info < (3, 11), reason="exception notes require Python 3.11")
-def test_large_message_notes_and_nested_body_are_captured_once_and_redacted() -> None:
+def test_large_message_notes_and_nested_body_are_captured_once_without_rewriting() -> None:
     class NamedFailure(RuntimeError):
         calls = 0
 
@@ -119,7 +119,7 @@ def test_large_message_notes_and_nested_body_are_captured_once_and_redacted() ->
     assert diagnostic.traceback.count("NOTE_MARKER_") == 1
     assert "n" * 100000 in diagnostic.traceback
     assert "z" * 100000 in diagnostic.traceback
-    assert "synthetic-secret" not in json.dumps(diagnostic.to_payload())
+    assert "synthetic-secret" in json.dumps(diagnostic.to_payload())
     assert "NamedFailure" in diagnostic.traceback
 
 

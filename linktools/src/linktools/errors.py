@@ -267,8 +267,7 @@ def missing_optional_class(name: str, extra: str, exc: BaseException) -> type:
 class DownloadHttpError(DownloadError):
     """A download failed with a specific HTTP status code.
 
-    ``code`` carries the status; the message argument must already be
-    secret-safe (URL redaction is applied by the download layer).
+    ``code`` carries the status; the supplied diagnostic text is preserved.
     """
 
     def __init__(self, code: int, e: object) -> None:
