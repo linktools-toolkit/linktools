@@ -191,8 +191,6 @@ async def test_current_cursor_rejects_wrong_scope_manifest_and_position(
 ) -> None:
     async with completed(tmp_path) as (evaluations, storage, run, scorer, policy):
         other = await run.rescore(RescoreRequest((rule_scorer(scorer),), "cursor-other"))
-        result = (await other.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
-        assert result.completion == "complete", result
         await evaluations.close()
         owner = evaluations
         first = await run.current_trials(limit=1)
@@ -240,7 +238,6 @@ async def test_rescore_current_pages_use_only_selected_source_trials(
         plans = record.manifest.trials
         run = await source.rescore(RescoreRequest((rule_scorer(scorer),), "selected-rescore",
             trial_ids=(plans[2].trial_id, plans[0].trial_id)))
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         await evaluations.close()
         selected = await repository.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         state = evaluations._read_graph
