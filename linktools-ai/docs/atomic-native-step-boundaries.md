@@ -6,9 +6,10 @@ continue to use the original `StepPersistence`. The adaptation requires a
 Runtime-bound store and does not maintain a second standalone tool lifecycle.
 
 The original Agent, RunRecord, StepEvent, ContinuableSnapshot, ModelMessage and
-continuation algorithm remain in use. Harness 0.66.0 and PydanticAI 2.66.0 are
-pinned. The module reproduces the original MIT attribution. Upgrades require
-review of the native node lifecycle, list rebinding and continuation behavior.
+continuation algorithm remain in use. The minimum supported versions are Harness
+0.66.0 and PydanticAI 2.66.0. The module reproduces the original MIT attribution.
+Upgrades require review of the native node lifecycle, list rebinding and
+continuation behavior.
 No durable-journal compatibility with another capability implementation is
 promised.
 
