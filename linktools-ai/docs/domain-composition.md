@@ -6,6 +6,10 @@ engine, registry, adapter, or application lifecycle. Every model binding, task,
 score function, graph input, shared resource, result read, and close is visible.
 The temporary SQLite stores are for the example, not a production migration.
 
+For real capability tool calls, captured Asset resources, native wrappers,
+Memory reuse after reopen and Session/Planning composition, see the complete
+[capability program and ownership matrix](capability-ownership.md).
+
 Run it after installing the package through the repository entry point:
 
 ```sh
@@ -127,6 +131,8 @@ API is needed to preserve advanced producer implementations.
 - Memory and Planning still have domain-specific projection/restore logic in
   Runtime. Preserve Memory's admitted scope and keep model plan tools, execution
   plan mode, and Task scheduling as three different concepts.
-- Full capability declaration/capture/restore and native extension examples
-  remain separate work. This document deliberately does not prescribe new
-  public types or silently present unimplemented candidates as usable APIs.
+- The capability program covers resource capture and admitted Memory reuse;
+  crash recovery, custom persistent callbacks and the remaining extension
+  paths still require their own evidence. The [complete current Task port
+  surface](capability-ownership.md#task-to-agent-complete-current-integration-surface)
+  records the contracts that must be preserved before its public design changes.

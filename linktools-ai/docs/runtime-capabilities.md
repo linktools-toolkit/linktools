@@ -1,5 +1,10 @@
 # Runtime-wide capabilities
 
+The [complete capability composition program](capability-ownership.md) uses
+offline models to invoke real tools, inspect captured Skill resources, reopen
+admitted Memory, and compose native hooks, Planning, Session and Trace. It also
+maps declaration, execution, persistence and resource ownership.
+
 `RuntimeFeatures.capability(capability)` registers a native
 Pydantic AI `AbstractCapability[AgentContext[AppT]]` as host policy. The same
 `features=group` argument to `Runtime.open` supplies both Agent-selected
