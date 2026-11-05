@@ -12,7 +12,8 @@ import socket
 from collections.abc import AsyncIterator, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
-from linktools.ai.capability import CheckpointCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from typing import Any
 
 import pytest
@@ -610,7 +611,7 @@ async def test_lost_remote_result_requires_confirmation_and_recovery_does_not_re
         state_path = tmp_path / "runtime"
         storage = PersistenceStorage.from_root(state_path, exclusive_writer=True)
         features = _group(_spec(remote))
-        features.capability(CheckpointCapability(), scope="runtime")
+        features.capability(native_checkpoint(), scope="runtime")
         async with Persistence.open('remote-recovery', storage=storage) as persistence_623, Runtime.attach(persistence=persistence_623, features=model_features(_RemoteModels(), features)) as runtime:
             execution = await runtime.agents.get("default").start("echo")
             with pytest.raises(AIError) as raised:
@@ -628,7 +629,7 @@ async def test_lost_remote_result_requires_confirmation_and_recovery_does_not_re
         remote.lose_result = False
         restored = PersistenceStorage.from_root(state_path, exclusive_writer=True)
         restored_features = _group(_spec(remote, headers={"X-Rotated": "true"}))
-        restored_features.capability(CheckpointCapability(), scope="runtime")
+        restored_features.capability(native_checkpoint(), scope="runtime")
         try:
             async with Persistence.open('remote-recovery', storage=restored) as persistence_646, Runtime.attach(persistence=persistence_646, features=model_features(_RemoteModels(), restored_features)) as runtime:
                 execution = await runtime.executions.get(execution_id)
@@ -925,7 +926,7 @@ async def test_cleanup_failure_preserves_confirmed_tool_result_and_idempotent_re
     async with _serve() as remote:
         storage = PersistenceStorage.in_memory()
         features = _group(_spec(remote))
-        features.capability(CheckpointCapability(), scope="runtime")
+        features.capability(native_checkpoint(), scope="runtime")
         async with Persistence.open('remote-cleanup', storage=storage) as persistence_957, Runtime.attach(persistence=persistence_957, features=model_features(_RemoteModels(), features)) as runtime:
             execution = await runtime.agents.get("default").start(
                 "echo",

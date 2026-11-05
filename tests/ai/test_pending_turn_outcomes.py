@@ -9,7 +9,7 @@ import pytest
 
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, IdempotencyStatus, StopReason, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence.contracts import ExecutionCheckpointState
+from linktools.ai.persistence.contracts import ExecutionRecoveryState
 from linktools.ai.persistence._runtime_commands import StateCommands
 
 from .test_pending_turn_commit import _NAMESPACE, _commit, _pending_turn, _snapshot, _turn_state
@@ -62,9 +62,9 @@ async def test_pending_unsuccessful_outcome_and_source_replay(
         assert stored.status is (IdempotencyStatus.FAILED if status is ExecutionStatus.FAILED
                                  else IdempotencyStatus.CANCELLED)
         assert stored.result_digest is None and stored.error_code == result.execution.error_code
-        recovery = await state.storage.checkpoint.checkpoints.get(result.execution.execution_id, tenant_id="tenant")
-        assert recovery.state is ExecutionCheckpointState.COMPLETED
-        assert recovery.agent_run_id == (None if sequence == 0 else agent_run_id(
+        recovery = await state.storage.execution.executions.get(result.execution.execution_id, tenant_id="tenant")
+        assert recovery.recovery_state is ExecutionRecoveryState.COMPLETED
+        assert recovery.recovery.agent_run_id == (None if sequence == 0 else agent_run_id(
             namespace=_NAMESPACE, tenant_id="tenant", execution_id=result.execution.execution_id, agent_run_seq=1,
         ))
         if not sessionless:

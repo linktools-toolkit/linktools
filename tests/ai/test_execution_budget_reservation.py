@@ -18,16 +18,17 @@ from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence.snapshots import SnapshotLimits
 from linktools.ai.persistence.contracts import ExecutionStartReservationResult
-from linktools.ai.persistence.state import RecordQuery
+from linktools.ai.persistence.state import RecordQuery, active_state_transaction
 from linktools.ai.storage import InMemoryObjectStore
 
+from . import _runtime_test_helpers
 from ._runtime_test_helpers import RuntimeUsageModels
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("local_sqlite", "sqlite"))
 @pytest.mark.parametrize("budget", (None, RunBudget(model_requests=2)))
-async def test_cancelled_reservation_snapshot_restores_and_replays(
+async def test_caller_cancelled_reservation_completes_and_snapshot_replays(
     backend: str, budget: RunBudget | None, tmp_path: Path, monkeypatch,
 ) -> None:
     storage = (PersistenceStorage.from_root(tmp_path / "source", exclusive_writer=True) if backend == "local_sqlite"
@@ -35,10 +36,21 @@ async def test_cancelled_reservation_snapshot_restores_and_replays(
     namespace = "cancelled-budget-reservation"
     limits = SnapshotLimits(max_entries=1000, max_bytes=1024 * 1024)
     objects = InMemoryObjectStore("snapshot")
+    requests = 0
+    original_model = _runtime_test_helpers._runtime_usage_model
+
+    async def count_requests(messages, info):
+        nonlocal requests
+        requests += 1
+        return await original_model(messages, info)
+
+    monkeypatch.setattr(_runtime_test_helpers, "_runtime_usage_model", count_requests)
     async with Persistence.open(namespace, storage=storage) as persistence_35, Runtime.attach(persistence=persistence_35, features=model_features(RuntimeUsageModels())) as runtime:
         store = runtime._state.execution.budgets.state_store
-        mutate = store.mutate
+        group = store.storage_group
+        mutate = group.mutate
         committed = asyncio.Event()
+        committed_reservations = []
         release = asyncio.Event()
         reservations = []
         reserve = runtime._state.execution.executions.reserve_start
@@ -47,22 +59,46 @@ async def test_cancelled_reservation_snapshot_restores_and_replays(
             reservations.append(value)
             return await reserve(value)
 
-        async def pause_after_commit(callback):
-            value = await mutate(callback)
-            if isinstance(value, ExecutionStartReservationResult):
+        async def pause_after_commit(stores, callback):
+            outermost = active_state_transaction(store) is None
+            value = await mutate(stores, callback)
+            if outermost and isinstance(value, ExecutionStartReservationResult) and value.created:
+                assert active_state_transaction(store) is None
+                committed_reservations.append(value)
                 committed.set()
                 await release.wait()
             return value
 
         with monkeypatch.context() as patch:
             patch.setattr(runtime._state.execution.executions, "reserve_start", capture_reservation)
-            patch.setattr(store, "mutate", pause_after_commit)
+            patch.setattr(group, "mutate", pause_after_commit)
             start = asyncio.create_task(runtime.agents.get().start(
                 "hello", budget=budget, idempotency_key="cancelled",
             ))
             try:
                 await asyncio.wait_for(committed.wait(), timeout=10)
                 start.cancel()
+
+                reservation = reservations[0]
+                scope = reservation.execution.budget_scope_id
+                if scope is not None:
+                    assert (await runtime._state.execution.budgets.read(scope)).limits == budget
+
+                # The winner is still admitted, with its committed reply paused.
+                # A concurrent idempotency loser must not create an unused scope.
+                loser_id = "losing-execution"
+                replay = await reserve(replace(
+                    reservation,
+                    execution=replace(reservation.execution, execution_id=loser_id,
+                                      root_execution_id=loser_id,
+                                      budget_scope_id=None if budget is None else "execution:" + loser_id),
+                    idempotency=replace(reservation.idempotency, resource_id=loser_id),
+                ))
+                assert not replay.created
+                assert replay.execution == committed_reservations[0].execution
+                assert replay.execution.execution_id == reservation.execution.execution_id
+                scopes = await store.read(lambda transaction: transaction.list_records(RecordQuery(kind="budget_scope")))
+                assert len(scopes) == (0 if budget is None else 1)
                 release.set()
                 with pytest.raises(asyncio.CancelledError):
                     await start
@@ -72,24 +108,10 @@ async def test_cancelled_reservation_snapshot_restores_and_replays(
                     start.cancel()
                     await asyncio.gather(start, return_exceptions=True)
 
-        reservation = reservations[0]
-        scope = reservation.execution.budget_scope_id
-        if scope is not None:
-            assert (await runtime._state.execution.budgets.read(scope)).limits == budget
-
-        # A concurrent idempotency loser must not create its own unused scope.
-        loser_id = "losing-execution"
-        replay = await reserve(replace(
-            reservation,
-            execution=replace(reservation.execution, execution_id=loser_id,
-                              root_execution_id=loser_id,
-                              budget_scope_id=None if budget is None else "execution:" + loser_id),
-            idempotency=replace(reservation.idempotency, resource_id=loser_id),
-        ))
-        assert not replay.created
-        assert replay.execution == reservation.execution
-        scopes = await store.read(lambda transaction: transaction.list_records(RecordQuery(kind="budget_scope")))
-        assert len(scopes) == (0 if budget is None else 1)
+        # Cancelling start only detaches its caller; the admitted owner continues.
+        run = await runtime.executions.get(reservation.execution.execution_id)
+        assert (await asyncio.wait_for(run.wait(), 10)).result.status is ExecutionStatus.SUCCEEDED
+        assert requests == 1
 
     reader = (PersistenceStorage.from_root(tmp_path / "source", exclusive_writer=True) if backend == "local_sqlite"
               else PersistenceStorage.sqlite(tmp_path / "source.db"))
@@ -106,6 +128,7 @@ async def test_cancelled_reservation_snapshot_restores_and_replays(
         run = await runtime.agents.get().start("hello", budget=budget, idempotency_key="cancelled")
         assert run.execution_id == reservation.execution.execution_id
         assert (await run.wait()).result.status is ExecutionStatus.SUCCEEDED
+        assert requests == 1
         usage = await run.budget_usage()
         if budget is None:
             assert usage is None
@@ -130,7 +153,7 @@ async def test_failed_reservation_rolls_back_budget_scope(
         async def fail_before_commit(callback):
             async def write(transaction):
                 value = await callback(transaction)
-                if isinstance(value, ExecutionStartReservationResult):
+                if isinstance(value, ExecutionStartReservationResult) and value.created:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 return value
             return await mutate(write)

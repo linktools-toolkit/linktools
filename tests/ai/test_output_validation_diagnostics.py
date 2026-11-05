@@ -16,7 +16,7 @@ import pytest
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import ModelHTTPError, UnexpectedModelBehavior
-from pydantic_ai.messages import ModelMessage, ModelResponse, RetryPromptPart, ToolCallPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, RetryInfo, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from pydantic_ai.usage import RunUsage, UsageLimits
 
@@ -66,12 +66,15 @@ def test_schema_diagnostic_is_actionable_and_does_not_echo_values(
     assert mapped.retryable is False
     assert mapped.safe_details["output_validation"]["path"] == path
     assert mapped.safe_details["output_validation"]["rule"] == rule
-    retry = RetryPromptPart.from_error(failed.value, tool_name="final_result")
+    retry = ToolReturnPart(
+        "final_result", failed.value.errors(include_url=False, include_context=False),
+        outcome="retried", retry=RetryInfo(cause="validation_error"),
+    )
     rendered = "\n".join((
-        str(failed.value), failed.value.json(), retry.model_response(), str(mapped),
+        str(failed.value), failed.value.json(), retry.model_response_str(), str(mapped),
         str(mapped.safe_details), str(mapped.diagnostics), "".join(traceback.format_exception(failed.value)),
     ))
-    assert rule in retry.model_response()
+    assert rule in retry.model_response_str()
     assert _SECRET not in rendered
     assert _ENUM_SECRET not in rendered
     assert all(detail.get("input") is None for detail in failed.value.errors())
@@ -203,10 +206,7 @@ async def test_model_corrects_output_from_safe_retry_feedback() -> None:
         retries = [part for message in messages for part in message.parts if is_tool_retry(part)]
         if retries:
             part = retries[-1]
-            retry_feedback.append(
-                part.model_response() if isinstance(part, RetryPromptPart)
-                else part.model_response_str()
-            )
+            retry_feedback.append(part.model_response_str())
         return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {"count": 3 if retries else _SECRET})])
 
     binding = _binding({"count": {"type": "integer"}})

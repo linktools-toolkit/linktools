@@ -6,42 +6,28 @@ import asyncio
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from types import TracebackType
 from typing import Any, NoReturn, TYPE_CHECKING
 
 import anyio
-import httpx
-from fastmcp.client.transports import ClientTransport
-from fastmcp.exceptions import McpError
-from jsonschema import Draft202012Validator
-from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
-from jsonschema.validators import validator_for
-from referencing import Registry
-from referencing.exceptions import InvalidAnchor, NoSuchAnchor, PointerToNowhere, Unresolvable
 
-from httpx2 import HTTPError as HTTPErrorV2, HTTPStatusError as HTTPStatusErrorV2
 from linktools.core import environ
-from pydantic import ValidationError
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.toolsets import (
     AbstractToolset,
     ToolsetTool,
     WrapperToolset,
 )
 from pydantic_ai.tools import RunContext as PydanticRunContext
-from pydantic_ai.tools import ToolDefinition
-from mcp.types import Tool as MCPTool
 
 from ..capability import (
     AgentContext,
     TOOL_MCP_SELECTOR_METADATA_KEY,
-    ToolCallRetry,
     ToolEffectPolicy,
     tool_metadata,
     validate_resource_path,
     validate_resource_tree,
 )
+from ..capability.mcp import MCPToolset
 from ..asset import AssetMaterializer, AssetStoreReader, AssetVersionRef
 from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
@@ -191,127 +177,16 @@ class _MCPModelToolset(WrapperToolset[object]):
         )
 
 
-class _MCPDiscoveryToolset(MCPToolset[object]):
-    def __init__(self, transport: ClientTransport, *, server: MCPServerSpec) -> None:
-        super().__init__(
-            transport,
-            id=f"mcp:{server.id}",
-            cache_tools=True,
-            init_timeout=server.init_timeout,
-            read_timeout=server.read_timeout,
-        )
-        self._init_timeout = server.init_timeout
-        self._server_id = server.id
-        self._transport_kind = server.transport
-        self._cleanup_error: BaseException | None = None
-
-    def tool_for_tool_def(
-        self,
-        tool_def: ToolDefinition,
-        *,
-        ctx: PydanticRunContext[object],
-    ) -> ToolsetTool[object]:
-        tool = super().tool_for_tool_def(tool_def, ctx=ctx)
-        schema = tool_def.parameters_json_schema
-        validator_type = validator_for(
-            schema, default=None if "$schema" in schema else Draft202012Validator,
-        )
-        if validator_type is None:
-            # The server remains authoritative for a dialect this client cannot evaluate.
-            return tool
-        validator_type.check_schema(schema)
-        validator = validator_type(schema, registry=Registry())
-
-        def validate_arguments(context: PydanticRunContext[object], /, **arguments: Any) -> None:
-            del context
-            try:
-                validator.validate(arguments)
-            except Unresolvable as error:
-                if isinstance(error.__cause__ or error, (InvalidAnchor, NoSuchAnchor, PointerToNowhere)):
-                    raise
-                # The registry never fetches external documents. Their semantics
-                # remain with the server, unlike broken references within this schema.
-                return
-            except JsonSchemaValidationError as error:
-                schema_path = tuple(error.absolute_schema_path)
-                field = next((schema_path[index + 1] for index, item in enumerate(schema_path[:-1])
-                              if item == "properties"), None)
-                location = f" field {json.dumps(str(field)[:80])}" if field is not None else ""
-                raise ToolCallRetry(
-                    f"MCP tool arguments{location} violate the {error.validator} schema constraint. "
-                    "Check the tool schema, correct the argument fields and types, and retry."
-                ) from None
-
-        return replace(tool, args_validator_func=validate_arguments)
-
-    def _details(self, phase: str) -> dict[str, JsonValue]:
-        return {
-            "server_id": self._server_id,
-            "transport": self._transport_kind,
-            "phase": phase,
-        }
-
-    async def __aenter__(self) -> "_MCPDiscoveryToolset":
-        try:
-            with anyio.fail_after(self._init_timeout):
-                await super().__aenter__()
-        except BaseException as error:
-            _raise_connection_failure(error, self._details("connect"))
-        return self
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> bool | None:
-        try:
-            return await super().__aexit__(exc_type, exc_value, traceback)
-        except asyncio.CancelledError:
-            raise
-        except BaseException as error:
-            try:
-                _raise_cleanup_failure(error, self._details("close"))
-            except BaseException as cleanup_error:
-                # Upstream wrapper exits may discard the primary exception.
-                # Final owned cleanup still has it and can report both safely.
-                if self._cleanup_error is None:
-                    self._cleanup_error = cleanup_error
-            return None
-
-    async def list_tools(self) -> list[MCPTool]:
-        try:
-            tools = await super().list_tools()
-        except BaseException as error:
-            _raise_connection_failure(error, self._details("tools/list"))
-        names = tuple(tool.name for tool in tools)
-        if len(names) != len(set(names)):
-            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        return tools
-
-    async def close_resources(self) -> None:
-        try:
-            await self.client.close()
-        except BaseException as error:
-            try:
-                _raise_cleanup_failure(error, self._details("close"))
-            except BaseException as cleanup_error:
-                if self._cleanup_error is None:
-                    self._cleanup_error = cleanup_error
-        if self._cleanup_error is not None:
-            raise self._cleanup_error
-
-
 class _MCPCapability(AbstractCapability[AgentContext[object]]):
     def __init__(
         self,
         capability_id: str,
         toolset: AbstractToolset[AgentContext[object]],
-        owned_toolset: _MCPDiscoveryToolset | None,
+        owned_toolset: MCPToolset | None,
     ) -> None:
         self.id = capability_id
         self._toolset = toolset
-        self._owned_toolset: _MCPDiscoveryToolset | None = owned_toolset
+        self._owned_toolset: MCPToolset | None = owned_toolset
 
     def get_toolset(self) -> AbstractToolset[AgentContext[object]]:
         return self._toolset
@@ -327,15 +202,23 @@ async def close_mcp_resources(
     capabilities: Sequence[AbstractCapability[AgentContext[object]]],
 ) -> None:
     """Finish owned MCP cleanup before propagating caller cancellation."""
+    owned: dict[int, _MCPCapability] = {}
+
+    def collect(capability: AbstractCapability[AgentContext[object]]) -> None:
+        if isinstance(capability, _MCPCapability):
+            owned[id(capability)] = capability
+
+    for capability in capabilities:
+        capability.apply(collect)
+
     async def close_owned() -> BaseException | None:
         failure: BaseException | None = None
-        for capability in capabilities:
-            if isinstance(capability, _MCPCapability):
-                try:
-                    await capability.close_resources()
-                except BaseException as error:
-                    if failure is None:
-                        failure = error
+        for capability in owned.values():
+            try:
+                await capability.close_resources()
+            except BaseException as error:
+                if failure is None:
+                    failure = error
         return failure
 
     task = asyncio.create_task(close_owned())
@@ -362,52 +245,6 @@ def _raise_cleanup_failure(
     if isinstance(error, (AIError, asyncio.CancelledError)):
         raise error
     raise AIError(ErrorCode.MCP_CLEANUP_FAILED, safe_details=details) from None
-
-
-def _connection_errors(error: BaseException) -> tuple[BaseException, ...] | None:
-    if isinstance(error, (AIError, asyncio.CancelledError)):
-        raise error
-    nested = getattr(error, "exceptions", None)
-    if isinstance(nested, tuple):
-        values: list[BaseException] = []
-        for child in nested:
-            result = _connection_errors(child)
-            if result is None:
-                return None
-            values.extend(result)
-        return tuple(values) if values else None
-    if isinstance(error, (
-        OSError, TimeoutError, httpx.HTTPError, HTTPErrorV2, McpError, ValidationError,
-        anyio.EndOfStream, anyio.ClosedResourceError, anyio.BrokenResourceError,
-    )):
-        return (error,)
-    if type(error) is RuntimeError:
-        if error.__cause__ is not None:
-            return _connection_errors(error.__cause__)
-        # SDK negotiation failures have no public error type, and transport
-        # exception-group unwrapping can remove their original timeout cause.
-        message = str(error)
-        if message in {
-            "Failed to initialize server session",
-            "Server session was closed unexpectedly",
-        } or message.startswith("Unsupported protocol version from the server:"):
-            return (error,)
-    return None
-
-
-def _raise_connection_failure(
-    error: BaseException,
-    details: Mapping[str, JsonValue],
-) -> NoReturn:
-    failures = _connection_errors(error)
-    if failures is None:
-        raise error
-    safe_details = dict(details)
-    for failure in failures:
-        if isinstance(failure, (httpx.HTTPStatusError, HTTPStatusErrorV2)):
-            safe_details["status_code"] = failure.response.status_code
-            break
-    raise AIError(ErrorCode.MCP_CONNECTION_FAILED, safe_details=safe_details) from None
 
 
 def _raise_primary_after_cleanup(
@@ -533,7 +370,7 @@ async def materialize_mcp_capabilities(
             retained_policy = binding.execution_policy.get("tool_effect_policy", "non_replay_safe")
             fixed_policy = "non_replay_safe" if retained_policy == "non_replay_safe" else None
 
-            toolset: _MCPDiscoveryToolset | None = None
+            toolset: MCPToolset | None = None
             mapped: AbstractToolset[object]
             if response_fixture is not None:
                 recorded = response_fixture.server(server.id)
@@ -557,7 +394,7 @@ async def materialize_mcp_capabilities(
                         else None
                     ),
                 )
-                toolset = _MCPDiscoveryToolset(transport, server=server)
+                toolset = MCPToolset(transport, server=server)
                 mapped = _MCPModelToolset(
                     toolset,
                     server.id,

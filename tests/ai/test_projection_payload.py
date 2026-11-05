@@ -109,7 +109,7 @@ async def test_source_materialization_uses_only_captured_payloads() -> None:
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="captured-payload", tenant_id="tenant")
     try:
-        await state.execution.executions.create_with_history_head(_execution())
+        await state.execution.executions.create_execution(_execution())
         staging, projection = _capture(state.run_store._staging)
         staging.stage_transcript("run", StagedTranscript(projection.local_messages))
         await state.run_store.register_agent_run(projection.run, execution_id="execution")

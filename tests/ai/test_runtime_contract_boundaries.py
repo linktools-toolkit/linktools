@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Regression coverage for the remaining runtime audit boundaries."""
-from linktools.ai.model import create_model
 
 import json
 import os
@@ -434,6 +433,16 @@ class _RecordingToolOperations:
 
     async def complete(self, decision: ToolOperationDecision, result: object) -> bool:
         del decision, result
+        return False
+
+    async def require_active(self) -> None:
+        return None
+
+    async def require_fresh_control(self) -> None:
+        await self.require_active()
+
+    async def defer(self, decision: ToolOperationDecision) -> bool:
+        del decision
         return False
 
 

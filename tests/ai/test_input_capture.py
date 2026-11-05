@@ -10,6 +10,11 @@ import json
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
+import asyncio
+
+from pydantic_ai import RunContext
+from pydantic_ai.capabilities import AbstractCapability
+
 import pytest
 
 
@@ -196,22 +201,41 @@ async def test_subagent_capture_runs_as_independent_execution(tmp_path: Path) ->
     from linktools.ai.inputs import AgentTaskInput
     from linktools.ai.execution import ExecutionRequest
 
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class ParentBarrier(AbstractCapability):
+        id = "test.parent-barrier"
+
+        async def before_run(self, ctx: RunContext) -> None:
+            if not entered.is_set():
+                entered.set()
+                await release.wait()
+
     group = RuntimeFeatures("capture-child")
+    group.capability(ParentBarrier(), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     group.agent("child", model="default", system_prompt="Captured child instructions", allow_tools=(), allow_skills=(), allow_subagents=())
     async with Persistence.open('subagent-capture', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_194, Runtime.attach(persistence=persistence_194, features=model_features(_TaskTestModels(), group)) as runtime, TaskEngine.open(persistence=persistence_194, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("capture", runtime.tenant_id)
         parent = await runtime.agents.get().start("parent input", principal=principal)
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            head = await runtime._state.execution.executions.get(parent.execution_id, tenant_id=runtime.tenant_id)
+            assert head is not None
+            child_agent = runtime.agents.get("child")
+            compiled = runtime._compiled_agent(child_agent.id, child_agent.revision, child_agent.compiled)
+            binding = runtime._compiler.bind_subagent(compiled)
+            child = await runtime._execution_service.start_subagent(binding.binding_digest,
+                ExecutionRequest(user_prompt="accepted child input", principal=principal, idempotency_key="child-input-0001",
+                                 memory_scope=None, mode="run", planning=False, thinking=False),
+                parent_execution_id=parent.execution_id, root_execution_id=parent.execution_id,
+                parent_producer_generation=head.producer_generation,
+                parent_invocation_id="source-invocation", binding_contract=binding.binding_contract)
+            await runtime.executions.wait(child.execution_id, principal=principal)
+        finally:
+            release.set()
         await parent.wait()
-        child_agent = runtime.agents.get("child")
-        compiled = runtime._compiled_agent(child_agent.id, child_agent.revision, child_agent.compiled)
-        binding = runtime._compiler.bind_subagent(compiled)
-        child = await runtime._execution_service.start_subagent(binding.binding_digest,
-            ExecutionRequest(user_prompt="accepted child input", principal=principal, idempotency_key="child-input-0001",
-                             memory_scope=None, mode="run", planning=False, thinking=False),
-            parent_execution_id=parent.execution_id, root_execution_id=parent.execution_id,
-            parent_invocation_id="source-invocation", binding_contract=binding.binding_contract)
-        await runtime.executions.wait(child.execution_id, principal=principal)
         reference = await runtime_engine.inputs.capture_input(child.execution_id,
             CaptureInputRequest(principal, "capture-child-input-0001"))
         value = await runtime_engine.inputs.read_agent(reference, principal=principal)

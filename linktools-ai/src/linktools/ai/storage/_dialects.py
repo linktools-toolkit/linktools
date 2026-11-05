@@ -485,7 +485,7 @@ class MySQLDialect(SQLiteDialect):
         from sqlalchemy.exc import IntegrityError
 
         try:
-            await session.execute(insert(table).values(dict(values)))
+            result = await session.execute(insert(table).values(dict(values)))
         except IntegrityError as error:
             if (
                 self.classify_integrity_error(error)
@@ -502,7 +502,7 @@ class MySQLDialect(SQLiteDialect):
             if existing is None:
                 raise
             return InsertResult(False, None)
-        return InsertResult(True, None)
+        return InsertResult(True, int(result.inserted_primary_key[0]))
 
     async def insert_ignore_conflict_many(
         self,

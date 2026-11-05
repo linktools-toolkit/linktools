@@ -51,6 +51,7 @@ async def test_terminal_child_becomes_typed_tool_failure(
     with pytest.raises(AIError) as raised:
         await dispatcher.dispatch(
             parent_execution_id="parent",
+            parent_producer_generation=1,
             root_execution_id="root",
             memory_scope=None,
             principal=Principal("principal", "tenant", "service"),
@@ -90,6 +91,7 @@ async def test_existing_child_replay_does_not_require_current_definition() -> No
 
     value = await dispatcher.dispatch(
         parent_execution_id="parent",
+        parent_producer_generation=1,
         root_execution_id="root",
         memory_scope="memory",
         principal=Principal("principal", "tenant", "service"),
@@ -281,6 +283,7 @@ async def test_model_input_failure_reaches_parent_and_receipt_without_losing_saf
             raise original
         return await dispatcher.dispatch(
             parent_execution_id="parent", root_execution_id="parent", memory_scope=None,
+            parent_producer_generation=1,
             principal=Principal("reader", "tenant", "service"), ref=ref, mode="run",
             user_prompt=task, invocation_id=invocation_id,
         )

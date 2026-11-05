@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """Immutable staging snapshots preserve range and consumer acknowledgement semantics."""
 
 import gc
@@ -66,7 +67,7 @@ def test_message_staging_releases_unreferenced_context_and_returns_independent_v
     assert later[0].parts[0].content == "later"
 
 
-def test_checkpoint_staging_waits_for_slowest_configured_consumer():
+def test_trace_staging_waits_for_its_acknowledged_frontier():
     from linktools.ai.persistence._plan import PersistenceDomain
     from linktools.ai.persistence._step_archive import InMemoryStepArchive
     from linktools.ai.persistence.runs import RuntimeAgentRunStore
@@ -76,20 +77,18 @@ def test_checkpoint_staging_waits_for_slowest_configured_consumer():
     owner = RuntimeAgentRunStore(
         staging, conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
         execution_archive=InMemoryStepArchive(PersistenceDomain.TRACE),
-        checkpoint_archive=InMemoryStepArchive(PersistenceDomain.CHECKPOINT),
     )
     for index in range(4):
         staging.save_checkpoint_local(AgentRunCheckpoint(
             "run", index, [ModelRequest(parts=[UserPromptPart(str(index))])],
         ))
-    owner.trace_persistence.offsets["run"] = _ProjectionOffset(checkpoints=3)
-    # An unresolved checkpoint write has no acknowledged frontier.
+    owner.trace_persistence.offsets["run"] = _ProjectionOffset(checkpoints=0)
     owner._trim_checkpoint_staging_locked("run")
     assert len(staging.list_checkpoints_local("run")) == 4
-    owner._checkpoint_acknowledged["run"] = 2
+    owner.trace_persistence.offsets["run"].checkpoints = 2
     owner._trim_checkpoint_staging_locked("run")
     assert [value.step_index for value in staging.list_checkpoints_local("run")] == [2, 3]
-    owner._checkpoint_acknowledged["run"] = 4
+    owner.trace_persistence.offsets["run"].checkpoints = 3
     owner._trim_checkpoint_staging_locked("run")
     assert [value.step_index for value in staging.list_checkpoints_local("run")] == [3]
     owner.trace_persistence.offsets["run"].checkpoints = 4

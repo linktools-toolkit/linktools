@@ -517,7 +517,7 @@ class _MySQLSession:
                 {},
                 RuntimeError("1062 Duplicate entry"),
             )
-        return SimpleNamespace(lastrowid=7)
+        return SimpleNamespace(lastrowid=7, inserted_primary_key=(7,))
 
     async def scalar(self, _statement: object) -> int | None:
         return 3 if self.target_exists else None
@@ -542,7 +542,7 @@ async def test_mysql_insert_result_does_not_depend_on_found_rows_rowcount() -> N
         index_elements=("token",),
     )
     assert inserted.inserted is True
-    assert inserted.row_id is None
+    assert inserted.row_id == 7
 
     duplicate = await dialect.insert_ignore_conflict(
         _MySQLSession(duplicate=True),  # type: ignore[arg-type]

@@ -16,7 +16,9 @@ from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import TraceCapability, CheckpointCapability, ExecutionCapability
+from linktools.ai.capability import TraceCapability, ExecutionCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence.codec import (
@@ -142,7 +144,7 @@ async def test_admitted_policy_preserves_stronger_durability(
     if conversation:
         policies.append(ExecutionCapability(retain_history=True))
     if restart:
-        policies.append(CheckpointCapability())
+        policies.append(native_checkpoint())
     if trace:
         policies.append(TraceCapability())
     if combined:
@@ -214,7 +216,7 @@ async def test_current_execution_record_retains_conversation_through_recovery(
     from linktools.ai.persistence import _repository_common
 
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
-    group.capability(CheckpointCapability(), scope="runtime")
+    group.capability(native_checkpoint(), scope="runtime")
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     storage_path = tmp_path / "runtime"
     storage = PersistenceStorage.from_root(storage_path, exclusive_writer=True)

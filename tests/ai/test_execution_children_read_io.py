@@ -3,13 +3,14 @@
 """Child metadata reads retain authorization and consistent read boundaries."""
 
 from linktools.ai.persistence import Persistence
+import asyncio
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from sqlalchemy import event
 
-from linktools.ai.core import ExecutionLineageKind
+from linktools.ai.core import ExecutionLineageKind, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
 
@@ -34,7 +35,7 @@ async def test_children_read_observes_authorization_changes_outside_read_scope(
         class Authorization:
             async def authorize(self, principal, action, resource):
                 # A read-only callback scope must not enclose application writes.
-                await state.execution.executions.create_with_history_head(child)
+                await state.execution.executions.create_execution(child)
 
         children = await _service(state, authorization=Authorization()).list_children(
             "execution", principal=_PRINCIPAL,
@@ -60,6 +61,11 @@ async def test_children_metadata_uses_fewer_sql_read_setups_without_skipping_que
 
         independent = IndependentOwner(repository.state_store, namespace="children-read", tenant_id="tenant")
         engine = repository.state_store.storage_group.context.engine.sync_engine
+        class Authorization(TenantAuthorizationPolicy):
+            async def authorize(self, principal, action, resource):
+                await asyncio.sleep(0)
+                await super().authorize(principal, action, resource)
+
         observations = []
         for owner in (independent, repository):
             statements = []
@@ -69,7 +75,7 @@ async def test_children_metadata_uses_fewer_sql_read_setups_without_skipping_que
 
             event.listen(engine, "before_cursor_execute", capture)
             try:
-                assert await _service(state, repository=owner).list_children(
+                assert await _service(state, repository=owner, authorization=Authorization()).list_children(
                     "execution", principal=_PRINCIPAL,
                 ) == ()
             finally:

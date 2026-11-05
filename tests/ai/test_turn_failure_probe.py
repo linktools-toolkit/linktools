@@ -165,22 +165,28 @@ async def test_volatile_turn_replacement_does_not_publish_the_stale_worker(
                 await asyncio.wait_for(entered.wait(), 5)
                 backend = old._execution_service.runtime_backend()
                 pending = backend._pending_turns.get(lost.execution_id, tenant_id=old.tenant_id)
-                coordinator = backend._pending_turns.coordination
                 lease = pending.coordination.lease
                 if interference == 'backend_unavailable':
                     original = cache.renew_turn
+                    renewal_attempted = asyncio.Event()
+                    owner = backend._turn_owners[lost.execution_id]
 
                     async def unavailable(*args: object, **kwargs: object) -> object:
+                        renewal_attempted.set()
                         raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
                     monkeypatch.setattr(cache, 'renew_turn', unavailable)
+                    # Renewal is backend-owned background work. Observe the
+                    # injected fault before allowing the model to finish.
+                    await asyncio.wait_for(renewal_attempted.wait(), 10)
+                    await asyncio.wait_for(owner.closed.wait(), 10)
                     release.set()
                     with pytest.raises(AIError) as failed:
                         await lost.wait(timeout_seconds=10)
                     assert failed.value.code is ErrorCode.STORAGE_UNAVAILABLE
                     assert await first.execution.executions.get(lost.execution_id, tenant_id=first.tenant_id) is None
                     monkeypatch.setattr(cache, 'renew_turn', original)
-                released = await coordinator.release(lease)
+                released = await cache.release_turn(lease)
                 assert released is (interference == 'lost_lease')
                 replacement_calls = []
                 async with Persistence.open('volatile-probe', storage=storage) as second:
@@ -190,11 +196,14 @@ async def test_volatile_turn_replacement_does_not_publish_the_stale_worker(
                         assert replacement.execution_id != lost.execution_id
                         assert (await replacement.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
                         assert len(replacement_calls) == 2
-                        release.set()
                         if interference == 'lost_lease':
+                            owner = backend._turn_owners.get(lost.execution_id)
+                            if owner is not None:
+                                await asyncio.wait_for(owner.closed.wait(), 10)
                             with pytest.raises(AIError) as failed:
                                 await lost.wait(timeout_seconds=10)
                             assert failed.value.code is ErrorCode.STORAGE_CONFLICT
+                        release.set()
                         assert await second.execution.executions.get(lost.execution_id, tenant_id=second.tenant_id) is None
                         stored = await second.execution.executions.get(replacement.execution_id, tenant_id=second.tenant_id)
                         assert stored.status is ExecutionStatus.SUCCEEDED
@@ -253,7 +262,7 @@ async def test_probe_lease_loss_after_last_check_before_sql_commit(
                 await asyncio.wait_for(commit_entered.wait(), 5)
                 backend = old._execution_service.runtime_backend()
                 pending = backend._pending_turns.get(stale.execution_id, tenant_id=old.tenant_id)
-                assert await backend._pending_turns.coordination.release(pending.coordination.lease)
+                assert await cache.release_turn(pending.coordination.lease)
                 async with Persistence.open('volatile-probe', storage=storage) as second:
                     async with Runtime.attach(persistence=second,
                                               features=_features(effects, new_calls, entered=new_entered, release=new_release, buffer=new_buffer, trace=buffered_trace)) as new:

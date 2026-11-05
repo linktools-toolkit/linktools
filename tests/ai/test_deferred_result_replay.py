@@ -16,6 +16,8 @@ from linktools.ai.core import (
     canonical_sha256,
     ExternalCallStatus,
     Principal,
+    ExecutionStatus,
+    TenantAuthorizationPolicy,
     ResourceKind,
     ResourceRef,
 )
@@ -26,15 +28,16 @@ from linktools.ai.runtime._approval import (
 from linktools.ai.runtime._external import (
     DefaultExternalService,
 )
-from linktools.ai.execution import ApprovalDecisionRequest, ExternalCallSucceeded, ExternalSupplyRequest
+from linktools.ai.execution import (
+    ApprovalDecisionRequest, ExternalCallSucceeded, ExternalSupplyRequest,
+    ExecutionRecoveryDetail, ExecutionRecoveryState,
+)
 from linktools.ai.persistence.contracts import (
     deferred_resource_id,
     ApprovalRecord,
     ExternalCallRecord,
     PendingDeferredCall,
     PendingToolContinuation,
-    ExecutionCheckpoint,
-    ExecutionCheckpointState,
 )
 from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy, StoredPayload
 from linktools.ai.persistence.objects import ObjectKeyFactory
@@ -61,50 +64,25 @@ class _ReadStateStore:
 
 
 class _Executions:
-    def __init__(self) -> None:
+    def __init__(self, pending: PendingDeferredCall, *, approvals: bool) -> None:
         self.state_store = _ReadStateStore()
-        self.execution = SimpleNamespace(status=type("Status", (), {"value": "WAITING_DEFERRED"})())
-
-    async def get_header(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-    ) -> ResourceRef | None:
-        if execution_id == "execution" and tenant_id == "tenant":
-            return ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id)
-        return None
+        self.execution = SimpleNamespace(
+            execution_id="execution", principal_id="owner",
+            status=ExecutionStatus.WAITING_DEFERRED,
+            recovery_state=ExecutionRecoveryState.WAITING,
+            recovery=ExecutionRecoveryDetail(
+                agent_run_id="step",
+                pending_tools=PendingToolContinuation(
+                    "step",
+                    approvals=(pending,) if approvals else (),
+                    calls=() if approvals else (pending,),
+                ),
+            ),
+        )
 
     async def get(self, execution_id: str, *, tenant_id: str) -> object | None:
         if execution_id == "execution" and tenant_id == "tenant":
             return self.execution
-        return None
-
-
-class _Checkpoints:
-    def __init__(self, pending: PendingDeferredCall, *, approvals: bool) -> None:
-        self.record = ExecutionCheckpoint(
-            execution_id="execution",
-            agent_run_id="step",
-            state=ExecutionCheckpointState.WAITING,
-            revision=0,
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
-            pending_tools=PendingToolContinuation(
-                "step",
-                approvals=(pending,) if approvals else (),
-                calls=() if approvals else (pending,),
-            ),
-        )
-
-    async def get(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-    ) -> ExecutionCheckpoint | None:
-        if execution_id == "execution" and tenant_id == "tenant":
-            return self.record
         return None
 
 
@@ -262,12 +240,10 @@ async def test_external_supply_exact_replay_uses_durable_result() -> None:
             supplied_at=None,
         )
     )
-    executions = _Executions()
-    checkpoints = _Checkpoints(pending, approvals=False)
+    executions = _Executions(pending, approvals=False)
     service = DefaultExternalService(
         calls,
         executions,
-        checkpoints,
         _AllowAuthorization(),
         objects=InMemoryObjectStore(),
         object_key_factory=object.__new__(ObjectKeyFactory),
@@ -327,12 +303,10 @@ async def test_approval_exact_replay_requires_same_actor() -> None:
             decided_at=None,
         )
     )
-    executions = _Executions()
-    checkpoints = _Checkpoints(pending, approvals=True)
+    executions = _Executions(pending, approvals=True)
     service = DefaultApprovalService(
         approvals,
         executions,
-        checkpoints,
         _AllowAuthorization(),
         objects=InMemoryObjectStore(),
     )
@@ -387,3 +361,48 @@ async def test_approval_exact_replay_requires_same_actor() -> None:
     with pytest.raises(AIError) as error:
         await service.decide("execution", conflicting)
     assert error.value.code is ErrorCode.APPROVAL_CONFLICT
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("approvals", (True, False))
+async def test_deferred_list_rejects_another_tenant(approvals: bool) -> None:
+    pending = PendingDeferredCall("call", "tool", StoredPayload.inline_json({}))
+    executions = _Executions(pending, approvals=approvals)
+    if approvals:
+        service = DefaultApprovalService(
+            object(), executions, TenantAuthorizationPolicy(),
+            objects=InMemoryObjectStore(),
+        )
+    else:
+        service = DefaultExternalService(
+            object(), executions, TenantAuthorizationPolicy(),
+            objects=InMemoryObjectStore(),
+            object_key_factory=object.__new__(ObjectKeyFactory),
+            payload_policy=PayloadPolicy(),
+        )
+    with pytest.raises(AIError) as error:
+        await service.list("execution", principal=Principal("other", "another-tenant", "service"))
+    assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("approvals", (True, False))
+async def test_deferred_list_respects_custom_authorization(approvals: bool) -> None:
+    class Deny:
+        async def authorize(self, principal: Principal, action: object, resource: ResourceRef) -> None:
+            assert principal.tenant_id == resource.tenant_id
+            assert resource.owner_principal_id is None
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+
+    pending = PendingDeferredCall("call", "tool", StoredPayload.inline_json({}))
+    executions = _Executions(pending, approvals=approvals)
+    if approvals:
+        service = DefaultApprovalService(object(), executions, Deny(), objects=InMemoryObjectStore())
+    else:
+        service = DefaultExternalService(
+            object(), executions, Deny(), objects=InMemoryObjectStore(),
+            object_key_factory=object.__new__(ObjectKeyFactory), payload_policy=PayloadPolicy(),
+        )
+    with pytest.raises(AIError) as error:
+        await service.list("execution", principal=Principal("approver", "tenant", "service"))
+    assert error.value.code is ErrorCode.AUTHORIZATION_DENIED

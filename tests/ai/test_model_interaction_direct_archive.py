@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """Direct responses retain content without weakening prepared-request records."""
 
 import hashlib
@@ -140,7 +141,7 @@ async def test_mixed_direct_and_prepared_archive_reads_keep_response_positions(t
 async def test_staged_and_prepared_direct_response_round_trip() -> None:
     staging = StagingAgentRunStore()
     archive = ModelInteractionInMemoryStepArchive(PersistenceDomain.TRACE)
-    store = RuntimeAgentRunStore(staging, conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION), execution_archive=None, checkpoint_archive=None)
+    store = RuntimeAgentRunStore(staging, conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION), execution_archive=None)
     await store.initialize()
     await archive.initialize()
     try:
@@ -193,7 +194,7 @@ async def test_running_page_resolves_after_terminal_archive_releases_staging() -
     staging = StagingAgentRunStore()
     archive = ModelInteractionInMemoryStepArchive(PersistenceDomain.TRACE)
     store = RuntimeAgentRunStore(staging, conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
-                                 execution_archive=archive, checkpoint_archive=None)
+                                 execution_archive=archive)
     await store.initialize()
     try:
         run = AgentRunRecord("run")

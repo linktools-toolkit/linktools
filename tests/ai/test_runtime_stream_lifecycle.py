@@ -260,15 +260,18 @@ async def test_remote_watch_before_first_admission_receives_later_preview(tmp_pa
         async with Persistence.open('early-preview', storage=reader_storage) as persistence_259, Runtime.attach(persistence=persistence_259, features=model_features(models, group)) as reader:
             execution = await owner.agents.get().start("question")
             repository = reader._state.execution.executions
-            read_head = repository.get_history_head
+            durable_stream = reader._events._stream_durable
 
-            async def observed_head(*args, **kwargs):
-                head = await read_head(*args, **kwargs)
-                if head is not None and head.producer_generation == 0 and head.producer_claim_id is None:
+            async def observed_durable(*args, **kwargs):
+                if kwargs.get("initial_shared"):
+                    # This branch is entered only after observing an unclaimed
+                    # source. A generic Execution.get also runs during lookup
+                    # and authorization, before the watcher has reached it.
                     observed_unclaimed.set()
-                return head
+                async for event in durable_stream(*args, **kwargs):
+                    yield event
 
-            monkeypatch.setattr(repository, "get_history_head", observed_head)
+            monkeypatch.setattr(reader._events, "_stream_durable", observed_durable)
             remote = await reader.executions.get(execution.execution_id)
             stream = remote.watch(include_content=True)
             observed = []
@@ -296,9 +299,8 @@ async def test_remote_watch_before_first_admission_receives_later_preview(tmp_pa
                 sequences = [event.durable_seq for event in observed if event.durable_seq is not None]
                 assert sequences == sorted(set(sequences))
                 current = await repository.get(execution.execution_id, tenant_id=reader.tenant_id)
-                head = await read_head(execution.execution_id, tenant_id=reader.tenant_id)
                 assert current.agent_run_seq == 1 and not current.durable_trace
-                assert head.producer_generation > 1 and cache.reads > 0
+                assert current.producer_generation > 1 and cache.reads > 0
                 assert not release.is_set()
             finally:
                 admit.set()

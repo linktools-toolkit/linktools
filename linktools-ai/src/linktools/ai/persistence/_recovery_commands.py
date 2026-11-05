@@ -484,15 +484,9 @@ class RuntimeRecoveryCommands:
                 if target_matches and event_type is ExecutionEventType.EXECUTION_RESUMED:
                     # Unrelated record updates preserve this admission, but a
                     # later producer cannot be adopted by this caller.
-                    head = await self._execution.get_history_head(
-                        execution.execution_id, tenant_id=self._execution.tenant_id,
-                    )
-                    target_matches = head.producer_generation == target_revision
+                    target_matches = current.producer_generation == target_revision
                 if target_matches and producer_generation is not None:
-                    head = await self._execution.get_history_head(
-                        execution.execution_id, tenant_id=self._execution.tenant_id,
-                    )
-                    target_matches = head is not None and head.producer_generation == producer_generation
+                    target_matches = current.producer_generation == producer_generation
                 if target_matches:
                     return CommitObservation(DurableCommitState.COMMITTED, value=current)
                 predecessor = current == execution and not page.items
@@ -681,7 +675,6 @@ def _resolved_tool_matches(
     if target_status is ToolOperationStatus.PENDING:
         return (
             current.owner is None
-            and current.lease_expires_at is None
             and current.result_payload is None
             and current.error_code is None
             and current.error_payload is None

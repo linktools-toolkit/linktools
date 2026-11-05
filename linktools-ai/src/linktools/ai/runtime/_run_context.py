@@ -5,10 +5,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.messages import ModelMessage, ModelRequest
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
 from ..errors import AIError, ErrorCode
@@ -44,6 +44,7 @@ class RunContextCapture:
         messages: Sequence[ModelMessage],
         pending: ModelMessage | None = None,
         state: CheckpointState,
+        prepared_request: bool = False,
     ) -> None:
         context_messages, pending_index = self.recorder.checkpoint_context(
             messages,
@@ -58,6 +59,39 @@ class RunContextCapture:
             and self._last_checkpoint_pending_index == pending_index
         ):
             return
+        previous_context = self._last_checkpoint_context
+        if (
+            prepared_request
+            and state == self._last_checkpoint_state == "complete"
+            and pending_index is None
+            and previous_context
+            and self._last_checkpoint_pending_index == len(previous_context) - 1
+            and len(frozen_context) == len(previous_context)
+            and frozen_context[:-1] == previous_context[:-1]
+            and len(raw) == self._last_checkpoint_transcript_count + 1
+        ):
+            previous, current = previous_context[-1], frozen_context[-1]
+            if (
+                isinstance(previous, ModelRequest)
+                and isinstance(current, ModelRequest)
+                and raw[-1] == current
+                and current.timestamp is not None
+                and previous.timestamp in (None, current.timestamp)
+                and previous.run_id in (None, current.run_id)
+                and previous.conversation_id in (None, current.conversation_id)
+                and current.run_id == ctx.run_id
+                and current.conversation_id == ctx.conversation_id
+                and replace(
+                    previous,
+                    timestamp=current.timestamp,
+                    run_id=current.run_id,
+                    conversation_id=current.conversation_id,
+                ) == current
+            ):
+                # The tool checkpoint already owns this request's complete content.
+                # SDK admission only assigns its occurrence metadata; retain the
+                # durable transcript prefix until the next distinct frontier.
+                return
         await self.recorder.save_checkpoint(
             AgentRunCheckpoint(
                 agent_run_id=self.agent_run_id,

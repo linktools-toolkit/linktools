@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Observed tool-result prefixes survive replay from an older checkpoint."""
+"""Trace rehydration preserves result positions independently of native snapshots."""
 
 from dataclasses import replace
 from datetime import timedelta
@@ -16,9 +16,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime._persistence_services import CheckpointService
-from linktools.ai.runtime._run_hooks import AgentRunCapture
-from linktools.ai.capability import CheckpointCapability
+from tests.ai._runtime_test_helpers import native_checkpoint, seed_native_snapshot
 from linktools.ai.observe.journal import ModelRequestJournal
 from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
 from linktools.ai.persistence.runs import RuntimeAgentRunStore, StagingAgentRunStore
@@ -29,26 +27,30 @@ from .test_step_projection import _execution
 @pytest.mark.asyncio
 @pytest.mark.parametrize("completed_partial", (False, True))
 @pytest.mark.parametrize("conflicting_replay", (False, True))
-async def test_recovery_preserves_each_tool_result_once_with_its_original_position(
+async def test_trace_reopen_preserves_each_tool_result_once_with_its_original_position(
     completed_partial: bool, conflicting_replay: bool,
 ) -> None:
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="partial-recovery", tenant_id="tenant")
+    state.run_store.bind_step_store(native_checkpoint().store)
     try:
         execution = replace(_execution(), revision=1)
         repository = state.execution.executions
-        await repository.create_with_history_head(execution)
-        await repository.state_store.mutate(
-            lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
-        )
+        execution = replace(execution, producer_generation=1)
+        await repository.create_execution(execution)
         first = state.run_store
-        first.bind_execution_producer("run", execution_id="execution", producer_generation=1)
+        first.bind_execution_producer("run", execution_id="execution", producer_generation=1, restart_checkpoints=False)
 
         def recorder_for(store):
             async def boundary():
                 await store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
 
             async def checkpoint_sink(value):
+                await seed_native_snapshot(
+                    store.step_store, run_id=value.agent_run_id,
+                    messages=list(value.context_messages or value.messages),
+                    step_index=value.step_index, state=value.state,
+                )
                 await store.save_checkpoint(value, execution_id="execution", producer_generation=1)
 
             return AgentRunRecorder(
@@ -57,9 +59,10 @@ async def test_recovery_preserves_each_tool_result_once_with_its_original_positi
             )
 
         original = recorder_for(first)
-        await original.register_agent_run(AgentRunRecord("run", agent_id="agent", agent_conversation_id="conversation"))
-        user = ModelRequest(parts=[UserPromptPart("run both")])
-        response = ModelResponse(parts=[
+        run = AgentRunRecord("run", agent_id="agent", agent_conversation_id="conversation")
+        await original.register_agent_run(run)
+        user = ModelRequest(run_id="run", parts=[UserPromptPart("run both")])
+        response = ModelResponse(run_id="run", parts=[
             ToolCallPart("tool", {}, tool_call_id="quick"),
             ToolCallPart("tool", {}, tool_call_id="slow"),
         ])
@@ -91,19 +94,20 @@ async def test_recovery_preserves_each_tool_result_once_with_its_original_positi
         archive = first.read_store(PersistenceDomain.TRACE)
         before = (await archive.capture_history(("run",), include_pending=True))["run"]
         assert before.message_count == 3
+        snapshot = await first.step_store.latest_snapshot(run_id="run")
+        assert snapshot is not None and snapshot.messages == [user, response]
 
         second = RuntimeAgentRunStore(
             StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant",
             conversation_archive=first.read_store(PersistenceDomain.CONVERSATION),
             execution_archive=archive,
-            checkpoint_archive=first.read_store(PersistenceDomain.CHECKPOINT),
         )
+        second.bind_step_store(native_checkpoint().store)
         await second.initialize()
-        second.bind_execution_producer("run", execution_id="execution", producer_generation=1)
+        second.bind_execution_producer("run", execution_id="execution", producer_generation=1, restart_checkpoints=False)
         recorder = recorder_for(second)
-        capability = AgentRunCapture(recorder=recorder, agent_id="agent", agent_run_id="run")
         ctx = SimpleNamespace(messages=[user, response], conversation_id="conversation", run_step=1)
-        await capability.before_run(ctx)
+        await recorder.register_agent_run(run)
         replayed = replace(
             quick, timestamp=quick.timestamp + timedelta(seconds=1),
             content="changed output" if conflicting_replay else quick.content,
@@ -112,13 +116,13 @@ async def test_recovery_preserves_each_tool_result_once_with_its_original_positi
             with pytest.raises(AIError) as caught:
                 await recorder.record_tool_result_boundary(replayed, 1)
             assert caught.value.code is ErrorCode.STORAGE_CONFLICT
+            assert await second.step_store.latest_snapshot(run_id="run") == snapshot
             return
         await recorder.record_tool_result_boundary(replayed, 1)
         await recorder.record_tool_result_boundary(slow, 1)
-        ctx.messages.append(ModelRequest(parts=[replayed, slow]))
-        request_context = await capability.before_model_request(ctx, SimpleNamespace())
-        await CheckpointCapability().bind(CheckpointService(capability)).before_model_request(ctx, request_context)
-        recorder.append_transcript_message(ModelResponse(parts=[TextPart("done")]))
+        ctx.messages.append(ModelRequest(run_id="run", parts=[replayed, slow]))
+        recorder.append_transcript_message(ctx.messages[-1])
+        recorder.append_transcript_message(ModelResponse(run_id="run", parts=[TextPart("done")]))
         await recorder.commit_history_boundary()
         messages = [message async for message in archive.iter_messages(agent_run_id="run")]
         results = [(message_index, part_index, part) for message_index, message in enumerate(messages)
@@ -126,6 +130,7 @@ async def test_recovery_preserves_each_tool_result_once_with_its_original_positi
         assert [(part.tool_call_id, part.content) for _, _, part in results] == [("quick", "quick done"), ("slow", "slow done")]
         assert results[0] == (2, 0, quick)
         assert results[1][:2] == ((3, 0) if completed_partial else (2, 1))
+        assert await second.step_store.latest_snapshot(run_id="run") == snapshot
     finally:
         await state.close()
 
@@ -154,13 +159,13 @@ async def test_replayed_model_calls_reuse_effects_and_keep_new_raw_part_indexes(
     )
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace=namespace, tenant_id="tenant")
+    state.run_store.bind_step_store(native_checkpoint().store)
     try:
         execution = replace(_execution(), revision=1)
         repository = state.execution.executions
-        await repository.create_with_history_head(execution)
-        await repository.state_store.mutate(
-            lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
-        )
+        execution = replace(execution, producer_generation=1, producer_claim_id="first")
+        producer_generation = 1
+        await repository.create_execution(execution)
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
         commands = StateCommands(
             repository, namespace=namespace, events=state.execution.events,
@@ -173,28 +178,33 @@ async def test_replayed_model_calls_reuse_effects_and_keep_new_raw_part_indexes(
                 namespace=namespace, tenant_id="tenant", execution_id="execution",
                 agent_run_id=run_id, binding_digest=execution.binding_digest,
                 owner=owner, background_tasks=set(), payload_policy=PayloadPolicy(),
-                terminal_commands=commands, producer_generation=1,
+                terminal_commands=commands, producer_generation=producer_generation,
             )
 
         def recorder_for(store):
-            store.bind_execution_producer(run_id, execution_id="execution", producer_generation=1)
+            store.bind_execution_producer(run_id, execution_id="execution", producer_generation=producer_generation, restart_checkpoints=False)
 
             async def boundary():
-                await store.flush_execution_projection(run_id, execution_id="execution", producer_generation=1)
+                await store.flush_execution_projection(run_id, execution_id="execution", producer_generation=producer_generation)
 
             async def checkpoint_sink(value):
-                await store.save_checkpoint(value, execution_id="execution", producer_generation=1)
+                await seed_native_snapshot(
+                    store.step_store, run_id=value.agent_run_id,
+                    messages=list(value.context_messages or value.messages),
+                    step_index=value.step_index, state=value.state,
+                )
+                await store.save_checkpoint(value, execution_id="execution", producer_generation=producer_generation)
 
             return AgentRunRecorder(
                 store, execution_id="execution", agent_run_id=run_id,
                 history_boundary=boundary, checkpoint_sink=checkpoint_sink,
             )
 
-        user = ModelRequest(parts=[UserPromptPart("run tools")])
+        user = ModelRequest(run_id=run_id, parts=[UserPromptPart("run tools")])
         quick_call = ToolCallPart("tool", {"which": "quick"}, tool_call_id="quick")
         slow_call = ToolCallPart("tool", {"which": "slow"}, tool_call_id="slow")
         new_call = ToolCallPart("tool", {"which": "new"}, tool_call_id="new")
-        first_response = ModelResponse(parts=[quick_call, slow_call])
+        first_response = ModelResponse(run_id=run_id, parts=[quick_call, slow_call])
         original = recorder_for(state.run_store)
         run = AgentRunRecord(
             run_id, agent_id="agent", metadata={"agent_run_seq": "1"},
@@ -242,14 +252,21 @@ async def test_replayed_model_calls_reuse_effects_and_keep_new_raw_part_indexes(
             return part
 
         quick_result = await execute(bridge_for("first"), original, quick_call)
+        execution = await repository.compare_and_swap(
+            "execution", tenant_id="tenant", expected_revision=execution.revision,
+            next_record=replace(execution, revision=execution.revision + 1,
+                                producer_generation=2, producer_claim_id="resumed"),
+        )
+        producer_generation = 2
         second = RuntimeAgentRunStore(
             StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant", conversation_archive=state.run_store.read_store(PersistenceDomain.CONVERSATION),
-            execution_archive=archive, checkpoint_archive=state.run_store.read_store(PersistenceDomain.CHECKPOINT),
+            execution_archive=archive,
         )
+        second.bind_step_store(native_checkpoint().store)
         await second.initialize()
         recorder = recorder_for(second)
         await recorder.register_agent_run(run)
-        replayed_response = ModelResponse(parts=[
+        replayed_response = ModelResponse(run_id=run_id, parts=[
             replace(quick_call, args={"which": "changed"}) if conflicting_call else quick_call,
             TextPart("new text"), slow_call, new_call,
         ])
@@ -262,7 +279,7 @@ async def test_replayed_model_calls_reuse_effects_and_keep_new_raw_part_indexes(
         await publish_response(recorder, replayed_response, stream=streamed)
         resumed = bridge_for("resumed")
         results = [await execute(resumed, recorder, call) for call in (quick_call, slow_call, new_call)]
-        recorder.append_transcript_message(ModelRequest(parts=results))
+        recorder.append_transcript_message(ModelRequest(run_id=run_id, parts=results))
         await recorder.commit_history_boundary()
         assert effects == ["quick", "slow", "new"]
         messages = [message async for message in archive.iter_messages(agent_run_id=run_id)]
@@ -296,13 +313,12 @@ async def test_delayed_observation_cannot_write_after_another_producer_is_admitt
 
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="delayed-producer", tenant_id="tenant")
+    state.run_store.bind_step_store(native_checkpoint().store)
     try:
         execution = replace(_execution(), revision=1)
         repository = state.execution.executions
-        await repository.create_with_history_head(execution)
-        await repository.state_store.mutate(
-            lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
-        )
+        execution = replace(execution, producer_generation=1)
+        await repository.create_execution(execution)
         first = state.run_store
         first.bind_execution_producer("run", execution_id="execution", producer_generation=1)
         run = AgentRunRecord("run", agent_id="agent", agent_conversation_id="conversation")
@@ -315,8 +331,9 @@ async def test_delayed_observation_cannot_write_after_another_producer_is_admitt
         archive = first.read_store(PersistenceDomain.TRACE)
         old_producer = RuntimeAgentRunStore(
             StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant", conversation_archive=first.read_store(PersistenceDomain.CONVERSATION),
-            execution_archive=archive, checkpoint_archive=first.read_store(PersistenceDomain.CHECKPOINT),
+            execution_archive=archive,
         )
+        old_producer.bind_step_store(native_checkpoint().store)
         await old_producer.initialize()
         old_producer.trace_persistence.configure("run", buffer=InMemoryCacheBackend(max_bytes=65536))
         old_producer.bind_execution_producer("run", execution_id="execution", producer_generation=1)
@@ -344,10 +361,7 @@ async def test_delayed_observation_cannot_write_after_another_producer_is_admitt
         assert await archive.list_events(agent_run_id="run") == []
         updated = await repository.compare_and_swap(
             "execution", tenant_id="tenant", expected_revision=1,
-            next_record=replace(execution, revision=2),
-        )
-        await repository.state_store.mutate(
-            lambda tx: repository.admit_history_producer_in_transaction(tx, updated)
+            next_record=replace(execution, revision=2, producer_generation=2),
         )
         await asyncio.wait_for(completed_attempt.wait(), 5)
         assert await archive.list_events(agent_run_id="run") == []
@@ -373,14 +387,14 @@ async def test_delayed_observation_cannot_write_after_another_producer_is_admitt
         with pytest.raises(AIError) as close_error:
             await old_producer.preflight_close()
         assert close_error.value.code is ErrorCode.STORAGE_CONFLICT
-        assert (await repository.get_history_head("execution", tenant_id="tenant")).producer_generation == 2
+        assert (await repository.get("execution", tenant_id="tenant")).producer_generation == 2
     finally:
         await state.close()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("interrupt", ("cancel_checkpoint", "failed_observation"))
-async def test_recovery_checkpoint_settles_and_public_drain_retries_interrupted_observation(
+@pytest.mark.parametrize("interrupt", ("cancel_observation", "failed_observation"))
+async def test_native_snapshot_survives_cancelled_or_failed_trace_drain(
     monkeypatch: pytest.MonkeyPatch, interrupt: str,
 ) -> None:
     import asyncio
@@ -388,20 +402,20 @@ async def test_recovery_checkpoint_settles_and_public_drain_retries_interrupted_
     buffer = InMemoryCacheBackend(max_bytes=65536)
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="observation-checkpoint", tenant_id="tenant")
+    state.run_store.bind_step_store(native_checkpoint().store)
     release = asyncio.Event()
-    checkpoint_task = None
+    drain_task = None
     try:
         execution = replace(_execution(), revision=1)
         repository = state.execution.executions
-        await repository.create_with_history_head(execution)
-        await repository.state_store.mutate(
-            lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
-        )
+        execution = replace(execution, producer_generation=1)
+        await repository.create_execution(execution)
         store = state.run_store
         store.trace_persistence.configure("run", buffer=buffer)
         store.bind_execution_producer("run", execution_id="execution", producer_generation=1)
-        await store.register_agent_run(AgentRunRecord("run", agent_id="agent"), execution_id="execution")
-        first = ModelRequest(parts=[UserPromptPart("start")])
+        run = AgentRunRecord("run", agent_id="agent")
+        await store.register_agent_run(run, execution_id="execution")
+        first = ModelRequest(run_id="run", parts=[UserPromptPart("start")])
         checkpoint = AgentRunCheckpoint("run", 1, [first], transcript_message_count_before=0)
         await store.save_checkpoint(checkpoint, execution_id="execution", producer_generation=1)
         archive = store.read_store(PersistenceDomain.TRACE)
@@ -421,7 +435,7 @@ async def test_recovery_checkpoint_settles_and_public_drain_retries_interrupted_
 
         monkeypatch.setattr(archive, "sync_prepared_projection", interrupt_observation)
         recorder = AgentRunRecorder(store, execution_id="execution", agent_run_id="run")
-        await recorder.register_agent_run(AgentRunRecord("run", agent_id="agent"))
+        await recorder.register_agent_run(run)
         await recorder.record_event("AGENT_RUN_STARTED", 1)
         await store.flush_execution_projection(
             "run", execution_id="execution", producer_generation=1, deferred=True,
@@ -436,17 +450,19 @@ async def test_recovery_checkpoint_settles_and_public_drain_retries_interrupted_
                     "run", execution_id="execution", producer_generation=1, deferred=True,
                 )
             assert failed.value.code is ErrorCode.STORAGE_UNAVAILABLE
-        checkpoint_task = asyncio.create_task(store.save_checkpoint(
-            target, execution_id="execution", producer_generation=1,
-        ))
-        if interrupt == "cancel_checkpoint":
+        await seed_native_snapshot(
+            store.step_store, run_id="run", messages=target.messages,
+            step_index=target.step_index, state=target.state,
+        )
+        if interrupt == "cancel_observation":
+            drain_task = asyncio.create_task(store.flush_execution_projection(
+                "run", execution_id="execution", producer_generation=1,
+            ))
             await asyncio.sleep(0)
-            checkpoint_task.cancel()
+            drain_task.cancel()
             release.set()
             with pytest.raises(asyncio.CancelledError):
-                await checkpoint_task
-        else:
-            await checkpoint_task
+                await drain_task
         recovered = await store.read_store(PersistenceDomain.CHECKPOINT).latest_checkpoint(
             agent_run_id="run", include_interrupted=True,
         )
@@ -460,8 +476,8 @@ async def test_recovery_checkpoint_settles_and_public_drain_retries_interrupted_
         assert [event.event_type for event in await archive.list_events(agent_run_id="run")] == ["AGENT_RUN_STARTED"]
     finally:
         release.set()
-        if checkpoint_task is not None:
-            await asyncio.gather(checkpoint_task, return_exceptions=True)
+        if drain_task is not None:
+            await asyncio.gather(drain_task, return_exceptions=True)
         await state.close()
 
 
@@ -469,6 +485,7 @@ async def test_recovery_checkpoint_settles_and_public_drain_retries_interrupted_
 async def test_terminal_producer_discard_preserves_unresolved_durability_flight() -> None:
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="unresolved-producer", tenant_id="tenant")
+    state.run_store.bind_step_store(native_checkpoint().store)
     store = state.run_store
     store.bind_execution_producer("run", execution_id="execution", producer_generation=1)
     run = AgentRunRecord("run")

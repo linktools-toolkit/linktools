@@ -5,11 +5,7 @@ from linktools.ai.persistence import Persistence
 """Current SQLite history survives reopening and snapshot restoration."""
 from ._runtime_test_helpers import model_features
 
-import base64
-import hashlib
 import json
-import sqlite3
-import zlib
 from pathlib import Path
 
 import pytest
@@ -18,7 +14,7 @@ from pydantic_ai.models.function import AgentInfo
 
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, Principal
-from linktools.ai.capability import ExecutionCapability
+from linktools.ai.capability import ExecutionCapability, TraceCapability
 from linktools.ai.history import History
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
@@ -27,7 +23,18 @@ from linktools.ai.persistence import Persistence
 from . import _runtime_test_helpers as helpers
 
 
-_FIXTURE = Path(__file__).parent / "fixtures" / "persistence" / "sqlite_session_history_current.json"
+async def _seed_current_history(path: Path) -> None:
+    application = RuntimeFeatures("application")
+    application.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    application.capability(TraceCapability(), scope="runtime")
+    application.agent("default", model="default", allow_tools=())
+    async with Persistence.open("legacy-history", storage=PersistenceStorage.sqlite(path)) as persistence:
+        async with Runtime.attach(persistence=persistence,
+                                  features=model_features(helpers.RuntimeUsageModels(), application)) as runtime:
+            session = await runtime.agents.get("default").create_session("session")
+            result = await session.run("retained old question", timeout_seconds=10)
+            assert result.result.status is ExecutionStatus.SUCCEEDED
+
 
 
 async def _execution_evidence(
@@ -77,22 +84,8 @@ async def _execution_evidence(
 async def test_sqlite_history_retains_prior_turn_when_resumed_and_reopened(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fixture = json.loads(_FIXTURE.read_text(encoding="utf-8"))
-    sql = zlib.decompress(base64.b64decode(fixture["sql_zlib_base64"]))
-    assert hashlib.sha256(sql).hexdigest() == fixture["sql_sha256"]
-    assert b'pending_part_count' in sql
     path = tmp_path / "history.db"
-    with sqlite3.connect(path) as connection:
-        connection.executescript(sql.decode("utf-8"))
-        heads = connection.execute(
-            "SELECT payload_json FROM ai_state_records WHERE kind = ?", ("transcript_head",),
-        ).fetchall()
-        assert heads
-        assert all(
-            set(json.loads(row[0])["value"]["payload"]["fields"])
-            == {"owner_domain", "owner_id", "message_count", "chunk_count", "quality", "pending", "pending_part_count"}
-            for row in heads
-        )
+    await _seed_current_history(path)
 
     observed_prompts: list[str] = []
     original_model = helpers._runtime_usage_model
@@ -175,12 +168,8 @@ async def test_sqlite_history_survives_snapshot_restore(tmp_path: Path) -> None:
     from linktools.ai.persistence.snapshots import SnapshotLimits
     from linktools.ai.storage import InMemoryObjectStore
 
-    fixture = json.loads(_FIXTURE.read_text(encoding="utf-8"))
-    sql = zlib.decompress(base64.b64decode(fixture["sql_zlib_base64"]))
-    assert hashlib.sha256(sql).hexdigest() == fixture["sql_sha256"]
     path = tmp_path / "history.db"
-    with sqlite3.connect(path) as connection:
-        connection.executescript(sql.decode("utf-8"))
+    await _seed_current_history(path)
     principal = Principal("runtime", "default", "local_trusted")
     async with Persistence.open('legacy-history', storage=PersistenceStorage.sqlite(path), tenant_id="default", read_only=True) as history_persistence_184, History.open(persistence=history_persistence_184) as history:
         timeline = await history.session_timeline("session", principal=principal)

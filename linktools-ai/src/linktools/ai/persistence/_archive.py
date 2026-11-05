@@ -174,7 +174,7 @@ class ContentRecord:
 
 @dataclass(slots=True)
 class PreparedArchive:
-    """Unpublished immutable records; publish with the owning domain's CAS."""
+    """Publication records and immutable nodes known during one preparation."""
 
     owner: tuple[str, str, str] | None = None
     records: dict[bytes, StoredRecord] = field(default_factory=dict)
@@ -401,6 +401,23 @@ class ContentArchive:
             raise _integrity()
         return node
 
+    def prepared_frontier(self, root: ArchiveRoot, prepared: PreparedArchive) -> tuple[StoredRecord, ...]:
+        """Return the at-most-two append nodes already held by this publication."""
+        self._bind(prepared)
+        if root.scope_id != self.scope_id or root.content_scope != self.content_scope:
+            raise _integrity()
+        if not root.slices:
+            return ()
+        tail = root.slices[-1]
+        node = prepared.nodes.get(tail.first)
+        if tail.start != 0 or tail.end != tail.count or node is None:
+            return ()
+        identities = (tail.first,) if node.next_forest is None else (tail.first, node.next_forest)
+        records = tuple(prepared.records.get(self._key("archive_sequence", identity)) for identity in identities)
+        if any(record is None for record in records):
+            return ()
+        return records
+
     def reuse_frontier(
         self, root: ArchiveRoot, records: tuple[StoredRecord, ...], prepared: PreparedArchive,
     ) -> None:
@@ -491,7 +508,7 @@ class ContentArchive:
                 node = self._decode_node_record(record)
                 if node.identity != identity:
                     raise _integrity()
-            cache[identity] = node
+            prepared.nodes[identity] = cache[identity] = node
 
     async def append(self, root: ArchiveRoot, contents: Sequence[str],
                      prepared: PreparedArchive) -> ArchiveRoot:
@@ -581,7 +598,11 @@ class ContentArchive:
 
     def _publication_dependencies(self, prepared: PreparedArchive) -> set[bytes]:
         dependencies: set[bytes] = set()
-        for node in prepared.nodes.values():
+        # Previously confirmed nodes are read knowledge, not pending writes.
+        for record in prepared.records.values():
+            if record.kind != "archive_sequence":
+                continue
+            node = prepared.nodes[record.sort_key]
             dependencies.add(self._key("archive_content", node.content_id))
             dependencies.update(self._key("archive_sequence", child) for child in
                                 (node.left, node.right, node.next_forest) if child is not None)
@@ -783,6 +804,7 @@ class ContentArchive:
         groups = tuple(tuple(value for group in matches[start:start + count]
                              for value in reversed(group) if value is not None)
                        for start, count in positions)
+        prepared.nodes.update(nodes)
         return groups, {identity: contents[identity] for group in groups for identity in group} if include_content else {}
 
     async def content_records(self, identities: Sequence[str]) -> tuple[ContentRecord, ...]:

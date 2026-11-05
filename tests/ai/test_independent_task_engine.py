@@ -7,7 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.core import ExecutionContext, Principal, RunBudget, TaskStatus
+from linktools.ai.core import (
+    AuthorizationAction, ExecutionContext, Principal, ResourceKind, ResourceRef,
+    RunBudget, TaskStatus, TenantAuthorizationPolicy,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.task.engine import TaskEngine
@@ -135,6 +138,20 @@ async def test_reopening_task_engine_preserves_admitted_principal_and_execution_
     original = Principal("original", "tenant")
     operator = Principal("recovery-operator", "tenant")
     seen: list[Principal] = []
+    authorized_reads: list[ResourceRef] = []
+
+    class RecoveryAuthorization(TenantAuthorizationPolicy):
+        async def authorize(
+            self, principal: Principal, action: AuthorizationAction, resource: ResourceRef,
+        ) -> None:
+            if (principal == operator and resource.tenant_id == original.tenant_id
+                    and resource.kind is ResourceKind.EXECUTION
+                    and resource.id == execution_id
+                    and resource.owner_principal_id == original.principal_id
+                    and action is AuthorizationAction.EXECUTION_READ):
+                authorized_reads.append(resource)
+                return
+            await super().authorize(principal, action, resource)
 
     async def effect(context: TaskNodeContext[None]) -> str:
         seen.append(context.principal)
@@ -150,7 +167,7 @@ async def test_reopening_task_engine_preserves_admitted_principal_and_execution_
             state = await run.state()
             execution_id = state.node_states[0].execution_id
     async with Persistence.open("recovery", storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id="tenant") as persistence:
-        async with TaskEngine.open(task, persistence=persistence) as engine:
+        async with TaskEngine.open(task, persistence=persistence, authorization=RecoveryAuthorization()) as engine:
             run = await engine.get("effect", principal=operator)
             state = await run.state()
             assert state.node_states[0].execution_id == execution_id
@@ -158,6 +175,12 @@ async def test_reopening_task_engine_preserves_admitted_principal_and_execution_
             assert (await run.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED
             assert await run.result("n") == original.principal_id
             assert seen == [original, original]
+            assert authorized_reads[-1].id == execution_id
+            with pytest.raises(AIError) as denied:
+                await TenantAuthorizationPolicy().authorize(
+                    operator, AuthorizationAction.EXECUTION_READ, authorized_reads[-1],
+                )
+            assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
             assert (await run.state()).node_states[0].execution_id == execution_id
 
 

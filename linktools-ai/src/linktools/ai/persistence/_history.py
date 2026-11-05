@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from linktools.core import environ
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolReturnPart
 
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, StoredPayload, read_object
@@ -384,7 +384,7 @@ class TranscriptRepository:
         if isinstance(key, str):
             kind, separator, suffix = key.partition(":")
             if separator and suffix and (
-                kind in {"tool_result", "retry"}
+                kind == "tool_result"
                 or kind == "part" and suffix.isascii() and suffix.isdigit()
                 and (suffix == "0" or not suffix.startswith("0"))
             ):
@@ -397,9 +397,8 @@ class TranscriptRepository:
             return {f"part:{index}": part for index, part in enumerate(message.parts)}
         result: dict[str, object] = {}
         for part in message.parts:
-            kind = "tool_result" if part.part_kind == "tool-return" else "retry" if part.part_kind == "retry-prompt" else None
-            if kind is not None and part.tool_call_id is not None:
-                key = f"{kind}:{part.tool_call_id}"
+            if isinstance(part, ToolReturnPart):
+                key = f"tool_result:{part.tool_call_id}"
                 if key in result:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 result[key] = part
@@ -480,9 +479,9 @@ class TranscriptRepository:
                     if not isinstance(pending, ModelResponse):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 else:
-                    kind, _, call_id = key.partition(":")
-                    expected = "tool-return" if kind == "tool_result" else "retry-prompt"
-                    if not isinstance(pending, ModelRequest) or part.part_kind != expected or part.tool_call_id != call_id:
+                    _, _, call_id = key.partition(":")
+                    if (not isinstance(pending, ModelRequest) or not isinstance(part, ToolReturnPart)
+                            or part.tool_call_id != call_id):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if index < len(previous):
                     existing = previous[index]
@@ -1337,7 +1336,12 @@ class TranscriptRepository:
         tenant_id: str,
     ) -> LoadedModelContext:
         require_no_run_history_lock("TranscriptRepository.load_session_model_context")
-        projection, head = await self._load_context_metadata(history_id)
+        capture = await self.capture_session_context_metadata(history_id, tenant_id=tenant_id)
+        if capture is None:
+            projection, head = await self._load_context_metadata(history_id)
+            history = None
+        else:
+            projection, history, head = capture
         if projection is not None:
             return await self._load_model_context_from_projection(
                 history_id,
@@ -1345,19 +1349,47 @@ class TranscriptRepository:
             )
         if head is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        history = (
-            None
-            if self._history_repository is None
-            else await self._history_repository.get(
-                history_id,
-                tenant_id=tenant_id,
+        if capture is None and self._history_repository is not None:
+            history = await self._history_repository.get(
+                history_id, tenant_id=tenant_id,
             )
-        )
         if history is None:
             raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
         if head.message_count or history.inherited_message_count:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return LoadedModelContext(())
+
+    async def capture_session_context_metadata(
+        self, history_id: str, *, tenant_id: str,
+    ) -> tuple[
+        ContextProjection | None,
+        ConversationHistoryRecord | None,
+        TranscriptHeadRecord | None,
+    ] | None:
+        """Capture the branch, transcript boundary and mutable context selection once."""
+        require_no_run_history_lock("TranscriptRepository.capture_session_context_metadata")
+        repository = self._history_repository
+        if repository is None or tenant_id != self._tenant_id or not self.accepts_history_capture(repository):
+            return None
+        history_key, head_key = repository.history_record_keys(history_id)
+        projection_key = self._projection_key(history_id)
+        records = await self._store.read(
+            lambda transaction: transaction.get_records((history_key, head_key, projection_key))
+        )
+        stored_projection = records.get(projection_key)
+        projection = (None if stored_projection is None else
+                      _decode_enveloped_domain(stored_projection.data, ContextProjection))
+        stored_head = records.get(head_key)
+        head = None if stored_head is None else self._decode_head(stored_head)
+        stored_history = records.get(history_key)
+        history = (None if stored_history is None else
+                   _decode_enveloped_domain(stored_history.data, ConversationHistoryRecord))
+        if history is not None:
+            if history.history_id != history_id or history.inherited_message_count < 0:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if head is not None:
+            head = self._validate_observed_head(history_id, head)
+        return projection, history, head
 
     async def load_session_raw_model_context(
         self,
@@ -1365,6 +1397,7 @@ class TranscriptRepository:
         *,
         tenant_id: str,
         message_count: int,
+        observed_history: tuple[ConversationHistoryRecord, TranscriptHeadRecord] | None = None,
     ) -> LoadedModelContext:
         require_no_run_history_lock(
             "TranscriptRepository.load_session_raw_model_context"
@@ -1375,11 +1408,17 @@ class TranscriptRepository:
             or message_count < 0
         ):
             raise ValueError("session message count must be a non-negative integer")
+        history_capture = None
+        if observed_history is not None:
+            if self._history_repository is None or not self.accepts_history_capture(self._history_repository):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            history_capture = (self._history_repository, *observed_history)
         resolution = await self._history_message_segments(
             history_id,
             tenant_id=tenant_id,
             start=0,
             end=message_count,
+            history_capture=history_capture,
         )
         values: list[LoadedContextMessage] = []
         for segment in resolution.segments:

@@ -10,7 +10,7 @@ import pytest
 from linktools.ai.core import BudgetUsage, ResourceKind, ResourceRef, RunBudget
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.codec import _CURRENT_CODEC, _decode_domain, _encode_domain, _encode_persisted_domain
-from linktools.ai.persistence.contracts import ExecutionCheckpoint, ExecutionCheckpointState, RecoveryHandoffPhase
+from linktools.ai.persistence.contracts import ExecutionRecoveryDetail, RecoveryHandoffPhase
 
 
 @dataclass
@@ -77,12 +77,10 @@ def test_explicit_invalid_defaulted_or_derived_values_never_fall_back(
     (RunBudget(total_tokens=100), "total_tokens", RunBudget()),
     (ResourceRef(ResourceKind.SESSION, "session", "tenant", "owner"), "owner_principal_id",
      ResourceRef(ResourceKind.SESSION, "session", "tenant")),
-    (ExecutionCheckpoint("execution", "run", ExecutionCheckpointState.COMPLETED, 1,
-                        datetime(2026, 1, 1, tzinfo=timezone.utc), datetime(2026, 1, 1, tzinfo=timezone.utc),
+    (ExecutionRecoveryDetail("run",
                         handoff_phase=RecoveryHandoffPhase.COMPLETED),
      "handoff_phase",
-     ExecutionCheckpoint("execution", "run", ExecutionCheckpointState.COMPLETED, 1,
-                        datetime(2026, 1, 1, tzinfo=timezone.utc), datetime(2026, 1, 1, tzinfo=timezone.utc))),
+     ExecutionRecoveryDetail("run")),
 ))
 def test_budget_resource_and_recovery_defaults_preserve_explicit_values(
     persisted: bool, value: object, field_name: str, expected: object,
@@ -108,13 +106,12 @@ def test_budget_and_resource_explicit_invalid_values_are_not_replaced(
 
 
 def test_recovery_defaults_still_enforce_cross_field_consistency() -> None:
-    value = ExecutionCheckpoint(
-        "execution", "run", ExecutionCheckpointState.COMPLETED, 1,
-        datetime(2026, 1, 1, tzinfo=timezone.utc), datetime(2026, 1, 1, tzinfo=timezone.utc),
+    value = ExecutionRecoveryDetail(
+        "run",
         handoff_phase=RecoveryHandoffPhase.COMPLETED,
     )
     payload = _encode_persisted_domain(value)
     payload["fields"]["handoff_phase"]["value"] = RecoveryHandoffPhase.PREPARED.value
     with pytest.raises(AIError) as caught:
-        _decode_domain(payload, ExecutionCheckpoint, _CURRENT_CODEC, persisted=True)
+        _decode_domain(payload, ExecutionRecoveryDetail, _CURRENT_CODEC, persisted=True)
     assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

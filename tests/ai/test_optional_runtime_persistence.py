@@ -25,7 +25,9 @@ from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ExecutionCapability, TraceCapability, CheckpointCapability
+from linktools.ai.capability import ExecutionCapability, TraceCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence import PersistenceDomain
@@ -36,12 +38,7 @@ from linktools.ai.persistence.codec import (
     encode_domain,
     encode_envelope,
 )
-from linktools.ai.persistence.contracts import (
-    ExecutionHistoryState,
-    ExecutionRecord,
-    ExecutionCheckpointState,
-    RecoveryHandoffPhase,
-)
+from linktools.ai.persistence.contracts import ExecutionRecord, ExecutionRecoveryState, RecoveryHandoffPhase
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
 from ._session_tool_test_helpers import _split_sqlite_storage
@@ -63,10 +60,13 @@ async def _start_delegated_execution(
 
     parent = await storage.execution.executions.get(parent_id, tenant_id=runtime.tenant_id)
     assert parent is not None
+    head = parent
+    assert head is not None and head.producer_generation > 0
     handle = await runtime._execution_service.start_subagent(
         parent.binding_digest,
         ExecutionRequest(prompt, runtime.default_principal, prompt, None, "run", False, False),
         parent_execution_id=parent.execution_id, root_execution_id=parent.root_execution_id,
+        parent_producer_generation=head.producer_generation,
         parent_invocation_id=f"delegate-{prompt}", binding_contract=parent.binding,
     )
     return handle.execution_id
@@ -120,9 +120,18 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
     group.tool(lookup, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("lookup",), allow_capabilities=())
     if restart:
-        group.capability(CheckpointCapability(), scope="runtime")
+        group.capability(native_checkpoint(), scope="runtime")
     if trace:
         group.capability(TraceCapability(), scope="runtime")
+    async def assert_native_snapshot(runtime, run_id):
+        recovery = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)
+        if restart:
+            assert await recovery.latest_checkpoint(agent_run_id=run_id, include_interrupted=True) is not None
+        else:
+            with pytest.raises(AIError) as unavailable:
+                await recovery.latest_checkpoint(agent_run_id=run_id, include_interrupted=True)
+            assert unavailable.value.code is ErrorCode.STORAGE_DEPENDENCY_NOT_READY
+
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "runtime.db"
     storage_factory = _split_sqlite_storage if split_storage else PersistenceStorage.sqlite
@@ -141,17 +150,14 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
                 namespace=_NAMESPACE, tenant_id=runtime.tenant_id,
                 execution_id=execution.execution_id, agent_run_seq=record.agent_run_seq,
             )
-            checkpoint = await runtime._run_store.read_store(PersistenceDomain.CHECKPOINT).latest_checkpoint(
-                agent_run_id=run_id, include_interrupted=True,
-            )
-            assert (checkpoint is not None) is restart
-            active_head = await runtime._state.execution.executions.get_history_head(
+            await assert_native_snapshot(runtime, run_id)
+            active_head = await runtime._state.execution.executions.get(
                 execution.execution_id, tenant_id=runtime.tenant_id,
             )
             assert active_head is not None
-            assert active_head.state is ExecutionHistoryState.OPEN
-            assert active_head.producer_generation > 0
-            assert active_head.producer_claim_id is not None
+            assert (active_head.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and active_head.history_seal_digest is None)
+            assert record.producer_generation > 0
+            assert record.producer_claim_id is not None
 
             async def observe_progress() -> None:
                 seen: set[ExecutionEventType] = set()
@@ -172,27 +178,27 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
         assert result.output == first_output
         history = (await session.history()).items
         assert any(item.item_kind == "tool_result" and item.content == "retained tool result" for item in history)
-        terminal_head = await runtime._state.execution.executions.get_history_head(
+        terminal_head = await runtime._state.execution.executions.get(
             execution.execution_id, tenant_id=runtime.tenant_id,
         )
         assert terminal_head is not None
-        assert terminal_head.state is (ExecutionHistoryState.SEALED if trace else ExecutionHistoryState.CLOSED)
-        assert terminal_head.producer_generation == active_head.producer_generation
-        assert terminal_head.producer_claim_id == active_head.producer_claim_id
+        assert (terminal_head.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and (terminal_head.history_seal_digest is not None) is trace)
+        terminal_record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        assert terminal_record.producer_generation == record.producer_generation
+        assert terminal_record.producer_claim_id == record.producer_claim_id
         seal = await runtime._state.execution.executions.get_history_seal(execution.execution_id, tenant_id=runtime.tenant_id)
         assert (seal is not None) is trace
-        assert terminal_head.seal_digest == (seal.seal_digest if seal is not None else None)
+        assert terminal_head.history_seal_digest == (seal.seal_digest if seal is not None else None)
         archive = runtime._run_store.read_store(PersistenceDomain.TRACE)
         assert (await archive.get_agent_run(agent_run_id=run_id) is not None) is trace
         assert bool(await archive.list_model_interactions(agent_run_id=run_id)) is trace
         assert bool(await archive.list_events(agent_run_id=run_id)) is trace
-        recovery = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)
-        assert (await recovery.latest_checkpoint(agent_run_id=run_id) is not None) is (restart or split_storage)
+        await assert_native_snapshot(runtime, run_id)
         if split_storage:
-            handoff = await runtime._state.checkpoint.checkpoints.get(execution.execution_id, tenant_id=runtime.tenant_id)
-            assert handoff is not None and handoff.state is ExecutionCheckpointState.COMPLETED
-            assert handoff.handoff_phase is RecoveryHandoffPhase.COMPLETED
-            assert handoff.terminal_handoff is not None
+            handoff = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+            assert handoff is not None and handoff.recovery_state is ExecutionRecoveryState.COMPLETED
+            assert handoff.recovery.handoff_phase is RecoveryHandoffPhase.COMPLETED
+            assert handoff.recovery.terminal_handoff is not None
 
     reopened = storage_factory(database)
     async with Persistence.open(_NAMESPACE, storage=reopened) as persistence_196, Runtime.attach(persistence=persistence_196, features=model_features(models, group)) as runtime:
@@ -201,15 +207,14 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
         record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert record is not None
         assert record.restart_checkpoints is restart and record.durable_trace is trace
-        assert await runtime._state.execution.executions.get_history_head(
+        assert await runtime._state.execution.executions.get(
             execution.execution_id, tenant_id=runtime.tenant_id,
         ) == terminal_head
         archive = runtime._run_store.read_store(PersistenceDomain.TRACE)
         assert (await archive.get_agent_run(agent_run_id=run_id) is not None) is trace
         assert bool(await archive.list_model_interactions(agent_run_id=run_id)) is trace
         assert bool(await archive.list_events(agent_run_id=run_id)) is trace
-        recovery = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)
-        assert (await recovery.latest_checkpoint(agent_run_id=run_id) is not None) is (restart or split_storage)
+        await assert_native_snapshot(runtime, run_id)
         if trace:
             assert (await restored.trace()).items
             assert (await restored.model_interactions(include_content=True)).items
@@ -273,12 +278,12 @@ async def test_task_admission_retains_its_explicit_persistence_guarantees() -> N
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("capability_type", (CheckpointCapability, TraceCapability))
+@pytest.mark.parametrize("capability_type", (StepPersistence, TraceCapability))
 async def test_persistence_capabilities_reject_agent_scope(
-    capability_type: type[CheckpointCapability | TraceCapability],
+    capability_type: type[StepPersistence | TraceCapability],
 ) -> None:
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
-    group.capability(capability_type(), scope="agent")
+    group.capability(native_checkpoint() if capability_type is StepPersistence else capability_type(), scope="agent")
     group.agent("default", model="default", allow_capabilities=())
 
     async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -322,11 +327,11 @@ async def test_recovery_cannot_enable_restart_after_execution_admission(
         try:
             await asyncio.wait_for(entered.wait(), 10)
             before = await owner._state.execution.executions.get(execution.execution_id, tenant_id=owner.tenant_id)
-            head = await owner._state.execution.executions.get_history_head(execution.execution_id, tenant_id=owner.tenant_id)
+            head = await owner._state.execution.executions.get(execution.execution_id, tenant_id=owner.tenant_id)
             assert before is not None and not before.restart_checkpoints
             assert before.agent_run_seq > 0
             if reopen_with_restart:
-                group.capability(CheckpointCapability(), scope="runtime")
+                group.capability(native_checkpoint(), scope="runtime")
             async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.sqlite(database)) as persistence_338, Runtime.attach(persistence=persistence_338, features=model_features(models, group)) as reopened:
                 remote = await reopened.executions.get(execution.execution_id)
                 replayed = await reopened.agents.get().start(
@@ -343,12 +348,11 @@ async def test_recovery_cannot_enable_restart_after_execution_admission(
                 assert await owner._state.execution.executions.get(
                     execution.execution_id, tenant_id=owner.tenant_id,
                 ) == before
-                current_head = await owner._state.execution.executions.get_history_head(
+                current_head = await owner._state.execution.executions.get(
                     execution.execution_id, tenant_id=owner.tenant_id,
                 )
                 assert current_head is not None and head is not None
-                assert current_head.producer_generation == head.producer_generation
-                assert current_head.producer_claim_id == head.producer_claim_id
+                assert current_head == head
         finally:
             release.set()
         assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
@@ -423,11 +427,11 @@ async def test_remote_force_cancel_releases_session_and_fences_late_provider(
                     execution.execution_id, tenant_id=observer.tenant_id,
                 )
                 assert terminal is not None and terminal.status is ExecutionStatus.CANCELLED
-                head = await observer._state.execution.executions.get_history_head(
+                head = await observer._state.execution.executions.get(
                     execution.execution_id, tenant_id=observer.tenant_id,
                 )
                 assert head is not None
-                assert head.state is (ExecutionHistoryState.SEALED if trace else ExecutionHistoryState.CLOSED)
+                assert (head.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and (head.history_seal_digest is not None) is trace)
                 session = await observer._state.conversation.sessions.get("session", tenant_id=observer.tenant_id)
                 assert session is not None and session.active_execution_id is None
                 assert (await remote.cancel(idempotency_key="force-cancel", force=True)).cancelled
@@ -438,7 +442,7 @@ async def test_remote_force_cancel_releases_session_and_fences_late_provider(
                 assert await observer._state.execution.executions.get(
                     execution.execution_id, tenant_id=observer.tenant_id,
                 ) == terminal
-                assert await observer._state.execution.executions.get_history_head(
+                assert await observer._state.execution.executions.get(
                     execution.execution_id, tenant_id=observer.tenant_id,
                 ) == head
                 assert (await remote.wait(timeout_seconds=10)).result.status is ExecutionStatus.CANCELLED
@@ -471,12 +475,12 @@ async def test_remote_force_cancel_orders_with_tool_admission(
     original_admit = StateCommands.commit_tool_admission
 
     async def pause_admission(
-        commands: StateCommands, request: ToolOperationAdmission,
+        commands: StateCommands, request: ToolOperationAdmission, **kwargs: object,
     ) -> ToolOperationRecord:
-        record = await original_admit(commands, request) if claimed else None
+        record = await original_admit(commands, request, **kwargs) if claimed else None
         reached.set()
         await release.wait()
-        return record if record is not None else await original_admit(commands, request)
+        return record if record is not None else await original_admit(commands, request, **kwargs)
 
     monkeypatch.setattr(StateCommands, "commit_tool_admission", pause_admission)
 
@@ -519,12 +523,17 @@ async def test_remote_force_cancel_orders_with_tool_admission(
                 )
                 assert record is not None
                 assert record.status is (ExecutionStatus.CANCELLING if claimed else ExecutionStatus.CANCELLED)
+                if claimed:
+                    assert await observer._state.checkpoint.tools.list_by_execution(
+                        execution.execution_id, tenant_id=observer.tenant_id,
+                    ) == operations
                 session = await observer._state.conversation.sessions.get("session", tenant_id=observer.tenant_id)
                 assert session is not None
                 assert session.active_execution_id == (execution.execution_id if claimed else None)
                 assert effects == []
                 release.set()
                 await asyncio.wait_for(asyncio.gather(worker, return_exceptions=True), 10)
+                assert effects == []
                 if not claimed:
                     assert effects == []
                     assert await observer._state.checkpoint.tools.list_by_execution(
@@ -610,10 +619,10 @@ async def test_remote_force_cancel_requires_explicit_tool_effect_resolution(
             assert (await remote.wait(timeout_seconds=10)).result.status is ExecutionStatus.CANCELLED
             session = await observer._state.conversation.sessions.get("session", tenant_id=observer.tenant_id)
             assert session is not None and session.active_execution_id is None
-            head = await observer._state.execution.executions.get_history_head(
+            head = await observer._state.execution.executions.get(
                 execution.execution_id, tenant_id=observer.tenant_id,
             )
-            assert head is not None and head.state is ExecutionHistoryState.CLOSED
+            assert head is not None and (head.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and head.history_seal_digest is None)
             assert (await remote.cancel(idempotency_key="force-unknown", force=True)).cancelled
     assert effects == ["effect started"]
     assert requests == ["request"]
@@ -741,10 +750,10 @@ async def test_remote_force_cancel_recursively_fences_ordinary_delegated_tree(tm
                     assert not record.restart_checkpoints and not record.durable_trace
                     assert record.root_execution_id == root.execution_id
                     terminal_records.append(record)
-                    head = await observer._state.execution.executions.get_history_head(
+                    head = await observer._state.execution.executions.get(
                         execution_id, tenant_id=observer.tenant_id,
                     )
-                    assert head is not None and head.state is ExecutionHistoryState.CLOSED
+                    assert head is not None and (head.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and head.history_seal_digest is None)
                     terminal_heads.append(head)
                 session = await observer._state.conversation.sessions.get("session", tenant_id=observer.tenant_id)
                 assert session is not None and session.active_execution_id is None
@@ -754,7 +763,7 @@ async def test_remote_force_cancel_recursively_fences_ordinary_delegated_tree(tm
                 await asyncio.wait_for(asyncio.gather(*workers, return_exceptions=True), 10)
                 for execution_id, record, head in zip(execution_ids, terminal_records, terminal_heads):
                     assert await observer._state.execution.executions.get(execution_id, tenant_id=observer.tenant_id) == record
-                    assert await observer._state.execution.executions.get_history_head(
+                    assert await observer._state.execution.executions.get(
                         execution_id, tenant_id=observer.tenant_id,
                     ) == head
         finally:
@@ -820,8 +829,8 @@ async def test_unknown_delegated_tool_effect_prevents_parent_cancel_and_session_
                 assert child_record is not None and child_record.status is ExecutionStatus.RECOVERY_REQUIRED
                 for execution_id in (root.execution_id, child_id):
                     assert await observer._state.execution.executions.get_result(execution_id, tenant_id=observer.tenant_id) is None
-                    head = await observer._state.execution.executions.get_history_head(execution_id, tenant_id=observer.tenant_id)
-                    assert head is not None and head.state is ExecutionHistoryState.OPEN
+                    head = await observer._state.execution.executions.get(execution_id, tenant_id=observer.tenant_id)
+                    assert head is not None and (head.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and head.history_seal_digest is None)
                 session = await observer._state.conversation.sessions.get("session", tenant_id=observer.tenant_id)
                 assert session is not None and session.active_execution_id == root.execution_id
                 with pytest.raises(AIError) as busy:
@@ -894,7 +903,7 @@ async def test_remote_force_cancel_of_model_delegation_respects_root_owner(
     group.agent("default", model="default", allow_tools=(), allow_subagents=("child",))
     group.agent("child", model="default", allow_tools=(), allow_subagents=())
     if restart:
-        group.capability(CheckpointCapability(), scope="runtime")
+        group.capability(native_checkpoint(), scope="runtime")
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "model-delegation.db"
     original = PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1024 * 1024) if cache_enabled else None)
@@ -904,7 +913,7 @@ async def test_remote_force_cancel_of_model_delegation_respects_root_owner(
             task = Task.from_agent("delegation.agent", owner.agents.get())
             run = await engine.with_definitions(task).start(
                 TaskGraph("delegation", (TaskNode("agent", task=task, input=AgentTaskInput("root")),)),
-                idempotency_key="task-root",
+                principal=owner.default_principal, idempotency_key="task-root",
             )
             state = await _wait_for_committed(run.state, lambda value: value.node_states[0].execution_id is not None)
             root_id = state.node_states[0].execution_id
@@ -935,8 +944,8 @@ async def test_remote_force_cancel_of_model_delegation_respects_root_owner(
                         current = await observer._state.execution.executions.get(execution_id, tenant_id=observer.tenant_id)
                         assert current is not None and current.status is ExecutionStatus.CANCELLING
                         assert await observer._state.execution.executions.get_result(execution_id, tenant_id=observer.tenant_id) is None
-                        head = await observer._state.execution.executions.get_history_head(execution_id, tenant_id=observer.tenant_id)
-                        assert head is not None and head.state is ExecutionHistoryState.OPEN
+                        head = await observer._state.execution.executions.get(execution_id, tenant_id=observer.tenant_id)
+                        assert head is not None and (head.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and head.history_seal_digest is None)
                     assert all(not worker.done() for worker in workers)
                 else:
                     assert (await remote.cancel(idempotency_key="root-force", force=True)).cancelled
@@ -999,7 +1008,7 @@ async def test_no_trace_terminal_readback_preserves_session_and_single_metric(
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     if restart:
-        group.capability(CheckpointCapability(), scope="runtime")
+        group.capability(native_checkpoint(), scope="runtime")
     storage_factory = _split_sqlite_storage if split_storage else PersistenceStorage.sqlite
     storage = storage_factory(tmp_path / "terminal.db")
     async with Persistence.open(_NAMESPACE, storage=storage) as persistence_1039, Runtime.attach(persistence=persistence_1039, metrics=Metrics.from_store(MetricStore(), namespace=_NAMESPACE), features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
@@ -1018,8 +1027,8 @@ async def test_no_trace_terminal_readback_preserves_session_and_single_metric(
         record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert record is not None and record.status is ExecutionStatus.SUCCEEDED
         assert record.restart_checkpoints is restart and not record.durable_trace
-        head = await runtime._state.execution.executions.get_history_head(execution.execution_id, tenant_id=runtime.tenant_id)
-        assert head is not None and head.state is ExecutionHistoryState.CLOSED
+        head = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        assert head is not None and (head.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and head.history_seal_digest is None)
         assert await runtime._state.execution.executions.get_history_seal(execution.execution_id, tenant_id=runtime.tenant_id) is None
         run_id = agent_run_id(
             namespace=_NAMESPACE, tenant_id=runtime.tenant_id,
@@ -1082,19 +1091,19 @@ async def test_default_admission_without_worker_never_restarts_on_reopen(
         assert admitted is not None and admitted.status is ExecutionStatus.STARTED
         assert admitted.agent_run_seq == 0
         assert not admitted.restart_checkpoints and not admitted.durable_trace
-        head = await runtime._state.execution.executions.get_history_head(execution.execution_id, tenant_id=runtime.tenant_id)
+        head = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert head is not None
         assert requests == []
 
     if reopen_with_restart:
-        group.capability(CheckpointCapability(), scope="runtime")
+        group.capability(native_checkpoint(), scope="runtime")
     reopened = storage()
     async with Persistence.open(_NAMESPACE, storage=reopened) as persistence_1129, Runtime.attach(persistence=persistence_1129, features=model_features(models, group)) as runtime:
         assert persistence_1129.exclusive_execution_writer is (backend == "exclusive_sqlite")
         assert await runtime._state.execution.executions.get(
             execution.execution_id, tenant_id=runtime.tenant_id,
         ) == admitted
-        assert await runtime._state.execution.executions.get_history_head(
+        assert await runtime._state.execution.executions.get(
             execution.execution_id, tenant_id=runtime.tenant_id,
         ) == head
         assert not runtime._execution_service.runtime_backend().worker_installed(execution.execution_id)
@@ -1108,7 +1117,7 @@ async def test_default_admission_without_worker_never_restarts_on_reopen(
         assert await runtime._state.execution.executions.get(
             execution.execution_id, tenant_id=runtime.tenant_id,
         ) == admitted
-        assert await runtime._state.execution.executions.get_history_head(
+        assert await runtime._state.execution.executions.get(
             execution.execution_id, tenant_id=runtime.tenant_id,
         ) == head
         session = await runtime._state.conversation.sessions.get("session", tenant_id=runtime.tenant_id)

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
-from linktools.ai.core import BudgetUsage, IdempotencyStatus, OperationStatus, RunBudget, UsageMetrics
+from linktools.ai.core import ExecutionStatus, BudgetUsage, IdempotencyStatus, OperationStatus, RunBudget, UsageMetrics
 from linktools.ai.evaluation import CaseRef
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.codec import (
@@ -32,17 +32,7 @@ from linktools.ai.persistence.codec import (
     parse_envelope,
     wire_type_id,
 )
-from linktools.ai.persistence.contracts import (
-    ConversationCursor,
-    ExecutionHistoryState,
-    IdempotencyTerminalUpdate,
-    OperationTerminalUpdate,
-    StoredAgentRunCheckpoint,
-    TranscriptMessageRef,
-    TranscriptHeadRecord,
-    TranscriptOwnerDomain,
-    HistoryQuality,
-)
+from linktools.ai.persistence.contracts import ContextProjection, ConversationCursor, IdempotencyTerminalUpdate, OperationTerminalUpdate, StoredAgentRunCheckpoint, TranscriptMessageRef, TranscriptHeadRecord, TranscriptOwnerDomain, HistoryQuality
 from linktools.ai.persistence._step_contracts import AgentRunRecord, StepEvent
 from linktools.ai.task import TaskBindingContract
 
@@ -80,8 +70,8 @@ def test_golden_current_envelopes_and_storage_primitives_decode() -> None:
 
     state_payload = envelopes[1]["value"]["payload"]
     assert (
-        decode_domain(state_payload, ExecutionHistoryState)
-        is ExecutionHistoryState.OPEN
+        decode_domain(state_payload, ExecutionStatus)
+        is ExecutionStatus.STARTED
     )
 
     ref_payload = envelopes[2]["value"]["payload"]
@@ -293,7 +283,7 @@ def test_checkpoint_frontier_always_writes_pending_request_index() -> None:
         1,
         datetime(2026, 9, 20, tzinfo=timezone.utc),
         "complete",
-        "projection",
+        ContextProjection(()),
         0,
         True,
     )
@@ -311,7 +301,7 @@ def test_checkpoint_frontier_preserves_pending_request_index() -> None:
         1,
         datetime(2026, 9, 20, tzinfo=timezone.utc),
         "complete",
-        "projection",
+        ContextProjection(()),
         0,
         True,
         3,
@@ -418,7 +408,7 @@ def test_domain_decode_uses_constructor_factories_for_missing_fields(
 @pytest.mark.parametrize("value", (None, True, -1, "0"))
 def test_checkpoint_boundary_rejects_invalid_explicit_values(value: object) -> None:
     checkpoint = StoredAgentRunCheckpoint(
-        "run", 1, datetime(2026, 9, 20, tzinfo=timezone.utc), "complete", "projection", 2,
+        "run", 1, datetime(2026, 9, 20, tzinfo=timezone.utc), "complete", ContextProjection(()), 2,
     )
     payload = _encode_persisted_domain(checkpoint)
     payload["fields"]["transcript_message_count"] = value

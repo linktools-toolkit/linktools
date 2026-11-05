@@ -1083,6 +1083,7 @@ class ExecutionService(Protocol):
         execution_id: str,
         *,
         tenant_id: str,
+        terminal_commit: bool = False,
     ) -> None: ...
 
     async def start(

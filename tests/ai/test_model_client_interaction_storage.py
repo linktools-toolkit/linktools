@@ -35,6 +35,7 @@ from linktools.ai.storage import InMemoryObjectStore, StoredPayload
 
 from .test_evaluation_retention import Offline
 from .test_history_projection_conformance import _record
+from ._runtime_test_helpers import native_checkpoint, seed_native_snapshot
 
 _NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -92,7 +93,12 @@ async def test_original_attempts_round_trip_and_relocate_without_sdk_context(
     prepared = PreparedArchive()
     storage = Persistence(_storage(backend, tmp_path))
     await storage.initialize(namespace="native-client", tenant_id="tenant")
-    await storage.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
+    await storage.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
+    target_root = tmp_path / "relocated"
+    target_root.mkdir()
+    target_storage = Persistence(_storage(backend, target_root))
+    await target_storage.initialize(namespace="native-client", tenant_id="tenant")
+    await target_storage.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
     try:
         run = AgentRunRecord("run")
         source = storage.run_store.read_store(PersistenceDomain.TRACE)
@@ -121,14 +127,10 @@ async def test_original_attempts_round_trip_and_relocate_without_sdk_context(
             archive=prepared)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
-        target = storage.run_store.read_store(PersistenceDomain.CHECKPOINT)
+        target = target_storage.run_store.read_store(PersistenceDomain.TRACE)
         relocated = await target.prepare_relocated_interactions(archived, resolved, prepared=prepared)
-        metadata = tuple(replace(
-            request, body=None,
-            response=replace(request.response, body=None) if request.response is not None else None,
-        ) for request in requests)
-        expected = [(None, None, None, metadata, None)]
-        assert all(request.body is None for request in relocated[0].client_requests)
+        expected = [(None, None, None, requests, None)]
+        assert relocated[0].client_requests[0].body.raw_digest == record.client_requests[0].body.raw_digest
         assert relocated[0].model == record.model
         assert relocated[0].usage == record.usage
         await target.sync_projection(run, events=(), checkpoints=(), interactions=relocated, execution_id="execution", archive=prepared)
@@ -138,6 +140,7 @@ async def test_original_attempts_round_trip_and_relocate_without_sdk_context(
         await source.release_agent_run("run", execution_id="execution")
         assert await target.resolve_model_interactions(relocated, include_client_requests=True) == expected
     finally:
+        await target_storage.close()
         await storage.close()
 
 
@@ -147,7 +150,7 @@ async def test_missing_capture_and_no_dispatch_remain_distinct_on_wire(requests)
     prepared = PreparedArchive()
     storage = Persistence(PersistenceStorage.in_memory())
     await storage.initialize(namespace="native-client", tenant_id="tenant")
-    await storage.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
+    await storage.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
     try:
         archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         record, = await archive.prepare_interactions(AgentRunRecord("run"), (_staged(requests),), lambda _: b"{}", prepared=prepared)
@@ -170,7 +173,7 @@ async def test_original_body_decoded_integrity_fails_closed(corruption: str) -> 
     prepared = PreparedArchive()
     storage = Persistence(PersistenceStorage.in_memory())
     await storage.initialize(namespace="native-client", tenant_id="tenant")
-    await storage.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
+    await storage.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
     try:
         archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         record, = await archive.prepare_interactions(AgentRunRecord("run"), (_staged(_requests(large=True)),), lambda _: b"{}", prepared=prepared)
@@ -210,7 +213,7 @@ async def test_native_objects_survive_snapshot_and_follow_owner_cleanup(
     prepared = PreparedArchive()
     storage = Persistence(_storage(backend, tmp_path))
     await storage.initialize(namespace="native-client", tenant_id="tenant")
-    await storage.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
+    await storage.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
     requests = _requests(large=True)
     try:
         archive = storage.run_store.read_store(PersistenceDomain.TRACE)
@@ -298,7 +301,7 @@ async def test_sdk_projection_and_native_bytes_remain_separate(
 
     storage = Persistence(PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True))
     await storage.initialize(namespace="native-client", tenant_id="tenant")
-    await storage.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
+    await storage.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
     payloads: dict[str, bytes] = {}
 
     def intern(raw: bytes) -> tuple[str, int]:
@@ -339,10 +342,9 @@ async def test_sdk_projection_and_native_bytes_remain_separate(
             ]
             assert (await archive.resolve_model_interaction(records[0]))[3] is None
             metadata = await resolve_client_requests(
-                records[0].client_requests, PersistenceDomain.CHECKPOINT, include_bodies=False,
+                records[0].client_requests, PersistenceDomain.TRACE, include_bodies=False,
             )
-            checkpoint_archive = storage.run_store.read_store(PersistenceDomain.CHECKPOINT)
-            relocated = await checkpoint_archive.prepare_relocated_interactions(
+            relocated = await archive.prepare_relocated_interactions(
                 records, [(sdk_request, sdk_response, b'{"streaming":true}', metadata, None)],
             prepared=prepared)
             assert relocated[0].client_requests[0].body is None
@@ -370,7 +372,7 @@ async def test_cancelled_preparation_leaves_no_owner_and_body_is_reclaimable(
 
     storage = Persistence(PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True))
     await storage.initialize(namespace="native-client", tenant_id="tenant")
-    await storage.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
+    await storage.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
     try:
         objects = storage.object_store(PersistenceDomain.TRACE)
         original_put = objects.put
@@ -399,7 +401,7 @@ async def test_interrupted_record_preserves_observed_incomplete_response() -> No
     prepared = PreparedArchive()
     storage = Persistence(PersistenceStorage.in_memory())
     await storage.initialize(namespace="native-client", tenant_id="tenant")
-    await storage.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
+    await storage.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
     try:
         requests = (_requests()[1],)
         staged = replace(_staged(requests), status="INTERRUPTED", duration_ns=None, finished_at=None)
@@ -425,17 +427,21 @@ async def test_recovery_preserves_existing_trace_bodies_without_reading_them(
 
     storage = Persistence(PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True))
     await storage.initialize(namespace="native-client", tenant_id="tenant")
-    await storage.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
+    await storage.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
     try:
         run = AgentRunRecord("run")
         trace = storage.run_store.read_store(PersistenceDomain.TRACE)
-        checkpoint = storage.run_store.read_store(PersistenceDomain.CHECKPOINT)
+        native = native_checkpoint().store
+        storage.run_store.bind_step_store(native)
+        await seed_native_snapshot(native, run_id="run", messages=[])
+        snapshot = await native.latest_snapshot(run_id="run")
         requests = _requests(large=True)
         traced = await trace.prepare_interactions(run, (_staged(requests),), lambda _: b"{}", prepared=prepared)
         await trace.sync_projection(run, events=(), checkpoints=(), interactions=traced, execution_id="execution", archive=prepared)
-        recovered = await checkpoint.prepare_interactions(run, (_staged(requests),), lambda _: b"{}", prepared=prepared)
-        await checkpoint.sync_projection(run, events=(), checkpoints=(), interactions=recovered, archive=prepared)
-        await checkpoint.materialize_checkpoint(run, AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0))
+        await trace.materialize_checkpoint(
+            run, AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0),
+            execution_id="execution",
+        )
         objects = storage.object_store(PersistenceDomain.TRACE)
         original_open = objects.open
         raw_keys = {ref.key for _, ref in iter_runtime_object_refs(
@@ -453,6 +459,10 @@ async def test_recovery_preserves_existing_trace_bodies_without_reading_them(
             await storage.run_store.materialize_from_recovery(
                 target=PersistenceDomain.TRACE, agent_run_id="run", execution_id="execution",
             )
+        assert await native.latest_snapshot(run_id="run") == snapshot
+        assert await storage.run_store.read_store(PersistenceDomain.CHECKPOINT).list_model_interactions(
+            agent_run_id="run",
+        ) == []
         loaded = await trace.list_model_interactions(agent_run_id="run")
         assert loaded[0].client_requests == traced[0].client_requests
         assert await trace.resolve_model_interactions(loaded, include_client_requests=True) == [

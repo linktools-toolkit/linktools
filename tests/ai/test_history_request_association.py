@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 from functools import partial
 
 import pytest
-from linktools.ai.runtime._persistence_services import CheckpointService
 from pydantic_ai import Agent, ModelRequestNode, RunContext
 from pydantic_ai.capabilities import (
     AbstractCapability,
@@ -24,7 +23,8 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
+    RetryFeedbackPart,
+    RetryInfo,
     SystemPromptPart,
     TextPart,
     ThinkingPart,
@@ -43,7 +43,8 @@ from linktools.ai.core import (
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._run_hooks import AgentRunCapture
-from linktools.ai.capability import CheckpointCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.history._projection import StepExecutionHistoryReader
 from linktools.ai.observe.journal import ModelRequestJournal
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
@@ -88,7 +89,7 @@ async def _history(run_count: int = 1) -> AsyncIterator[_History]:
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
-        await state.execution.executions.create_with_history_head(
+        await state.execution.executions.create_execution(
             _record(ExecutionStatus.STARTED, run_count)
         )
         reader = StepExecutionHistoryReader(
@@ -151,7 +152,7 @@ async def test_history_response_and_tool_result_keep_origin_after_archive() -> N
         recorder.stage_tool_result(result)
         await recorder.record_tool_result_boundary(result, 4)
         recorder.append_transcript_message(ModelRequest(parts=[
-            result, RetryPromptPart("validate the output"),
+            result, RetryFeedbackPart("validate the output", retry=RetryInfo(cause="model_retry")),
         ]))
         await recorder.commit_history_boundary()
         live = await history.reader.history(
@@ -206,7 +207,7 @@ async def test_history_same_step_requests_use_actual_response_slots(
             include_observation=False,
         )
         if preceding_request == "output_retry":
-            recorder.append_transcript_message(ModelRequest(parts=[RetryPromptPart("try again")]))
+            recorder.append_transcript_message(ModelRequest(parts=[RetryFeedbackPart("try again", retry=RetryInfo(cause="model_retry"))]))
         else:
             assert len(recorder.transcript_messages()) == 1
         second = journal.begin(5, output_retry_index=1 if preceding_request == "output_retry" else None)
@@ -386,13 +387,16 @@ async def test_sdk_after_node_boundary_retains_one_actual_raw_response(
     recorder = AgentRunRecorder(store, execution_id=None, agent_run_id="run")
     response = ModelResponse(parts=[ThinkingPart("actual reasoning"), TextPart("actual answer")])
 
+    calls = []
+
     async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        del messages, info
+        calls.append(list(messages))
+        del info
         return response
 
     class FailAfterResponse(AbstractCapability[None]):
         def get_ordering(self) -> CapabilityOrdering:
-            return CapabilityOrdering(position="innermost", wrapped_by=(CheckpointCapability,))
+            return CapabilityOrdering(position="innermost", wrapped_by=(StepPersistence,))
 
         async def after_node_run(
             self, ctx: RunContext[None], *, node: AgentNode[None], result: NodeResult[None],
@@ -408,20 +412,32 @@ async def test_sdk_after_node_boundary_retains_one_actual_raw_response(
     persistence = AgentRunCapture(
         recorder=recorder, agent_id="default", agent_run_id="run",
     )
-    agent = Agent(FunctionModel(model), capabilities=[observation, persistence, CheckpointCapability().bind(CheckpointService(persistence)), FailAfterResponse()])
+    native = native_checkpoint()
+    agent = Agent(FunctionModel(model), capabilities=[observation, persistence, native, FailAfterResponse()])
     if fail_after_node:
         with pytest.raises(RuntimeError, match="after-node failure"):
-            await agent.run("question")
+            await agent.run("question", run_id="run")
     else:
-        assert (await agent.run("question")).output == "actual answer"
+        assert (await agent.run("question", run_id="run")).output == "actual answer"
     raw_responses = [message for message in recorder.transcript_messages() if isinstance(message, ModelResponse)]
     assert len(raw_responses) == 1
     assert raw_responses[0].parts == response.parts
     assert raw_responses[0].usage == response.usage
-    checkpoint = await recorder.latest_checkpoint(include_interrupted=True)
+    checkpoint = await native.store.latest_snapshot(run_id="run", include_interrupted=True)
     assert checkpoint is not None
-    assert [message for message in checkpoint.messages if isinstance(message, ModelResponse)] == raw_responses
-    assert checkpoint.state == ("interrupted" if fail_after_node else "complete")
+    if fail_after_node:
+        assert not any(isinstance(message, ModelResponse) for message in checkpoint.messages)
+        from pydantic_ai_harness.step_persistence import continue_run
+        history = await continue_run(native.store, run_id="run")
+        resumed = await Agent(FunctionModel(model)).run(message_history=history)
+        assert resumed.output == "actual answer"
+        assert len(calls) == 2
+    else:
+        assert [message for message in checkpoint.messages if isinstance(message, ModelResponse)] == raw_responses
+        assert len(calls) == 1
+    assert checkpoint.state == "complete"
+    events = await native.store.list_events(run_id="run")
+    assert events[-1].kind == ("run_failed" if fail_after_node else "run_completed")
     completed = [event for event in await store.list_events(agent_run_id="run")
                  if event.event_type == "MODEL_REQUEST_SUCCEEDED"]
     assert len(completed) == 1
@@ -429,7 +445,7 @@ async def test_sdk_after_node_boundary_retains_one_actual_raw_response(
 
 
 @pytest.mark.asyncio
-async def test_same_run_recovery_restores_committed_response_ahead_of_checkpoint() -> None:
+async def test_trace_reopen_restores_committed_response_ahead_of_checkpoint() -> None:
     async with _history() as history:
         recorder, = history.recorders
         journal, = history.journals
@@ -461,7 +477,7 @@ async def test_same_run_recovery_restores_committed_response_ahead_of_checkpoint
 
 
 @pytest.mark.asyncio
-async def test_same_run_recovery_rejects_response_fact_without_committed_body() -> None:
+async def test_trace_reopen_rejects_response_fact_without_committed_body() -> None:
     from linktools.ai.errors import AIError, ErrorCode
 
     async with _history() as history:

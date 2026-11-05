@@ -24,3 +24,11 @@ async def test_session_tool_turn_recovers_at_terminal_commit_without_replaying_e
     phase: str,
 ) -> None:
     await _assert_tool_turn_recovers_without_replaying_effect(tmp_path, backend, phase)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", ("missing_source", "missing_latest", "interrupted_latest"))
+async def test_completed_native_resume_does_not_hide_missing_or_partial_trace(tmp_path: Path, damage: str) -> None:
+    await _assert_tool_turn_recovers_without_replaying_effect(
+        tmp_path, "sqlite", "before_terminal", trace_damage=damage,
+    )

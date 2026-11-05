@@ -13,13 +13,15 @@ completed turn makes subsequent resume/fork fail with
 later. See
 [optional execution persistence](runtime-capabilities.md#optional-execution-persistence).
 
-For runs with restart checkpoints disabled, model-boundary control checks may
-reuse one execution/history-head observation captured within the last three
-seconds. Both records share the same source capture and expiry. Without a hot
-record cache, each check reads the source. Tool admission, recovery checkpoints,
-terminal commits and result consumption retain their authoritative transaction
-checks. Task-owned runs and their delegated descendants keep source-only model control
-checks, including on transient execution routes.
+ExecutionRecord is the sole producer-control authority. The bound, same-group
+native writer uses its confirmed storage revision for a conditional update at
+each dispatch boundary. A conflicting cancellation or takeover rejects that
+update before another external call. Other dispatch paths read fresh control;
+an ordinary record-cache hit never grants permission to continue. Conversation
+and Trace may stage observations locally, but their durable publication still
+requires the producer fence. Result consumption uses this Runtime's confirmed
+terminal publication or reads the source; it still checks caller access and
+owned worker failures.
 
 With durable trace enabled and an explicit `CommitPolicy.batch(buffer=...)`,
 Trace coalesces observation writes through its owned cache-buffer scopes. The
@@ -217,9 +219,8 @@ page = await runtime.executions.history(
 
 The result has the same `ExecutionHistoryItem` shapes as unfiltered history:
 `tool_call` contains the model's arguments, `tool_result` contains the returned
-content, and `retry` contains a legacy SDK retry prompt. On SDKs with native
-retry feedback, a tool retry remains a `tool_result` with a failed status, not a
-successful result; its original `ToolReturnPart` has `outcome="retried"` and
+content. A tool retry is a `tool_result` with a failed status, not a
+successful result; its `ToolReturnPart` has `outcome="retried"` and
 optional `retry` information. Non-tool output feedback has item kind
 `retry-feedback`, without a fabricated tool name or call ID. Its content
 includes the feedback and retry cause, attempt and maximum retry count.
@@ -228,13 +229,9 @@ post-validation parameters or a separate external-effect ledger. A call can be
 visible before any result exists. A failed or cancelled call without a returned
 part does not acquire a fabricated result.
 
-The durable message codec preserves both the legacy retry prompt and the native
-feedback/tool-return shapes. Native retry information is retained through
-checkpoints and history, including explicit unknown (`None`) retry budgets.
-Ordinary tool returns without retry information keep their existing encoding.
-Reading native retry semantics on an older SDK that cannot represent them fails
-with `STORAGE_VERSION_UNSUPPORTED`, rather than silently translating or dropping
-the feedback. These additive message fields do not change the format version.
+Writes and checkpoints use native retry shapes, including explicit unknown
+(`None`) retry budgets. Ordinary tool returns without retry information keep
+their existing encoding. These message semantics do not change the format version.
 
 An empty page means no matching committed fact is currently available. During
 an active run it does not prove that a live-observed request or call is absent.
@@ -621,9 +618,13 @@ SQL and SQLite permit several Runtime instances to use one namespace. Opening
 another Runtime does not take over an admitted or running execution, or finish
 an unhanded-off cancellation. Separate sessions can run concurrently; one
 session's active-execution admission still uses its existing optimistic claim.
-The ordinary durable path does not add an ownership heartbeat or a
-namespace-wide database lock. Eligible deferred turns use the optional cache
-turn-coordination lease while a turn has no database record; see
+The ordinary durable path does not add a namespace-wide database lock. An
+optional turn-coordination scope covers the active worker lifetime, including
+its model/tool steps. Each child has its own scope; a parent stop also drains
+the child workers owned by that parent attempt. The injected coordinator owns lease
+renewal and loss delivery; Runtime owns stopping and draining the exact worker.
+Without a coordinator, source control and conditional writes remain in effect.
+Pending turns can additionally use the coordinator's pending views; see
 [independent commit boundaries](runtime-capabilities.md#independent-commit-boundaries).
 
 With `ExecutionCapability(retain_history=True)` and non-transient conversation storage,
@@ -826,9 +827,9 @@ facts must not be silently discarded or coerced. Provider usage extensions remai
 open data, not a way to replace standard usage fields.
 
 Thin owned extensions retain Runtime summary provenance, Asset reference and
-retirement descriptors, portable tool-return values, open recorded settings, and
-supported `RetryPromptPart` tool correlation that the native union otherwise
-upgrades to feedback. These are not new public authoring parameters. Native
+retirement descriptors, portable tool-return values, and open recorded settings.
+Legacy retries use the native SDK union, retaining tool correlation for tool-bound
+returns and keeping output feedback separate. These are not new public authoring parameters. Native
 validation is supplemented only for durable facts its authoring dataclasses do
 not enforce, such as nonnegative usage/durations and valid instruction digests.
 An omitted clock factory runs at read time; it is not proof of a historical

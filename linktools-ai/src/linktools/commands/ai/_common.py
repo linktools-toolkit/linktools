@@ -216,7 +216,8 @@ async def _open_local_runtime(
 ) -> "AsyncIterator[LocalRuntime]":
     from linktools.ai.capability import AssetCapability, FileSystem, MemoryCapability, ShellCapability
     from linktools.ai.runtime import RuntimeFeatures
-    from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
+    from linktools.ai.capability import ExecutionCapability, TraceCapability
+    from pydantic_ai_harness.step_persistence import StepPersistence, SqliteStepStore
     from linktools.ai.runtime import Runtime
 
     async with AssetCapability.open(_local_runtime_assets(workspace)) as assets:
@@ -227,7 +228,10 @@ async def _open_local_runtime(
         features.capability(ShellCapability())
         features.capability(MemoryCapability())
         features.capability(ExecutionCapability(retain_history=True))
-        features.capability(CheckpointCapability())
+        features.capability(StepPersistence(
+            store=SqliteStepStore(database=_local_runtime_root(workspace) / "steps.db"),
+            capture_frontier=True,
+        ))
         features.capability(TraceCapability())
         metrics = await _local_metrics(workspace)
         capture = await features.capture()

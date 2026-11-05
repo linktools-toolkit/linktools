@@ -21,7 +21,6 @@ from .state import StateStore
 _STEP_DOMAINS = (
     PersistenceDomain.CONVERSATION,
     PersistenceDomain.TRACE,
-    PersistenceDomain.CHECKPOINT,
 )
 
 
@@ -52,6 +51,7 @@ def build_runtime_agent_run_store(
         archives[domain] = ModelInteractionStateStepArchive(
             stores[domain],
             object_store=objects.object_store(domain),
+            cache=route.cache,
             archive_object_store=objects.archive_object_store(domain),
             archive_object_reader=partial(objects.read_archive_object, domain),
             object_reader=objects.read_object,
@@ -72,7 +72,6 @@ def build_runtime_agent_run_store(
         tenant_id=tenant_id,
         conversation_archive=archives[PersistenceDomain.CONVERSATION],
         execution_archive=archives.get(PersistenceDomain.TRACE),
-        checkpoint_archive=archives.get(PersistenceDomain.CHECKPOINT),
     )
 
 

@@ -410,6 +410,7 @@ async def test_rejected_start_preserves_admission_truth_and_cleanup_before_metri
                 commit, session_id=session_id, expected_execution=expected_execution,
             )
             metrics = object.__new__(LocalExecutionBackend)
+            metrics._terminal_publication = None
             metrics._metric_recorder = Recorder()
             metrics._namespace = "rejected-start-metric"
             metrics._tenant_id = "tenant"

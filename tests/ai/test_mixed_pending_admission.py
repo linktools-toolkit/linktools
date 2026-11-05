@@ -4,6 +4,7 @@
 
 from linktools.ai.persistence import Persistence
 import asyncio
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import replace
 
@@ -30,11 +31,42 @@ class _Coordinator(PendingTurnCoordination):
     def __init__(self, cache):
         super().__init__(cache, cache, namespace="mixed-admission", tenant_id="tenant")
         self.claims = []
+        self.closed = asyncio.Event()
+        self.tasks = []
 
-    async def claim(self, **kwargs):
-        result = await super().claim(**kwargs)
-        self.claims.append(result)
-        return result
+    async def run_turn(self, service, reservation, principal, admit):
+        admitted = asyncio.get_running_loop().create_future()
+
+        async def own():
+            execution, identity = reservation.execution, reservation.idempotency
+            try:
+                async with self.enter(
+                    session_key=(f"session:{execution.session_id}" if execution.session_id is not None else
+                                 f"request:{identity.scope}:{identity.idempotency_key_digest}"),
+                    request_key=f"{identity.scope}:{identity.idempotency_key_digest}",
+                    request_digest=identity.request_digest, execution_id=execution.execution_id,
+                    owner_id=uuid.uuid4().hex,
+                ) as coordination:
+                    self.claims.append(coordination)
+                    if coordination is None:
+                        raise AIError(ErrorCode.SESSION_BUSY)
+                    result = await admit(coordination)
+                    if service._runtime_bridge.pending_turns.get(
+                        execution.execution_id, tenant_id=principal.tenant_id,
+                    ) is not None:
+                        admitted.set_result(result)
+                        await self.closed.wait()
+                if not admitted.done():
+                    admitted.set_result(result)
+            except BaseException as error:
+                if not admitted.done():
+                    admitted.set_exception(error)
+                else:
+                    raise
+
+        task = asyncio.create_task(own())
+        self.tasks.append(task)
+        return await admitted
 
     async def read_owner(self, execution_id, *, tenant_id):
         if tenant_id != self._tenant_id:
@@ -55,15 +87,19 @@ async def _writers():
         service = _service(state, backend=_Launcher(state.execution.executions), commit=commit)
         service._conversation = True
         service._runtime_bridge.pending_turns = _RemotePendingTurns(coordinator)
+
+        async def run_turn(reservation, principal, admit, *, service=service, coordinator=coordinator):
+            return await coordinator.run_turn(service, reservation, principal, admit)
+
+        service._runtime_bridge.run_turn = run_turn
         services.append(service)
     try:
         yield state, *services
     finally:
         for service in services:
             coordinator = service._runtime_bridge.pending_turns.coordination
-            for claim in coordinator.claims:
-                if claim is not None and claim.lease is not None:
-                    await coordinator.release(claim.lease)
+            coordinator.closed.set()
+            await asyncio.gather(*coordinator.tasks)
         await state.close()
 
 
@@ -266,10 +302,10 @@ async def test_coordination_failure_does_not_fall_through_to_source_admission(mo
     async with _writers() as (_state, _pending, legacy):
         coordinator = legacy._runtime_bridge.pending_turns.coordination
 
-        async def unavailable(**kwargs):
+        async def unavailable(*args, **kwargs):
             raise OSError("claim outcome unavailable")
 
-        monkeypatch.setattr(coordinator, "claim", unavailable)
+        monkeypatch.setattr(coordinator._backend, "claim_turn", unavailable)
         with pytest.raises(OSError, match="claim outcome unavailable"):
             await _start(legacy)
         assert legacy.runtime_backend().calls == 0
@@ -284,7 +320,7 @@ async def test_release_failure_preserves_successful_source_admission(monkeypatch
             raise OSError("release unavailable")
 
         with monkeypatch.context() as patch:
-            patch.setattr(coordinator, "release", unavailable)
+            patch.setattr(coordinator._backend, "release_turn", unavailable)
             result = await _start(legacy)
         assert legacy.runtime_backend().calls == 1
         assert await state.execution.executions.get(result.execution_id, tenant_id="tenant") is not None
@@ -305,7 +341,7 @@ async def test_release_failure_preserves_original_admission_error(monkeypatch) -
 
         with monkeypatch.context() as patch:
             patch.setattr(state.execution.executions, "reserve_start", reject)
-            patch.setattr(coordinator, "release", unavailable)
+            patch.setattr(coordinator._backend, "release_turn", unavailable)
             with pytest.raises(AIError) as raised:
                 await _start(legacy)
         assert raised.value is original

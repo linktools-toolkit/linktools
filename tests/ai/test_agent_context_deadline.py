@@ -10,7 +10,11 @@ from ._runtime_test_helpers import model_features
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 from pathlib import Path
-from linktools.ai.capability import ExecutionCapability, CheckpointCapability
+from linktools.ai.capability import ExecutionCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
+
+import asyncio
 
 import pytest
 from pydantic_ai import RunContext
@@ -62,8 +66,21 @@ def test_deadline_is_optional_readonly_and_timezone_aware() -> None:
 @pytest.mark.asyncio
 async def test_deadline_inherits_across_retry_fork_and_graph_without_worker_reads(monkeypatch) -> None:
     contexts: list[AgentContext[None]] = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class ParentBarrier(AbstractCapability):
+        id = "test.parent-barrier"
+
+        async def before_run(self, ctx: RunContext) -> None:
+            if not entered.is_set():
+                entered.set()
+                await release.wait()
+
+    features = _group(contexts)
+    features.capability(ParentBarrier(), scope="runtime")
     storage = PersistenceStorage.in_memory()
-    async with Persistence.open('context-deadline', storage=storage) as persistence_59, Runtime.attach(persistence=persistence_59, features=model_features(RuntimeUsageModels(), _group(contexts))) as runtime, TaskEngine.open(persistence=persistence_59, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('context-deadline', storage=storage) as persistence_59, Runtime.attach(persistence=persistence_59, features=model_features(RuntimeUsageModels(), features)) as runtime, TaskEngine.open(persistence=persistence_59, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         reads: list[str] = []
         read = runtime._state.execution.budgets.read
 
@@ -82,24 +99,33 @@ async def test_deadline_inherits_across_retry_fork_and_graph_without_worker_read
 
         monkeypatch.setattr(backend, "launch", recorded_launch)
 
-        async def completed(run, expected):
+        async def completed(run, expected, expected_reads=None):
             assert (await run.wait()).result.status is ExecutionStatus.SUCCEEDED
-            assert contexts[-1].execution_id == run.execution_id
-            assert contexts[-1].deadline_at == expected
-            assert len(reads) == launch_reads[run.execution_id]
+            context = next(ctx for ctx in contexts if ctx.execution_id == run.execution_id)
+            assert context.deadline_at == expected
+            assert len(reads) == (launch_reads[run.execution_id] if expected_reads is None else expected_reads)
 
         root = await runtime.agents.get().start("root", budget=RunBudget(deadline_at=_DEADLINE))
-        await completed(root, _DEADLINE)
-        agent = runtime.agents.get()
-        compiled = runtime._compiled_agent(agent.id, agent.revision, agent.compiled)
-        binding = runtime._compiler.bind_subagent(compiled)
-        child = await runtime._execution_service.start_subagent(
-            binding.binding_digest,
-            ExecutionRequest("child", runtime.default_principal, "child", None, "run", False, False),
-            parent_execution_id=root.execution_id, root_execution_id=root.execution_id,
-            parent_invocation_id="child", binding_contract=binding.binding_contract,
-        )
-        await completed(await runtime.executions.get(child.execution_id), _DEADLINE)
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            assert len(reads) == launch_reads[root.execution_id]
+            head = await runtime._state.execution.executions.get(root.execution_id, tenant_id=runtime.tenant_id)
+            assert head is not None
+            agent = runtime.agents.get()
+            compiled = runtime._compiled_agent(agent.id, agent.revision, agent.compiled)
+            binding = runtime._compiler.bind_subagent(compiled)
+            child = await runtime._execution_service.start_subagent(
+                binding.binding_digest,
+                ExecutionRequest("child", runtime.default_principal, "child", None, "run", False, False),
+                parent_execution_id=root.execution_id, root_execution_id=root.execution_id,
+                parent_producer_generation=head.producer_generation,
+                parent_invocation_id="child", binding_contract=binding.binding_contract,
+            )
+            await completed(await runtime.executions.get(child.execution_id), _DEADLINE)
+            parent_reads = len(reads)
+        finally:
+            release.set()
+        await completed(root, _DEADLINE, parent_reads)
         await completed(await root.retry("retry"), _DEADLINE)
         await completed(await root.fork("fork"), _DEADLINE)
         await completed(await root.fork("fresh", budget=RunBudget(model_requests=2)), None)
@@ -116,7 +142,7 @@ async def test_deadline_inherits_across_retry_fork_and_graph_without_worker_read
 async def test_cold_recovery_restores_absolute_deadline_once(tmp_path: Path, monkeypatch) -> None:
     contexts: list[AgentContext[None]] = []
     features = _group(contexts)
-    features.capability(CheckpointCapability(), scope="runtime")
+    features.capability(native_checkpoint(), scope="runtime")
     async with Persistence.open('deadline-recovery', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_114, Runtime.attach(persistence=persistence_114, features=model_features(RuntimeUsageModels(), features)) as runtime:
         async def interrupted_launch(*args, **kwargs):
             pass

@@ -37,7 +37,7 @@ async def test_model_subscription_eliminates_duplicate_sql_owner_lookup(tmp_path
     state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
-        await state.execution.executions.create_with_history_head(_execution())
+        await state.execution.executions.create_execution(_execution())
         engine = state.execution.executions.state_store.storage_group.context.engine.sync_engine
 
         class CustomReader(StepExecutionHistoryReader):
@@ -75,7 +75,7 @@ async def test_model_subscription_fails_closed_before_registering(
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
-        await state.execution.executions.create_with_history_head(_execution())
+        await state.execution.executions.create_execution(_execution())
         principal = replace(_PRINCIPAL, tenant_id="other") if denial == "tenant" else _PRINCIPAL
 
         class Authorization:
@@ -108,7 +108,7 @@ async def test_model_subscription_preserves_custom_and_different_reader_authorit
     state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
-        await state.execution.executions.create_with_history_head(_execution())
+        await state.execution.executions.create_execution(_execution())
         repository = state.execution.executions
         calls = []
 
@@ -143,7 +143,7 @@ async def test_model_subscription_preserves_custom_reader_override(tmp_path: Pat
     state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
-        await state.execution.executions.create_with_history_head(_execution())
+        await state.execution.executions.create_execution(_execution())
         calls = []
 
         class CustomReader(StepExecutionHistoryReader):

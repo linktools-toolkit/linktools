@@ -76,7 +76,7 @@ def _runner(execution: _Execution) -> AgentTaskRunner:
 
     runner._inspect_execution = inspect
     runner._get_execution = get
-    runner._record_invocation = None
+    runner._record_invocation = AsyncMock()
     return runner
 
 
@@ -161,13 +161,14 @@ def test_recovery_deadline_uses_original_start_and_tighter_parent() -> None:
 @pytest.mark.asyncio
 async def test_recovery_deadline_guard_does_not_block_pending_cancellation() -> None:
     from linktools.ai.runtime._recovery_coordinator import _RecoveryCoordinator
-    from linktools.ai.persistence.contracts import ExecutionCheckpointState, RecoveryHandoffPhase
+    from linktools.ai.persistence.contracts import ExecutionRecoveryDetail
     from .test_local_execution_recovery import _record
 
-    execution = replace(_record(), status=ExecutionStatus.CANCELLING)
+    execution = replace(_record(), status=ExecutionStatus.CANCELLING, recovery=ExecutionRecoveryDetail(agent_run_id="run"))
     port = SimpleNamespace(
         tenant_id="tenant",
         load_execution=AsyncMock(return_value=execution),
+        _reconcile_cancelled_tool_claims=AsyncMock(),
         _reconcile_tool_effects=AsyncMock(return_value=((), 0)),
         _pending_cancel_operations=AsyncMock(return_value=()),
         validate_binding=Mock(),
@@ -178,10 +179,7 @@ async def test_recovery_deadline_guard_does_not_block_pending_cancellation() -> 
     coordinator = _RecoveryCoordinator(port, None)
     guard = AsyncMock(return_value=False)
     coordinator.bind_relaunch_guard(guard)
-    launched = await coordinator.reconcile_checkpoint(SimpleNamespace(
-        execution_id=execution.execution_id, state=ExecutionCheckpointState.ACTIVE,
-        handoff_phase=RecoveryHandoffPhase.NONE,
-    ))
+    launched = await coordinator.reconcile_execution(execution)
     assert not launched
     guard.assert_not_awaited()
     assert port._commit_terminal.await_args.args[1] is ExecutionStatus.CANCELLED

@@ -22,7 +22,9 @@ from linktools.ai.capability import ExecutionCapability, AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import CheckpointCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
@@ -106,7 +108,7 @@ async def test_conversation_pending_requires_complete_coordination(tmp_path, mon
     features = _features()
     features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
     if evidence != "none":
-        features.capability(CheckpointCapability() if evidence == "checkpoint" else TraceCapability(), scope="runtime")
+        features.capability(native_checkpoint() if evidence == "checkpoint" else TraceCapability(), scope="runtime")
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache if cache_kind == "full" else None, coordination=cache)
     async with Persistence.open('pending', storage=storage) as persistence_108, Runtime.attach(persistence=persistence_108, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), features)) as runtime:
         session = await runtime.agents.get().create_session("session")
@@ -137,7 +139,7 @@ async def test_conversation_pending_requires_complete_coordination(tmp_path, mon
 @pytest.mark.asyncio
 async def test_no_optional_features_preserves_required_deferred_frontier(tmp_path):
     from linktools.ai.core import ApprovalStatus
-    from linktools.ai.persistence.contracts import ExecutionCheckpointState
+    from linktools.ai.persistence.contracts import ExecutionRecoveryState
     from linktools.ai.workspace import Workspace, WorkspacePolicy, ToolPermissionPolicy
     workspace = Workspace.load(tmp_path, policy=WorkspacePolicy(tool_permissions=ToolPermissionPolicy(default="ask")))
     features = workspace_features("deferred", workspace=workspace)
@@ -154,15 +156,15 @@ async def test_no_optional_features_preserves_required_deferred_frontier(tmp_pat
 
         record = await asyncio.wait_for(wait_for_deferred(), timeout=5)
         assert not record.conversation and not record.restart_checkpoints and not record.durable_trace
-        checkpoint = await runtime._state.checkpoint.checkpoints.get(execution.execution_id, tenant_id=runtime.tenant_id)
-        assert checkpoint is not None and checkpoint.state is ExecutionCheckpointState.WAITING
-        assert checkpoint.pending_tools is not None
+        checkpoint = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        assert checkpoint is not None and checkpoint.recovery_state is ExecutionRecoveryState.WAITING
+        assert checkpoint.recovery.pending_tools is not None
         approvals = await runtime._state.checkpoint.approvals.list_pending(execution.execution_id, tenant_id=runtime.tenant_id)
         assert len(approvals) == 1 and approvals[0].status is ApprovalStatus.PENDING
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("feature_type", (ExecutionCapability, CheckpointCapability, TraceCapability))
+@pytest.mark.parametrize("feature_type", (ExecutionCapability, StepPersistence, TraceCapability))
 async def test_native_type_requirement_survives_binding(feature_type):
     from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
     observed = []

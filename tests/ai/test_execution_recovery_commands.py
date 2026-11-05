@@ -24,7 +24,7 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._tool import ToolOperationRecord
-from linktools.ai.persistence.contracts import ExecutionRecord
+from linktools.ai.persistence.contracts import ExecutionRecord, ToolOperationAdmission
 from linktools.ai.persistence._recovery_commands import RuntimeRecoveryCommands
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
@@ -88,7 +88,6 @@ def _tool(now: datetime, *, operation_id: str = "tool-operation") -> ToolOperati
         status=ToolOperationStatus.EFFECT_UNKNOWN,
         owner="worker",
         fence=3,
-        lease_expires_at=None,
         error_code=ErrorCode.TOOL_EFFECT_UNKNOWN.value,
         created_at=now,
         updated_at=now,
@@ -137,7 +136,7 @@ async def test_recovery_status_and_resume_are_durable_nonterminal_events() -> No
     now = datetime.now(timezone.utc)
     execution = _execution(now)
     try:
-        await state.execution.executions.create_with_history_head(execution)
+        await state.execution.executions.create_execution(execution)
         commands = _commands(state)
         recovery = await commands.commit_recovery_required(
             execution,
@@ -177,7 +176,7 @@ async def test_recovery_cancel_intent_fences_stale_resume() -> None:
     now = datetime.now(timezone.utc)
     execution = _execution(now)
     try:
-        await state.execution.executions.create_with_history_head(execution)
+        await state.execution.executions.create_execution(execution)
         commands = _commands(state)
         recovery = await commands.commit_recovery_required(
             execution,
@@ -242,7 +241,7 @@ async def test_recovery_cancel_claim_reports_concurrent_intent_as_conflict(
     now = datetime.now(timezone.utc)
     execution = _execution(now)
     try:
-        await state.execution.executions.create_with_history_head(execution)
+        await state.execution.executions.create_execution(execution)
         commands = _commands(state)
         recovery = await commands.commit_recovery_required(
             execution,
@@ -327,12 +326,13 @@ async def test_not_applied_resolution_reopens_tool_with_next_fence() -> None:
         assert resolved.owner is None
         assert resolved.fence == 3
 
-        claimed = await state.checkpoint.tools.claim(
-            "tool-operation",
-            tenant_id="tenant",
-            owner="next-worker",
-            lease_seconds=60,
-        )
+        claimed = await state.checkpoint.tools.admit(ToolOperationAdmission(
+            execution_id=resolved.execution_id, tool_operation_id=resolved.tool_operation_id,
+            agent_run_id=resolved.agent_run_id, recovery_agent_run_id=None,
+            tool_call_id=resolved.tool_call_id, idempotency_key_digest=resolved.idempotency_key_digest,
+            tool_name=resolved.tool_name, arguments_digest=resolved.arguments_digest,
+            binding_digest=resolved.binding_digest, replay_safe=resolved.replay_safe, owner="next-worker",
+        ))
         assert claimed.status is ToolOperationStatus.CLAIMED
         assert claimed.fence == 4
         assert claimed.owner == "next-worker"
@@ -442,22 +442,22 @@ async def test_tool_effect_resolution_rejects_stale_fence_and_key_reuse(
 
 
 @pytest.mark.asyncio
-async def test_active_restart_admits_a_new_history_producer_and_fences_predecessor() -> None:
+async def test_active_restart_admits_a_new_execution_producer_and_fences_predecessor() -> None:
     state = PersistenceStorage.in_memory()
     state = Persistence(state)
     await state.initialize(namespace="restart-producer", tenant_id="tenant")
     execution = _execution(datetime.now(timezone.utc))
     try:
         repository = state.execution.executions
-        await repository.create_with_history_head(execution)
+        await repository.create_execution(execution)
         resumed = await _commands(state).commit_resumed(execution)
         assert resumed.status is ExecutionStatus.STARTED
         assert resumed.revision == execution.revision + 1
-        head = await repository.get_history_head(execution.execution_id, tenant_id="tenant")
+        head = await repository.get(execution.execution_id, tenant_id="tenant")
         assert head.producer_generation == resumed.revision
 
         async def guard(transaction, generation):
-            return await repository.require_open_history_head_in_transaction(
+            return await repository.require_execution_producer_in_transaction(
                 transaction, execution.execution_id, expected_producer_generation=generation,
             )
 
@@ -489,7 +489,7 @@ async def test_resume_recovers_its_own_lost_commit_acknowledgement(monkeypatch, 
     execution = _execution(datetime.now(timezone.utc))
     try:
         repository = state.execution.executions
-        await repository.create_with_history_head(execution)
+        await repository.create_execution(execution)
         store_type = type(repository.state_store)
         original = store_type.mutate
         interrupted = False
@@ -513,60 +513,38 @@ async def test_resume_recovers_its_own_lost_commit_acknowledgement(monkeypatch, 
         resumed = await _commands(state).commit_resumed(execution)
         assert interrupted
         assert resumed.revision == execution.revision + 1 + int(unrelated_update)
-        head = await repository.get_history_head(execution.execution_id, tenant_id="tenant")
+        head = await repository.get(execution.execution_id, tenant_id="tenant")
         assert head.producer_generation == execution.revision + 1
     finally:
         await state.close()
 
 
 @pytest.mark.asyncio
-async def test_producer_guard_batches_known_keys_and_reuses_transaction_records(
+async def test_producer_guard_reuses_execution_without_history_control(
     tmp_path: "Path", monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from sqlalchemy import event
-
-    state = PersistenceStorage.sqlite(tmp_path / "producer-guard.db")
-    state = Persistence(state)
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "producer-guard.db"))
     await state.initialize(namespace="producer-guard", tenant_id="tenant")
     try:
         repository = state.execution.executions
-        await repository.create_with_history_head(_execution(datetime.now(timezone.utc)))
-        engine = repository.state_store.storage_group.context.engine.sync_engine
-        totals, writes = [], []
-        for split in (True, False):
-            statements = []
-            def capture(_connection, _cursor, statement, _parameters, _context, _many):
-                statements.append(statement.lstrip().upper())
-            async def guard(transaction):
-                async def separate(keys):
-                    values = {}
-                    for key in keys:
-                        record = await transaction.get_record(key)
-                        if record is not None:
-                            values[key] = record
-                    return values
-                with monkeypatch.context() as patch:
-                    if split:
-                        patch.setattr(transaction, "get_records", separate)
-                    result = await repository.require_open_history_head_in_transaction(
-                        transaction, "execution", expected_producer_generation=0,
-                    )
-                    # Subsequent owner reads must retain the guarded cached versions.
-                    execution = await transaction.get_record(repository._key("execution", "execution"))
-                    assert execution is not None
-                    assert await transaction.get_record(repository._key("execution_history_head", "execution")) == result[1]
-                    return result[0]
-            event.listen(engine, "before_cursor_execute", capture)
-            try:
-                head = await repository.state_store.mutate(guard)
-            finally:
-                event.remove(engine, "before_cursor_execute", capture)
-            assert head.producer_generation == 0
-            totals.append(sum(sql.startswith("SELECT") for sql in statements))
-            writes.append([sql.split()[0] for sql in statements if not sql.startswith("SELECT")])
-        assert writes[1] == writes[0]
-        assert totals[1] < totals[0]
-        print("producer guard SELECT separate, batched:", totals)
+        execution = await repository.create_execution(_execution(datetime.now(timezone.utc)))
+        admitted = await repository.claim_next_agent_run(
+            execution.execution_id, tenant_id="tenant", expected_revision=execution.revision,
+            expected_agent_run_seq=execution.agent_run_seq, producer_claim_id="owner",
+        )
+        async def guard(transaction):
+            original = transaction.get_record
+            async def execution_only(key):
+                assert key != repository._key("execution_history_head", "execution")
+                return await original(key)
+            with monkeypatch.context() as patch:
+                patch.setattr(transaction, "get_record", execution_only)
+                result = await repository.require_execution_producer_in_transaction(
+                    transaction, "execution", expected_producer_generation=admitted.producer_generation,
+                )
+                assert await transaction.get_record(repository._key("execution", "execution")) == result[1]
+                return result[0]
+        assert await repository.state_store.mutate(guard) == admitted
     finally:
         await state.close()
 
@@ -574,15 +552,13 @@ async def test_producer_guard_batches_known_keys_and_reuses_transaction_records(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
 @pytest.mark.parametrize("failure,expected", (
-    ("missing_head", ErrorCode.STORAGE_INTEGRITY_ERROR),
     ("missing_execution", ErrorCode.STORAGE_INTEGRITY_ERROR),
     ("stale_generation", ErrorCode.STORAGE_CONFLICT),
-    ("stale_generation_missing_execution", ErrorCode.STORAGE_CONFLICT),
+    ("stale_generation_missing_execution", ErrorCode.STORAGE_INTEGRITY_ERROR),
     ("stale_revision", ErrorCode.STORAGE_CONFLICT),
     ("cancelled", ErrorCode.EXECUTION_CANCELLED),
     ("terminal", ErrorCode.STORAGE_CONFLICT),
     ("execution_guard", ErrorCode.STORAGE_CONFLICT),
-    ("head_guard", ErrorCode.STORAGE_CONFLICT),
 ))
 async def test_producer_guard_batch_preserves_fail_closed_checks(
     tmp_path: "Path", monkeypatch: pytest.MonkeyPatch, backend: str, failure: str, expected: ErrorCode,
@@ -595,27 +571,39 @@ async def test_producer_guard_batch_preserves_fail_closed_checks(
     try:
         repository = state.execution.executions
         execution = _execution(datetime.now(timezone.utc))
+        await repository.create_execution(execution)
+        execution = await repository.claim_next_agent_run(
+            execution.execution_id, tenant_id="tenant", expected_revision=execution.revision,
+            expected_agent_run_seq=execution.agent_run_seq, producer_claim_id="owner",
+        )
         if failure in ("cancelled", "terminal"):
-            execution = replace(execution, status=ExecutionStatus.CANCELLING if failure == "cancelled" else ExecutionStatus.SUCCEEDED)
-        await repository.create_with_history_head(execution)
-        head_key = repository._key("execution_history_head", "execution")
+            execution = await repository.compare_and_swap(
+                execution.execution_id, tenant_id="tenant", expected_revision=execution.revision,
+                next_record=replace(execution, revision=execution.revision + 1,
+                    status=ExecutionStatus.CANCELLING if failure == "cancelled" else ExecutionStatus.SUCCEEDED),
+            )
         execution_key = repository._key("execution", "execution")
-        if failure in ("missing_head", "missing_execution", "stale_generation_missing_execution"):
+        if failure in ("missing_execution", "stale_generation_missing_execution"):
             await repository.state_store.mutate(lambda transaction: transaction.delete_record(
-                head_key if failure == "missing_head" else execution_key,
+                execution_key,
             ))
         async def guard(transaction):
             original = transaction.guard_record
             async def reject(key, **kwargs):
-                if key == (execution_key if failure == "execution_guard" else head_key):
+                if key == execution_key:
                     return None
                 return await original(key, **kwargs)
             with monkeypatch.context() as patch:
-                if failure in ("execution_guard", "head_guard"):
+                if failure == "execution_guard":
                     patch.setattr(transaction, "guard_record", reject)
-                return await repository.require_open_history_head_in_transaction(
-                    transaction, "execution", expected_producer_generation=1 if failure.startswith("stale_generation") else 0,
-                    expected_revision=1 if failure == "stale_revision" else 0, allow_cancelling=False,
+                if failure == "stale_revision":
+                    return await repository.compare_and_swap_in_transaction(
+                        transaction, "execution", tenant_id="tenant", expected_revision=execution.revision - 1,
+                        next_record=replace(execution, revision=execution.revision + 1),
+                    )
+                return await repository.require_execution_producer_in_transaction(
+                    transaction, "execution", expected_producer_generation=execution.producer_generation + int(failure.startswith("stale_generation")),
+                    allow_cancelling=False,
                 )
         with pytest.raises(AIError) as raised:
             await repository.state_store.mutate(guard)
@@ -638,7 +626,7 @@ async def test_recovery_write_failure_rolls_back_its_operation_receipt(
     execution = replace(_execution(now), status=ExecutionStatus.RECOVERY_REQUIRED)
     tool = _tool(now)
     try:
-        await state.execution.executions.create_with_history_head(execution)
+        await state.execution.executions.create_execution(execution)
         await state.checkpoint.tools.reserve(tool)
         commands = _commands(state)
         if command == "cancel_intent":
@@ -724,7 +712,7 @@ async def test_recovery_repository_rejects_stale_state_before_receipt_admission(
         raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
     try:
-        await state.execution.executions.create_with_history_head(execution)
+        await state.execution.executions.create_execution(execution)
         await state.checkpoint.tools.reserve(tool)
         with pytest.raises(AIError) as conflict:
             if command == "cancel_intent":

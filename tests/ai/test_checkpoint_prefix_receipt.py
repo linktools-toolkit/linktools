@@ -1,188 +1,136 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Hot producer receipts never replace recovery source validation."""
+"""Native confirmation never hides caller mutation or uncertain durable truth."""
 
-from contextlib import suppress
+import asyncio
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import pytest
+from pydantic_ai.messages import ModelRequest, UserPromptPart
+from pydantic_ai_harness.step_persistence import ContinuableSnapshot, InMemoryStepStore, RunRecord
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence import Persistence
-from linktools.ai.persistence._step_archive import StateStepArchive
-from linktools.ai.persistence._step_contracts import AgentRunRecord
+from linktools.ai.runtime._step_store import RuntimeStepStore
 
+from ._runtime_test_helpers import native_checkpoint
 from .test_checkpoint_metadata_snapshot_io import _checkpoint
-from .test_incremental_projection_boundaries import _storage
+from .test_official_checkpoint_owner import _runtime_store
 
 
 @pytest.mark.asyncio
-async def test_confirmed_checkpoint_prefix_avoids_old_bodies_but_rejects_mutation(tmp_path, monkeypatch):
-    state = Persistence(_storage("sqlite", tmp_path))
-    await state.initialize(namespace="prefix-receipt", tenant_id="tenant")
+async def test_confirmed_native_values_detach_caller_and_reader_mutations(tmp_path: Path) -> None:
+    native = native_checkpoint(database=tmp_path / "copy.db").store
+    store = _runtime_store(native)
+    await store.initialize()
+    store.bind_execution_producer("run", execution_id="execution", producer_generation=1)
+    writer = RuntimeStepStore(native, InMemoryStepStore(), working_set=store)
+    run = RunRecord(run_id="run", metadata={"linktools.transcript_start": "0", "label": "original"})
+    snapshot = ContinuableSnapshot(run_id="run", step_index=1, idempotency_key="one", messages=[
+        ModelRequest(parts=[UserPromptPart("original")], run_id="run"),
+    ])
     try:
-        store = state.run_store
-        run = AgentRunRecord("run")
-        await store.register_agent_run(run)
-        caller_checkpoint = _checkpoint(2)
-        materialize = StateStepArchive.materialize_checkpoint_in_transaction
-
-        async def mutate_caller_after_prepare(self, *args, **kwargs):
-            await materialize(self, *args, **kwargs)
-            caller_checkpoint.messages[0].parts[0].content = "caller changed during commit"
-
-        monkeypatch.setattr(StateStepArchive, "materialize_checkpoint_in_transaction", mutate_caller_after_prepare)
-        await store.save_checkpoint(caller_checkpoint)
-        archive = store.read_store(PersistenceDomain.CHECKPOINT)
-        assert "run" in archive._checkpoint_prefix_receipts
-
-        async def missing_source(*args, **kwargs):
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-
-        monkeypatch.setattr(archive.transcript_repository, "load_message_span", missing_source)
-        relocated, _ = await archive.prepare_run_checkpoint(run, _checkpoint(3))
-        assert relocated.transcript_message_count_before == 2
-        changed = _checkpoint(3)
-        changed.messages[0].parts[0].content = "same-count mutation"
-        with pytest.raises(AIError) as caught:
-            await archive.prepare_run_checkpoint(run, changed)
-        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-        # A public relocation is a recovery consumer even on the warm producer.
-        with pytest.raises(AIError) as caught:
-            await archive.relocate_run_checkpoint(run, _checkpoint(3))
-        assert caught.value.code is ErrorCode.STORAGE_NOT_FOUND
-        archive.release_runtime_cache("run")
-        with pytest.raises(AIError) as caught:
-            await archive.prepare_run_checkpoint(run, _checkpoint(3))
-        assert caught.value.code is ErrorCode.STORAGE_NOT_FOUND
+        await writer.register_run(run)
+        await writer.save_snapshot(snapshot)
+        run.metadata["label"] = "caller mutation"
+        snapshot.messages[0].parts[0].content = "caller mutation"
+        reader = store.checkpoint_persistence.reader
+        first = await reader.latest_checkpoint(agent_run_id="run")
+        assert first.messages[0].parts[0].content == "original"
+        first.messages[0].parts[0].content = "reader mutation"
+        observed_run = await reader.get_run(run_id="run")
+        observed_run.metadata["label"] = "reader mutation"
+        assert (await reader.latest_checkpoint(agent_run_id="run")).messages[0].parts[0].content == "original"
+        assert (await reader.get_run(run_id="run")).metadata["label"] == "original"
+        assert (await native.latest_snapshot(run_id="run")).messages[0].parts[0].content == "original"
     finally:
-        await state.close()
+        await store.preflight_close()
+        await store.close()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("unknown", [False, True])
-async def test_unconfirmed_checkpoint_cannot_advance_prefix_receipt(tmp_path, monkeypatch, unknown):
-    state = Persistence(_storage("sqlite", tmp_path))
-    await state.initialize(namespace="prefix-rollback", tenant_id="tenant")
+@pytest.mark.parametrize("state", ("complete", "interrupted"))
+async def test_unkeyed_native_snapshot_discards_cached_frontier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: Literal["complete", "interrupted"],
+) -> None:
+    native = native_checkpoint(database=tmp_path / "unkeyed.db").store
+    store = _runtime_store(native)
+    await store.initialize()
+    store.bind_execution_producer("run", execution_id="execution", producer_generation=1)
+    writer = RuntimeStepStore(native, InMemoryStepStore(), working_set=store)
+    run = RunRecord(run_id="run", metadata={"linktools.transcript_start": "0"})
+    first = ContinuableSnapshot(run_id="run", step_index=1, messages=[], idempotency_key="one")
     try:
-        store = state.run_store
-        run = AgentRunRecord("run")
-        await store.register_agent_run(run)
-        await store.save_checkpoint(_checkpoint(1))
-        archive = store.read_store(PersistenceDomain.CHECKPOINT)
-        receipt = archive._checkpoint_prefix_receipts["run"]
-        original = StateStepArchive.materialize_checkpoint_in_transaction
+        await writer.register_run(run)
+        await writer.save_snapshot(first)
+        unkeyed = replace(first, step_index=2, state=state, idempotency_key=None)
+        await writer.save_snapshot(unkeyed)
+        reads = []
+        latest = native.latest_snapshot
 
-        async def fail_after_write(self, *args, **kwargs):
-            await original(self, *args, **kwargs)
-            raise OSError("lost transaction before commit")
+        async def tracked(**kwargs):
+            reads.append(kwargs)
+            return await latest(**kwargs)
 
-        async def unknown_readback(*args, **kwargs):
+        monkeypatch.setattr(native, "latest_snapshot", tracked)
+        reader = store.checkpoint_persistence.reader
+        assert await reader.latest_snapshot(run_id="run", include_interrupted=True) == unkeyed
+        assert await reader.latest_snapshot(run_id="run") == (unkeyed if state == "complete" else first)
+        assert len(reads) == 2
+    finally:
+        await store.preflight_close()
+        await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("committed", (False, True))
+@pytest.mark.parametrize("cancelled", (False, True))
+async def test_unconfirmed_snapshot_cannot_replace_unknown_readback_with_cached_truth(
+    monkeypatch: pytest.MonkeyPatch, committed: bool, cancelled: bool,
+) -> None:
+    native = InMemoryStepStore()
+    store = _runtime_store(native)
+    await store.initialize()
+    store.bind_execution_producer("run", execution_id="execution", producer_generation=1)
+    writer = RuntimeStepStore(native, native, working_set=store)
+    first = ContinuableSnapshot(run_id="run", step_index=1, messages=[], idempotency_key="one")
+    try:
+        await writer.register_run(RunRecord(run_id="run", metadata={"linktools.transcript_start": "0"}))
+        await writer.save_snapshot(first)
+        pending = replace(first, step_index=2, idempotency_key="two")
+        save = native.save_snapshot
+        latest = native.latest_snapshot
+        writes = []
+
+        async def uncertain(snapshot):
+            writes.append(snapshot)
+            if committed:
+                await save(snapshot)
+            if cancelled:
+                raise asyncio.CancelledError
+            raise OSError("source outcome unavailable")
+
+        async def unknown(**kwargs):
             raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
 
-        if unknown:
-            mutate = type(archive.state_store).mutate
-
-            async def lose_ack_after_commit(self, callback):
-                result = await mutate(self, callback)
-                if self is archive.state_store:
-                    raise OSError("committed but acknowledgement lost")
-                return result
-
-            monkeypatch.setattr(type(archive.state_store), "mutate", lose_ack_after_commit)
-            monkeypatch.setattr(archive, "verify_checkpoint_range", unknown_readback)
-        else:
-            monkeypatch.setattr(StateStepArchive, "materialize_checkpoint_in_transaction", fail_after_write)
-        with pytest.raises((AIError, OSError)):
-            await store.save_checkpoint(_checkpoint(2))
-        assert archive._checkpoint_prefix_receipts["run"] == receipt
-        # A receipt for another immutable fact cannot authorize a newer prefix.
-        archive._checkpoint_prefix_receipts["run"] = replace(
-            receipt, checkpoint=replace(receipt.checkpoint, step_index=999),
-        )
-        called = []
-        load = archive.transcript_repository.load_message_span
-
-        async def observe(*args, **kwargs):
-            called.append(True)
-            return await load(*args, **kwargs)
-
-        monkeypatch.setattr(archive.transcript_repository, "load_message_span", observe)
-        await archive.prepare_run_checkpoint(run, _checkpoint(2))
-        assert called
-    finally:
-        with suppress(AIError):
-            await state.close()
-
-
-@pytest.mark.asyncio
-async def test_prefix_receipt_never_hides_deleted_recovery_body_from_fresh_reader(tmp_path):
-    from pydantic_ai.messages import ModelRequest, UserPromptPart
-    from linktools.ai.persistence import PersistenceStorage
-    from linktools.ai.persistence._step_contracts import AgentRunCheckpoint
-    from linktools.ai.storage import InMemoryObjectStore
-
-    objects = InMemoryObjectStore()
-    path = tmp_path / "deleted-prefix.db"
-    state = Persistence(PersistenceStorage.sqlite(path, object_store=objects))
-    fresh = Persistence(PersistenceStorage.sqlite(path, object_store=objects))
-    await state.initialize(namespace="deleted-prefix", tenant_id="tenant")
-    await fresh.initialize(namespace="deleted-prefix", tenant_id="tenant")
-    try:
-        run = AgentRunRecord("run")
-        await state.run_store.register_agent_run(run)
-        checkpoint = AgentRunCheckpoint("run", 1, [ModelRequest(parts=[UserPromptPart("body " * 10000)])])
-        await state.run_store.save_checkpoint(checkpoint)
-        warm = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
-        cold = fresh.run_store.read_store(PersistenceDomain.CHECKPOINT)
-        assert "run" in warm._checkpoint_prefix_receipts
-        assert not cold._checkpoint_prefix_receipts
-        refs = [ref async for ref in objects.list_objects()]
-        assert refs
-        for ref in refs:
-            await objects.delete_object(ref.key, expected_digest=ref.digest)
-        for archive in (warm, cold):
+        with monkeypatch.context() as patch:
+            patch.setattr(native, "save_snapshot", uncertain)
+            patch.setattr(native, "latest_snapshot", unknown)
+            with pytest.raises(asyncio.CancelledError if cancelled else OSError):
+                await writer.save_snapshot(pending)
             with pytest.raises(AIError) as caught:
-                await archive.relocate_run_checkpoint(run, checkpoint)
-            assert caught.value.code is ErrorCode.STORAGE_NOT_FOUND
-        with pytest.raises(AIError) as caught:
-            await cold.prepare_run_checkpoint(run, checkpoint)
-        assert caught.value.code is ErrorCode.STORAGE_NOT_FOUND
+                await store.checkpoint_persistence.materialize_recovery_checkpoint(agent_run_id="run", require_complete=True)
+            assert caught.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+            assert writes == [pending]
+        assert await store.checkpoint_persistence.reader.latest_snapshot(run_id="run") == await latest(run_id="run")
+        assert (await latest(run_id="run")).step_index == (2 if committed else 1)
     finally:
-        await fresh.close()
-        await state.close()
+        await store.preflight_close()
+        await store.close()
 
 
-@pytest.mark.asyncio
-async def test_confirmed_immutable_prefix_never_decodes_or_reencodes_old_messages(tmp_path, monkeypatch):
-    from linktools.ai.persistence._transcript_staging import MessageArchive, MessageSnapshot
-
-    state = Persistence(_storage("sqlite", tmp_path))
-    await state.initialize(namespace="immutable-prefix-receipt", tenant_id="tenant")
-    try:
-        run = AgentRunRecord("run")
-        await state.run_store.register_agent_run(run)
-        await state.run_store.save_checkpoint(_checkpoint(2))
-        archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
-        receipt = archive._checkpoint_prefix_receipts["run"]
-        # Independent immutable snapshots also compare encoded bytes directly;
-        # sharing leaf identities is an optimization, not an authority check.
-        incoming = replace(_checkpoint(3), messages=MessageArchive().snapshot(_checkpoint(3).messages))
-
-        def no_decode(self):
-            raise AssertionError("confirmed prefix must stay encoded")
-
-        monkeypatch.setattr(MessageSnapshot, "__iter__", no_decode)
-        relocated, _ = await archive._relocate_run_checkpoint(run, incoming, use_confirmed_prefix=True)
-        assert relocated.transcript_message_count_before == 2
-        assert archive._checkpoint_prefix_receipts["run"] is receipt
-    finally:
-        await state.close()
-
-
-def test_shared_checkpoint_prefix_compares_tree_nodes_without_scanning_payloads(monkeypatch):
+def test_shared_checkpoint_prefix_compares_tree_nodes_without_scanning_payloads(monkeypatch: pytest.MonkeyPatch) -> None:
     from linktools.ai.persistence._transcript_staging import MessageArchive, MessageSnapshot
 
     archive = MessageArchive()
@@ -194,65 +142,3 @@ def test_shared_checkpoint_prefix_compares_tree_nodes_without_scanning_payloads(
 
     monkeypatch.setattr(MessageSnapshot, "_payloads", no_payload_scan)
     assert extended[:len(committed)] == committed
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "sqlite"))
-async def test_warm_checkpoint_reuses_complete_metadata_snapshot(tmp_path, monkeypatch, backend):
-    from .test_checkpoint_metadata_snapshot_io import _assert_prepared_values_equal
-
-    state = Persistence(_storage(backend, tmp_path))
-    await state.initialize(namespace="warm-checkpoint-metadata", tenant_id="tenant")
-    try:
-        run = AgentRunRecord("run")
-        await state.run_store.register_agent_run(run)
-        await state.run_store.save_checkpoint(_checkpoint(2))
-        archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
-        prepare = archive._prepare_explicit_checkpoints
-        observed = []
-
-        async def capture(*args, **kwargs):
-            observed.append(kwargs.get("observed_records"))
-            return await prepare(*args, **kwargs)
-
-        monkeypatch.setattr(archive, "_prepare_explicit_checkpoints", capture)
-        relocated, prepared = await archive.prepare_run_checkpoint(run, _checkpoint(3))
-        assert observed[0] is not None
-        assert archive.transcript_repository.projection_key("run") in observed[0]
-        fresh = await archive.prepare_checkpoints(run, (relocated,))
-        await _assert_prepared_values_equal(archive, prepared, fresh)
-
-        archive.release_runtime_cache("run")
-        await archive.prepare_run_checkpoint(run, _checkpoint(3))
-        # Body I/O can interleave a publication; cold preparation must recapture.
-        assert observed[-1] is None
-    finally:
-        await state.close()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "sqlite"))
-async def test_metadata_less_receipt_survives_external_checkpoint_advance(tmp_path: Path, backend: str) -> None:
-    state = Persistence(_storage(backend, tmp_path))
-    await state.initialize(namespace="metadata-less-receipt", tenant_id="tenant")
-    try:
-        run = AgentRunRecord("run")
-        store = state.run_store
-        await store.register_agent_run(run)
-        await store.save_checkpoint(_checkpoint(1))
-        archive = store.read_store(PersistenceDomain.CHECKPOINT)
-        # Standalone publication confirms the prefix without grouped metadata.
-        assert archive._checkpoint_prefix_receipts["run"].records is None
-        # Another legitimate publication advances source without this receipt.
-        second = await archive.relocate_run_checkpoint(run, _checkpoint(2))
-        await archive.materialize_checkpoint(run, second)
-        third, prepared = await archive.prepare_run_checkpoint(run, _checkpoint(3))
-        assert third.transcript_message_count_before == 2
-        await archive.state_store.mutate(lambda transaction: archive.materialize_checkpoint_in_transaction(
-            transaction, run, prepared.checkpoints[0],
-        ))
-        latest = await archive.latest_checkpoint(agent_run_id="run")
-        assert latest.step_index == 3 and len(latest.messages) == 3
-        assert prepared.checkpoints[0].preparation_receipt is None
-    finally:
-        await state.close()

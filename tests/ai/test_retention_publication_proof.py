@@ -17,6 +17,7 @@ from linktools.ai.history import History
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.persistence.state import active_state_scope
+from linktools.ai.persistence.contracts import ExecutionTerminalPublication
 from linktools.ai.storage import StorageRoute
 
 from .test_conversation_output_retention import _NAMESPACE, _features, _models
@@ -36,7 +37,7 @@ async def test_stale_unadmitted_cache_cannot_prove_publication(tmp_path, monkeyp
             _execution(), session_id="session", conversation=True,
             status=ExecutionStatus.SUCCEEDED, retention_closed=False,
         )
-        await repository.create_with_history_head(terminal)
+        await repository.create_execution(terminal)
         original_get = repository.get
         stale = None if cached == "absent" else replace(
             terminal, status=ExecutionStatus.PENDING_START, started_at=None,
@@ -151,7 +152,7 @@ async def test_unknown_close_preserves_only_durable_publication_proof(tmp_path, 
     await state.initialize(namespace="retention-io", tenant_id="tenant")
     try:
         repository = state.execution.executions
-        await repository.create_with_history_head(replace(_execution(), status=ExecutionStatus.SUCCEEDED))
+        await repository.create_execution(replace(_execution(), status=ExecutionStatus.SUCCEEDED))
         calls = []
         controller = _controller(repository, calls)
         original = repository.state_store.mutate
@@ -181,23 +182,28 @@ async def test_unknown_close_preserves_only_durable_publication_proof(tmp_path, 
         await state.close()
 
 
-async def test_dependency_hold_added_after_source_confirmation_prevents_close(tmp_path, monkeypatch):
+@pytest.mark.parametrize("confirmed", (False, True))
+async def test_dependency_hold_added_after_source_confirmation_prevents_close(tmp_path, monkeypatch, confirmed):
     state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="retention-io", tenant_id="tenant")
     try:
         repository = state.execution.executions
-        await repository.create_with_history_head(replace(_execution(), status=ExecutionStatus.SUCCEEDED))
-        original = repository.close_retention
+        terminal = replace(_execution(), status=ExecutionStatus.SUCCEEDED)
+        await repository.create_execution(terminal)
+        original = repository.close_retention_in_transaction
 
-        async def acquire_before_close(execution_id, *, tenant_id):
+        async def acquire_before_close(transaction, execution_id, *, tenant_id, observed=None):
             assert await repository.acquire_dependency_hold(
                 execution_id, tenant_id=tenant_id, hold_id="late-dependent",
             )
-            return await original(execution_id, tenant_id=tenant_id)
+            return await original(transaction, execution_id, tenant_id=tenant_id, observed=observed)
 
-        monkeypatch.setattr(repository, "close_retention", acquire_before_close)
+        monkeypatch.setattr(repository, "close_retention_in_transaction", acquire_before_close)
         calls = []
-        assert not await _controller(repository, calls).release_execution_handoff("execution", tenant_id="tenant")
+        controller = _controller(repository, calls)
+        if confirmed:
+            controller.confirm_terminal_publication(terminal)
+        assert not await controller.release_execution_handoff("execution", tenant_id="tenant")
         assert calls == []
         async def source(transaction):
             del transaction
@@ -207,3 +213,78 @@ async def test_dependency_hold_added_after_source_confirmation_prevents_close(tm
         assert durable.dependency_hold_ids == ("late-dependent",)
     finally:
         await state.close()
+
+
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_same_runtime_confirmed_terminal_reuses_publication_receipt(tmp_path, monkeypatch, backend):
+    storage = _storage(backend, tmp_path)
+    async with Persistence.open(_NAMESPACE, storage=storage) as state:
+        retention = state.retention
+        confirmed = []
+        original_confirm = retention.confirm_terminal_publication
+
+        def confirm(execution):
+            original_confirm(execution)
+            confirmed.append(execution)
+
+        monkeypatch.setattr(retention, "confirm_terminal_publication", confirm)
+        async with Runtime.attach(persistence=state, features=model_features(_models(), _features())) as runtime:
+            session = await runtime.agents.get().create_session("receipt-session")
+            sessions = state.conversation.sessions
+            original_read = sessions.pending_turn_commit_in_transaction
+            receipt_reads = []
+
+            async def read_receipt(*args, **kwargs):
+                receipt_reads.append(kwargs["execution_id"])
+                return await original_read(*args, **kwargs)
+
+            monkeypatch.setattr(sessions, "pending_turn_commit_in_transaction", read_receipt)
+            result = (await session.run("confirmed publication", timeout_seconds=5)).result
+            assert result.status is ExecutionStatus.SUCCEEDED
+            assert len(confirmed) == 1
+            receipt = confirmed[0]
+            terminal = receipt.execution if isinstance(receipt, ExecutionTerminalPublication) else receipt
+            assert terminal.execution_id == result.execution_id
+            assert receipt_reads == []
+            assert not retention.terminal_publication_confirmed(terminal)
+            current = await state.execution.executions.get(result.execution_id, tenant_id=runtime.tenant_id)
+            assert current.retention_closed
+
+
+async def test_publication_receipt_matches_exact_source_revision_and_clears_on_close(tmp_path):
+    async with Persistence.open("retention-io", storage=_storage("memory", tmp_path), tenant_id="tenant") as state:
+        terminal = replace(_execution(), status=ExecutionStatus.SUCCEEDED)
+        retention = state.retention
+        assert not retention.terminal_publication_confirmed(terminal)
+        retention.confirm_terminal_publication(terminal)
+        assert retention.terminal_publication_confirmed(terminal)
+        assert not retention.terminal_publication_confirmed(replace(terminal, revision=terminal.revision + 1))
+        assert not retention.terminal_publication_confirmed(replace(terminal, execution_id="other"))
+        with pytest.raises(ValueError):
+            retention.confirm_terminal_publication(replace(terminal, status=ExecutionStatus.STARTED))
+    assert not retention.terminal_publication_confirmed(terminal)
+
+
+async def test_publication_receipt_does_not_assume_session_released(tmp_path):
+    async with Persistence.open("retention-io", storage=_storage("sqlite", tmp_path), tenant_id="tenant") as state:
+        repository = state.execution.executions
+        terminal = replace(_execution(), status=ExecutionStatus.SUCCEEDED,
+                           session_id="session", conversation=True)
+        await repository.create_execution(terminal)
+        calls = []
+        controller = _controller(repository, calls)
+        controller.confirm_terminal_publication(terminal)
+        session_reads = []
+        original_release = controller._conversation.sessions.release_execution
+
+        async def read_session(session_id, *, tenant_id):
+            session_reads.append((session_id, tenant_id))
+            return SimpleNamespace(active_execution_id=terminal.execution_id)
+
+        controller._conversation.sessions = SimpleNamespace(
+            state_store=repository.state_store, get=read_session,
+            release_execution=original_release,
+        )
+        assert await controller.release_execution_handoff(terminal.execution_id, tenant_id="tenant")
+        assert session_reads == [("session", "tenant")]
+        assert calls == [("session", "session"), ("objects", terminal.execution_id)]

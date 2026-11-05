@@ -44,12 +44,9 @@ async def test_close_persists_queued_projection_referencing_external_transcript(
     )
     message = ModelRequest(parts=[UserPromptPart("external transcript " * 4096)])
     try:
-        execution = replace(_execution(), revision=1)
+        execution = replace(_execution(), revision=1, producer_generation=1, producer_claim_id="owner-claim")
         repository = storage.execution.executions
-        await repository.create_with_history_head(execution)
-        await repository.state_store.mutate(
-            lambda transaction: repository.admit_history_producer_in_transaction(transaction, execution)
-        )
+        await repository.create_execution(execution)
         store = storage.run_store
         store.trace_persistence.configure("run", buffer=cache, flush_interval=60.0)
         store.bind_execution_producer("run", execution_id="execution", producer_generation=1)

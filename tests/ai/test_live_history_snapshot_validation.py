@@ -7,11 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.persistence import Persistence
 from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.codec import (
     _decode_enveloped_domain,
@@ -24,8 +22,9 @@ from linktools.ai.persistence._snapshot_validation import (
     canonical_snapshot_indexes,
     validate_snapshot_domain,
 )
-from linktools.ai.persistence._step_contracts import AgentRunRecord
 from linktools.ai.persistence.state import stream_digest
+
+from .test_step_archive_read_boundaries import _archive
 
 
 @pytest.mark.asyncio
@@ -33,11 +32,8 @@ from linktools.ai.persistence.state import stream_digest
 async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
     tmp_path: Path, corruption: str | None,
 ) -> None:
-    storage = Persistence(PersistenceStorage.sqlite(tmp_path / "state.db"))
-    await storage.initialize(namespace="pending-snapshot", tenant_id="tenant")
-    try:
-        archive = storage.run_store.read_store(PersistenceDomain.CHECKPOINT)
-        await archive.register_agent_run(AgentRunRecord("run"))
+    async with _archive(tmp_path, "sqlite") as (_state, archive, run):
+        await archive.register_agent_run(run, execution_id="execution")
         repository = archive.transcript_repository
         message = ModelResponse(parts=[TextPart("first"), TextPart("second")])
         prepared = await repository.prepare_observation(
@@ -48,7 +44,7 @@ async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
         records = await archive.state_store.read(lambda tx: tx.scan_records())
         facts = await archive.state_store.read(lambda tx: tx.scan_facts())
         aliases, sequences = canonical_snapshot_indexes(
-            namespace="pending-snapshot", tenant_id="tenant", domain=PersistenceDomain.CHECKPOINT,
+            namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
             records=records, facts=facts, operations=(),
         )
         assert not sequences
@@ -60,7 +56,7 @@ async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
                 if corruption == "future-index":
                     chunk = replace(chunk, first_message_index=1)
                     fact = replace(fact, stream_digest=stream_digest(
-                        "pending-snapshot", "tenant", PersistenceDomain.CHECKPOINT.value,
+                        "archive-boundaries", "tenant", PersistenceDomain.TRACE.value,
                         "transcript_pending_parts", ["run", 1],
                     ))
                 elif corruption == "content-scope":
@@ -86,13 +82,13 @@ async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
         if corruption is not None:
             with pytest.raises(AIError) as raised:
                 validate_snapshot_domain(
-                    namespace="pending-snapshot", tenant_id="tenant", domain=PersistenceDomain.CHECKPOINT,
+                    namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
                     records=records, aliases=aliases, facts=facts, operations=(), sequences=sequences,
                 )
             assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         else:
             validate_snapshot_domain(
-                namespace="pending-snapshot", tenant_id="tenant", domain=PersistenceDomain.CHECKPOINT,
+                namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
                 records=records, aliases=aliases, facts=facts, operations=(), sequences=sequences,
             )
             completed = await repository.prepare_observation(
@@ -102,15 +98,13 @@ async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
             records = await archive.state_store.read(lambda tx: tx.scan_records())
             facts = await archive.state_store.read(lambda tx: tx.scan_facts())
             aliases, sequences = canonical_snapshot_indexes(
-                namespace="pending-snapshot", tenant_id="tenant", domain=PersistenceDomain.CHECKPOINT,
+                namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
                 records=records, facts=facts, operations=(),
             )
             validate_snapshot_domain(
-                namespace="pending-snapshot", tenant_id="tenant", domain=PersistenceDomain.CHECKPOINT,
+                namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
                 records=records, aliases=aliases, facts=facts, operations=(), sequences=sequences,
             )
-    finally:
-        await storage.close()
 
 
 @pytest.mark.asyncio
@@ -118,23 +112,20 @@ async def test_snapshot_checkpoint_cannot_exceed_observed_transcript(tmp_path: P
     from linktools.ai.persistence.contracts import StoredAgentRunCheckpoint
     from linktools.ai.persistence._step_contracts import AgentRunCheckpoint
 
-    storage = Persistence(PersistenceStorage.sqlite(tmp_path / "state.db"))
-    await storage.initialize(namespace="pending-snapshot", tenant_id="tenant")
-    try:
-        archive = storage.run_store.read_store(PersistenceDomain.CHECKPOINT)
-        await archive.register_agent_run(AgentRunRecord("run"))
+    async with _archive(tmp_path, "sqlite") as (_state, archive, run):
+        await archive.register_agent_run(run, execution_id="execution")
         await archive.save_checkpoint(AgentRunCheckpoint(
             "run", 1, [ModelResponse(parts=[TextPart("complete")])],
             transcript_message_count_before=0,
-        ))
+        ), execution_id="execution")
         records = await archive.state_store.read(lambda tx: tx.scan_records())
         facts = await archive.state_store.read(lambda tx: tx.scan_facts())
         aliases, sequences = canonical_snapshot_indexes(
-            namespace="pending-snapshot", tenant_id="tenant", domain=PersistenceDomain.CHECKPOINT,
+            namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
             records=records, facts=facts, operations=(),
         )
         validate_snapshot_domain(
-            namespace="pending-snapshot", tenant_id="tenant", domain=PersistenceDomain.CHECKPOINT,
+            namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
             records=records, aliases=aliases, facts=facts, operations=(), sequences=sequences,
         )
         corrupted = []
@@ -148,12 +139,10 @@ async def test_snapshot_checkpoint_cannot_exceed_observed_transcript(tmp_path: P
             corrupted.append(fact)
         with pytest.raises(AIError) as raised:
             validate_snapshot_domain(
-                namespace="pending-snapshot", tenant_id="tenant", domain=PersistenceDomain.CHECKPOINT,
+                namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
                 records=records, aliases=aliases, facts=tuple(corrupted), operations=(), sequences=sequences,
             )
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    finally:
-        await storage.close()
 
 
 @pytest.mark.asyncio
@@ -162,7 +151,6 @@ async def test_snapshot_model_interaction_records_validate_identity_and_sequence
     tmp_path: Path, corruption: str | None,
 ) -> None:
     from .test_model_interaction_lifecycle_paging import _interaction
-    from .test_step_archive_read_boundaries import _archive
 
     async with _archive(tmp_path) as (_state, archive, run):
         await archive.register_agent_run(run, execution_id="execution")
@@ -206,8 +194,6 @@ async def test_snapshot_coverage_requires_complete_authoritative_event_prefix(
     tmp_path: Path, corruption: str | None,
 ) -> None:
     from linktools.ai.persistence._step_contracts import StepEvent
-
-    from .test_step_archive_read_boundaries import _archive
 
     async with _archive(tmp_path) as (_state, archive, run):
         await archive.register_agent_run(run, execution_id="execution")

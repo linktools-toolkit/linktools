@@ -198,6 +198,9 @@ class InMemoryStateStorageGroup:
             token = bind_state_scope(self, transactions)
             try:
                 result = await fn(group_transaction)
+                for transaction in transactions.values():
+                    if transaction.mutation_error is not None:
+                        raise transaction.mutation_error
                 for store, transaction in transactions.items():
                     store._apply_transaction(transaction)
                 _logger.debug(

@@ -125,7 +125,8 @@ async def test_independent_history_reads_only_current_shared_pending_owner() -> 
     writer = PendingTurnCoordination.select(cache, namespace="history", tenant_id="tenant")
     assert writer is not None
     record = _record(ExecutionStatus.STARTED, 1)
-    claim = await writer.claim(
+    claim = await cache.claim_turn(
+        writer._scope,
         session_key="session", request_key="request", request_digest="digest",
         execution_id=record.execution_id, owner_id="producer", lease_seconds=30,
     )
@@ -137,7 +138,7 @@ async def test_independent_history_reads_only_current_shared_pending_owner() -> 
         async with History.open(persistence=persistence) as history:
             info = await history.inspect_execution(record.execution_id, principal=principal, include_usage=False)
             assert info.status is ExecutionStatus.STARTED
-            assert await writer.release(claim.lease)
+            assert await cache.release_turn(claim.lease)
             with pytest.raises(AIError) as rejected:
                 await history.inspect_execution(record.execution_id, principal=principal, include_usage=False)
             assert rejected.value.code is ErrorCode.AUTHORIZATION_DENIED

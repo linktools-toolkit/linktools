@@ -6,27 +6,32 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from copy import copy
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from linktools.core import environ
+from pydantic_ai_harness.step_persistence import StepPersistence
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
 from ..core import PromptLimits, DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
 from ..errors import AIError, ErrorCode
 from ..persistence.capabilities import CapabilityPersistence
+from ..capability.steps import AtomicStepPersistence
 from ._agent_run_recorder import AgentRunRecorder
+from ._step_store import RuntimeStepStore
+from ._tool import ToolOperationBridge
 from ._budget import RunBudgetContext
 from ._compaction import ExternalModelRequestRecorder, CompactionCapability, CompactionPolicy
 from ..capability import ExecutionCapability, MemoryCapability
 from ._harness import HarnessPlanStoreAdapter
 from ..capability.planning import HarnessPlanning
 from ._memory import MemoryStore
-from ..capability import CheckpointCapability, TraceCapability
+from ..capability import TraceCapability
 from ._plan import RuntimePlanStore
 from ._run_hooks import AgentRunCapture
 from ._conversation_service import ConversationService
-from ._persistence_services import CheckpointService, TraceService
+from ._persistence_services import TraceService
 from ._persistence_configuration import execution_configuration
 from ..persistence.runs import AgentRunStore
 from ..persistence.runs import RuntimeAgentRunStore
@@ -73,6 +78,8 @@ async def compose_platform_capabilities(
     recorder: AgentRunRecorder | None = None,
     budget: RunBudgetContext | None = None,
     runtime_capabilities: Sequence[AbstractCapability[None]] = (),
+    transcript_start: int = 0,
+    tool_operations: ToolOperationBridge | None = None,
 ) -> tuple[AbstractCapability[None], ...]:
     capabilities: list[AbstractCapability[None]] = []
     run_recorder = recorder or AgentRunRecorder(
@@ -80,9 +87,17 @@ async def compose_platform_capabilities(
         execution_id=execution_id,
         agent_run_id=agent_run_id,
     )
-    guarantees = (execution_configuration(runtime_capabilities).retain_history, True, True)
+    leaves = tuple(leaf for capability in runtime_capabilities for leaf in runtime_feature_leaves(capability))
+    guarantees = (
+        execution_configuration(runtime_capabilities).retain_history,
+        any(isinstance(leaf, StepPersistence) for leaf in leaves),
+        any(isinstance(leaf, TraceCapability) for leaf in leaves),
+    )
     if isinstance(run_store, RuntimeAgentRunStore):
-        guarantees = run_store.execution_persistence(agent_run_id)
+        guarantees = run_store.execution_persistence(agent_run_id, declared=guarantees)
+        run_store.bind_execution_persistence(
+            agent_run_id, conversation=guarantees[0], restart_checkpoints=guarantees[1], durable_trace=guarantees[2],
+        )
     async def require_active_producer() -> None:
         if isinstance(run_store, RuntimeAgentRunStore):
             await run_store.require_active_producer(agent_run_id)
@@ -130,7 +145,37 @@ async def compose_platform_capabilities(
         if isinstance(capability, ExecutionCapability):
             bound_types.add(ExecutionCapability)
             return capability.bind(ConversationService(persistence), retain_history=guarantees[0])
-        for enabled, feature, service in zip(guarantees[1:], (CheckpointCapability, TraceCapability), (CheckpointService, TraceService)):
+        if isinstance(capability, StepPersistence):
+            if not guarantees[1]:
+                return None
+            bound_types.add(StepPersistence)
+            persistence.metadata = {**capability.metadata, **persistence.metadata}
+            # Preserve user-defined hook overrides; only adapt the original native class.
+            if type(capability) is StepPersistence:
+                capability = AtomicStepPersistence(
+                    id=capability.id, description=capability.description, defer_loading=capability.defer_loading,
+                    store=capability.store, agent_name=capability.agent_name,
+                    run_id=capability.run_id, parent_run_id=capability.parent_run_id,
+                    metadata=capability.metadata, capture_frontier=capability.capture_frontier,
+                )
+            if type(capability) is AtomicStepPersistence and isinstance(run_store, RuntimeAgentRunStore):
+                run_store.activate_step_boundary(agent_run_id)
+            return replace(
+                capability, run_id=agent_run_id, parent_run_id=parent_agent_run_id,
+                store=capability.store if tool_operations is None else RuntimeStepStore(
+                    capability.store, tool_operations,
+                    native_boundary=isinstance(capability, AtomicStepPersistence),
+                    working_set=run_store if isinstance(run_store, RuntimeAgentRunStore) else None,
+                    commit_boundary=(run_store.step_boundary(agent_run_id)
+                                     if isinstance(run_store, RuntimeAgentRunStore)
+                                     and isinstance(capability, AtomicStepPersistence) else None),
+                ),
+                agent_name=agent_id,
+                metadata={**persistence.metadata, "linktools.transcript_start": str(transcript_start),
+                    "linktools.transcript_run_id": (run_store.checkpoint_transcript_run_id(agent_run_id)
+                        if isinstance(run_store, RuntimeAgentRunStore) else agent_run_id)},
+            )
+        for enabled, feature, service in ((guarantees[2], TraceCapability, TraceService),):
             if isinstance(capability, feature):
                 if not enabled:
                     return None
@@ -153,7 +198,7 @@ async def compose_platform_capabilities(
         capabilities.append(ExecutionCapability().bind(
             ConversationService(persistence), retain_history=guarantees[0],
         ))
-    for enabled, feature, service in zip(guarantees[1:], (CheckpointCapability, TraceCapability), (CheckpointService, TraceService)):
+    for enabled, feature, service in ((guarantees[2], TraceCapability, TraceService),):
         if enabled and feature not in bound_types:
             capabilities.append(feature().bind(service(persistence)))
     selected_memory = MemoryCapability.select_tools(tool_policy)

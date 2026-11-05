@@ -5,7 +5,9 @@
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
+from typing import TypeVar
+from pydantic_ai_harness.step_persistence import ToolEffectRecord
 from linktools.core import environ
 from ..core import (
     ApprovalDecision,
@@ -17,7 +19,6 @@ from ..core import (
     ResourceKind,
     ToolOperationStatus,
     validate_lease_owner,
-    validate_lease_seconds,
 )
 from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload
@@ -25,14 +26,12 @@ from .contracts import ToolOperationRecord
 from .contracts import (
     ApprovalRecord,
     ExternalCallRecord,
-    ExecutionCheckpoint,
-    ExecutionCheckpointState,
     ToolOperationAdmission,
     decode_tool_operation_failure,
 )
 from ._plan import PersistenceDomain
 from .state import (
-    RecordLeaseTransition,
+    Observed,
     RecordReplacement,
     StateStore,
     StateTransaction,
@@ -53,6 +52,8 @@ from ._repository_common import (
 )
 
 _logger = environ.get_logger("ai.runtime.state.repositories")
+
+_ToolValue = TypeVar("_ToolValue")
 
 
 class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
@@ -296,164 +297,6 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
         )
 
 
-class ExecutionCheckpointRepositoryImpl(_ResourceRepository[ExecutionCheckpoint]):
-    """Store one immutable recovery frontier per execution."""
-
-    _KIND = "recovery_checkpoint"
-
-    def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
-        super().__init__(
-            store,
-            namespace=namespace,
-            tenant_id=tenant_id,
-            domain=PersistenceDomain.CHECKPOINT,
-            kind=self._KIND,
-            resource_kind=ResourceKind.EXECUTION,
-            value_type=ExecutionCheckpoint,
-        )
-
-    async def list(self, *, tenant_id: str) -> tuple[ExecutionCheckpoint, ...]:
-        if tenant_id != self._tenant_id:
-            return ()
-        records = await self._records(self._KIND)
-        return tuple(
-            [await self._decode(record, ExecutionCheckpoint) for record in records]
-        )
-
-    async def list_recoverable_page(
-        self,
-        *,
-        tenant_id: str,
-        cursor: str | None,
-        limit: int,
-    ) -> Page[ExecutionCheckpoint]:
-        if tenant_id != self._tenant_id:
-            return Page(())
-        _validate_page_limit(limit)
-        records = await self._records(
-            self._KIND,
-            states=frozenset(
-                {
-                    ExecutionCheckpointState.ADMITTED.value,
-                    ExecutionCheckpointState.ACTIVE.value,
-                    ExecutionCheckpointState.WAITING.value,
-                    ExecutionCheckpointState.HANDOFF.value,
-                }
-            ),
-            cursor=cursor,
-            limit=min(limit + 1, 1001),
-        )
-        selected = records[:limit]
-        values = tuple(
-            [await self._decode(record, ExecutionCheckpoint) for record in selected]
-        )
-        next_cursor = _record_cursor(selected[-1]) if len(records) > limit else None
-        return Page(values, next_cursor)
-
-    async def get(
-        self, execution_id: str, *, tenant_id: str
-    ) -> ExecutionCheckpoint | None:
-        if tenant_id != self._tenant_id:
-            return None
-        record = await self._record(self._key(self._KIND, execution_id))
-        return None if record is None else await self._decode(record, ExecutionCheckpoint)
-
-    async def get_in_transaction(
-        self,
-        transaction: StateTransaction,
-        execution_id: str,
-        *,
-        tenant_id: str,
-    ) -> ExecutionCheckpoint | None:
-        if tenant_id != self._tenant_id:
-            return None
-        record = await transaction.get_record(self._key(self._KIND, execution_id))
-        return None if record is None else await self._decode(record, ExecutionCheckpoint)
-
-    def checkpoint_record_key(self, execution_id: str) -> bytes:
-        return self._key(self._KIND, execution_id)
-
-    async def create(self, record: ExecutionCheckpoint) -> ExecutionCheckpoint:
-        return await self._store.mutate(
-            lambda transaction: self.admit_in_transaction(transaction, record)
-        )
-
-    async def admit_in_transaction(
-        self,
-        transaction: StateTransaction,
-        record: ExecutionCheckpoint,
-    ) -> ExecutionCheckpoint:
-        _require_tenant(record, self._tenant_id)
-        key = self._key(self._KIND, record.execution_id)
-        current = await transaction.get_record(key)
-        if current is not None:
-            existing = await self._decode(current, ExecutionCheckpoint)
-            if existing != record:
-                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            return existing
-        await transaction.insert_record(
-            self._stored(
-                self._KIND,
-                record.execution_id,
-                record,
-                state=_record_state(record),
-            )
-        )
-        return record
-
-    async def compare_and_swap(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-        expected_revision: int,
-        next_record: ExecutionCheckpoint,
-    ) -> ExecutionCheckpoint:
-        return await self._store.mutate(
-            lambda transaction: self.compare_and_swap_in_transaction(
-                transaction,
-                execution_id,
-                tenant_id=tenant_id,
-                expected_revision=expected_revision,
-                next_record=next_record,
-            )
-        )
-
-    async def compare_and_swap_in_transaction(
-        self,
-        transaction: StateTransaction,
-        execution_id: str,
-        *,
-        tenant_id: str,
-        expected_revision: int,
-        next_record: ExecutionCheckpoint,
-    ) -> ExecutionCheckpoint:
-        if tenant_id != self._tenant_id:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        _require_tenant(next_record, self._tenant_id)
-        key = self._key(self._KIND, execution_id)
-        current_record = await transaction.get_record(key)
-        if current_record is None:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        current = await self._decode(current_record, ExecutionCheckpoint)
-        if current.revision != expected_revision:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if next_record.execution_id != execution_id:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        await _replace_checked(
-            transaction,
-            replace(
-                self._stored(
-                    self._KIND, execution_id, next_record,
-                    state=_record_state(next_record),
-                ),
-                storage_revision=current_record.storage_revision + 1,
-            ),
-            current_record.storage_revision,
-        )
-        return next_record
-
-
 class ToolRepositoryImpl(_RepositoryBase):
     def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
         super().__init__(
@@ -468,8 +311,8 @@ class ToolRepositoryImpl(_RepositoryBase):
 
     async def _retry_storage_conflict(
         self,
-        operation: Callable[[], Awaitable[ToolOperationRecord]],
-    ) -> ToolOperationRecord:
+        operation: Callable[[], Awaitable[_ToolValue]],
+    ) -> _ToolValue:
         while True:
             try:
                 return await operation()
@@ -478,11 +321,89 @@ class ToolRepositoryImpl(_RepositoryBase):
                     raise
                 await asyncio.sleep(0)
 
+    async def record_tool_effect(
+        self, effect: ToolEffectRecord, *, execution_id: str, tool_operation_id: str,
+        binding_digest: str, recovery_agent_run_id: str | None = None,
+        observed: Observed[ToolOperationRecord] | None = None,
+    ) -> Observed[ToolOperationRecord]:
+        """Annotate an admitted effect without creating or changing its outcome."""
+        async def mutate(transaction: StateTransaction) -> Observed[ToolOperationRecord]:
+            if observed is None:
+                stored = await transaction.get_record(self._tool_key(tool_operation_id))
+                if stored is None and recovery_agent_run_id is not None:
+                    alias = alias_digest(self._namespace, self._tenant_id, self._domain.value,
+                                         "tool_call", [effect.run_id, effect.tool_call_id])
+                    resolved = await transaction.resolve_alias(alias)
+                    stored = None if resolved is None else await transaction.get_record(resolved)
+                if stored is None:
+                    raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+                current = await self._decode(stored, ToolOperationRecord)
+            else:
+                current = observed.value
+                stored = replace(self._stored("tool_operation", current.tool_operation_id, current,
+                                              state=current.status.value), storage_revision=observed.storage_revision)
+            if (current.execution_id != execution_id or current.tool_call_id != effect.tool_call_id
+                    or current.tool_name != effect.tool_name or current.binding_digest != binding_digest
+                    or current.agent_run_id not in {effect.run_id, recovery_agent_run_id}
+                    or current.to_tool_effect(effect.run_id).status != effect.status):
+                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+            value = replace(current,
+                effect_started_at=current.effect_started_at or effect.started_at,
+                effect_idempotency_key=effect.idempotency_key if effect.idempotency_key is not None else current.effect_idempotency_key,
+                effect_summary=effect.effect_summary if effect.effect_summary is not None else current.effect_summary,
+            )
+            if value == current:
+                return Observed(current, stored.storage_revision)
+            value = replace(value, updated_at=datetime.now(timezone.utc))
+            await self._replace_tool_in_transaction(transaction, stored, value)
+            return Observed(value, stored.storage_revision + 1)
+        return await self._store.mutate(mutate)
+
+    async def get_tool_effect(
+        self, *, run_id: str, tool_call_id: str, source_run_id: str | None = None,
+    ) -> ToolEffectRecord | None:
+        value = await self.get_by_call(run_id, tool_call_id, tenant_id=self._tenant_id)
+        if value is None and source_run_id is not None and source_run_id != run_id:
+            value = await self.get_by_call(source_run_id, tool_call_id, tenant_id=self._tenant_id)
+        return None if value is None else value.to_tool_effect(run_id)
+
+    async def list_unresolved_tool_effects(
+        self, *, execution_id: str, run_id: str, source_run_id: str | None = None,
+    ) -> list[ToolEffectRecord]:
+        values = await self._list_effect_records(execution_id, run_id, source_run_id)
+        return [effect for value in values
+                if (effect := value.to_tool_effect(run_id)).status == "started"]
+
+    async def _list_effect_records(
+        self, execution_id: str, run_id: str, source_run_id: str | None,
+    ) -> tuple[ToolOperationRecord, ...]:
+        records = await self._records(
+            "tool_operation", parent=self._parent("tool_operation", "execution", execution_id),
+        )
+        values = [await self._decode(stored, ToolOperationRecord) for stored in records]
+        if any(value.execution_id != execution_id for value in values):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        direct = {run_id, source_run_id} - {None}
+        selected = {stored.key_digest for stored, value in zip(records, values, strict=True)
+                    if value.agent_run_id in direct}
+        remaining = [(stored, value) for stored, value in zip(records, values, strict=True)
+                     if stored.key_digest not in selected]
+        if remaining:
+            aliases = tuple(alias_digest(
+                self._namespace, self._tenant_id, self._domain.value,
+                "tool_call", [alias_run_id, value.tool_call_id],
+            ) for _stored, value in remaining for alias_run_id in direct)
+            resolved = await self._store.read(lambda transaction: transaction.resolve_aliases(aliases))
+            selected.update(resolved.values())
+        return tuple(value for stored, value in zip(records, values, strict=True)
+                     if stored.key_digest in selected)
+
     async def admit(self, request: ToolOperationAdmission) -> ToolOperationRecord:
         async def attempt() -> ToolOperationRecord:
             result = await self._store.mutate(
                 lambda transaction: self.admit_in_transaction(transaction, request)
             )
+            result = result.value
             _logger.debug(
                 "tool operation admitted: operation=%s status=%s fence=%s",
                 result.tool_operation_id,
@@ -499,46 +420,54 @@ class ToolRepositoryImpl(_RepositoryBase):
         self,
         transaction: StateTransaction,
         request: ToolOperationAdmission,
-    ) -> ToolOperationRecord:
+        *, observed: Observed[ToolOperationRecord] | None = None, known_new: bool = False,
+    ) -> Observed[ToolOperationRecord]:
         validate_lease_owner(request.owner)
-        validate_lease_seconds(request.lease_seconds)
-        aliases = tuple(
-            dict.fromkeys(
-                alias_digest(
-                    self._namespace,
-                    self._tenant_id,
-                    self._domain.value,
-                    "tool_call",
-                    [agent_run_id, request.tool_call_id],
-                )
-                for agent_run_id in (request.agent_run_id, request.recovery_agent_run_id)
-                if agent_run_id is not None
-            )
-        )
+        if known_new and (observed is not None or request.recovery_agent_run_id is not None):
+            raise ValueError("known-new admission cannot carry recovery evidence")
+        aliases = ((alias_digest(
+            self._namespace, self._tenant_id, self._domain.value, "tool_call",
+            [request.agent_run_id, request.tool_call_id],
+        ),) if request.recovery_agent_run_id is not None
+            and request.recovery_agent_run_id != request.agent_run_id else ())
 
-        async def mutate(transaction: StateTransaction) -> ToolOperationRecord:
-            resolved = await transaction.resolve_aliases(aliases)
-            record_keys = tuple(
-                dict.fromkeys(
-                    (*resolved.values(), self._tool_key(request.tool_operation_id))
+        async def mutate(transaction: StateTransaction) -> Observed[ToolOperationRecord]:
+            if known_new:
+                record = None
+                resolved = {}
+            elif observed is not None:
+                current = observed.value
+                if (current.tool_operation_id != request.tool_operation_id
+                        or current.execution_id != request.execution_id
+                        or current.agent_run_id not in {request.agent_run_id, request.recovery_agent_run_id}
+                        or current.tool_call_id != request.tool_call_id):
+                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                record = replace(self._stored("tool_operation", current.tool_operation_id, current),
+                                 storage_revision=observed.storage_revision)
+                resolved = {}
+            else:
+                resolved = await transaction.resolve_aliases(aliases)
+                record_keys = tuple(
+                    dict.fromkeys(
+                        (*resolved.values(), self._tool_key(request.tool_operation_id))
+                    )
                 )
-            )
-            records = await transaction.get_records(record_keys)
-            resolved_keys = tuple(dict.fromkeys(resolved.values()))
-            if len(resolved_keys) > 1:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            candidate_key = self._tool_key(request.tool_operation_id)
-            candidate_record = records.get(candidate_key)
-            if (
-                resolved_keys
-                and candidate_record is not None
-                and candidate_key not in resolved_keys
-            ):
-                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            existing_key = resolved_keys[0] if resolved_keys else candidate_key
-            record = records.get(existing_key)
+                records = await transaction.get_records(record_keys)
+                resolved_keys = tuple(dict.fromkeys(resolved.values()))
+                if len(resolved_keys) > 1:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                candidate_key = self._tool_key(request.tool_operation_id)
+                candidate_record = records.get(candidate_key)
+                if (
+                    resolved_keys
+                    and candidate_record is not None
+                    and candidate_key not in resolved_keys
+                ):
+                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                existing_key = resolved_keys[0] if resolved_keys else candidate_key
+                record = records.get(existing_key)
             if record is None:
-                now = await transaction.now()
+                now = datetime.now(timezone.utc)
                 value = ToolOperationRecord(
                     tool_operation_id=request.tool_operation_id,
                     execution_id=request.execution_id,
@@ -552,7 +481,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                     status=ToolOperationStatus.CLAIMED,
                     owner=request.owner,
                     fence=1,
-                    lease_expires_at=now + timedelta(seconds=request.lease_seconds),
+                    producer_generation=request.producer_generation,
                     error_code=None,
                     created_at=now,
                     updated_at=now,
@@ -575,7 +504,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                         for alias in aliases
                     )
                 )
-                return value
+                return Observed(value, 0)
             current = await self._decode(record, ToolOperationRecord)
             if not _tool_admission_matches(current, request):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
@@ -597,7 +526,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                     )
                 )
             now = (
-                await transaction.now()
+                datetime.now(timezone.utc)
                 if current.status
                 in {
                     ToolOperationStatus.PENDING,
@@ -611,46 +540,22 @@ class ToolRepositoryImpl(_RepositoryBase):
                 ToolOperationStatus.EFFECT_UNKNOWN,
                 ToolOperationStatus.CANCELLED,
             }:
-                if current.status is ToolOperationStatus.EFFECT_UNKNOWN:
-                    raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
                 if current.status is ToolOperationStatus.CANCELLED:
                     raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-                return current
+                return Observed(current, record.storage_revision)
             if now is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            expired = (
-                current.lease_expires_at is not None and current.lease_expires_at <= now
-            )
-            if current.status is ToolOperationStatus.CLAIMED and not expired:
+            if current.status is ToolOperationStatus.CLAIMED:
                 if current.owner == request.owner:
-                    return current
+                    return Observed(current, record.storage_revision)
                 raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-            if (
-                current.status is ToolOperationStatus.CLAIMED
-                and not current.replay_safe
-            ):
-                value = replace(
-                    current,
-                    status=ToolOperationStatus.EFFECT_UNKNOWN,
-                    lease_expires_at=None,
-                    updated_at=now,
-                )
-            elif current.status in {
-                ToolOperationStatus.PENDING,
-                ToolOperationStatus.CLAIMED,
-            }:
-                value = replace(
-                    current,
-                    status=ToolOperationStatus.CLAIMED,
-                    owner=request.owner,
-                    fence=current.fence + 1,
-                    lease_expires_at=now + timedelta(seconds=request.lease_seconds),
-                    updated_at=now,
-                )
-            else:
+            if current.status is not ToolOperationStatus.PENDING:
                 raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+            value = replace(current, status=ToolOperationStatus.CLAIMED,
+                            owner=request.owner, fence=current.fence + 1,
+                            producer_generation=request.producer_generation, updated_at=now)
             await self._replace_tool_in_transaction(transaction, record, value)
-            return value
+            return Observed(value, record.storage_revision + 1)
 
         return await mutate(transaction)
 
@@ -711,9 +616,77 @@ class ToolRepositoryImpl(_RepositoryBase):
         if tenant_id != self._tenant_id:
             return None
         record = await self._record(self._tool_key(tool_operation_id))
-        return (
-            None if record is None else await self._decode(record, ToolOperationRecord)
+        value = None if record is None else await self._decode(record, ToolOperationRecord)
+        return value
+
+    async def settle_deferred_result_in_transaction(
+        self, transaction: StateTransaction, expected: ToolOperationRecord, *,
+        result_payload: StoredPayload | None, error_code: str | None,
+        error_payload: StoredPayload | None,
+    ) -> ToolOperationRecord:
+        stored = await transaction.get_record(self._tool_key(expected.tool_operation_id))
+        if stored is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        current = await self._decode(stored, ToolOperationRecord)
+        if not _tool_replay_matches(current, expected) or current.fence != expected.fence:
+            raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+        target = ToolOperationStatus.COMPLETED if result_payload is not None else ToolOperationStatus.FAILED
+        if target is ToolOperationStatus.FAILED:
+            decode_tool_operation_failure(error_code, error_payload)
+        if current.status is target:
+            if (current.result_payload == result_payload and current.error_code == error_code
+                    and current.error_payload == error_payload):
+                return current
+            raise AIError(ErrorCode.TOOL_RESULT_CONFLICT)
+        if current.status is not ToolOperationStatus.PENDING or current.owner is not None:
+            raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+        value = replace(current, status=target, result_payload=result_payload,
+                        error_code=error_code, error_payload=error_payload,
+                        updated_at=datetime.now(timezone.utc))
+        await self._replace_tool_in_transaction(transaction, stored, value)
+        return value
+
+    async def reconcile_turn_claim_in_transaction(
+        self, transaction: StateTransaction, tool_operation_id: str, *,
+        execution_id: str, producer_generation: int, producer_claim_id: str,
+        turn_stopping: bool,
+    ) -> ToolOperationRecord:
+        stored = await transaction.get_record(self._tool_key(tool_operation_id))
+        if stored is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        current = await self._decode(stored, ToolOperationRecord)
+        if current.execution_id != execution_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if current.status is not ToolOperationStatus.CLAIMED:
+            return current
+        same_turn = (current.owner == producer_claim_id
+                     and current.producer_generation == producer_generation)
+        if same_turn and not turn_stopping:
+            return current
+        if (current.producer_generation is None
+                or current.producer_generation > producer_generation
+                or current.producer_generation == producer_generation and not same_turn):
+            raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+        retry = current.replay_safe and not turn_stopping
+        value = replace(
+            current,
+            status=ToolOperationStatus.PENDING if retry else ToolOperationStatus.EFFECT_UNKNOWN,
+            owner=None if retry else current.owner,
+            error_code=None if retry else ErrorCode.TOOL_EFFECT_UNKNOWN.value,
+            updated_at=datetime.now(timezone.utc),
         )
+        await self._replace_tool_in_transaction(transaction, stored, value)
+        return value
+
+    async def observe_operation(
+        self, tool_operation_id: str, *, tenant_id: str,
+    ) -> Observed[ToolOperationRecord] | None:
+        if tenant_id != self._tenant_id:
+            return None
+        record = await self._record(self._tool_key(tool_operation_id))
+        if record is None:
+            return None
+        return Observed(await self._decode(record, ToolOperationRecord), record.storage_revision)
 
     async def get_operation_in_transaction(
         self,
@@ -724,7 +697,8 @@ class ToolRepositoryImpl(_RepositoryBase):
     ) -> ToolOperationRecord | None:
         _require_repository_tenant(tenant_id, self._tenant_id)
         record = await transaction.get_record(self._tool_key(tool_operation_id))
-        return None if record is None else await self._decode(record, ToolOperationRecord)
+        value = None if record is None else await self._decode(record, ToolOperationRecord)
+        return value
 
     async def resolve_effect_in_transaction(
         self,
@@ -751,7 +725,7 @@ class ToolRepositoryImpl(_RepositoryBase):
             or current.fence != expected_fence
         ):
             raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-        resolved_at = await transaction.now()
+        resolved_at = datetime.now(timezone.utc)
         if target_status is ToolOperationStatus.COMPLETED:
             updated = replace(
                 current,
@@ -759,7 +733,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                 result_payload=result_payload,
                 error_code=None,
                 error_payload=None,
-                lease_expires_at=None,
+
                 updated_at=resolved_at,
             )
         elif target_status is ToolOperationStatus.PENDING:
@@ -767,7 +741,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                 current,
                 status=ToolOperationStatus.PENDING,
                 owner=None,
-                lease_expires_at=None,
+
                 error_code=None,
                 error_payload=None,
                 result_payload=None,
@@ -780,7 +754,6 @@ class ToolRepositoryImpl(_RepositoryBase):
                 result_payload=None,
                 error_code=error_code,
                 error_payload=error_payload,
-                lease_expires_at=None,
                 updated_at=resolved_at,
             )
         else:
@@ -806,58 +779,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         )
         if any(value.execution_id != execution_id for value in values):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return values
-
-    async def reconcile_expired_claim(
-        self,
-        tool_operation_id: str,
-        *,
-        tenant_id: str,
-    ) -> ToolOperationRecord:
-        if tenant_id != self._tenant_id:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-
-        async def attempt() -> ToolOperationRecord:
-            async def mutate(transaction: StateTransaction) -> ToolOperationRecord:
-                record = await transaction.get_record(
-                    self._tool_key(tool_operation_id)
-                )
-                if record is None:
-                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-                current = await self._decode(record, ToolOperationRecord)
-                if current.status is not ToolOperationStatus.CLAIMED:
-                    return current
-                if current.lease_expires_at is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                now = await transaction.now()
-                if current.lease_expires_at > now:
-                    return current
-                reconciled = replace(
-                    current,
-                    status=(
-                        ToolOperationStatus.PENDING
-                        if current.replay_safe
-                        else ToolOperationStatus.EFFECT_UNKNOWN
-                    ),
-                    owner=None if current.replay_safe else current.owner,
-                    lease_expires_at=None,
-                    error_code=(
-                        None
-                        if current.replay_safe
-                        else ErrorCode.TOOL_EFFECT_UNKNOWN.value
-                    ),
-                    updated_at=now,
-                )
-                await self._replace_tool_in_transaction(
-                    transaction,
-                    record,
-                    reconciled,
-                )
-                return reconciled
-
-            return await self._store.mutate(mutate)
-
-        return await self._retry_storage_conflict(attempt)
+        return tuple(values)
 
     async def has_by_agent_run(
         self,
@@ -870,6 +792,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         records = await self._records(
             "tool_operation",
             scope=self._scope("tool_operation", "agent_run", agent_run_id),
+            states=frozenset(status.value for status in ToolOperationStatus),
             limit=1,
         )
         return bool(records)
@@ -881,102 +804,66 @@ class ToolRepositoryImpl(_RepositoryBase):
         return frozenset(value.tool_call_id for value in values)
 
     async def get_by_call_ids(
-        self,
-        agent_run_id: str,
-        tool_call_ids: Sequence[str],
-        *,
-        tenant_id: str,
+        self, agent_run_id: str, tool_call_ids: Sequence[str], *, tenant_id: str,
     ) -> tuple[ToolOperationRecord, ...]:
         if tenant_id != self._tenant_id:
             return ()
         if not isinstance(agent_run_id, str) or not agent_run_id:
             raise ValueError("agent_run_id must be a non-empty string")
-        if not isinstance(tool_call_ids, Sequence) or isinstance(
-            tool_call_ids, (str, bytes)
-        ):
+        if not isinstance(tool_call_ids, Sequence) or isinstance(tool_call_ids, (str, bytes)):
             raise TypeError("tool_call_ids must be a sequence")
         ordered = tuple(dict.fromkeys(tool_call_ids))
         if any(not isinstance(value, str) or not value for value in ordered):
             raise ValueError("tool_call_ids must contain non-empty strings")
         if not ordered:
             return ()
-        aliases = tuple(
-            alias_digest(
-                self._namespace,
-                self._tenant_id,
-                self._domain.value,
-                "tool_call",
-                [agent_run_id, tool_call_id],
-            )
-            for tool_call_id in ordered
-        )
-
-        async def read(transaction: StateTransaction) -> tuple[ToolOperationRecord, ...]:
-            resolved = await transaction.resolve_aliases(aliases)
-            record_keys = tuple(
-                dict.fromkeys(key for key in resolved.values() if key is not None)
-            )
-            records = await transaction.get_records(record_keys) if record_keys else {}
-            decoded: dict[bytes, ToolOperationRecord] = {}
-            present: list[ToolOperationRecord] = []
-            for tool_call_id, alias in zip(ordered, aliases, strict=True):
-                key = resolved.get(alias)
-                if key is None:
-                    continue
-                stored = records.get(key)
-                if stored is None or stored.kind != "tool_operation":
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                value = decoded.get(key)
-                if value is None:
+        records = await self._records("tool_operation", scope=self._scope("tool_operation", "agent_run", agent_run_id))
+        values = [await self._decode(record, ToolOperationRecord) for record in records]
+        selected = {value.tool_call_id: value for value in values
+                    if value.agent_run_id == agent_run_id and value.tool_call_id in ordered}
+        missing = tuple(call_id for call_id in ordered if call_id not in selected)
+        if missing:
+            aliases = tuple(alias_digest(self._namespace, self._tenant_id, self._domain.value,
+                                         "tool_call", [agent_run_id, call_id]) for call_id in missing)
+            async def read(transaction: StateTransaction) -> None:
+                resolved = await transaction.resolve_aliases(aliases)
+                keys = tuple(dict.fromkeys(resolved.values()))
+                sources = await transaction.get_records(keys) if keys else {}
+                for call_id, alias in zip(missing, aliases, strict=True):
+                    key = resolved.get(alias)
+                    if key is None:
+                        continue
+                    stored = sources.get(key)
+                    if stored is None or stored.kind != "tool_operation":
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     value = await self._decode(stored, ToolOperationRecord)
-                    decoded[key] = value
-                if value.tool_call_id != tool_call_id or value.agent_run_id != agent_run_id:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                present.append(value)
-            return tuple(present)
-
-        return await self._store.read(read)
+                    if value.tool_call_id != call_id:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    selected[call_id] = value
+            await self._store.read(read)
+        return tuple(selected[call_id] for call_id in ordered if call_id in selected)
 
     async def get_by_call(
-        self,
-        agent_run_id: str,
-        tool_call_id: str,
-        *,
-        tenant_id: str,
+        self, agent_run_id: str, tool_call_id: str, *, tenant_id: str,
     ) -> ToolOperationRecord | None:
-        if tenant_id != self._tenant_id:
-            return None
-        replay_alias = alias_digest(
-            self._namespace,
-            self._tenant_id,
-            self._domain.value,
-            "tool_call",
-            [agent_run_id, tool_call_id],
-        )
-
-        async def read(transaction: StateTransaction) -> ToolOperationRecord | None:
-            key = await transaction.resolve_alias(replay_alias)
-            if key is None:
-                return None
-            stored = await transaction.get_record(key)
-            return (
-                None
-                if stored is None
-                else await self._decode(stored, ToolOperationRecord)
-            )
-
-        return await self._store.read(read)
+        values = await self.get_by_call_ids(agent_run_id, (tool_call_id,), tenant_id=tenant_id)
+        return values[0] if values else None
 
     async def list_by_agent_run(
         self,
         agent_run_id: str,
         *,
         tenant_id: str,
+        execution_id: str | None = None,
+        recovery_agent_run_id: str | None = None,
     ) -> tuple[ToolOperationRecord, ...]:
         if tenant_id != self._tenant_id:
             return ()
         if not isinstance(agent_run_id, str) or not agent_run_id:
             raise ValueError("agent_run_id must be a non-empty string")
+        if execution_id is not None:
+            values = await self._list_effect_records(execution_id, agent_run_id, recovery_agent_run_id)
+            return tuple(values)
         records = await self._records(
             "tool_operation",
             scope=self._scope("tool_operation", "agent_run", agent_run_id),
@@ -986,109 +873,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         )
         if any(value.agent_run_id != agent_run_id for value in values):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return values
-
-    async def claim(
-        self, tool_operation_id: str, *, tenant_id: str, owner: str, lease_seconds: int
-    ) -> ToolOperationRecord:
-        async def attempt() -> ToolOperationRecord:
-            if tenant_id != self._tenant_id:
-                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-            validate_lease_owner(owner)
-            validate_lease_seconds(lease_seconds)
-
-            async def mutate(transaction: StateTransaction) -> ToolOperationRecord:
-                record = await transaction.get_record(self._tool_key(tool_operation_id))
-                if record is None:
-                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-                current = await self._decode(record, ToolOperationRecord)
-                if current.status in {
-                    ToolOperationStatus.COMPLETED,
-                    ToolOperationStatus.FAILED,
-                    ToolOperationStatus.EFFECT_UNKNOWN,
-                    ToolOperationStatus.CANCELLED,
-                }:
-                    raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-                now = await transaction.now()
-                expired = (
-                    current.lease_expires_at is not None
-                    and current.lease_expires_at <= now
-                )
-                if current.status is ToolOperationStatus.CLAIMED and not expired:
-                    raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-                if (
-                    current.status is ToolOperationStatus.CLAIMED
-                    and not current.replay_safe
-                ):
-                    unknown = replace(
-                        current,
-                        status=ToolOperationStatus.EFFECT_UNKNOWN,
-                        lease_expires_at=None,
-                        updated_at=now,
-                    )
-                    await self._replace_tool_in_transaction(
-                        transaction, record, unknown
-                    )
-                    return unknown
-                if (
-                    current.status is not ToolOperationStatus.PENDING
-                    and current.status is not ToolOperationStatus.CLAIMED
-                ):
-                    raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-                value = replace(
-                    current,
-                    status=ToolOperationStatus.CLAIMED,
-                    owner=owner,
-                    fence=current.fence + 1,
-                    lease_expires_at=now + timedelta(seconds=lease_seconds),
-                    updated_at=now,
-                )
-                await self._replace_tool_in_transaction(transaction, record, value)
-                return value
-
-            result = await self._store.mutate(mutate)
-            if result.status is ToolOperationStatus.EFFECT_UNKNOWN:
-                raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
-            return result
-
-        return await self._retry_storage_conflict(attempt)
-
-    async def renew(
-        self,
-        tool_operation_id: str,
-        *,
-        tenant_id: str,
-        owner: str,
-        fence: int,
-        lease_seconds: int,
-    ) -> ToolOperationRecord:
-        if tenant_id != self._tenant_id:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        validate_lease_owner(owner)
-        validate_lease_seconds(lease_seconds)
-
-        async def mutate(transaction: StateTransaction) -> ToolOperationRecord:
-            record = await transaction.get_record(self._tool_key(tool_operation_id))
-            if record is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            current = await self._decode(record, ToolOperationRecord)
-            now = await transaction.now()
-            _require_live_tool_lease(current, owner=owner, fence=fence, now=now)
-            renewed = await transaction.transition_record_lease(
-                record.key_digest,
-                expected_storage_revision=record.storage_revision,
-                transition=RecordLeaseTransition("renew", owner, fence, lease_seconds),
-            )
-            if renewed is None:
-                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-            return replace(current, lease_expires_at=renewed.lease_expires_at)
-
-        try:
-            return await self._store.mutate(mutate)
-        except AIError as error:
-            if error.code is ErrorCode.STORAGE_CONFLICT:
-                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT) from error
-            raise
+        return tuple(values)
 
     async def complete_payload(
         self,
@@ -1100,7 +885,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         result_payload: StoredPayload,
     ) -> ToolOperationRecord:
         async def attempt() -> ToolOperationRecord:
-            return await self._finish_tool(
+            receipt = await self._finish_tool(
                 tool_operation_id,
                 tenant_id=tenant_id,
                 owner=owner,
@@ -1111,10 +896,11 @@ class ToolRepositoryImpl(_RepositoryBase):
                     current,
                     status=ToolOperationStatus.COMPLETED,
                     result_payload=result_payload,
-                    lease_expires_at=None,
+                    error_code=None,
                     updated_at=now,
                 ),
             )
+            return receipt.value
 
         return await self._retry_storage_conflict(attempt)
 
@@ -1129,7 +915,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         error_payload: StoredPayload,
     ) -> ToolOperationRecord:
         async def attempt() -> ToolOperationRecord:
-            return await self._finish_tool(
+            receipt = await self._finish_tool(
                 tool_operation_id,
                 tenant_id=tenant_id,
                 owner=owner,
@@ -1142,10 +928,10 @@ class ToolRepositoryImpl(_RepositoryBase):
                     status=ToolOperationStatus.FAILED,
                     error_code=error_code,
                     error_payload=error_payload,
-                    lease_expires_at=None,
                     updated_at=now,
                 ),
             )
+            return receipt.value
 
         return await self._retry_storage_conflict(attempt)
 
@@ -1189,18 +975,17 @@ class ToolRepositoryImpl(_RepositoryBase):
         if current.status is ToolOperationStatus.PENDING:
             if (
                 current.owner is None
-                and current.lease_expires_at is None
                 and current.fence == fence
             ):
                 return current
             raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-        now = await transaction.now()
-        _require_live_tool_lease(current, owner=owner, fence=fence, now=now)
+        now = datetime.now(timezone.utc)
+        _require_tool_claim(current, owner=owner, fence=fence)
         value = replace(
             current,
             status=ToolOperationStatus.PENDING,
             owner=None,
-            lease_expires_at=None,
+
             error_code=None,
             error_payload=None,
             result_payload=None,
@@ -1217,6 +1002,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         owner: str,
         fence: int,
         error_code: str | None,
+        write: Callable[[StateTransaction], Awaitable[None]] | None = None,
     ) -> ToolOperationRecord:
         async def attempt() -> ToolOperationRecord:
             if tenant_id != self._tenant_id:
@@ -1228,24 +1014,32 @@ class ToolRepositoryImpl(_RepositoryBase):
                 if record is None:
                     raise AIError(ErrorCode.STORAGE_NOT_FOUND)
                 current = await self._decode(record, ToolOperationRecord)
-                now = await transaction.now()
+                now = datetime.now(timezone.utc)
                 if current.status is ToolOperationStatus.EFFECT_UNKNOWN:
                     if (
                         current.owner == owner
                         and current.fence == fence
                         and current.error_code == error_code
                     ):
+                        if write is not None:
+                            guarded = await transaction.guard_record_revision(
+                                record.key_digest, expected_storage_revision=record.storage_revision,
+                            )
+                            if guarded is None:
+                                raise AIError(ErrorCode.STORAGE_CONFLICT)
+                            await write(transaction)
                         return current
                     raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-                _require_live_tool_lease(current, owner=owner, fence=fence, now=now)
+                _require_tool_claim(current, owner=owner, fence=fence)
                 value = replace(
                     current,
                     status=ToolOperationStatus.EFFECT_UNKNOWN,
                     error_code=error_code,
-                    lease_expires_at=None,
                     updated_at=now,
                 )
                 await self._replace_tool_in_transaction(transaction, record, value)
+                if write is not None:
+                    await write(transaction)
                 return value
 
             return await self._store.mutate(mutate)
@@ -1265,7 +1059,8 @@ class ToolRepositoryImpl(_RepositoryBase):
         requested_error_payload: StoredPayload | None = None,
         value: object,
         transaction: StateTransaction | None = None,
-    ) -> ToolOperationRecord:
+        observed: Observed[ToolOperationRecord] | None = None,
+    ) -> Observed[ToolOperationRecord]:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         validate_lease_owner(owner)
@@ -1275,12 +1070,17 @@ class ToolRepositoryImpl(_RepositoryBase):
                 requested_error_payload,
             )
 
-        async def mutate(transaction: StateTransaction) -> ToolOperationRecord:
-            record = await transaction.get_record(self._tool_key(tool_operation_id))
+        async def mutate(transaction: StateTransaction) -> Observed[ToolOperationRecord]:
+            record = (await transaction.get_record(self._tool_key(tool_operation_id))
+                      if observed is None else replace(
+                          self._stored("tool_operation", observed.value.tool_operation_id, observed.value),
+                          storage_revision=observed.storage_revision))
+            if observed is not None and observed.value.tool_operation_id != tool_operation_id:
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             if record is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            current = await self._decode(record, ToolOperationRecord)
-            now = await transaction.now()
+            current = observed.value if observed is not None else await self._decode(record, ToolOperationRecord)
+            now = datetime.now(timezone.utc)
             if current.status is ToolOperationStatus.COMPLETED:
                 if (
                     terminal_status is ToolOperationStatus.COMPLETED
@@ -1288,7 +1088,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                     and current.fence == fence
                     and current.result_payload == requested_result_payload
                 ):
-                    return current
+                    return Observed(current, record.storage_revision)
                 if terminal_status is ToolOperationStatus.COMPLETED:
                     raise AIError(ErrorCode.TOOL_RESULT_CONFLICT)
                 raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
@@ -1300,17 +1100,14 @@ class ToolRepositoryImpl(_RepositoryBase):
                     and current.error_code == requested_error
                     and current.error_payload == requested_error_payload
                 ):
-                    return current
+                    return Observed(current, record.storage_revision)
                 raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-            if current.status in {
-                ToolOperationStatus.EFFECT_UNKNOWN,
-                ToolOperationStatus.CANCELLED,
-            }:
+            if current.status is ToolOperationStatus.CANCELLED:
                 raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-            _require_live_tool_lease(current, owner=owner, fence=fence, now=now)
+            _require_tool_claim(current, owner=owner, fence=fence, allow_unknown=True)
             next_value = value(current, now)
             await self._replace_tool_in_transaction(transaction, record, next_value)
-            return next_value
+            return Observed(next_value, record.storage_revision + 1)
 
         if transaction is not None:
             return await mutate(transaction)
@@ -1325,7 +1122,8 @@ class ToolRepositoryImpl(_RepositoryBase):
         owner: str,
         fence: int,
         result_payload: StoredPayload,
-    ) -> ToolOperationRecord:
+        observed: Observed[ToolOperationRecord] | None = None,
+    ) -> Observed[ToolOperationRecord]:
         return await self._finish_tool(
             tool_operation_id,
             tenant_id=tenant_id,
@@ -1337,10 +1135,11 @@ class ToolRepositoryImpl(_RepositoryBase):
                 current,
                 status=ToolOperationStatus.COMPLETED,
                 result_payload=result_payload,
-                lease_expires_at=None,
+                error_code=None,
                 updated_at=now,
             ),
             transaction=transaction,
+            observed=observed,
         )
 
     async def fail_in_transaction(
@@ -1353,7 +1152,8 @@ class ToolRepositoryImpl(_RepositoryBase):
         fence: int,
         error_code: str,
         error_payload: StoredPayload,
-    ) -> ToolOperationRecord:
+        observed: Observed[ToolOperationRecord] | None = None,
+    ) -> Observed[ToolOperationRecord]:
         return await self._finish_tool(
             tool_operation_id,
             tenant_id=tenant_id,
@@ -1367,10 +1167,10 @@ class ToolRepositoryImpl(_RepositoryBase):
                 status=ToolOperationStatus.FAILED,
                 error_code=error_code,
                 error_payload=error_payload,
-                lease_expires_at=None,
                 updated_at=now,
             ),
             transaction=transaction,
+            observed=observed,
         )
 
     async def _replace_tool_in_transaction(
@@ -1429,21 +1229,19 @@ def _tool_argument_payloads_match(
     return left is not None and left.digest == right.digest and left.size == right.size
 
 
-def _require_live_tool_lease(
+def _require_tool_claim(
     current: ToolOperationRecord,
     *,
     owner: str,
     fence: int,
-    now: datetime,
+    allow_unknown: bool = False,
 ) -> None:
-    if (
-        current.status is not ToolOperationStatus.CLAIMED
-        or current.owner != owner
-        or current.fence != fence
-        or current.lease_expires_at is None
-        or current.lease_expires_at <= now
-    ):
+    allowed = {ToolOperationStatus.CLAIMED}
+    if allow_unknown:
+        allowed.add(ToolOperationStatus.EFFECT_UNKNOWN)
+    if current.status not in allowed or current.owner != owner or current.fence != fence:
         raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+
 
 
 
@@ -1476,7 +1274,6 @@ tool_admission_matches = _tool_admission_matches
 __all__ = [
     "ApprovalRepositoryImpl",
     "ExternalCallRepositoryImpl",
-    "ExecutionCheckpointRepositoryImpl",
     "ToolRepositoryImpl",
     "tool_admission_matches",
 ]

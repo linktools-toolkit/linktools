@@ -17,7 +17,7 @@ from linktools.ai.core import ApprovalStatus, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.persistence.contracts import ExecutionCheckpointState
+from linktools.ai.persistence.contracts import ExecutionRecoveryState
 from linktools.ai.workspace import (
     Workspace,
     WorkspacePolicy,
@@ -79,13 +79,13 @@ async def test_composed_runtime_ask_enters_approval_wait(
 
         assert record is not None
         assert record.status is ExecutionStatus.WAITING_DEFERRED
-        checkpoint = await runtime._state.checkpoint.checkpoints.get(
+        checkpoint = await runtime._state.execution.executions.get(
             execution.execution_id,
             tenant_id=runtime.tenant_id,
         )
         assert checkpoint is not None
-        assert checkpoint.state is ExecutionCheckpointState.WAITING
-        assert checkpoint.pending_tools is not None
+        assert checkpoint.recovery_state is ExecutionRecoveryState.WAITING
+        assert checkpoint.recovery.pending_tools is not None
         approvals = await runtime._state.checkpoint.approvals.list_pending(
             execution.execution_id,
             tenant_id=runtime.tenant_id,

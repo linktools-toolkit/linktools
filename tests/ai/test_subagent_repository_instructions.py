@@ -78,7 +78,7 @@ class _Launcher:
         identity: object,
     ) -> ExecutionRecord:
         del request, identity
-        started = replace(execution, status=ExecutionStatus.STARTED)
+        started = replace(execution, status=ExecutionStatus.STARTED, revision=execution.revision + 1)
         await self._repository.compare_and_swap(
             execution.execution_id,
             tenant_id=self._repository.tenant_id,
@@ -148,7 +148,7 @@ def _parent(pin: RuntimePayloadRef | None) -> ExecutionRecord:
         fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.STARTED,
-        revision=0,
+        revision=1,
         event_seq=0,
         agent_run_seq=1,
         error_code=None,
@@ -160,8 +160,16 @@ def _parent(pin: RuntimePayloadRef | None) -> ExecutionRecord:
         thinking=False,
         binding=binding.binding_contract,
         repository_instructions=pin,
+        producer_generation=1,
+        producer_claim_id="parent-owner",
         **execution_owner_fields(),
     )
+
+
+async def _create_parent(state: Persistence, pin: RuntimePayloadRef | None) -> None:
+    parent = _parent(pin)
+    repository = state.execution.executions
+    await repository.create_execution(parent)
 
 
 def _service(
@@ -201,13 +209,14 @@ async def test_new_child_inherits_exact_parent_structured_pin_without_live_resol
     await state.initialize(namespace="subagent-inherit", tenant_id="tenant")
     try:
         _, parent_pin = _pin("parent-v1")
-        await state.execution.executions.create(_parent(parent_pin))
+        await _create_parent(state, parent_pin)
         resolver = _Resolver(_pin("live-root")[0])
         service = _service(state, resolver=resolver, ids=("child",))
         handle = await service.start_subagent(
             _binding().binding_digest,
             _request("child-key"),
             parent_execution_id="parent",
+            parent_producer_generation=1,
             root_execution_id="parent",
             parent_invocation_id="delegate-call",
         )
@@ -224,7 +233,7 @@ async def test_instruction_aware_child_resolves_root_when_parent_pin_is_none() -
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="subagent-root", tenant_id="tenant")
     try:
-        await state.execution.executions.create(_parent(None))
+        await _create_parent(state, None)
         root, _ = _pin("resolved-root")
         resolver = _Resolver(root)
         service = _service(state, resolver=resolver, ids=("child",))
@@ -232,6 +241,7 @@ async def test_instruction_aware_child_resolves_root_when_parent_pin_is_none() -
             _binding().binding_digest,
             _request("child-key"),
             parent_execution_id="parent",
+            parent_producer_generation=1,
             root_execution_id="parent",
             parent_invocation_id="delegate-call",
         )
@@ -252,12 +262,13 @@ async def test_standalone_service_without_resolver_never_assigns_child_pin(with_
     await state.initialize(namespace=f"subagent-standalone-{with_parent_pin}", tenant_id="tenant")
     try:
         parent_pin = _pin("parent-v1")[1] if with_parent_pin else None
-        await state.execution.executions.create(_parent(parent_pin))
+        await _create_parent(state, parent_pin)
         service = _service(state, resolver=None, ids=("child",))
         handle = await service.start_subagent(
             _binding().binding_digest,
             _request("child-key"),
             parent_execution_id="parent",
+            parent_producer_generation=1,
             root_execution_id="parent",
             parent_invocation_id="delegate-call",
         )
@@ -273,7 +284,7 @@ async def test_subagent_idempotent_replay_keeps_first_persisted_pin_after_live_r
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="subagent-replay", tenant_id="tenant")
     try:
-        await state.execution.executions.create(_parent(None))
+        await _create_parent(state, None)
         first, _ = _pin("first")
         resolver = _Resolver(first)
         service = _service(state, resolver=resolver, ids=("child", "unused"))
@@ -282,6 +293,7 @@ async def test_subagent_idempotent_replay_keeps_first_persisted_pin_after_live_r
             _binding().binding_digest,
             request,
             parent_execution_id="parent",
+            parent_producer_generation=1,
             root_execution_id="parent",
             parent_invocation_id="delegate-call",
         )
@@ -293,6 +305,7 @@ async def test_subagent_idempotent_replay_keeps_first_persisted_pin_after_live_r
             _binding().binding_digest,
             request,
             parent_execution_id="parent",
+            parent_producer_generation=1,
             root_execution_id="parent",
             parent_invocation_id="delegate-call",
         )

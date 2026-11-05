@@ -73,7 +73,7 @@ async def _seed(backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             created_at=root.created_at + timedelta(seconds=1),
         )
         for record in (root, child):
-            await storage.execution.executions.create_with_history_head(record)
+            await storage.execution.executions.create_execution(record)
         archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         records, bodies, sdk_keys, raw_keys = {}, {}, {}, {}
         payloads = {}

@@ -351,7 +351,7 @@ async def test_pending_payload_dispatch_retains_exact_source_evidence(
             assert await persistence.execution.executions.get(
                 execution.execution_id, tenant_id=runtime.tenant_id,
             ) is None
-            assert await persistence.execution.executions.get_history_head(
+            assert await persistence.execution.executions.get(
                 execution.execution_id, tenant_id=runtime.tenant_id,
             ) is None
         else:

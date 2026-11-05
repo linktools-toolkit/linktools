@@ -13,10 +13,7 @@ from linktools.ai.persistence import Persistence
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, IdempotencyStatus, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.contracts import (
-    AgentAttemptClaim, ExecutionHistoryState, ExecutionRecord,
-    ExecutionCheckpoint, ExecutionCheckpointState, RuntimePayloadRef,
-)
+from linktools.ai.persistence.contracts import AgentAttemptClaim, ExecutionRecord, ExecutionRecoveryDetail, ExecutionRecoveryState, RuntimePayloadRef
 from linktools.ai.persistence.state import active_state_scope
 from linktools.ai.storage import StoredPayload
 
@@ -41,7 +38,7 @@ def _context() -> RuntimePayloadRef:
 
 async def _promote(
     state: _TurnState, turn: _PendingTurn, context: RuntimePayloadRef | None,
-) -> tuple[ExecutionRecord, ExecutionCheckpoint]:
+) -> ExecutionRecord:
     return await state.commands.promote_pending_turn(
         turn.reservation, expected_session=state.session, captured_input_context=context,
     )
@@ -49,33 +46,29 @@ async def _promote(
 
 async def _assert_promoted(
     state: _TurnState, turn: _PendingTurn, context: RuntimePayloadRef | None,
-    result: tuple[ExecutionRecord, ExecutionCheckpoint],
+    result: ExecutionRecord,
 ) -> None:
-    execution, recovery = result
+    execution = result
     initial = turn.reservation.execution
     prepared = context is not None
     assert execution == replace(
         initial, status=ExecutionStatus.STARTED, revision=3 if prepared else 1,
         event_seq=1, agent_run_seq=1 if prepared else 0, input_context=context,
         started_at=initial.created_at, updated_at=execution.updated_at,
-    )
-    assert recovery == ExecutionCheckpoint(
-        initial.execution_id,
-        agent_run_id(namespace=_NAMESPACE, tenant_id="tenant", execution_id=initial.execution_id, agent_run_seq=1) if prepared else None,
-        ExecutionCheckpointState.ACTIVE if prepared else ExecutionCheckpointState.ADMITTED,
-        1 if prepared else 0, initial.created_at, execution.updated_at,
+        producer_generation=2 if prepared else 0, producer_claim_id=execution.producer_claim_id,
+        recovery=ExecutionRecoveryDetail(agent_run_id=agent_run_id(namespace=_NAMESPACE, tenant_id="tenant",
+                   execution_id=initial.execution_id, agent_run_seq=1) if prepared else None),
     )
     storage = state.storage
     assert await storage.execution.executions.get(initial.execution_id, tenant_id="tenant") == execution
-    assert await storage.checkpoint.checkpoints.get(initial.execution_id, tenant_id="tenant") == recovery
     identity = turn.reservation.idempotency
     assert await storage.execution.idempotency.get(identity.scope, identity.idempotency_key_digest, tenant_id="tenant") == replace(
         identity, status=IdempotencyStatus.STARTED,
     )
-    head = await storage.execution.executions.get_history_head(initial.execution_id, tenant_id="tenant")
-    assert head is not None and head.state is ExecutionHistoryState.OPEN
-    assert head.producer_generation == (2 if prepared else 0)
-    assert bool(head.producer_claim_id) is prepared
+    head = await storage.execution.executions.get(initial.execution_id, tenant_id="tenant")
+    assert head is not None and (head.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and head.history_seal_digest is None)
+    assert execution.producer_generation == (2 if prepared else 0)
+    assert bool(execution.producer_claim_id) is prepared
     assert await storage.conversation.sessions.get(state.session.session_id, tenant_id="tenant") == replace(
         state.session, active_execution_id=initial.execution_id,
     )
@@ -131,12 +124,13 @@ async def test_pending_turn_promotion_commits_one_boundary_and_can_prepare_after
             assert len(transactions) == 1 and None not in transactions
         await _assert_promoted(state, turn, context, result)
         if not prepared:
-            execution, recovery = result
+            execution = result
             context = _context()
             activated = await state.commands.commit_prepared_agent_attempt_checkpoint(
                 AgentAttemptClaim(execution.execution_id, execution.revision, execution.agent_run_seq,
-                                  recovery.revision, recovery.state), context,
+                                  execution.recovery_state), context,
             )
+            activated = activated.value
             await _assert_promoted(state, turn, context, activated)
 
 
@@ -191,8 +185,8 @@ async def test_pending_turn_promotion_last_stage_failure_rolls_back_all_domains(
             with pytest.raises(AIError) as raised:
                 await _promote(state, turn, context)
         assert raised.value.code is ErrorCode.STORAGE_CONFLICT and len(staged) == 1
-        assert staged[0][0].revision == (3 if prepared else 1)
-        assert staged[0][1].state is (ExecutionCheckpointState.ACTIVE if prepared else ExecutionCheckpointState.ADMITTED)
+        assert staged[0].revision == (3 if prepared else 1)
+        assert staged[0].recovery_state is (ExecutionRecoveryState.ACTIVE if prepared else ExecutionRecoveryState.ADMITTED)
         assert await _snapshot(state) == before
         await _assert_promoted(state, turn, context, await _promote(state, turn, context))
 
@@ -275,17 +269,16 @@ async def test_pending_turn_promotion_independent_connections_grant_only_one_can
                     return_exceptions=True,
                 ), 15)
             assert len(entered) == 2
-            successful = [item for item in results if isinstance(item, tuple)]
+            successful = [item for item in results if isinstance(item, ExecutionRecord)]
             errors = [item for item in results if isinstance(item, BaseException)]
             assert len(successful) == len(errors) == 1, results
             assert isinstance(errors[0], AIError) and errors[0].code in {ErrorCode.SESSION_BUSY, ErrorCode.STORAGE_CONFLICT}
             winner = successful[0]
-            winning_turn = next(turn for turn in turns if turn.reservation.execution.execution_id == winner[0].execution_id)
+            winning_turn = next(turn for turn in turns if turn.reservation.execution.execution_id == winner.execution_id)
             await _assert_promoted(first, winning_turn, context, winner)
             losing_id = next(turn.reservation.execution.execution_id for turn in turns if turn is not winning_turn)
             assert await first.storage.execution.executions.get(losing_id, tenant_id="tenant") is None
-            assert await first.storage.execution.executions.get_history_head(losing_id, tenant_id="tenant") is None
-            assert await first.storage.checkpoint.checkpoints.get(losing_id, tenant_id="tenant") is None
+            assert await first.storage.execution.executions.get(losing_id, tenant_id="tenant") is None
             assert not (await first.storage.execution.events.list(losing_id, tenant_id="tenant", after_event_seq=0, limit=20)).items
         finally:
             await second_storage.close()

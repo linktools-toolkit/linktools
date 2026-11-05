@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from ..core import JsonValue, canonical_json_bytes, canonical_sha256, validate_persistence_namespace, validate_tenant_id
 from ..errors import AIError, ErrorCode
-from ..storage import Lease, TurnCoordination
+from ..storage import Lease, TurnCoordination, TurnScope, RenewingTurnScope
 from .state import (
     RecordLeaseTransition, RecordReplacement, StateStore, StateTransaction, StateTransactionNestingError,
     StoredRecord, active_state_scope, record_key_digest, scope_digest,
@@ -141,17 +141,16 @@ class _Graph:
 class StateTurnCoordination:
     """Atomic S/R/E admissions over one borrowed, initialized StateStore.
 
-    Session anchors and execution receipts are retained; execution IDs and owner
-    IDs must never be reused. Fences advance per session; only the complete
+    Session anchors and the latest execution receipt are retained. A logical
+    execution may be reclaimed after its old owner expires or releases; owner
+    IDs must be fresh. Fences advance per session; only the complete
     opaque lease key, token and fence identify an owner. Authority reads use the
     source, never a display cache.
     Lease durations round upward to milliseconds. Stored authority must only be
     restored as a complete offline resource, never rolled back beneath a live
-    producer or cloned into concurrent writers. This object supplies only turn
-    authority. Runtime selection also requires a host-owned CacheBackend on the
-    same configured object: explicitly bind that thin composition once, after
-    Persistence is ready and before attaching any Runtime. Never fall back to
-    the display cache's authority methods while the source is unbound.
+    producer or cloned into concurrent writers. This object supplies turn
+    authority and its ownership lifetime independently of display caches.
+    Bind it after Persistence is ready and before attaching any Runtime.
     """
 
     def __init__(
@@ -162,6 +161,15 @@ class StateTurnCoordination:
         self._require_ready = require_ready
         self._store = store
         self._records = _TurnRecords(namespace, tenant_id)
+
+    def enter(
+        self, scope: str, *, session_key: str, request_key: str,
+        request_digest: str, execution_id: str, owner_id: str,
+    ) -> TurnScope:
+        return RenewingTurnScope(
+            self, scope, session_key=session_key, request_key=request_key,
+            request_digest=request_digest, execution_id=execution_id, owner_id=owner_id,
+        )
 
     def _outside_transaction(self) -> None:
         if self._require_ready is not None:
@@ -389,7 +397,11 @@ class StateTurnCoordination:
             if session is not None and protected[session.key_digest][1]:
                 return None
             if proposed is not None:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
+                if (proposed.data["session_key"] != session_key
+                        or proposed.data["request_key"] != request_key
+                        or proposed.data["request_digest"] != request_digest
+                        or proposed.data["owner_id"] == owner_id):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
             for key, graph in sorted(graphs.items()):
                 guarded, live = protected[key]
                 if live:
@@ -419,12 +431,16 @@ class StateTurnCoordination:
                 **common, "owner_id": owner_id, "token": token, "fence": acquired.lease_fence,
                 "cancel_requested": False, "receipt_id": token, "receipt_kind": "claim",
             }, state="ACTIVE")
+            previous_execution = await self._load(tx, scope, "turn_execution", execution_id) if proposed is not None else None
+            if previous_execution is None:
+                await tx.insert_record(execution)
+            else:
+                execution = await self._replace(tx, previous_execution, data=execution.data, state="ACTIVE")
             request = await self._load(tx, scope, "turn_request", request_key)
             if request is None:
                 request = self._records.make("turn_request", common, state="ACTIVE")
-                await tx.insert_records((execution, request))
+                await tx.insert_record(request)
             else:
-                await tx.insert_record(execution)
                 request = await self._replace(tx, request, data=common, state="ACTIVE")
             session = await self._replace(tx, acquired, state="ACTIVE", data={
                 **acquired.data, "execution_id": execution_id, "request_key": request_key,

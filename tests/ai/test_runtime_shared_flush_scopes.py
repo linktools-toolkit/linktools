@@ -28,11 +28,8 @@ from .test_step_projection import _execution
 async def _prepare_trace(runtime, policy):
     store = runtime._run_store
     repository = runtime._state.execution.executions
-    execution = replace(_execution(), revision=1)
-    await repository.create_with_history_head(execution)
-    await repository.state_store.mutate(
-        lambda transaction: repository.admit_history_producer_in_transaction(transaction, execution)
-    )
+    execution = replace(_execution(), revision=1, producer_generation=1, producer_claim_id="owner-claim")
+    await repository.create_execution(execution)
     store.trace_persistence.configure(
         "run", buffer=policy.buffer, batch_size=policy.batch_size,
         flush_interval=policy.flush_interval,

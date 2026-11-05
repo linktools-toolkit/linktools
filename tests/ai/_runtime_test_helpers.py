@@ -3,12 +3,16 @@
 """Shared helpers for Runtime tests and persistence fixtures."""
 
 import asyncio
+import os
+import sqlite3
+from pathlib import Path
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
+from uuid import uuid4
 
 from pydantic_ai import Tool
-from pydantic_ai.messages import ModelMessage, ModelResponse, RetryPromptPart, TextPart, ToolReturnPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolReturnPart
 from pydantic_ai.models import (
     CompletedStreamedResponse,
     ModelRequestParameters,
@@ -26,7 +30,8 @@ from linktools.ai.capability import AssetCapability, FileSystem, tool_metadata
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.model import ModelBinding
 from linktools.ai.core import JsonValue
-from linktools.ai.capability import TraceCapability, CheckpointCapability
+from linktools.ai.capability import TraceCapability
+from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepPersistence, StepStore, SqliteStepStore
 from linktools.ai.runtime._tool_boundary import ManagedToolDescriptor
 from linktools.ai.persistence.contracts import StoredUserInput
 from linktools.ai.storage import StoredPayload
@@ -37,9 +42,7 @@ _ReadT = TypeVar("_ReadT")
 
 def is_tool_retry(part: object) -> bool:
     """Recognize native retry feedback on the supported SDK message shapes."""
-    return (
-        isinstance(part, RetryPromptPart) and part.tool_name is not None
-    ) or (isinstance(part, ToolReturnPart) and part.outcome == "retried")
+    return isinstance(part, ToolReturnPart) and part.outcome == "retried"
 
 
 def model_features(
@@ -55,10 +58,44 @@ def model_features(
     return features
 
 
+def native_checkpoint(*, database: Path | None = None) -> StepPersistence:
+    """Reopen a real official store shared only by this test's recovery attempts.
+
+    Runtime run IDs include namespace, tenant and execution identity. Low-level
+    tests with manually chosen run IDs can pass separate databases explicitly.
+    The environment path is inherited by process-exit recovery probes.
+    """
+    if database is None:
+        database = Path(os.environ["LINKTOOLS_TEST_STEP_DATABASE"])
+    if not database.exists():
+        database.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(database) as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+    return StepPersistence(store=SqliteStepStore(database=database), capture_frontier=True)
+
+
+async def seed_native_snapshot(
+    store: StepStore, *, run_id: str, messages: list[ModelMessage],
+    step_index: int = 1, state: Literal["complete", "interrupted"] = "complete",
+    conversation_id: str | None = None, agent_name: str | None = None,
+    metadata: dict[str, str] | None = None,
+) -> None:
+    """Seed official source records for tests that control a precise crash boundary."""
+    if await store.get_run(run_id=run_id) is None:
+        await store.register_run(RunRecord(
+            run_id=run_id, conversation_id=conversation_id, agent_name=agent_name,
+            metadata={"linktools.transcript_start": "0", **(metadata or {})},
+        ))
+    await store.save_snapshot(ContinuableSnapshot(
+        run_id=run_id, messages=messages, step_index=step_index, state=state,
+        conversation_id=conversation_id, agent_name=agent_name, idempotency_key=uuid4().hex,
+    ))
+
+
 def _persistence_capabilities(*, restart: bool = False, trace: bool = False) -> RuntimeFeatures:
     group = RuntimeFeatures("persistence")
     if restart:
-        group.capability(CheckpointCapability(), scope="runtime")
+        group.capability(native_checkpoint(), scope="runtime")
     if trace:
         group.capability(TraceCapability(), scope="runtime")
     return group

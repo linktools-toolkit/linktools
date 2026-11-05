@@ -226,6 +226,7 @@ class _CaptureSessionExecution:
         self.agent_id: str | None = None
         self.binding_digest: str | None = None
         self.session_id: str | None = None
+        self.session: object | None = None
         self.requires_task_invocation_capture: bool | None = None
 
     async def start_for_session(
@@ -235,6 +236,7 @@ class _CaptureSessionExecution:
         session_id: str,
         request: ExecutionRequest,
         *,
+        session: object | None = None,
         binding_contract: object | None = None,
         resolved_binding: object | None = None,
         dependency_hold_id: str | None = None,
@@ -244,6 +246,7 @@ class _CaptureSessionExecution:
         self.agent_id = agent_id
         self.binding_digest = binding_digest
         self.session_id = session_id
+        self.session = session
         self.request = request
         self.binding_contract = binding_contract
         self.resolved_binding = resolved_binding
@@ -265,9 +268,11 @@ async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
         del session_id, tenant_id
         yield None
 
+    prepared_session = SimpleNamespace(agent_id="agent", cwd=None, status=SessionStatus.OPEN)
+
     async def _authorized(session_id: str, principal: object, action: object) -> object:
         del session_id, principal, action
-        return SimpleNamespace(agent_id="agent", cwd=None, status=SessionStatus.OPEN)
+        return prepared_session
 
     async def _reconcile(record: object) -> object:
         return record
@@ -294,6 +299,7 @@ async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
     assert capture.agent_id == "agent"
     assert capture.binding_digest == "b" * 64
     assert capture.session_id == "session"
+    assert capture.session is prepared_session
     assert capture.requires_task_invocation_capture is False
     assert capture.request is not None
     assert capture.request.mode == "plan"

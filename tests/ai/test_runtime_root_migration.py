@@ -6,6 +6,7 @@ import hashlib
 import json
 import shutil
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,7 @@ from linktools.ai.runtime._memory import RuntimeMemoryStore
 from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, ObjectRef, PayloadPolicy, read_object
 
 from ._filesystem_legacy_fixture_helpers import _extract, legacy_provenance, load_legacy_source
+from .test_step_projection import _execution
 
 
 NAMESPACE, TENANT = "legacy-reader", "tenant"
@@ -34,12 +36,17 @@ def _contents(root: Path) -> dict[str, bytes]:
 async def _write_retained_run(storage: PersistenceStorage, run_id: str) -> AgentRunRecord:
     record = AgentRunRecord(run_id)
     async with Persistence.open(NAMESPACE, storage=storage, tenant_id=TENANT) as persistence:
-        await persistence.run_store.read_store(PersistenceDomain.CHECKPOINT).register_agent_run(record)
+        execution = replace(_execution(), revision=1, producer_generation=1, producer_claim_id="owner-claim", restart_checkpoints=False)
+        repository = persistence.execution.executions
+        await repository.create_execution(execution)
+        await persistence.run_store.read_store(PersistenceDomain.TRACE).register_agent_run(
+            record, execution_id="execution",
+        )
     return record
 
 
 async def _retained_run(persistence: Persistence, run_id: str) -> AgentRunRecord | None:
-    return await persistence.run_store.read_store(PersistenceDomain.CHECKPOINT).get_agent_run(agent_run_id=run_id)
+    return await persistence.run_store.read_store(PersistenceDomain.TRACE).get_agent_run(agent_run_id=run_id)
 
 
 def _legacy_record(root: Path, domain: str, kind: str, provenance: dict | None = None) -> StoredRecord:
@@ -50,8 +57,17 @@ def _legacy_record(root: Path, domain: str, kind: str, provenance: dict | None =
     return decode_record(json.loads((root / names[0]).read_bytes()))
 
 
-def _legacy_run(root: Path, provenance: dict | None = None) -> AgentRunRecord:
-    return _decode_enveloped_domain(_legacy_record(root, "checkpoint", "agent_run", provenance).data, AgentRunRecord)
+async def _assert_retained_legacy_run(persistence: Persistence, expected: StoredRecord) -> None:
+    source = persistence.snapshot_resources().stores[PersistenceDomain.CHECKPOINT]
+    stored = await source.read(lambda tx: tx.get_record(expected.key_digest))
+    assert stored is not None and stored.data == expected.data
+    retained = _decode_enveloped_domain(stored.data, AgentRunRecord)
+    assert retained == _decode_enveloped_domain(expected.data, AgentRunRecord)
+    with pytest.raises(AIError) as unavailable:
+        await persistence.run_store.read_store(PersistenceDomain.CHECKPOINT).get_agent_run(
+            agent_run_id=retained.agent_run_id,
+        )
+    assert unavailable.value.code is ErrorCode.STORAGE_DEPENDENCY_NOT_READY
 
 
 async def _export_legacy(
@@ -85,7 +101,7 @@ def _minimal_source(root: Path, name: str) -> dict:
 async def test_from_root_rejects_recognizable_filesystem_state_without_touching_it(tmp_path: Path, manifest: str) -> None:
     root = tmp_path / "retained"
     load_legacy_source(root)
-    retained = _legacy_run(root)
+    retained = _legacy_record(root, "checkpoint", "agent_run")
     if manifest == "members":
         shutil.rmtree(root / ".state-groups")
     elif manifest == "direct_member":
@@ -103,10 +119,10 @@ async def test_from_root_rejects_recognizable_filesystem_state_without_touching_
         reference = await _export_legacy(root, objects, limits)
         assert reference.digest == legacy_provenance()["snapshot_digest"]
         target = tmp_path / "readback"
-        await Persistence.restore_snapshot(reference, object_store=objects, root=target, limits=limits)
-        async with Persistence.open(NAMESPACE, storage=PersistenceStorage.from_root(target),
-                                    tenant_id=TENANT, read_only=True) as persistence:
-            assert await _retained_run(persistence, "run") == retained
+        with pytest.raises(AIError) as rejected:
+            await Persistence.restore_snapshot(reference, object_store=objects, root=target, limits=limits)
+        assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert not (target / "runtime.db").exists()
         assert _contents(root) == before
 
 
@@ -138,7 +154,6 @@ async def test_existing_sqlite_root_keeps_its_explicit_source_with_filesystem_st
     root = tmp_path / "mixed"
     load_legacy_source(root)
     before = _contents(root)
-    filesystem_run = _legacy_run(root)
     sqlite_run = await _write_retained_run(PersistenceStorage.sqlite(root / "runtime.db"), "sqlite-run")
     async with Persistence.open(NAMESPACE, storage=PersistenceStorage.from_root(root),
                                 tenant_id=TENANT, read_only=True) as persistence:
@@ -149,11 +164,10 @@ async def test_existing_sqlite_root_keeps_its_explicit_source_with_filesystem_st
     reference = await _export_legacy(root, objects, limits)
     assert reference.digest == legacy_provenance()["snapshot_digest"]
     target = tmp_path / "legacy-only"
-    await Persistence.restore_snapshot(reference, object_store=objects, root=target, limits=limits)
-    async with Persistence.open(NAMESPACE, storage=PersistenceStorage.from_root(target),
-                                tenant_id=TENANT, read_only=True) as persistence:
-        assert await _retained_run(persistence, "run") == filesystem_run
-        assert await _retained_run(persistence, "sqlite-run") is None
+    with pytest.raises(AIError) as rejected:
+        await Persistence.restore_snapshot(reference, object_store=objects, root=target, limits=limits)
+    assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert not (target / "runtime.db").exists()
     assert all((root / name).read_bytes() == value for name, value in before.items())
 
 
@@ -163,7 +177,7 @@ async def test_filesystem_snapshot_restores_retained_run_into_a_new_sqlite_root(
     root, target = tmp_path / "source", tmp_path / "restored"
     provenance = _minimal_source(root, "run")
     before = _contents(root)
-    retained = _legacy_run(root, provenance)
+    retained = _legacy_record(root, "checkpoint", "agent_run", provenance)
     objects = InMemoryObjectStore(provenance["snapshot_object_store_id"])
     limits = SnapshotLimits(max_entries=1000, max_bytes=1_000_000)
     reference = await _export_legacy(root, objects, limits, provenance=provenance)
@@ -172,7 +186,7 @@ async def test_filesystem_snapshot_restores_retained_run_into_a_new_sqlite_root(
                                        exclusive_writer=exclusive_writer)
     async with Persistence.open(provenance["namespace"], storage=PersistenceStorage.from_root(target, exclusive_writer=exclusive_writer),
                                 tenant_id=provenance["tenant_id"], read_only=True) as persistence:
-        assert await _retained_run(persistence, "retained-run") == retained
+        await _assert_retained_legacy_run(persistence, retained)
         assert await persistence.export_snapshot(object_store=objects, limits=limits) == reference
     assert _contents(root) == before
     assert not (root / "runtime.db").exists() and (target / "runtime.db").is_file()

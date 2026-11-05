@@ -8,6 +8,11 @@ from ._runtime_test_helpers import model_features
 
 from pathlib import Path
 
+import asyncio
+
+from pydantic_ai.messages import ModelMessage, ModelResponse
+from pydantic_ai.models.function import AgentInfo
+
 import pytest
 
 from linktools.ai.runtime import RuntimeFeatures
@@ -18,7 +23,7 @@ from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
-from ._runtime_test_helpers import RuntimeUsageModels
+from ._runtime_test_helpers import RuntimeUsageModels, _UsageFunctionModel, _runtime_usage_model
 
 
 def _capabilities() -> RuntimeFeatures:
@@ -122,9 +127,22 @@ async def test_graph_budget_is_read_only_during_description_and_shared_by_mixed_
 async def test_zero_budget_stops_model_before_output_and_subagent_inherits_spent_scope() -> None:
     from linktools.ai.execution import ExecutionRequest
 
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def parent_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+        return await _runtime_usage_model(messages, info)
+
+    class ParentModels(RuntimeUsageModels):
+        def materialize(self) -> _UsageFunctionModel:
+            return _UsageFunctionModel(parent_model)
+
     group = _capabilities()
     group.agent("child", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Persistence.open('budget-child', storage=PersistenceStorage.in_memory()) as persistence_125, Runtime.attach(persistence=persistence_125, features=model_features(RuntimeUsageModels(), group)) as runtime:
+    async with Persistence.open('budget-child', storage=PersistenceStorage.in_memory()) as persistence_125, Runtime.attach(persistence=persistence_125, features=model_features(ParentModels(), group)) as runtime:
         denied = await runtime.agents.get().start("blocked", budget=RunBudget(model_requests=0))
         result = (await denied.wait()).result
         assert result.status is ExecutionStatus.FAILED
@@ -133,20 +151,28 @@ async def test_zero_budget_stops_model_before_output_and_subagent_inherits_spent
         assert (await denied.budget_usage()).model_requests == 0
 
         root = await runtime.agents.get().start("parent", budget=RunBudget(model_requests=1))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            assert (await root.budget_usage()).model_requests == 1
+            head = await runtime._state.execution.executions.get(root.execution_id, tenant_id=runtime.tenant_id)
+            assert head is not None
+            child_agent = runtime.agents.get("child")
+            compiled = runtime._compiled_agent(child_agent.id, child_agent.revision, child_agent.compiled)
+            binding = runtime._compiler.bind_subagent(compiled)
+            child_handle = await runtime._execution_service.start_subagent(
+                binding.binding_digest,
+                ExecutionRequest("child", runtime.default_principal, "budget-child", None, "run", False, False),
+                parent_execution_id=root.execution_id, root_execution_id=root.execution_id,
+                parent_producer_generation=head.producer_generation,
+                parent_invocation_id="child-invocation", binding_contract=binding.binding_contract,
+            )
+            child = await runtime.executions.get(child_handle.execution_id)
+            child_result = (await child.wait()).result
+            assert child_result.status is ExecutionStatus.FAILED
+            assert child_result.error_code == ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED.value
+        finally:
+            release.set()
         assert (await root.wait()).result.status is ExecutionStatus.SUCCEEDED
-        child_agent = runtime.agents.get("child")
-        compiled = runtime._compiled_agent(child_agent.id, child_agent.revision, child_agent.compiled)
-        binding = runtime._compiler.bind_subagent(compiled)
-        child_handle = await runtime._execution_service.start_subagent(
-            binding.binding_digest,
-            ExecutionRequest("child", runtime.default_principal, "budget-child", None, "run", False, False),
-            parent_execution_id=root.execution_id, root_execution_id=root.execution_id,
-            parent_invocation_id="child-invocation", binding_contract=binding.binding_contract,
-        )
-        child = await runtime.executions.get(child_handle.execution_id)
-        child_result = (await child.wait()).result
-        assert child_result.status is ExecutionStatus.FAILED
-        assert child_result.error_code == ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED.value
         assert await child.budget_usage() == await root.budget_usage()
         assert (await root.budget_usage()).model_requests == 1
 

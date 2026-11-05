@@ -27,10 +27,8 @@ async def _archive(tmp_path: Path, backend: str = "memory"):
     try:
         execution = replace(_execution(), revision=1)
         repository = state.execution.executions
-        await repository.create_with_history_head(execution)
-        await repository.state_store.mutate(
-            lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
-        )
+        execution = replace(execution, producer_generation=1)
+        await repository.create_execution(execution)
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
         yield state, archive, AgentRunRecord("run", metadata={"context": "x" * 16_384})
     finally:
@@ -101,20 +99,21 @@ async def test_observation_commit_bounds_immutable_owner_reads(
 
 
 @pytest.mark.asyncio
-async def test_empty_projection_advances_history_only_when_admitting_a_run(tmp_path: Path) -> None:
+async def test_empty_projection_keeps_one_immutable_run_and_control(tmp_path: Path) -> None:
     async with _archive(tmp_path) as (state, archive, run):
         repository = state.execution.executions
-        before = await repository.get_history_head("execution", tenant_id="tenant")
+        before = await repository.get_observed("execution", tenant_id="tenant")
         await archive.sync_prepared_projection(
             run, events=(), checkpoints=(), execution_id="execution", producer_generation=1,
         )
-        admitted = await repository.get_history_head("execution", tenant_id="tenant")
-        assert admitted.revision == before.revision + 1
+        admitted = await repository.get_observed("execution", tenant_id="tenant")
+        assert admitted.storage_revision == before.storage_revision + 1
         assert await archive.get_agent_run(agent_run_id="run") == run
         await archive.sync_prepared_projection(
             run, events=(), checkpoints=(), execution_id="execution", producer_generation=1,
         )
-        assert await repository.get_history_head("execution", tenant_id="tenant") == admitted
+        assert await repository.get("execution", tenant_id="tenant") == admitted.value
+        assert await archive.get_agent_run(agent_run_id=run.agent_run_id) == run
 
 
 @pytest.mark.asyncio
@@ -156,11 +155,9 @@ async def test_observation_commit_keeps_validation_and_fencing(
             )
         else:
             repository = state.execution.executions
-            await repository.state_store.mutate(
-                lambda tx: repository.admit_history_producer_in_transaction(
-                    tx, replace(_execution(), revision=2),
-                )
-            )
+            current = await repository.get("execution", tenant_id="tenant")
+            await repository.compare_and_swap("execution", tenant_id="tenant", expected_revision=current.revision,
+                                              next_record=replace(current, revision=current.revision + 1, producer_generation=2))
         with pytest.raises(AIError) as raised:
             await archive.sync_prepared_projection(
                 run, events=(StepEvent("run", "MODEL_REQUEST_SUCCEEDED", 1),),
@@ -235,14 +232,14 @@ async def test_projection_verification_reads_each_context_projection_once(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite",))
-async def test_projection_admission_advances_history_once_and_rolls_back_invalid_requests(
+async def test_projection_admission_keeps_control_and_rolls_back_invalid_requests(
     tmp_path: Path, backend: str,
 ) -> None:
     from .test_model_interaction_records import _running
 
     async with _archive(tmp_path, backend) as (state, archive, run):
         repository = state.execution.executions
-        before = await repository.get_history_head("execution", tenant_id="tenant")
+        before = await repository.get_observed("execution", tenant_id="tenant")
         invalid = replace(_running(), agent_run_id="different")
         with pytest.raises(AIError) as raised:
             await archive.sync_prepared_projection(
@@ -251,17 +248,18 @@ async def test_projection_admission_advances_history_once_and_rolls_back_invalid
             )
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         assert await archive.get_agent_run(agent_run_id=run.agent_run_id) is None
-        assert await repository.get_history_head("execution", tenant_id="tenant") == before
+        assert await repository.get_observed("execution", tenant_id="tenant") == before
         assert await archive.sync_prepared_projection(
             run, events=(), checkpoints=(), execution_id="execution", producer_generation=1,
         ) is None
-        admitted = await repository.get_history_head("execution", tenant_id="tenant")
-        assert admitted.revision == before.revision + 1
+        admitted = await repository.get_observed("execution", tenant_id="tenant")
+        assert admitted.storage_revision == before.storage_revision + 1
         assert await archive.get_agent_run(agent_run_id=run.agent_run_id) == run
         assert await archive.sync_prepared_projection(
             run, events=(), checkpoints=(), execution_id="execution", producer_generation=1,
         ) is None
-        assert await repository.get_history_head("execution", tenant_id="tenant") == admitted
+        assert await repository.get("execution", tenant_id="tenant") == admitted.value
+        assert await archive.get_agent_run(agent_run_id=run.agent_run_id) == run
 
 
 @pytest.mark.asyncio
@@ -298,12 +296,12 @@ async def test_projection_uses_batched_owner_admission_without_existence_preread
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite",))
-async def test_concurrent_empty_projection_admissions_advance_history_once(tmp_path: Path, backend: str) -> None:
+async def test_concurrent_empty_projection_admissions_keep_one_immutable_run(tmp_path: Path, backend: str) -> None:
     import asyncio
 
     async with _archive(tmp_path, backend) as (state, archive, run):
         repository = state.execution.executions
-        before = await repository.get_history_head("execution", tenant_id="tenant")
+        before = await repository.get_observed("execution", tenant_id="tenant")
         async def project():
             return await archive.sync_prepared_projection(
                 run, events=(), checkpoints=(), execution_id="execution", producer_generation=1,
@@ -314,8 +312,9 @@ async def test_concurrent_empty_projection_admissions_advance_history_once(tmp_p
             if result is not None:
                 assert isinstance(result, AIError) and result.code is ErrorCode.STORAGE_CONFLICT
                 assert await project() is None
-        after = await repository.get_history_head("execution", tenant_id="tenant")
-        assert after.revision == before.revision + 1
+        after = await repository.get_observed("execution", tenant_id="tenant")
+        assert after.value == before.value
+        assert after.storage_revision > before.storage_revision
         assert await archive.get_agent_run(agent_run_id=run.agent_run_id) == run
 
 
@@ -331,12 +330,14 @@ async def test_projection_keeps_custom_private_override_and_public_none_result(t
                 await super()._sync_projection_in_transaction(*args, **kwargs)
                 # Existing overrides may discard the private implementation result.
                 return None
-        recovery = _state.run_store.read_store(PersistenceDomain.CHECKPOINT)
         custom = CustomArchive(
-            recovery.state_store, object_store=None, namespace="archive-boundaries",
-            tenant_id="tenant", runtime_domain=PersistenceDomain.CHECKPOINT,
+            archive.state_store, object_store=None, namespace="archive-boundaries",
+            tenant_id="tenant", runtime_domain=PersistenceDomain.TRACE,
+            execution_repository=_state.execution.executions,
         )
-        assert await custom.sync_prepared_projection(run, events=(), checkpoints=()) is None
+        assert await custom.sync_prepared_projection(
+            run, events=(), checkpoints=(), execution_id="execution", producer_generation=1,
+        ) is None
         assert calls == [True]
         assert await custom.get_agent_run(agent_run_id=run.agent_run_id) == run
 

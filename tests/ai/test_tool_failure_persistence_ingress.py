@@ -37,7 +37,6 @@ def _record() -> ToolOperationRecord:
         status=ToolOperationStatus.FAILED,
         owner=None,
         fence=1,
-        lease_expires_at=None,
         error_code=ErrorCode.TOOL_RETRY_REQUIRED.value,
         created_at=now,
         updated_at=now,

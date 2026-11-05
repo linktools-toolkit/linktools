@@ -7,7 +7,7 @@ from dataclasses import replace
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.messages import (
-    CompactionPart, ModelMessage, ModelRequest, ModelResponse, RetryPromptPart, SystemPromptPart, TextContent,
+    CompactionPart, ModelMessage, ModelRequest, ModelResponse, RetryFeedbackPart, RetryInfo, SystemPromptPart, TextContent,
     TextPart, ToolCallPart, ToolReturnPart, UserPromptPart,
 )
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
@@ -125,7 +125,9 @@ async def test_summary_tail_preserves_retry_dependency_occurrences() -> None:
     old_call = ModelResponse(parts=[ToolCallPart('fetch', {}, 'reused')])
     old_return = ModelRequest(parts=[ToolReturnPart('fetch', 'old', 'reused')])
     call = ModelResponse(parts=[ToolCallPart('fetch', {}, 'reused')])
-    retry = ModelRequest(parts=[RetryPromptPart('retry', tool_name='fetch', tool_call_id='reused')])
+    retry_part = ToolReturnPart('fetch', 'retry', tool_call_id='reused', outcome='retried')
+    plain_part = RetryFeedbackPart('output invalid', retry=RetryInfo(cause='model_retry'))
+    retry = ModelRequest(parts=[retry_part])
     source = [old_call, old_return, ModelRequest(parts=[UserPromptPart('task')]), call, retry]
     original = encode_model_messages(source)
     compact = RuntimeSummarizingCompaction(model=model, max_messages=1, keep_messages=1)
@@ -134,7 +136,7 @@ async def test_summary_tail_preserves_retry_dependency_occurrences() -> None:
     assert old_call not in result and old_return not in result
     assert len(_summaries(result)) == 1
     assert encode_model_messages(source) == original
-    plain_retry = replace(retry, parts=[RetryPromptPart('output invalid', tool_call_id='reused')])
+    plain_retry = replace(retry, parts=[plain_part])
     plain = await compact.compact([source[2], call, plain_retry], ctx)
     assert plain[-1] is plain_retry and call not in plain
     with pytest.raises(AIError):

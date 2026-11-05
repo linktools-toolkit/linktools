@@ -25,10 +25,11 @@ from .contracts import (
     ExecutionCancelRequestCommit,
     ExecutionEventAppend,
     ExecutionEventRecord,
-    ExecutionHistoryHeadRecord,
+    ExecutionInsertionReceipt,
     ExecutionHistorySealRecord,
-    ExecutionHistoryState,
     ExecutionRecord,
+    ExecutionRecoveryDetail,
+    ExecutionRecoveryState,
     ExecutionStartClaim,
     ExecutionStartReservation,
     ExecutionStartReservationResult,
@@ -43,6 +44,7 @@ from .contracts import RuntimePayloadRef
 from ._plan import PersistenceDomain
 from .state import (
     FactQuery,
+    Observed,
     RecordQuery,
     RecordReplacement,
     StateStore,
@@ -193,6 +195,106 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             domain=PersistenceDomain.EXECUTION,
         )
 
+    async def get_recovery(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
+        execution = await self.get(execution_id, tenant_id=tenant_id)
+        return execution if execution is not None and execution.recovery is not None else None
+
+    async def get_recovery_in_transaction(
+        self, transaction: StateTransaction, execution_id: str, *, tenant_id: str,
+    ) -> ExecutionRecord | None:
+        execution = await self.get_in_transaction(transaction, execution_id, tenant_id=tenant_id)
+        return execution if execution is not None and execution.recovery is not None else None
+
+    async def get_observed(self, execution_id: str, *, tenant_id: str) -> Observed[ExecutionRecord] | None:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        record = await self._record(self._key("execution", execution_id))
+        return None if record is None else Observed(await self._decode(record, ExecutionRecord), record.storage_revision)
+
+    async def get_observed_in_transaction(
+        self, transaction: StateTransaction, execution_id: str, *, tenant_id: str,
+    ) -> Observed[ExecutionRecord] | None:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        record = await transaction.get_record(self._key("execution", execution_id))
+        return None if record is None else Observed(await self._decode(record, ExecutionRecord), record.storage_revision)
+
+    async def list_recoverable_page(
+        self, *, tenant_id: str, cursor: str | None, limit: int,
+    ) -> Page[ExecutionRecord]:
+        if tenant_id != self._tenant_id:
+            return Page(())
+        _validate_page_limit(limit)
+        states = frozenset(status.value for status in (
+            ExecutionStatus.PENDING_START, ExecutionStatus.STARTED, ExecutionStatus.RECOVERY_REQUIRED,
+            ExecutionStatus.CANCELLING, ExecutionStatus.FINALIZING, ExecutionStatus.WAITING_DEFERRED,
+        )) | {"execution_handoff"}
+        selected: list[tuple[StoredRecord, ExecutionRecord]] = []
+        next_cursor = cursor
+        while len(selected) <= limit:
+            records = await self._records("execution", states=states, cursor=next_cursor, limit=limit + 1)
+            if not records:
+                break
+            for record in records:
+                value = await self._decode(record, ExecutionRecord)
+                next_cursor = _record_cursor(record)
+                if value.recovery is not None and value.recovery_state is not ExecutionRecoveryState.COMPLETED:
+                    selected.append((record, value))
+                    if len(selected) > limit:
+                        return Page(tuple(item[1] for item in selected[:limit]), _record_cursor(selected[limit - 1][0]))
+            if len(records) < limit + 1:
+                break
+        return Page(tuple(item[1] for item in selected))
+
+    async def compare_and_swap(
+        self, execution_id: str, *, tenant_id: str,
+        expected_revision: int, next_record: ExecutionRecord,
+    ) -> ExecutionRecord:
+        return await self._store.mutate(lambda transaction: self.compare_and_swap_in_transaction(
+            transaction, execution_id, tenant_id=tenant_id,
+            expected_revision=expected_revision, next_record=next_record,
+        ))
+
+    async def compare_and_swap_in_transaction(
+        self, transaction: StateTransaction, execution_id: str, *, tenant_id: str,
+        expected_revision: int, next_record: ExecutionRecord,
+    ) -> ExecutionRecord:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        stored = await transaction.get_record(self._key("execution", execution_id))
+        if stored is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        current = await self._decode(stored, ExecutionRecord)
+        if current.revision != expected_revision or next_record.execution_id != execution_id or next_record.revision != expected_revision + 1:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        await _replace_checked(transaction, _projected_record(self, stored, next_record), stored.storage_revision)
+        return next_record
+
+    async def commit_boundary_in_transaction(
+        self, transaction: StateTransaction, observed: Observed[ExecutionRecord], *,
+        next_record: ExecutionRecord, expected_producer_generation: int,
+        expected_producer_claim_id: str,
+    ) -> Observed[ExecutionRecord]:
+        """Publish a prepared boundary using its confirmed control receipt."""
+        current = observed.value
+        if (current.execution_id != next_record.execution_id
+                or current.status is not ExecutionStatus.STARTED
+                or current.producer_generation != expected_producer_generation
+                or current.producer_claim_id != expected_producer_claim_id
+                or next_record.producer_generation != current.producer_generation
+                or next_record.producer_claim_id != current.producer_claim_id
+                or (next_record != current and next_record.revision != current.revision + 1)):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if next_record == current:
+            revision = await transaction.guard_record_revision(
+                self._key("execution", current.execution_id), expected_storage_revision=observed.storage_revision,
+            )
+            if revision is None or revision != observed.storage_revision + 1:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return Observed(current, revision)
+        candidate = replace(self._stored("execution", next_record.execution_id, next_record,
+                                         state=next_record.status.value),
+                            storage_revision=observed.storage_revision + 1)
+        await _replace_checked(transaction, candidate, observed.storage_revision)
+        return Observed(next_record, candidate.storage_revision)
+
     async def get_many(
         self,
         execution_ids: Sequence[str],
@@ -240,89 +342,38 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         """Identify the canonical record for a transaction-local read receipt."""
         return self._key("execution", execution_id)
 
+    def producer_record_keys(self, execution_id: str) -> tuple[bytes, ...]:
+        """Identify the source control records checked by producer publication."""
+        return (self._key("execution", execution_id),)
+
     def terminal_record_keys(
         self, execution: ExecutionRecord, *, include_history_seal: bool,
     ) -> tuple[bytes, ...]:
         """Identify control records checked by terminal publication."""
         _require_tenant(execution, self._tenant_id)
-        kinds = ("execution", "execution_history_head")
+        kinds = ("execution",)
         if include_history_seal:
             kinds = (*kinds, "execution_history_seal")
         return tuple(self._key(kind, execution.execution_id) for kind in kinds)
 
-    async def observe_execution_control(
-        self, execution_id: str, *, tenant_id: str,
-    ) -> tuple[ExecutionRecord | None, ExecutionHistoryHeadRecord | None]:
-        """Observe one bounded execution/head view; transaction scopes stay strong."""
-        _require_repository_tenant(tenant_id, self._tenant_id)
-        execution_key = self._key("execution", execution_id)
-        head_key = self._key("execution_history_head", execution_id)
-        records = await self._store.read_records((execution_key, head_key))
-        execution_record, head_record = records.get(execution_key), records.get(head_key)
-        execution = None
-        if execution_record is not None:
-            execution = await self._decode(execution_record, ExecutionRecord)
-            if execution_record.kind != "execution" or execution.execution_id != execution_id:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        head = None if head_record is None else await self._decode_history_head_record(head_record, execution_id)
-        return execution, head
-
-    async def create_with_history_head(
-        self, execution: ExecutionRecord
-    ) -> ExecutionRecord:
-        """Create a recovery execution and its OPEN history head atomically."""
+    async def create_execution(self, execution: ExecutionRecord) -> ExecutionRecord:
         return await self._store.mutate(
-            lambda transaction: self.create_with_history_head_in_transaction(
-                transaction,
-                execution,
-            )
+            lambda transaction: self.create_execution_in_transaction(transaction, execution)
         )
 
-    async def create_with_history_head_in_transaction(
-        self,
-        transaction: StateTransaction,
-        execution: ExecutionRecord,
+    async def create_execution_in_transaction(
+        self, transaction: StateTransaction, execution: ExecutionRecord,
     ) -> ExecutionRecord:
         _require_tenant(execution, self._tenant_id)
-        execution_key = self._key("execution", execution.execution_id)
-        head_key = self._key("execution_history_head", execution.execution_id)
-        records = await transaction.get_records((execution_key, head_key))
-        current = records.get(execution_key)
-        head_record = records.get(head_key)
+        current = await transaction.get_record(self._key("execution", execution.execution_id))
         if current is not None:
             existing = await self._decode(current, ExecutionRecord)
             if existing != execution:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if head_record is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await self._decode_history_head_record(
-                head_record,
-                execution.execution_id,
-            )
             return existing
-        if head_record is not None:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        head = ExecutionHistoryHeadRecord(
-            execution.execution_id,
-            ExecutionHistoryState.OPEN,
-            0,
-            None,
-        )
-        await transaction.insert_records(
-            (
-                self._stored(
-                    "execution",
-                    execution.execution_id,
-                    execution,
-                    state=execution.status.value,
-                ),
-                self._stored_history_head(head),
-            )
-        )
-        _logger.debug(
-            "execution admitted with history head: execution=%s",
-            execution.execution_id,
-        )
+        await transaction.insert_record(self._stored(
+            "execution", execution.execution_id, execution, state=execution.status.value,
+        ))
         return execution
 
     async def list_by_session(
@@ -339,11 +390,10 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             scope=self._scope("execution", "session", session_id),
             states=None
             if statuses is None
-            else frozenset(status.value for status in statuses),
+            else frozenset(status.value for status in statuses) | {"execution_handoff"},
         )
-        return tuple(
-            [await self._decode(record, ExecutionRecord) for record in records]
-        )
+        values = tuple([await self._decode(record, ExecutionRecord) for record in records])
+        return tuple(value for value in values if statuses is None or value.status in statuses)
 
     async def list_children(
         self, execution_id: str, *, tenant_id: str
@@ -512,11 +562,13 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         next_safe_error_details: Mapping[str, JsonValue],
         audit_events: Sequence[ExecutionEventAppend] = (),
         producer_generation: int | None = None,
+        agent_run_seq: int | None = None,
+        recovery: ExecutionRecoveryDetail | None = None,
     ) -> ExecutionRecord:
         """Commit recovery status, producer fencing and its ordered events."""
         events = (*audit_events, ExecutionEventAppend(event_type, event_payload))
         if producer_generation is not None:
-            await self.require_open_history_head_in_transaction(
+            await self.require_execution_producer_in_transaction(
                 transaction, execution.execution_id,
                 expected_producer_generation=producer_generation,
             )
@@ -531,9 +583,23 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             or current.status is not execution.status
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if agent_run_seq is not None and (
+            event_type is not ExecutionEventType.EXECUTION_RESUMED
+            or agent_run_seq != current.agent_run_seq + 1
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if (event_type is ExecutionEventType.EXECUTION_RESUMED
+                and execution.revision + len(events) <= current.producer_generation):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
         updated = replace(
             current,
             status=next_status,
+            producer_generation=(execution.revision + len(events)
+                if event_type is ExecutionEventType.EXECUTION_RESUMED else current.producer_generation),
+            producer_claim_id=(event_payload["producer_claim_id"]
+                if event_type is ExecutionEventType.EXECUTION_RESUMED else current.producer_claim_id),
+            agent_run_seq=current.agent_run_seq if agent_run_seq is None else agent_run_seq,
+            recovery=current.recovery if recovery is None else recovery,
             revision=execution.revision + len(events),
             event_seq=execution.event_seq + len(events),
             error_code=next_error_code,
@@ -546,11 +612,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             _projected_record(self, stored, updated),
             stored.storage_revision,
         )
-        if event_type is ExecutionEventType.EXECUTION_RESUMED:
-            await self.admit_history_producer_in_transaction(
-                transaction, updated,
-                producer_claim_id=event_payload["producer_claim_id"],
-            )
         stream = stream_digest(
             self._namespace, self._tenant_id, self._domain.value,
             "execution", execution.execution_id,
@@ -611,11 +672,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             )
             id_key = self._idempotency._key("idempotency", identity)
             execution_key = self._key("execution", reservation.execution.execution_id)
-            head_key = self._key(
-                "execution_history_head",
-                reservation.execution.execution_id,
-            )
-            records = await transaction.get_records((id_key, execution_key, head_key))
+            records = await transaction.get_records((id_key, execution_key))
             existing_id = records.get(id_key)
             if existing_id is not None:
                 existing_idempotency = await self._idempotency._decode(
@@ -628,26 +685,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 winner_key = self._key("execution", existing_idempotency.resource_id)
                 if winner_key == execution_key:
                     winner_records = records
-                    winner_head_key = head_key
                 else:
-                    winner_head_key = self._key(
-                        "execution_history_head",
-                        existing_idempotency.resource_id,
-                    )
-                    winner_records = await transaction.get_records(
-                        (winner_key, winner_head_key)
-                    )
+                    winner_records = await transaction.get_records((winner_key,))
                 winner_record = winner_records.get(winner_key)
                 if winner_record is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 existing_value = await self._decode(winner_record, ExecutionRecord)
-                winner_head = winner_records.get(winner_head_key)
-                if winner_head is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await self._decode_history_head_record(
-                    winner_head,
-                    existing_value.execution_id,
-                )
                 _logger.debug(
                     "execution start reservation replayed: execution=%s",
                     existing_value.execution_id,
@@ -655,8 +698,15 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 return ExecutionStartReservationResult(
                     existing_value, existing_idempotency, False
                 )
-            if execution_key in records or head_key in records:
+            if execution_key in records:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if reservation.execution.parent_execution_id is not None:
+                if reservation.parent_producer_generation is None:
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                await self._guard_subagent_parent_in_transaction(
+                    transaction, reservation.execution,
+                    parent_producer_generation=reservation.parent_producer_generation,
+                )
             scope_id = reservation.execution.budget_scope_id
             if scope_id is not None:
                 if reservation.budget is None:
@@ -670,12 +720,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 if archive.store.storage_group is not self._store.storage_group:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await archive.store.mutate(lambda tx: archive.publish(tx, prepared))
-            head = ExecutionHistoryHeadRecord(
-                reservation.execution.execution_id,
-                ExecutionHistoryState.OPEN,
-                0,
-                None,
-            )
             await transaction.insert_records(
                 (
                     self._stored(
@@ -690,7 +734,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                         reservation.idempotency,
                         state=reservation.idempotency.status.value,
                     ),
-                    self._stored_history_head(head),
                 )
             )
             _logger.debug(
@@ -702,6 +745,31 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             )
 
         return await self._store.mutate(mutate)
+
+    async def _guard_subagent_parent_in_transaction(
+        self, transaction: StateTransaction, execution: ExecutionRecord, *,
+        parent_producer_generation: int,
+    ) -> None:
+        """Order child admission against parent cancellation and producer takeover."""
+        _require_tenant(execution, self._tenant_id)
+        if (execution.parent_execution_id is None
+                or isinstance(parent_producer_generation, bool)
+                or not isinstance(parent_producer_generation, int) or parent_producer_generation < 1):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        parent = await self.get_in_transaction(
+            transaction, execution.parent_execution_id, tenant_id=self._tenant_id,
+        )
+        if parent is None or parent.root_execution_id != execution.root_execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if parent.status is ExecutionStatus.CANCELLING:
+            raise AIError(ErrorCode.EXECUTION_CANCELLED)
+        if parent.status is not ExecutionStatus.STARTED:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        await self.require_execution_producer_in_transaction(
+            transaction, parent.execution_id,
+            expected_producer_generation=parent_producer_generation,
+            allow_cancelling=False,
+        )
 
     async def claim_start(self, claim: ExecutionStartClaim) -> ExecutionRecord:
         return await self._store.mutate(
@@ -785,6 +853,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             event_seq=current.event_seq + 1,
             updated_at=now,
             started_at=current.started_at or now,
+            recovery=current.recovery or (ExecutionRecoveryDetail() if current.binding_kind == "agent" else None),
         )
         execution_replacement = RecordReplacement(
             _projected_record(self, execution_record, next_execution),
@@ -849,6 +918,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         tenant_id: str,
         expected_revision: int,
         expected_agent_run_seq: int,
+        producer_claim_id: str | None = None,
     ) -> ExecutionRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
 
@@ -859,6 +929,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 tenant_id=tenant_id,
                 expected_revision=expected_revision,
                 expected_agent_run_seq=expected_agent_run_seq,
+                producer_claim_id=producer_claim_id,
             )
 
         return await self._store.mutate(mutate)
@@ -871,6 +942,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         tenant_id: str,
         expected_revision: int,
         expected_agent_run_seq: int,
+        producer_claim_id: str | None = None,
+        recovery: ExecutionRecoveryDetail | None = None,
     ) -> ExecutionRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
         record = await transaction.get_record(self._key("execution", execution_id))
@@ -878,13 +951,18 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         current = await self._decode(record, ExecutionRecord)
         if (
-            current.revision != expected_revision
+            current.status is not ExecutionStatus.STARTED
+            or current.revision != expected_revision
             or current.agent_run_seq != expected_agent_run_seq
+            or current.revision + 1 <= current.producer_generation
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         next_value = replace(
             current,
             agent_run_seq=current.agent_run_seq + 1,
+            recovery=current.recovery if recovery is None else recovery,
+            producer_generation=current.revision + 1,
+            producer_claim_id=producer_claim_id,
             revision=current.revision + 1,
             updated_at=await transaction.now(),
         )
@@ -899,25 +977,33 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         self, transaction: StateTransaction, execution_id: str, *, tenant_id: str,
         expected_revision: int, expected_agent_run_seq: int,
         input_context: RuntimePayloadRef, producer_claim_id: str,
+        recovery: ExecutionRecoveryDetail | None = None,
+        observed: Observed[ExecutionRecord] | None = None,
     ) -> ExecutionRecord:
         """Claim the first attempt and its already materialized input together."""
         _require_repository_tenant(tenant_id, self._tenant_id)
-        record = await transaction.get_record(self._key("execution", execution_id))
-        if record is None:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        current = await self._decode(record, ExecutionRecord)
+        if observed is None:
+            record = await transaction.get_record(self._key("execution", execution_id))
+            if record is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            current = await self._decode(record, ExecutionRecord)
+        else:
+            current = observed.value
+            if current.execution_id != execution_id:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            record = replace(self._stored("execution", execution_id, current, state=current.status.value),
+                             storage_revision=observed.storage_revision)
         if (current.status is not ExecutionStatus.STARTED
                 or current.revision != expected_revision
                 or current.agent_run_seq != expected_agent_run_seq
-                or expected_agent_run_seq != 0 or current.input_context is not None):
+                or expected_agent_run_seq != 0 or current.input_context is not None
+                or current.revision + 1 <= current.producer_generation):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         admitted = replace(current, agent_run_seq=1, revision=current.revision + 1,
-                           updated_at=await transaction.now())
+                           producer_generation=current.revision + 1, producer_claim_id=producer_claim_id,
+                           updated_at=await transaction.now(), recovery=current.recovery if recovery is None else recovery)
         final = replace(admitted, input_context=input_context, revision=admitted.revision + 1)
         await _replace_checked(transaction, _projected_record(self, record, final), record.storage_revision)
-        await self.admit_history_producer_in_transaction(
-            transaction, admitted, producer_claim_id=producer_claim_id,
-        )
         return final
 
     async def enter_deferred_wait_in_transaction(
@@ -932,6 +1018,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         audit_events: Sequence[ExecutionEventAppend] = (),
         deferred_events: Sequence[ExecutionEventAppend],
         occurred_at: datetime,
+        recovery: ExecutionRecoveryDetail | None = None,
     ) -> ExecutionRecord:
         if not deferred_events or any(
             event.event_type
@@ -970,6 +1057,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             payload=last.payload,
             updated_at=occurred_at,
             transaction=transaction,
+            recovery=recovery,
         )
         if updated.agent_run_seq != expected_agent_run_seq:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -984,6 +1072,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         expected_revision: int,
         expected_event_seq: int,
         expected_agent_run_seq: int,
+        producer_claim_id: str | None = None,
+        recovery: ExecutionRecoveryDetail | None = None,
     ) -> ExecutionRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
         record = await transaction.get_record(self._key("execution", execution_id))
@@ -995,12 +1085,16 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             or current.revision != expected_revision
             or current.event_seq != expected_event_seq
             or current.agent_run_seq != expected_agent_run_seq
+            or current.revision + 1 <= current.producer_generation
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         next_value = replace(
             current,
             status=ExecutionStatus.STARTED,
             agent_run_seq=current.agent_run_seq + 1,
+            recovery=current.recovery if recovery is None else recovery,
+            producer_generation=current.revision + 1,
+            producer_claim_id=producer_claim_id,
             revision=current.revision + 1,
             updated_at=await transaction.now(),
         )
@@ -1091,6 +1185,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         *,
         expected_status: ExecutionStatus | None = None,
         pending_events: Sequence[ExecutionEventAppend] = (),
+        recovery: ExecutionRecoveryDetail | None = None,
     ) -> ExecutionRecord:
         return await self._transition_execution(
             commit.execution_id,
@@ -1104,6 +1199,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             updated_at=commit.requested_at,
             pending_events=pending_events,
             transaction=transaction,
+            recovery=recovery,
         )
 
     async def advance_event_seq(
@@ -1148,6 +1244,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         pending_events: Sequence[ExecutionEventAppend] = (),
         task_state: "tuple[int, datetime | None, datetime | None, str | None, Mapping[str, object]] | None" = None,
         transaction: StateTransaction | None = None,
+        recovery: ExecutionRecoveryDetail | None = None,
     ) -> ExecutionRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
         if any(
@@ -1198,6 +1295,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             next_value = replace(
                 stored_value,
                 status=next_status,
+                recovery=stored_value.recovery if recovery is None else recovery,
                 revision=stored_value.revision + event_count,
                 event_seq=stored_value.event_seq + event_count,
                 updated_at=updated_at,
@@ -1236,25 +1334,33 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             return await mutate(transaction)
         return await self._store.mutate(mutate)
 
+    def start_idempotency_record_key(self, identity: IdempotencyRecord) -> bytes:
+        """Physical key of the request identity confirmed by admission."""
+        return self._idempotency._key("idempotency", self._idempotency._identity_key(
+            identity.scope, identity.idempotency_key_digest,
+        ))
+
     async def terminal_idempotency_in_transaction(
         self,
         transaction: StateTransaction,
         commit: ExecutionTerminalCommit,
+        *, identity: IdempotencyRecord | None = None,
     ) -> IdempotencyTerminalUpdate | None:
         """Build the terminal idempotency update from the active transaction."""
-        scope = self._idempotency._scope(
-            "idempotency",
-            "resource",
-            [ResourceKind.EXECUTION.value, commit.execution.execution_id],
-        )
-        records = await transaction.list_records(
-            RecordQuery(scope_digest=scope, kind="idempotency")
-        )
-        if len(records) > 1:
+        if identity is None:
+            scope = self._idempotency._scope(
+                "idempotency", "resource",
+                [ResourceKind.EXECUTION.value, commit.execution.execution_id],
+            )
+            records = await transaction.list_records(RecordQuery(scope_digest=scope, kind="idempotency"))
+            if len(records) > 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if not records:
+                return None
+            identity = await self._idempotency._decode(records[0], IdempotencyRecord)
+        elif (identity.resource_kind is not ResourceKind.EXECUTION
+              or identity.resource_id != commit.execution.execution_id):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if not records:
-            return None
-        identity = await self._idempotency._decode(records[0], IdempotencyRecord)
         next_status = (
             IdempotencyStatus.COMPLETED
             if commit.execution.status is ExecutionStatus.SUCCEEDED
@@ -1286,7 +1392,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         *,
         pending_events: Sequence[ExecutionEventAppend] = (),
         transaction: StateTransaction | None = None,
-        history_head: RecordReplacement | None = None,
     ) -> ExecutionTerminalCommitResult:
         key = self._key("execution", commit.execution.execution_id)
         stream = stream_digest(
@@ -1324,6 +1429,10 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 or stored_value.event_seq != commit.expected_event_seq
                 or stored_value.restart_checkpoints != commit.execution.restart_checkpoints
                 or stored_value.durable_trace != commit.execution.durable_trace
+                or stored_value.producer_generation != commit.execution.producer_generation
+                or stored_value.producer_claim_id != commit.execution.producer_claim_id
+                or (commit.producer_generation is not None
+                    and stored_value.producer_generation != commit.producer_generation)
             ):
                 raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
             id_record = None
@@ -1337,6 +1446,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                     id_record,
                     IdempotencyRecord,
                 )
+                if (id_value.resource_kind is not ResourceKind.EXECUTION
+                        or id_value.resource_id != commit.execution.execution_id
+                        or id_value.scope != commit.idempotency.scope
+                        or id_value.idempotency_key_digest != commit.idempotency.idempotency_key_digest
+                        or id_value.request_digest != commit.idempotency.request_digest):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if id_value.status is not commit.idempotency.expected_status:
                     raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
             operation_record = None
@@ -1371,8 +1486,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                     stored.storage_revision,
                 )
             ]
-            if history_head is not None:
-                replacements.insert(0, history_head)
             if commit.idempotency is not None:
                 assert id_record is not None
                 assert id_value is not None
@@ -1476,35 +1589,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         *,
         pending_events: Sequence[ExecutionEventAppend] = (),
     ) -> ExecutionTerminalCommitResult:
-        """Close control ownership after the execution-first concurrency fence."""
         if commit.execution.durable_trace:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        head, record = await self._read_open_history_head_in_transaction(
-            transaction,
-            commit.execution.execution_id,
-            expected_producer_generation=commit.producer_generation,
-            guard=False,
-        )
-        execution_key = self._key("execution", commit.execution.execution_id)
-        execution_record = await transaction.get_record(execution_key)
-        if execution_record is None:
-            raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
-        # Tool admission guards execution before head. Keep that order even on
-        # dialects whose batch replacement locks members in digest order.
-        if await transaction.guard_record(
-            execution_key, expected_storage_revision=execution_record.storage_revision,
-        ) is None:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        replacement = self._history_head_replacement(
-            record,
-            replace(head, state=ExecutionHistoryState.CLOSED, revision=head.revision + 1),
-        )
-        return await self._commit_terminal(
-            commit,
-            pending_events=pending_events,
-            transaction=transaction,
-            history_head=replacement,
-        )
+        return await self._commit_terminal(commit, pending_events=pending_events, transaction=transaction)
 
     async def pending_turn_result_in_transaction(
         self, transaction: StateTransaction, reservation: ExecutionStartReservation,
@@ -1519,7 +1606,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         if not _same_idempotency_identity(current, reservation.idempotency):
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         execution = await self.get(current.resource_id, tenant_id=self._tenant_id)
-        head = await self.get_history_head(current.resource_id, tenant_id=self._tenant_id)
         terminal_statuses = {
             ExecutionStatus.SUCCEEDED: IdempotencyStatus.COMPLETED,
             ExecutionStatus.FAILED: IdempotencyStatus.FAILED,
@@ -1527,9 +1613,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         }
         if (execution is None or execution.status not in terminal_statuses
                 or current.status is not terminal_statuses[execution.status]
-                or execution.result is None or head is None
+                or execution.result is None
                 or execution.durable_trace != reservation.execution.durable_trace
-                or head.state is not (ExecutionHistoryState.SEALED if execution.durable_trace else ExecutionHistoryState.CLOSED)
+                or (execution.history_seal_digest is not None) != execution.durable_trace
                 or (execution.result.output is not None) != (execution.status is ExecutionStatus.SUCCEEDED)
                 or current.result_digest != (None if execution.result.output is None else execution.result.output.digest)
                 or current.error_code != execution.error_code):
@@ -1546,7 +1632,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     async def insert_pending_turn_in_transaction(
         self, transaction: StateTransaction, reservation: ExecutionStartReservation,
         commit: ExecutionTerminalCommit, *, audit_events: Sequence[ExecutionEventAppend] = (),
-    ) -> ExecutionTerminalCommitResult:
+    ) -> tuple[ExecutionTerminalCommitResult, ExecutionInsertionReceipt]:
         _require_tenant(reservation.execution, self._tenant_id)
         _require_tenant(reservation.idempotency, self._tenant_id)
         _require_tenant(commit.execution, self._tenant_id)
@@ -1592,15 +1678,10 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                             result_digest=None if commit.result.output is None else commit.result.output.digest,
                             error_code=commit.execution.error_code,
                             updated_at=await transaction.now())
-        head = ExecutionHistoryHeadRecord(
-            execution_id, ExecutionHistoryState.OPEN if commit.execution.durable_trace else ExecutionHistoryState.CLOSED,
-            1 if commit.execution.durable_trace else 2, None,
-            producer_generation=commit.producer_generation or 0,
-        )
+        execution_record = self._stored("execution", execution_id, final, state=final.status.value)
         await transaction.insert_records((
-            self._stored("execution", execution_id, final, state=final.status.value),
+            execution_record,
             self._idempotency._stored("idempotency", identity, completed, state=completed.status.value),
-            self._stored_history_head(head),
         ))
         stream = stream_digest(self._namespace, self._tenant_id, self._domain.value, "execution", execution_id)
         await transaction.insert_facts(tuple(
@@ -1608,7 +1689,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                        None, None, event.payload)
             for index, event in enumerate(events, 1)
         ))
-        return ExecutionTerminalCommitResult(final, commit.result)
+        return (ExecutionTerminalCommitResult(final, commit.result),
+                ExecutionInsertionReceipt(transaction, final, execution_record))
 
     async def get_result(
         self, execution_id: str, *, tenant_id: str
@@ -1698,38 +1780,54 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         *,
         tenant_id: str,
     ) -> bool:
+        released, _execution = await self._store.mutate(
+            lambda transaction: self.close_retention_in_transaction(
+                transaction, execution_id, tenant_id=tenant_id,
+            )
+        )
+        return released
+
+    async def close_retention_in_transaction(
+        self,
+        transaction: StateTransaction,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        observed: Observed[ExecutionRecord] | None = None,
+    ) -> tuple[bool, ExecutionRecord | None]:
         _require_repository_tenant(tenant_id, self._tenant_id)
         key = self._key("execution", execution_id)
-
-        async def mutate(transaction: StateTransaction) -> bool:
+        if observed is None:
             stored = await transaction.get_record(key)
             if stored is None:
-                return True
+                return True, None
             current = await self._decode(stored, ExecutionRecord)
-            if current.status not in {
-                ExecutionStatus.SUCCEEDED,
-                ExecutionStatus.FAILED,
-                ExecutionStatus.CANCELLED,
-            }:
-                return False
-            if current.dependency_hold_ids:
-                return False
-            if current.retention_closed:
-                return True
-            next_value = replace(
-                current,
-                retention_closed=True,
-                revision=current.revision + 1,
-                updated_at=await transaction.now(),
-            )
-            await _replace_checked(
-                transaction,
-                _projected_record(self, stored, next_value),
-                stored.storage_revision,
-            )
-            return True
-
-        return await self._store.mutate(mutate)
+        else:
+            current = observed.value
+            if current.execution_id != execution_id:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            stored = replace(self._stored("execution", execution_id, current, state=current.status.value),
+                             storage_revision=observed.storage_revision)
+        if current.status not in {
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        } or current.dependency_hold_ids or current.recovery_state is ExecutionRecoveryState.HANDOFF:
+            return False, current
+        if current.retention_closed:
+            return True, current
+        next_value = replace(
+            current,
+            retention_closed=True,
+            revision=current.revision + 1,
+            updated_at=await transaction.now(),
+        )
+        await _replace_checked(
+            transaction,
+            _projected_record(self, stored, next_value),
+            stored.storage_revision,
+        )
+        return True, next_value
 
     async def get_history_seal(
         self,
@@ -1765,211 +1863,55 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return value
 
-    async def get_history_head(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-    ) -> ExecutionHistoryHeadRecord | None:
-        _require_repository_tenant(tenant_id, self._tenant_id)
-        return await self._store.read(
-            lambda transaction: self._get_history_head_in_transaction(
-                transaction,
-                execution_id,
-            )
-        )
-
-    async def _get_history_head_in_transaction(
-        self,
-        transaction: StateTransaction,
-        execution_id: str,
-    ) -> ExecutionHistoryHeadRecord | None:
-        record = await transaction.get_record(
-            self._key("execution_history_head", execution_id)
-        )
-        if record is None:
-            return None
-        return await self._decode_history_head_record(record, execution_id)
-
-    async def _decode_history_head_record(
-        self,
-        record: StoredRecord,
-        execution_id: str,
-    ) -> ExecutionHistoryHeadRecord:
-        if record.kind != "execution_history_head":
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        value = await self._decode(record, ExecutionHistoryHeadRecord)
-        if value.execution_id != execution_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return value
-
-    async def admit_history_producer_in_transaction(
-        self,
-        transaction: StateTransaction,
-        execution: ExecutionRecord,
-        *,
-        producer_claim_id: str | None = None,
-    ) -> int:
-        """Fence previous producers using the revision of this admitted attempt."""
-        _require_tenant(execution, self._tenant_id)
-        if execution.status is not ExecutionStatus.STARTED or execution.agent_run_seq < 1:
+    async def require_execution_producer_in_transaction(
+        self, transaction: StateTransaction, execution_id: str, *,
+        expected_producer_generation: int, allow_cancelling: bool = True,
+    ) -> tuple[ExecutionRecord, StoredRecord]:
+        """Fence publication against the sole execution control owner."""
+        if (isinstance(expected_producer_generation, bool)
+                or not isinstance(expected_producer_generation, int)
+                or expected_producer_generation < 1):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if type(self) is ExecutionRepositoryImpl:
-            head, record = await self._read_open_history_head_in_transaction(
-                transaction, execution.execution_id, guard=False,
-            )
-        else:
-            head, record = await self.require_open_history_head_in_transaction(
-                transaction, execution.execution_id,
-            )
-        generation = execution.revision
-        if generation <= head.producer_generation:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        await self.replace_history_head_in_transaction(
-            transaction,
-            record,
-            replace(
-                head, revision=head.revision + 1, producer_generation=generation,
-                producer_claim_id=producer_claim_id,
-            ),
-        )
-        return generation
-
-    async def require_open_history_head_in_transaction(
-        self,
-        transaction: StateTransaction,
-        execution_id: str,
-        *,
-        expected_revision: "int | None" = None,
-        expected_producer_generation: "int | None" = None,
-        allow_cancelling: bool = True,
-    ) -> tuple[ExecutionHistoryHeadRecord, StoredRecord]:
-        """Read and guard the OPEN history head for one execution-domain mutation."""
-        return await self._read_open_history_head_in_transaction(
-            transaction, execution_id,
-            expected_revision=expected_revision,
-            expected_producer_generation=expected_producer_generation,
-            allow_cancelling=allow_cancelling,
-            guard=True,
-        )
-
-    async def _read_open_history_head_in_transaction(
-        self,
-        transaction: StateTransaction,
-        execution_id: str,
-        *,
-        expected_revision: int | None = None,
-        expected_producer_generation: int | None = None,
-        allow_cancelling: bool = True,
-        guard: bool,
-    ) -> tuple[ExecutionHistoryHeadRecord, StoredRecord]:
-        key = self._key("execution_history_head", execution_id)
-        execution_key = self._key("execution", execution_id)
-        if expected_producer_generation is None:
-            record = await transaction.get_record(key)
-        else:
-            records = await transaction.get_records((key, execution_key))
-            record = records.get(key)
-        if record is None:
+        key = self._key("execution", execution_id)
+        record = await transaction.get_record(key)
+        if record is None or record.kind != "execution":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if record.kind != "execution_history_head":
+        execution = await self._decode(record, ExecutionRecord)
+        if execution.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        head = await self._decode(record, ExecutionHistoryHeadRecord)
-        if head.execution_id != execution_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if head.state is not ExecutionHistoryState.OPEN:
-            _logger.info(
-                "execution history head is sealed: execution=%s revision=%s",
-                execution_id,
-                head.revision,
-            )
+        if execution.producer_generation != expected_producer_generation:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if expected_revision is not None and head.revision != expected_revision:
+        if execution.status is ExecutionStatus.CANCELLING and not allow_cancelling:
+            raise AIError(ErrorCode.EXECUTION_CANCELLED)
+        allowed = ({ExecutionStatus.STARTED, ExecutionStatus.CANCELLING, ExecutionStatus.FINALIZING}
+                   if allow_cancelling else {ExecutionStatus.STARTED})
+        if execution.status not in allowed:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if (
-            expected_producer_generation is not None
-            and head.producer_generation != expected_producer_generation
-        ):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if expected_producer_generation is not None:
-            execution_record = records.get(execution_key)
-            if execution_record is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            execution = await self._decode(execution_record, ExecutionRecord)
-            if execution.status is ExecutionStatus.CANCELLING and not allow_cancelling:
-                raise AIError(ErrorCode.EXECUTION_CANCELLED)
-            if execution.status not in {
-                ExecutionStatus.STARTED,
-                ExecutionStatus.CANCELLING,
-                ExecutionStatus.FINALIZING,
-            }:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if guard and await transaction.guard_record(
-                execution_key,
-                expected_storage_revision=execution_record.storage_revision,
-            ) is None:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if not guard:
-            return head, record
         guarded = await transaction.guard_record(
-            key,
-            expected_storage_revision=record.storage_revision,
+            key, expected_storage_revision=record.storage_revision,
         )
         if guarded is None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        return head, guarded
+        return execution, guarded
 
-    async def replace_history_head_in_transaction(
-        self,
-        transaction: StateTransaction,
-        current_record: StoredRecord,
-        next_head: ExecutionHistoryHeadRecord,
-    ) -> ExecutionHistoryHeadRecord:
-        replacement = self._history_head_replacement(current_record, next_head)
-        if not await transaction.replace_record(
-            replacement.record,
-            expected_storage_revision=replacement.expected_storage_revision,
-        ):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        return next_head
-
-    def _history_head_replacement(
-        self,
-        current_record: StoredRecord,
-        next_head: ExecutionHistoryHeadRecord,
-    ) -> RecordReplacement:
-        key = self._key("execution_history_head", next_head.execution_id)
-        if key != current_record.key_digest:
+    async def require_execution_history_write_in_transaction(
+        self, transaction: StateTransaction, execution_id: str,
+    ) -> tuple[ExecutionRecord, StoredRecord]:
+        key = self._key("execution", execution_id)
+        record = await transaction.get_record(key)
+        if record is None or record.kind != "execution":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        upgraded = replace(
-            self._stored(
-                "execution_history_head",
-                next_head.execution_id,
-                next_head,
-                state=next_head.state.value,
-            ),
-            storage_revision=current_record.storage_revision + 1,
-        )
-        return RecordReplacement(upgraded, current_record.storage_revision)
-
-    async def insert_history_head_in_transaction(
-        self,
-        transaction: StateTransaction,
-        head: ExecutionHistoryHeadRecord,
-    ) -> ExecutionHistoryHeadRecord:
-        key = self._key("execution_history_head", head.execution_id)
-        if await transaction.get_record(key) is not None:
+        execution = await self._decode(record, ExecutionRecord)
+        if execution.execution_id != execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if execution.history_seal_digest is not None or execution.status in {
+            ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+        }:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        await transaction.insert_record(self._stored_history_head(head))
-        return head
-
-    def _stored_history_head(self, head: ExecutionHistoryHeadRecord) -> StoredRecord:
-        return self._stored(
-            "execution_history_head",
-            head.execution_id,
-            head,
-            state=head.state.value,
-        )
+        guarded = await transaction.guard_record(key, expected_storage_revision=record.storage_revision)
+        if guarded is None:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return execution, guarded
 
     async def put_history_seal_in_transaction(
         self,

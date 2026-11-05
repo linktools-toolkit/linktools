@@ -8,11 +8,13 @@ import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.tools import ToolDefinition
 
-from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability, TraceCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._run_hooks import AgentRunCapture
 from linktools.ai.runtime._conversation_service import ConversationService
-from linktools.ai.runtime._persistence_services import CheckpointService, TraceService
+from linktools.ai.runtime._persistence_services import TraceService
 from linktools.ai.observe.journal import DURATION_NS_METADATA_KEY
 from linktools.ai.persistence.runs import StagingAgentRunStore
 
@@ -52,26 +54,24 @@ async def test_reused_trace_declaration_keeps_interleaved_tool_durations_per_run
 
 @pytest.mark.asyncio
 async def test_reused_conversation_and_checkpoint_declarations_keep_context_per_run() -> None:
+    from pydantic_ai import Agent
+    from pydantic_ai.models.test import TestModel
+
     store = StagingAgentRunStore()
     await store.initialize()
     conversation = ExecutionCapability(retain_history=True)
-    checkpoint = CheckpointCapability()
+    checkpoint = native_checkpoint()
     for identity in ("first", "second"):
-        user = ModelRequest(parts=[UserPromptPart(identity)])
-        response = ModelResponse(parts=[TextPart("answer " + identity)])
         recorder = AgentRunRecorder(store, execution_id=identity, agent_run_id=identity)
         capture = AgentRunCapture(recorder=recorder, agent_id="agent", agent_run_id=identity)
-        ctx = SimpleNamespace(messages=[user], conversation_id=identity, run_step=1)
-        await capture.before_run(ctx)
-        await capture.before_model_request(ctx, SimpleNamespace())
-        await checkpoint.bind(CheckpointService(capture)).before_model_request(ctx, SimpleNamespace())
-        recorder.append_transcript_message(response)
-        ctx.messages.append(response)
-        result = SimpleNamespace(all_messages=lambda: ctx.messages, output="done")
-        await conversation.bind(ConversationService(capture), retain_history=True).after_run(ctx, result=result)
-        saved = await store.latest_checkpoint(agent_run_id=identity)
-        assert saved.context_messages == [user, response]
-        assert saved.messages == [user, response]
-    first = await store.latest_checkpoint(agent_run_id="first")
-    second = await store.latest_checkpoint(agent_run_id="second")
-    assert first.context_messages != second.context_messages
+        agent = Agent(TestModel(custom_output_text="answer " + identity), capabilities=(
+            capture, conversation.bind(ConversationService(capture), retain_history=True), checkpoint,
+        ))
+        result = await agent.run(identity, run_id=identity, conversation_id=identity)
+        saved = await checkpoint.store.latest_snapshot(run_id=identity)
+        assert saved is not None and saved.messages == result.all_messages()
+        assert [part.content for message in saved.messages for part in message.parts
+                if isinstance(part, UserPromptPart)] == [identity]
+    first = await checkpoint.store.latest_snapshot(run_id="first")
+    second = await checkpoint.store.latest_snapshot(run_id="second")
+    assert first.messages != second.messages

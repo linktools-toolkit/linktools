@@ -115,7 +115,7 @@ async def test_history_and_task_results_keep_execution_object_ownership(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("domain", (PersistenceDomain.CONVERSATION, PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT))
+@pytest.mark.parametrize("domain", (PersistenceDomain.CONVERSATION, PersistenceDomain.TRACE))
 async def test_composed_transcript_archives_cache_verified_compressed_bytes(
     tmp_path: Path, domain: PersistenceDomain,
 ) -> None:
@@ -155,12 +155,6 @@ async def test_composed_transcript_archives_cache_verified_compressed_bytes(
 
         assert await repository.load_messages("run") == messages
         assert await repository.load_messages("run") == messages
-        if domain is PersistenceDomain.CHECKPOINT:
-            assert objects.reads == 2
-            assert cache.writes == []
-            assert await repository.read_payload(StoredPayload.inline_bytes(b"inline body")) == b"inline body"
-            assert objects.reads == 2
-            return
         assert objects.reads == 1
         assert len(cache.writes) == 1
         key, _envelope = cache.writes[0]
@@ -313,12 +307,11 @@ async def test_history_result_confirms_source_membership_inside_body_cache_windo
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("consumer", ("checkpoint", "verify", "relocate", "deferred"))
-@pytest.mark.parametrize("domain", (PersistenceDomain.CHECKPOINT, PersistenceDomain.CONVERSATION))
+@pytest.mark.parametrize("consumer", ("checkpoint", "verify", "relocate"))
+@pytest.mark.parametrize("domain", (PersistenceDomain.CONVERSATION,))
 async def test_checkpoint_consumers_confirm_source_inside_body_cache_window(
     tmp_path: Path, monkeypatch, consumer: str, domain: PersistenceDomain,
 ) -> None:
-    from linktools.ai.runtime._local import LocalExecutionBackend
     from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
     from linktools.ai.storage import _write_cache
 
@@ -353,14 +346,7 @@ async def test_checkpoint_consumers_confirm_source_inside_body_cache_window(
             elif consumer == "verify":
                 await archive.verify_checkpoint_projection(agent_run_id="run", checkpoint=checkpoint)
             elif consumer == "relocate":
-                if domain is PersistenceDomain.CONVERSATION:
-                    await archive.relocate_conversation_checkpoint(run, checkpoint)
-                else:
-                    await archive.relocate_run_checkpoint(run, checkpoint)
-            else:
-                backend = object.__new__(LocalExecutionBackend)
-                backend._run_stores = {PersistenceDomain.CHECKPOINT: archive}
-                await backend.load_interrupted_messages("run")
+                await archive.relocate_conversation_checkpoint(run, checkpoint)
         assert raised.value.code is ErrorCode.STORAGE_NOT_FOUND
     finally:
         await storage.close()

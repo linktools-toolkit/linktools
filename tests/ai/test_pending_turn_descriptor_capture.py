@@ -138,6 +138,12 @@ async def test_late_winner_after_capture_remains_authoritative(
             key="c" * 64 if identity == "different_request" else "a" * 64,
             request_digest="d" * 64 if identity == "conflicting_digest" else "b" * 64,
         )
+        published = []
+        confirm = archive.confirm_session_context
+        async def confirmed_context(**kwargs):
+            published.append(kwargs["prepared"].stored.agent_run_id)
+            await confirm(**kwargs)
+        monkeypatch.setattr(archive, "confirm_session_context", confirmed_context)
         winners = []
         snapshots = []
         injecting = False
@@ -160,6 +166,7 @@ async def test_late_winner_after_capture_remains_authoritative(
                 ErrorCode.SESSION_BUSY, ErrorCode.STORAGE_CONFLICT, ErrorCode.IDEMPOTENCY_CONFLICT,
             }
         assert len(winners) == 1 and await _snapshot(state) == snapshots[0]
+        assert published == [late.run.agent_run_id]
         assert await state.storage.execution.executions.get("contender", tenant_id="tenant") is None
         assert active_state_scope() is None
 

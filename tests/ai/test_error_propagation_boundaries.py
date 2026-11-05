@@ -3,7 +3,11 @@
 """Regression tests for stable error propagation across runtime boundaries."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
+from dataclasses import replace
+from datetime import datetime, timezone
+from .test_execution_recovery_commands import _execution
 
 import pytest
 from httpx import Request, Response
@@ -17,7 +21,7 @@ from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._recovery_coordinator import _RecoveryCoordinator
 from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.persistence.contracts import (
-    ExecutionCheckpointState,
+    ExecutionRecoveryDetail,
     RecoveryHandoffPhase,
 )
 from linktools.ai.task import DefaultTaskGraphService
@@ -220,18 +224,12 @@ def test_subagent_background_failure_preserves_classified_ai_error() -> None:
 @pytest.mark.asyncio
 async def test_recovery_reconcile_defers_unavailable_definition_per_execution() -> None:
     checkpoints = (
-        SimpleNamespace(
-            execution_id="unavailable",
-            state=ExecutionCheckpointState.ADMITTED,
-        ),
-        SimpleNamespace(
-            execution_id="available",
-            state=ExecutionCheckpointState.ADMITTED,
-        ),
+        replace(_execution(datetime.now(timezone.utc)), execution_id="unavailable", recovery=ExecutionRecoveryDetail()),
+        replace(_execution(datetime.now(timezone.utc)), execution_id="available", recovery=ExecutionRecoveryDetail()),
     )
 
     class Port:
-        async def _list_recoverable_checkpoints(self, *, cursor: str | None):
+        async def _list_recoverable_executions(self, *, cursor: str | None):
             assert cursor is None
             return SimpleNamespace(items=checkpoints, next_cursor=None)
 
@@ -240,7 +238,7 @@ async def test_recovery_reconcile_defers_unavailable_definition_per_execution() 
             super().__init__(Port(), None)  # type: ignore[arg-type]
             self.seen: list[str] = []
 
-        async def reconcile_checkpoint(
+        async def reconcile_execution(
             self, checkpoint: object, *, allow_active_recovery: bool = True,
         ) -> None:
             assert allow_active_recovery is True
@@ -257,13 +255,10 @@ async def test_recovery_reconcile_defers_unavailable_definition_per_execution() 
 
 @pytest.mark.asyncio
 async def test_recovery_reconcile_rejects_workspace_mismatch() -> None:
-    checkpoint = SimpleNamespace(
-        execution_id="execution",
-        state=ExecutionCheckpointState.ADMITTED,
-    )
+    checkpoint = replace(_execution(datetime.now(timezone.utc)), recovery=ExecutionRecoveryDetail())
 
     class Port:
-        async def _list_recoverable_checkpoints(self, *, cursor: str | None):
+        async def _list_recoverable_executions(self, *, cursor: str | None):
             assert cursor is None
             return SimpleNamespace(items=(checkpoint,), next_cursor=None)
 
@@ -271,7 +266,7 @@ async def test_recovery_reconcile_rejects_workspace_mismatch() -> None:
         def __init__(self) -> None:
             super().__init__(Port(), None)  # type: ignore[arg-type]
 
-        async def reconcile_checkpoint(
+        async def reconcile_execution(
             self, checkpoint: object, *, allow_active_recovery: bool = True,
         ) -> None:
             assert allow_active_recovery is True
@@ -290,31 +285,16 @@ async def test_recovery_reconcile_rejects_workspace_mismatch() -> None:
 
 @pytest.mark.asyncio
 async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
-    execution = SimpleNamespace(
-        restart_checkpoints=True,
-        execution_id="execution",
-        tenant_id="tenant",
-        principal_id="principal",
-        principal_kind="user",
-        binding_digest="binding",
-        parent_execution_id=None,
-        root_execution_id="execution",
-        parent_invocation_id=None,
-        previous_execution_id=None,
-        fork_base_execution_id=None,
-        conversation_agent_run_id=None,
-        lineage_kind=ExecutionLineageKind.RUN,
-        planning=False,
-        thinking=False,
-        binding="snapshot",
-        repository_instructions=None,
-        correlation={},
-        session_id=None,
-        status=ExecutionStatus.START_UNKNOWN,
-    )
+    execution = replace(_execution(datetime.now(timezone.utc)), status=ExecutionStatus.START_UNKNOWN,
+                        recovery=ExecutionRecoveryDetail(agent_run_id="run"))
 
     class Port:
         tenant_id = "tenant"
+
+        async def run_recovery_turn(
+            self, execution_id: str, action: Callable[[], Awaitable[object]],
+        ) -> object:
+            return await action()
 
         async def load_execution(
             self,
@@ -334,12 +314,11 @@ async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
 
         async def _reconcile_session_recovery(
             self,
-            checkpoint: object,
             value: object,
             *,
             recovery_operation: object = None,
         ) -> bool:
-            del checkpoint, recovery_operation
+            del recovery_operation
             assert value is execution
             return True
 
@@ -348,12 +327,6 @@ async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
             return object()
 
     coordinator = _RecoveryCoordinator(Port(), None)
-    checkpoint = SimpleNamespace(
-        execution_id="execution",
-        tenant_id="tenant",
-        handoff_phase=RecoveryHandoffPhase.NONE,
-        state=ExecutionCheckpointState.ACTIVE,
-    )
     with pytest.raises(AIError) as captured:
-        await coordinator.reconcile_checkpoint(checkpoint)  # type: ignore[arg-type]
+        await coordinator.reconcile_execution(execution)
     assert captured.value.code is ErrorCode.EXECUTION_START_UNKNOWN

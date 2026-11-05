@@ -3,12 +3,13 @@
 """Callable execution settlement does not need an Agent host or model configuration."""
 
 from pathlib import Path
+from inspect import Parameter, signature
 
 import pytest
 
 from linktools.ai.core import ExecutionStatus, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.execution import TaskExecutionService
+from linktools.ai.execution import ExecutionService, TaskExecutionService
 from linktools.ai.persistence import PersistenceDomain, Persistence, PersistenceStorage
 from linktools.ai.persistence.commands import StoredExecutionManagementAdapter
 from linktools.ai.task import TaskBindingContract
@@ -99,3 +100,12 @@ async def test_callable_result_keeps_dependency_hold_until_handoff() -> None:
         assert started.execution_id in released
     finally:
         await state.close()
+
+
+def test_execution_handoff_protocol_includes_existing_terminal_commit_keyword() -> None:
+    for owner in (ExecutionService, TaskExecutionService):
+        contract = signature(owner.request_terminal_handoff)
+        parameter = contract.parameters["terminal_commit"]
+        assert parameter.kind is Parameter.KEYWORD_ONLY
+        assert parameter.default is False
+        contract.bind(None, "execution", tenant_id="tenant", terminal_commit=True)

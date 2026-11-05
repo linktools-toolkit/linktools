@@ -24,7 +24,17 @@ def test_sql_orphan_waits_for_explicit_recovery(tmp_path: Path, phase: str) -> N
         )
         assert remote.initial["generation"] == owner.initial["generation"]
         assert remote.initial["model_calls"] == 0
-        remote.request("recover")
+        if phase == "pending":
+            assert owner.initial["status"] == "PENDING_START"
+            rejected = remote.request("try_recover_keyed")
+            assert rejected["error_code"] == ErrorCode.EXECUTION_NOT_READY.value
+            assert rejected["details"]["phase"] == "execution_recover_unprepared_start"
+            assert remote.request("snapshot")["model_calls"] == 0
+            # An unprepared reservation resumes through the same start identity.
+            replay = remote.request("replay_start")
+            assert replay["execution_id"] == owner.initial["execution_id"]
+        else:
+            remote.request("recover")
         resumed = remote.request("await_model")
         assert resumed["generation"] > owner.initial["generation"]
         assert resumed["model_calls"] == 1
@@ -125,3 +135,26 @@ def test_split_local_sqlite_execution_rejects_a_second_live_process(tmp_path: Pa
         owner.close(check=True)
     finally:
         owner.close()
+
+
+def test_reserved_orphan_resumes_only_after_explicit_start_replay(tmp_path: Path) -> None:
+    owner = _RuntimeProcess(tmp_path / "runtime.db", phase="reserved")
+    remote = None
+    try:
+        assert owner.initial["status"] == "PENDING_START"
+        assert owner.initial["model_calls"] == 0
+        owner.crash()
+        remote = _RuntimeProcess(
+            tmp_path / "runtime.db", phase="reserved", execution_id=owner.initial["execution_id"],
+        )
+        assert remote.initial["status"] == "PENDING_START"
+        assert remote.initial["model_calls"] == 0
+        replay = remote.request("replay_start")
+        assert replay["execution_id"] == owner.initial["execution_id"]
+        assert remote.request("await_model")["model_calls"] == 1
+        assert remote.request("finish")["status"] == "SUCCEEDED"
+        remote.close(check=True)
+    finally:
+        owner.close()
+        if remote is not None:
+            remote.close()

@@ -149,9 +149,9 @@ class ConversationService(AbstractCapability[AgentContext[AppT]]):
             and session.continuation is not None
         ):
             return await run_store.conversation_persistence.load_committed_conversation_context(
-                history_id=history_id,
                 agent_run_id=session.continuation.agent_run_id,
-                message_count=session.continuation.message_count,
+                checkpoint_sequence=session.continuation.checkpoint_sequence,
+                projection_digest=session.continuation.projection_digest,
                 tenant_id=tenant_id,
             )
         return await run_store.load_loaded_model_context(
@@ -223,7 +223,8 @@ class ConversationService(AbstractCapability[AgentContext[AppT]]):
             agent_run_seq=base.agent_run_seq,
         )
         if not base.durable_trace and base.session_id is None:
-            execution_run_store = checkpoint_archive
+            execution_run_store = (checkpoint_archive if base.restart_checkpoints
+                                   else conversation_run_store)
             if isinstance(execution_run_store, StateStepArchive):
                 checkpoint = await execution_run_store.latest_checkpoint(
                     agent_run_id=agent_run_id
@@ -255,15 +256,17 @@ class ConversationService(AbstractCapability[AgentContext[AppT]]):
                 cursor is None
                 or cursor.history_id is None
                 or cursor.message_count is None
+                or cursor.checkpoint_sequence is None
+                or cursor.projection_digest is None
                 or cursor.agent_run_id != agent_run_id
             ):
                 raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
             try:
                 context = (
                     await conversation_run_store.load_committed_session_model_context(
-                        cursor.history_id,
                         agent_run_id=agent_run_id,
-                        message_count=cursor.message_count,
+                        checkpoint_sequence=cursor.checkpoint_sequence,
+                        projection_digest=cursor.projection_digest,
                         tenant_id=tenant_id,
                     )
                 )

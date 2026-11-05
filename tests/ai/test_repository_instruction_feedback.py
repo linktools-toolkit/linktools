@@ -178,7 +178,7 @@ async def test_instruction_feedback_does_not_swallow_a_sibling_approval_pause(tm
             )
             approvals = await persistence.checkpoint.approvals.list_pending(execution.execution_id, tenant_id=runtime.tenant_id)
             assert len(approvals) == 1 and requests == 1
-            checkpoint = await persistence.checkpoint.checkpoints.get(execution.execution_id, tenant_id=runtime.tenant_id)
-            assert checkpoint is not None and checkpoint.repository_instruction_overlay is not None
-            assert checkpoint.pending_tools is not None
-            assert [call.tool_call_id for call in checkpoint.pending_tools.approvals] == ["approval"]
+            checkpoint = await persistence.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+            assert checkpoint is not None and checkpoint.recovery.repository_instruction_overlay is not None
+            assert checkpoint.recovery.pending_tools is not None
+            assert [call.tool_call_id for call in checkpoint.recovery.pending_tools.approvals] == ["approval"]

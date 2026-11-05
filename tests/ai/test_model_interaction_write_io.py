@@ -80,12 +80,13 @@ async def test_execution_interaction_conflict_rolls_back_and_can_retry(
         if fence == "producer":
             execution = await repository.get("execution", tenant_id="tenant")
             assert execution is not None
-            retry_generation = await repository.state_store.mutate(
-                lambda tx: repository.admit_history_producer_in_transaction(
-                    tx, replace(execution, revision=execution.revision + 1),
-                )
+            updated = await repository.compare_and_swap(
+                "execution", tenant_id="tenant", expected_revision=execution.revision,
+                next_record=replace(execution, revision=execution.revision + 1,
+                                    producer_generation=execution.producer_generation + 1),
             )
-        before = await repository.get_history_head("execution", tenant_id="tenant")
+            retry_generation = updated.producer_generation
+        before = await repository.get("execution", tenant_id="tenant")
 
         async def project(transaction):
             original_guard = transaction.guard_record
@@ -112,7 +113,7 @@ async def test_execution_interaction_conflict_rolls_back_and_can_retry(
             )
         assert raised.value.code is ErrorCode.STORAGE_CONFLICT
         assert await archive.list_model_interactions(agent_run_id="run") == [current]
-        assert await repository.get_history_head("execution", tenant_id="tenant") == before
+        assert await repository.get("execution", tenant_id="tenant") == before
         await archive.sync_prepared_projection(
             run, events=(), checkpoints=(), interactions=(update,),
             execution_id="execution", producer_generation=retry_generation,
@@ -133,7 +134,7 @@ async def test_invalid_execution_interaction_preserves_errors_and_rolls_back(
             else replace(_running(), agent_run_id="other" if invalid_kind == "foreign_owner" else object())
         )
         repository = state.execution.executions
-        before = await repository.get_history_head("execution", tenant_id="tenant")
+        before = await repository.get("execution", tenant_id="tenant")
         error_type = TypeError if invalid_kind == "type" and backend == "memory" else AIError
         with pytest.raises(error_type) as raised:
             await archive.sync_prepared_projection(
@@ -146,4 +147,4 @@ async def test_invalid_execution_interaction_preserves_errors_and_rolls_back(
             )
         assert await archive.get_agent_run(agent_run_id="run") is None
         assert await archive.model_interaction_count(agent_run_id="run") == 0
-        assert await repository.get_history_head("execution", tenant_id="tenant") == before
+        assert await repository.get("execution", tenant_id="tenant") == before

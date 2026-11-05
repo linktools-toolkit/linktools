@@ -140,7 +140,7 @@ and provider retry boundaries.
 
 Context retention, interrupted-run recovery and detailed trace are independent
 Runtime-scoped opt-ins: `ExecutionCapability(retain_history=True)`,
-`CheckpointCapability()`, and `TraceCapability()`. Durable storage alone enables
+native `StepPersistence(store=..., capture_frontier=True)`, and `TraceCapability()`. Durable storage alone enables
 none of these optional guarantees. `Runtime.open(..., metrics=dataset)` independently enables automatic
 Agent observations and supplies the dataset to Runtime-bound Task engines for
 Task and evaluation execution observations. Each producer owns its recorder
@@ -1389,7 +1389,7 @@ into user cancellation. Successful handoff closes owned resources; a later
 Cancellation of the handoff caller does not abandon its owned cleanup task.
 Retry `handoff()` or `close()` to join that same cleanup after a failure.
 
-Handoff requires `CheckpointCapability`, synchronous execution admission, and
+Handoff requires native `StepPersistence`, synchronous execution admission, and
 durable execution, recovery and checkpoint storage. Unsupported composition
 raises `CAPABILITY_REQUIRED_MISSING` before closing the Runtime. Runtime coordinates
 its bound Evaluation and Task domains before releasing Agent execution and owned
@@ -1611,6 +1611,17 @@ async with Runtime.open("service-runtime", storage=storage,
 binding metadata; portable PersistenceStorage restore therefore requires the
 corresponding Asset history to remain available through the AssetStore supplied
 when the Runtime is reopened.
+
+Native `StepPersistence(store=...)` is another caller-owned backup resource.
+Quiesce writers and back up its database consistently with Runtime control state.
+For `SqlStepStore`, include all six `ai_step_*` tables and the Runtime business
+tables in the same database backup; an external MediaStore must be backed up too.
+Portable export returns `SNAPSHOT_UNSUPPORTED` when persisted executions depend
+on native checkpoints, rather than producing an incomplete recovery archive.
+Executions without checkpoints retain their existing portable export behavior.
+Old checkpoint archive formats and portable packages are not a compatibility
+path for this version. Schema deployment remains an explicit maintenance action.
+
 
 SQLite-backed `PersistenceStorage` supports the built-in durable TaskGraph scheduler without a SQLite-specific launcher or an external lock. Normal internal Task optimistic-CAS races are reread and converged by the Task domain. Durable ToolOperation terminal persistence is also lease-aware: a same-lease heartbeat racing terminal persistence is reconciled without replaying the tool effect. Genuine ownership, fence, idempotency, tool-result, effect-unknown, integrity, and storage errors remain observable. A newly created local SQLite database initializes its Runtime and `ai_objects` schema; an existing SQLite database is opened without automatic schema validation and is never implicitly migrated or repaired. When `object_store` is omitted, durable SQLite Runtime objects are stored in the same database through the built-in `ai_objects` and `ai_object_chunks` tables. An explicitly supplied ObjectStore remains available when object payloads should live outside SQLite. External SQL backends still require explicit schema provisioning/migration. Process workers must initialize their own Runtime and SQL engine inside the worker process; initialized Runtime, engine, session, or connection objects must not be reused after `fork()`.
 

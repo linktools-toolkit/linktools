@@ -26,6 +26,10 @@ class _Sessions:
 
     def __init__(self, record: SessionRecord) -> None:
         self._record = record
+        self.state_store = self
+
+    async def read(self, callback):
+        return await callback(None)
 
     async def get_header(
         self,

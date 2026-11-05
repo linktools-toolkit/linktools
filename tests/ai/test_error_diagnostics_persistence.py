@@ -21,6 +21,7 @@ from linktools.ai.core import (
     StopReason,
     ToolOperationStatus,
     UsageMetrics,
+    Principal,
 )
 from linktools.ai.errors import AIError, ErrorCode, ErrorDiagnostics
 from linktools.ai.migrate import provision_runtime_database
@@ -216,11 +217,11 @@ async def test_terminal_results_survive_restart_through_live_and_read_only_apis(
     async with Persistence.open('default', storage=reopened) as persistence_212, Runtime.attach(persistence=persistence_212, features=model_features(_DiagnosticModels())) as runtime:
         result = await runtime.executions.result(
             started.execution_id,
-            principal=runtime.default_principal,
+            principal=Principal("principal", "default", "service"),
         )
         events = await runtime.events.list(
             started.execution_id,
-            principal=runtime.default_principal,
+            principal=Principal("principal", "default", "service"),
             limit=100,
         )
         terminal = next(
@@ -235,12 +236,12 @@ async def test_terminal_results_survive_restart_through_live_and_read_only_apis(
         assert result.output == ({"answer": "ok"} if status is ExecutionStatus.SUCCEEDED else None)
         assert await runtime.history.result(
             started.execution_id,
-            principal=runtime.default_principal,
+            principal=Principal("principal", "default", "service"),
         ) == result
         if status is ExecutionStatus.FAILED:
             summary = await runtime.history.inspect_execution(
                 started.execution_id,
-                principal=runtime.default_principal,
+                principal=Principal("principal", "default", "service"),
             )
             assert summary.error_diagnostics is None
             assert terminal.payload["error_code"] == result.error_code
@@ -258,12 +259,12 @@ async def test_terminal_results_survive_restart_through_live_and_read_only_apis(
     async with Persistence.open('default', storage=history_storage, tenant_id="default", read_only=True) as history_persistence_257, History.open(persistence=history_persistence_257) as history:
         assert await history.result(
             started.execution_id,
-            principal=runtime.default_principal,
+            principal=Principal("principal", "default", "service"),
         ) == result
         if status is ExecutionStatus.FAILED:
             summary = await history.inspect_execution(
                 started.execution_id,
-                principal=runtime.default_principal,
+                principal=Principal("principal", "default", "service"),
             )
             assert summary.error_diagnostics is None
 
@@ -346,7 +347,6 @@ def _failed_tool_record(
         status=ToolOperationStatus.FAILED,
         owner=None,
         fence=1,
-        lease_expires_at=None,
         error_code=error_code,
         created_at=now,
         updated_at=now,

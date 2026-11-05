@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 from pydantic_ai.models.function import FunctionModel
@@ -63,15 +64,22 @@ async def _recoverable(
         release.set()
 
 
-async def _head(state: Persistence, execution_id: str):
-    return await state.execution.executions.get_history_head(execution_id, tenant_id="default")
+class _ProducerClaim(NamedTuple):
+    producer_generation: int
+    producer_claim_id: str | None
+
+
+async def _producer(state: Persistence, execution_id: str) -> _ProducerClaim:
+    execution = await state.execution.executions.get(execution_id, tenant_id="default")
+    assert execution is not None
+    return _ProducerClaim(execution.producer_generation, execution.producer_claim_id)
 
 
 async def _flush_started_model(
     runtime: Runtime, execution_id: str, started: asyncio.Event,
 ) -> None:
     # Receipt settlement only confirms launch. Freeze the blocked model's
-    # registration projection before comparing heads across control replays.
+    # registration projection before comparing producer claims across control replays.
     await asyncio.wait_for(started.wait(), 10)
     runs = await runtime._run_store.list_agent_runs(agent_conversation_id=agent_conversation_id(
         namespace=_NAMESPACE, tenant_id="default", execution_id=execution_id,
@@ -100,23 +108,23 @@ async def test_keyed_recovery_replays_across_runtimes_and_after_completion(tmp_p
     async with _recoverable(
         tmp_path, phase=phase, model_started=started,
     ) as (runtime, other, state, execution_id, calls, release):
-        original = await _head(state, execution_id)
+        original = await _producer(state, execution_id)
         await _recover(runtime, execution_id, "recovery")
         await _flush_started_model(runtime, execution_id, started)
-        claimed = await _head(state, execution_id)
+        claimed = await _producer(state, execution_id)
         assert claimed.producer_generation > original.producer_generation
         receipt = await _receipt(state, "recovery")
         assert receipt.status is OperationStatus.SUCCEEDED
         assert receipt.result_ref == claimed.producer_claim_id
         await asyncio.gather(_recover(runtime, execution_id, "recovery"), _recover(other, execution_id, "recovery"))
-        assert await _head(state, execution_id) == claimed
+        assert await _producer(state, execution_id) == claimed
         release.set()
         result = await runtime.executions.wait(execution_id, principal=runtime.default_principal, timeout_seconds=10)
         assert result.result.status is ExecutionStatus.SUCCEEDED
         assert calls == [1]
-        terminal = await _head(state, execution_id)
+        terminal = await _producer(state, execution_id)
         await _recover(other, execution_id, "recovery")
-        assert await _head(state, execution_id) == terminal
+        assert await _producer(state, execution_id) == terminal
         assert calls == [1]
 
 
@@ -140,12 +148,12 @@ async def test_running_receipt_rejects_replay_and_caller_cancel_does_not_abandon
         recovering = asyncio.create_task(_recover(runtime, execution_id, "recovery"))
         try:
             await asyncio.wait_for(entered.wait(), 10)
-            claimed = await _head(state, execution_id)
+            claimed = await _producer(state, execution_id)
             assert (await _receipt(state, "recovery")).status is OperationStatus.RUNNING
             with pytest.raises(AIError) as unknown:
                 await _recover(other, execution_id, "recovery")
             assert unknown.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
-            assert await _head(state, execution_id) == claimed
+            assert await _producer(state, execution_id) == claimed
             assert calls == []
             recovering.cancel()
             await asyncio.sleep(0)
@@ -155,11 +163,11 @@ async def test_running_receipt_rejects_replay_and_caller_cancel_does_not_abandon
                 await recovering
             assert (await _receipt(state, "recovery")).status is OperationStatus.SUCCEEDED
             await _flush_started_model(runtime, execution_id, started)
-            started_head = await _head(state, execution_id)
+            started_head = await _producer(state, execution_id)
             assert started_head.producer_claim_id == claimed.producer_claim_id
             assert started_head.producer_generation == claimed.producer_generation
             await _recover(other, execution_id, "recovery")
-            assert await _head(state, execution_id) == started_head
+            assert await _producer(state, execution_id) == started_head
             release.set()
             result = await runtime.executions.wait(execution_id, principal=runtime.default_principal, timeout_seconds=10)
             assert result.result.status is ExecutionStatus.SUCCEEDED
@@ -170,7 +178,7 @@ async def test_running_receipt_rejects_replay_and_caller_cancel_does_not_abandon
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ("unknown", "launched_ack_lost", "rejected", "settled_ack_lost", "claims_changed"))
+@pytest.mark.parametrize("outcome", ("unknown", "launched_ack_lost", "rejected", "settled_ack_lost", "claims_unsettled"))
 async def test_launch_and_settlement_outcomes_do_not_repeat_takeover(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
 ) -> None:
@@ -198,18 +206,15 @@ async def test_launch_and_settlement_outcomes_do_not_repeat_takeover(
                     raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
                 raise AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"phase": "recovery_launch_rejected"})
 
-            if outcome == "claims_changed":
-                checks = 0
-
-                async def changing_claims(*args, **kwargs):
-                    nonlocal checks
-                    checks += 1
-                    return (), int(checks > 1)
+            if outcome == "claims_unsettled":
+                async def unsettled_claims(*args, **kwargs):
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                                  safe_details={"phase": "tool_operations_unsettled"})
 
                 def reject_background_retry(execution_id):
                     pytest.fail("Keyed recovery must not schedule an unkeyed retry")
 
-                monkeypatch.setattr(backend, "_reconcile_tool_effects", changing_claims)
+                monkeypatch.setattr(backend, "_load_admitted_recovery_execution", unsettled_claims)
                 monkeypatch.setattr(backend, "_defer_recovery_reconcile", reject_background_retry)
             else:
                 monkeypatch.setattr(backend, "launch", fail_launch)
@@ -218,7 +223,7 @@ async def test_launch_and_settlement_outcomes_do_not_repeat_takeover(
             expected = OperationStatus.FAILED if outcome == "rejected" else OperationStatus.RUNNING
         if outcome in {"launched_ack_lost", "settled_ack_lost"}:
             await _flush_started_model(runtime, execution_id, started)
-        claimed = await _head(state, execution_id)
+        claimed = await _producer(state, execution_id)
         assert (await _receipt(state, "recovery")).status is expected
         if expected is OperationStatus.SUCCEEDED:
             await _recover(other, execution_id, "recovery")
@@ -228,7 +233,7 @@ async def test_launch_and_settlement_outcomes_do_not_repeat_takeover(
             assert replay.value.code is (
                 ErrorCode.STORAGE_RECOVERY_REQUIRED if expected is OperationStatus.RUNNING else ErrorCode.STORAGE_CONFLICT
             )
-        assert await _head(state, execution_id) == claimed
+        assert await _producer(state, execution_id) == claimed
 
 
 @pytest.mark.asyncio
@@ -246,14 +251,14 @@ async def test_keyed_recovery_observes_cancel_intent_after_many_unfinished_recei
             candidate, operation_id="pending-cancel", operation_kind=OperationKind.EXECUTION_CANCEL,
             status=OperationStatus.PENDING, result_ref=None,
         ))
-        original = await _head(state, execution_id)
+        original = await _producer(state, execution_id)
         await _recover(runtime, execution_id, "recovery")
         receipt = await _receipt(state, "recovery")
         assert receipt.status is OperationStatus.CANCELLED
         assert receipt.result_ref is None
         current = await state.execution.executions.get(execution_id, tenant_id="default")
         assert current.status is ExecutionStatus.CANCELLED
-        assert (await _head(state, execution_id)).producer_generation == original.producer_generation
+        assert (await _producer(state, execution_id)).producer_generation == original.producer_generation
         await _recover(other, execution_id, "recovery")
         assert calls == []
 
@@ -325,20 +330,20 @@ async def test_keyed_recovery_retains_receipt_when_cancellation_prevents_launch(
                 session.session_id, tenant_id="default", expected_revision=session.revision,
                 next_record=replace(session, revision=session.revision + 1, status=SessionStatus.CLOSING),
             )
-        original = await _head(state, execution_id)
+        original = await _producer(state, execution_id)
         await _recover(runtime, execution_id, "recovery")
         receipt = await _receipt(state, "recovery")
         assert receipt.status is OperationStatus.CANCELLED
         current = await state.execution.executions.get(execution_id, tenant_id="default")
         assert current.status is ExecutionStatus.CANCELLED
-        final_head = await _head(state, execution_id)
+        final_head = await _producer(state, execution_id)
         if phase == "admitted":
             assert receipt.result_ref is None
             assert final_head.producer_generation == original.producer_generation
         else:
             assert receipt.result_ref == final_head.producer_claim_id
         await _recover(other, execution_id, "recovery")
-        assert await _head(state, execution_id) == final_head
+        assert await _producer(state, execution_id) == final_head
         assert calls == []
 
 
@@ -370,10 +375,10 @@ async def test_competing_cancel_recovery_replays_the_no_producer_winner(
             winner = await _recover(runtime, execution_id, "recovery")
             receipt = await _receipt(state, "recovery")
             assert receipt.status is OperationStatus.CANCELLED and receipt.result_ref is None
-            head = await _head(state, execution_id)
+            head = await _producer(state, execution_id)
             release_stale.set()
             assert (await stale).execution_id == winner.execution_id
-            assert await _head(state, execution_id) == head
+            assert await _producer(state, execution_id) == head
             assert await _receipt(state, "recovery") == receipt
             assert calls == []
         finally:
@@ -389,7 +394,7 @@ async def test_keyed_recovery_replays_session_conflict_terminal_outcome(tmp_path
         session = await state.conversation.sessions.get("session", tenant_id="default")
         assert execution is not None and session is not None
         sibling = replace(execution, execution_id="other-session-owner", root_execution_id="other-session-owner")
-        await state.execution.executions.create_with_history_head(sibling)
+        await state.execution.executions.create_execution(sibling)
         await state.conversation.sessions.release_execution(
             session.session_id, tenant_id="default", execution_id=execution_id,
         )
@@ -406,7 +411,7 @@ async def test_keyed_recovery_replays_session_conflict_terminal_outcome(tmp_path
         if phase == "admitted":
             assert receipt.result_ref is None
         else:
-            assert receipt.result_ref == (await _head(state, execution_id)).producer_claim_id
+            assert receipt.result_ref == (await _producer(state, execution_id)).producer_claim_id
         assert receipt.error_code == ErrorCode.SESSION_BUSY.value
         failed = await state.execution.executions.get(execution_id, tenant_id="default")
         assert failed.status is ExecutionStatus.FAILED and failed.error_code == ErrorCode.SESSION_BUSY.value
@@ -460,7 +465,7 @@ async def test_late_cancel_recovery_cannot_control_another_producer_claim(
             await asyncio.wait_for(launch_confirmed.wait(), 10)
             await _flush_started_model(runtime, execution_id, started)
             receipt = await _receipt(state, "recovery")
-            head = await _head(state, execution_id)
+            head = await _producer(state, execution_id)
             assert receipt.status is OperationStatus.RUNNING
             assert receipt.result_ref == head.producer_claim_id
             now = datetime.now(timezone.utc)
@@ -474,7 +479,7 @@ async def test_late_cancel_recovery_cannot_control_another_producer_claim(
                 await stale
             assert losing_control.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
             assert await _receipt(state, "recovery") == receipt
-            assert await _head(state, execution_id) == head
+            assert await _producer(state, execution_id) == head
             finish_launch.set()
             await winner
             settled = await _receipt(state, "recovery")
@@ -482,7 +487,7 @@ async def test_late_cancel_recovery_cannot_control_another_producer_claim(
             assert settled.result_ref == receipt.result_ref
             await _recover(other, execution_id, "recovery")
             assert await _receipt(state, "recovery") == settled
-            assert await _head(state, execution_id) == head
+            assert await _producer(state, execution_id) == head
             assert calls == [1]
         finally:
             scan_cancel.set()
@@ -522,30 +527,29 @@ async def test_confirmed_launch_receipt_is_independent_of_fast_business_terminal
         await _recover(runtime, execution_id, "recovery")
         receipt = await _receipt(state, "recovery")
         assert receipt.status is OperationStatus.SUCCEEDED
-        head = await _head(state, execution_id)
+        head = await _producer(state, execution_id)
         assert receipt.result_ref == head.producer_claim_id
         current = await state.execution.executions.get(execution_id, tenant_id="default")
         assert current.status is expected
         previous_calls = list(calls)
         await _recover(other, execution_id, "recovery")
         assert await _receipt(state, "recovery") == receipt
-        assert await _head(state, execution_id) == head
+        assert await _producer(state, execution_id) == head
         assert calls == previous_calls
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ("generation", "claim", "closed", "status", "event", "input"))
+@pytest.mark.parametrize("change", ("generation", "claim", "terminal", "status", "event", "input"))
 async def test_admitted_recovery_rejects_changed_owner_or_execution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str,
 ) -> None:
-    from linktools.ai.persistence.contracts import ExecutionHistoryState
     from linktools.ai.storage import StoredPayload
 
     async with _recoverable(tmp_path) as (runtime, other, state, execution_id, calls, release):
         backend = runtime._execution_service.runtime_backend()
         repository = state.execution.executions
         original_resume = backend._commit_recovery_resume
-        observe = repository.observe_execution_control
+        observe = repository.get
         effects = 0
         original_effects = backend._reconcile_tool_effects
 
@@ -558,13 +562,13 @@ async def test_admitted_recovery_rejects_changed_owner_or_execution(
             result = await original_resume(execution, **kwargs)
 
             async def changed_control(*args, **kwargs):
-                current, head = await observe(*args, **kwargs)
+                current = await observe(*args, **kwargs)
                 if change == "generation":
-                    head = replace(head, producer_generation=head.producer_generation + 1)
+                    current = replace(current, producer_generation=current.producer_generation + 1)
                 elif change == "claim":
-                    head = replace(head, producer_claim_id="different-owner")
-                elif change == "closed":
-                    head = replace(head, state=ExecutionHistoryState.CLOSED)
+                    current = replace(current, producer_claim_id="different-owner")
+                elif change == "terminal":
+                    current = replace(current, status=ExecutionStatus.SUCCEEDED)
                 elif change == "status":
                     current = replace(current, status=ExecutionStatus.CANCELLING)
                 elif change == "event":
@@ -573,9 +577,9 @@ async def test_admitted_recovery_rejects_changed_owner_or_execution(
                     current = replace(current, stored_user_input=replace(
                         current.stored_user_input, payload=StoredPayload.inline_text("different input"),
                     ))
-                return current, head
+                return current
 
-            monkeypatch.setattr(repository, "observe_execution_control", changed_control)
+            monkeypatch.setattr(repository, "get", changed_control)
             monkeypatch.setattr(backend, "_reconcile_tool_effects", count_effects)
             return result
 

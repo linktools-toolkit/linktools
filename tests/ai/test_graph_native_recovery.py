@@ -5,7 +5,7 @@ from linktools.ai.task.engine import TaskEngine
 
 from linktools.ai.persistence import Persistence
 """Native graph recovery preserves captured input and the admitted principal."""
-from ._runtime_test_helpers import model_features
+from ._runtime_test_helpers import model_features, native_checkpoint
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -80,6 +80,7 @@ async def test_run_only_actor_recovers_native_captured_agent_graph(
 
     authorization = Authorization()
     group = RuntimeFeatures("native-graph-recovery")
+    group.capability(native_checkpoint(), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
     try:
@@ -114,7 +115,7 @@ async def test_run_only_actor_recovers_native_captured_agent_graph(
             backend = runtime._execution_service.runtime_backend()
             worker = backend._tasks[execution_id]
             before = await runtime._state.execution.executions.get(execution_id, tenant_id=origin.tenant_id)
-            head = await runtime._state.execution.executions.get_history_head(execution_id, tenant_id=origin.tenant_id)
+            head = await runtime._state.execution.executions.get(execution_id, tenant_id=origin.tenant_id)
             assert before is not None and head is not None
             assert before.status is ExecutionStatus.STARTED
             assert bound.nodes[0].input_capture == task_capture
@@ -160,7 +161,7 @@ async def test_run_only_actor_recovers_native_captured_agent_graph(
             result = await runtime.executions.result(execution_id, principal=origin)
             assert result.output == {"text": "recovered answer"}
             current = await runtime._state.execution.executions.get(execution_id, tenant_id=origin.tenant_id)
-            recovered_head = await runtime._state.execution.executions.get_history_head(
+            recovered_head = await runtime._state.execution.executions.get(
                 execution_id, tenant_id=origin.tenant_id,
             )
             assert current is not None and recovered_head is not None
@@ -222,7 +223,7 @@ async def test_graph_takeover_rejects_active_local_worker_without_child_claim(tm
             )
             execution_id = bound.node_states[0].execution_id
             assert execution_id is not None
-            head = await runtime._state.execution.executions.get_history_head(
+            head = await runtime._state.execution.executions.get(
                 execution_id, tenant_id=runtime.tenant_id,
             )
             assert head is not None
@@ -234,7 +235,7 @@ async def test_graph_takeover_rejects_active_local_worker_without_child_claim(tm
             with pytest.raises(AIError) as raised:
                 await run.recover(idempotency_key="reject-local-takeover")
             assert raised.value.code is ErrorCode.STORAGE_CONFLICT
-            unchanged_head = await runtime._state.execution.executions.get_history_head(
+            unchanged_head = await runtime._state.execution.executions.get(
                 execution_id, tenant_id=runtime.tenant_id,
             )
             assert unchanged_head.producer_generation == head.producer_generation

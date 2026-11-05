@@ -3,7 +3,8 @@
 """Runtime AgentRunStore orchestration over durable archives."""
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+import json
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from time import monotonic
 from typing import TYPE_CHECKING, TypeVar, cast
@@ -11,10 +12,11 @@ from uuid import uuid4
 
 from linktools.core import environ
 from pydantic_ai.messages import ModelMessage
+from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepStore
 
-from ..core import ExecutionStatus
+from ..core import ExecutionStatus, canonical_json_bytes
 from ..errors import AIError, ErrorCode
-from ..model.messages import decode_model_messages, encode_model_messages
+from ..model.messages import decode_model_messages
 from ._transcript_staging import StagedTranscript
 from ._model_interaction import (
     StagedContextInline,
@@ -23,10 +25,11 @@ from ._model_interaction import (
 )
 from ._conversation_persistence import ConversationPersistence
 from ._checkpoint_persistence import CheckpointPersistence
+from ._official_step_reader import OfficialStepReader
 from ._trace_persistence import TracePersistence
+from .contracts import ExecutionTerminalPublication
 from .contracts import (
-    ExecutionHistoryHeadRecord,
-    ExecutionHistoryState,
+    ContextProjection,
     ExecutionRecord,
     ExecutionRepository,
     ExecutionRunSealHead,
@@ -43,7 +46,6 @@ from .durability import (
     await_owned_task,
     run_durable_commit,
 )
-from ._model_client import resolve_client_requests
 from ._projection_payload import decode_projection_payload, encode_projection_payload
 from ._plan import PersistenceDomain
 from ._archive import PreparedArchive
@@ -65,12 +67,11 @@ from ._step_archive import (
     _AgentRunHistoryLock,
     _AgentRunProjectionFlight,
     _StepArchiveBatch,
-    _conversation_relocated_checkpoint_matches,
     _materialize_checkpoint,
     _sync_projection,
 )
 from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent, AgentRunStore
-from .state import GroupRecordReader, StateGroupTransaction, StateTransaction, StoredRecord
+from .state import StateGroupTransaction, StateTransaction
 
 if TYPE_CHECKING:
     from .capabilities import RuntimeCapabilityWrites
@@ -123,7 +124,6 @@ class RuntimeAgentRunStore(AgentRunStore):
         *,
         conversation_archive: AgentRunStore,
         execution_archive: AgentRunStore | None,
-        checkpoint_archive: AgentRunStore | None,
         execution_repository: ExecutionRepository | None = None,
         tenant_id: str | None = None,
     ) -> None:
@@ -137,13 +137,16 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._archives = {
             PersistenceDomain.CONVERSATION: conversation_archive,
             **({PersistenceDomain.TRACE: execution_archive} if execution_archive is not None else {}),
-            **({PersistenceDomain.CHECKPOINT: checkpoint_archive} if checkpoint_archive is not None else {}),
         }
         self._initialized = False
         self._preflight = False
         self._execution_producers: dict[str, tuple[str, int]] = {}
+        self._step_boundaries: dict[str, Callable[..., Awaitable[None]]] = {}
+        self._step_boundary_guards: dict[str, Callable[[], None]] = {}
+        self._atomic_step_runs: set[str] = set()
         self._execution_persistence: dict[str, tuple[bool, bool, bool]] = {}
-        self._checkpoint_acknowledged: dict[str, int] = {}
+        self._checkpoint_transcript_starts: dict[str, int] = {}
+        self._checkpoint_transcript_runs: dict[str, str] = {}
         self._model_interaction_subscriptions: dict[str, set[_ModelInteractionSubscription]] = {}
         self._durability_flights: dict[str, _AgentRunDurabilityFlight] = {}
         self._background_tasks: set[asyncio.Task[object]] = set()
@@ -160,12 +163,51 @@ class RuntimeAgentRunStore(AgentRunStore):
             background_tasks=self._background_tasks,
         )
         self.checkpoint_persistence = CheckpointPersistence(
-            staging, checkpoint_archive, execution_archive,
-            trace_source_only=self.trace_persistence.failed_admission_settled,
+            staging, native_checkpoints=lambda run_id: self.execution_persistence(run_id)[1],
         )
         for archive in self._archives.values():
             if isinstance(archive, StateStepArchive):
                 archive.bind_history_lock(self._history_lock)
+
+    def bind_step_store(self, store: StepStore) -> None:
+        """Use the same official StepStore as the run's StepPersistence capability."""
+        self.checkpoint_persistence.bind_step_store(store)
+
+    @property
+    def step_store(self) -> StepStore:
+        return self.checkpoint_persistence.step_store
+
+    def bind_step_boundary(
+        self, run_id: str, commit: Callable[..., Awaitable[None]],
+        require_active: Callable[[], None],
+    ) -> None:
+        """Bind the admitted Runtime's single short-transaction boundary."""
+        if run_id not in self._execution_producers:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        self._step_boundaries[run_id] = commit
+        self._step_boundary_guards[run_id] = require_active
+
+    def activate_step_boundary(self, run_id: str) -> None:
+        """Use local prechecks only when the actual model/leaf writer fences dispatch."""
+        if run_id in self._step_boundaries:
+            self._atomic_step_runs.add(run_id)
+
+    def step_boundary(self, run_id: str) -> Callable[..., Awaitable[None]] | None:
+        return self._step_boundaries.get(run_id)
+
+    def confirm_step_run(self, record: RunRecord) -> None:
+        """Reuse a successful official registration only for this Runtime's owned run."""
+        if record.run_id in self._execution_producers:
+            self.checkpoint_persistence.reader.confirm_run(record)
+
+    def confirm_step_snapshot(self, snapshot: ContinuableSnapshot) -> None:
+        """Reuse a successful official write without treating a failed write as confirmed."""
+        if snapshot.run_id in self._execution_producers:
+            self.checkpoint_persistence.reader.confirm_snapshot(snapshot)
+
+    def invalidate_step_run(self, run_id: str) -> None:
+        """Discard confirmed data when a source operation has an uncertain outcome."""
+        self.checkpoint_persistence.reader.invalidate_run(run_id)
 
     def bind_pending_producer_guard(self, guard: Callable[[str, int, bool], bool]) -> None:
         """Bind the Runtime-owned authority for turns not yet persisted."""
@@ -181,25 +223,44 @@ class RuntimeAgentRunStore(AgentRunStore):
         previous = self._execution_producers.get(agent_run_id)
         if previous is not None and (previous[0] != execution_id or previous[1] > producer_generation):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+        self.bind_execution_persistence(
+            agent_run_id, conversation=conversation, restart_checkpoints=restart_checkpoints,
+            durable_trace=durable_trace,
+        )
+        if previous is not None and previous != value:
+            self.invalidate_step_run(agent_run_id)
+        self._execution_producers[agent_run_id] = value
+
+    def bind_execution_persistence(
+        self, agent_run_id: str, *, conversation: bool, restart_checkpoints: bool, durable_trace: bool,
+    ) -> None:
+        """Bind the admitted execution's guarantees without granting producer ownership."""
+        if not isinstance(agent_run_id, str) or not agent_run_id:
+            raise ValueError("AgentRun identity is required")
         persistence = (conversation, restart_checkpoints, durable_trace)
         if any(not isinstance(value, bool) for value in persistence):
             raise TypeError("execution persistence guarantees must be bool")
-        previous_persistence = self._execution_persistence.get(agent_run_id)
-        if previous_persistence is not None and previous_persistence != persistence:
+        previous = self._execution_persistence.get(agent_run_id)
+        if previous is not None and previous != persistence:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        self._execution_producers[agent_run_id] = value
         self._execution_persistence[agent_run_id] = persistence
 
-    def execution_persistence(self, agent_run_id: str) -> tuple[bool, bool, bool]:
-        """Return the run's fixed Conversation, Checkpoint and Trace guarantees."""
-        return self._execution_persistence.get(agent_run_id, (True, True, True))
+    def execution_persistence(
+        self, agent_run_id: str, *, declared: tuple[bool, bool, bool] | None = None,
+    ) -> tuple[bool, bool, bool]:
+        """Return admitted guarantees, or the actual configuration for a new run."""
+        if declared is None:
+            declared = (True, False, PersistenceDomain.TRACE in self._archives)
+        return self._execution_persistence.get(agent_run_id, declared)
 
-    def _archive_for_run(self, domain: PersistenceDomain, agent_run_id: str) -> AgentRunStore | None:
+    def _archive_for_run(self, domain: PersistenceDomain, agent_run_id: str) -> AgentRunStore | OfficialStepReader | None:
         conversation, restart, trace = self.execution_persistence(agent_run_id)
         if (domain is PersistenceDomain.CONVERSATION and not conversation
                 or domain is PersistenceDomain.CHECKPOINT and not restart
                 or domain is PersistenceDomain.TRACE and not trace):
             return None
+        if domain is PersistenceDomain.CHECKPOINT:
+            return self.checkpoint_persistence.reader
         return self._archives.get(domain)
 
     def execution_producer_generation(self, agent_run_id: str, *, execution_id: str) -> int | None:
@@ -209,6 +270,11 @@ class RuntimeAgentRunStore(AgentRunStore):
         if producer[0] != execution_id:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return producer[1]
+
+    def latest_local_producer_generation(self, *, execution_id: str) -> int | None:
+        """Return the newest admitted producer still retained by this Runtime."""
+        return max((generation for owner, generation in self._execution_producers.values()
+                    if owner == execution_id), default=None)
 
     def require_active_capability_run(self, agent_run_id: str, execution_id: str) -> None:
         """Require a locally owned active run before binding optional writers."""
@@ -221,18 +287,41 @@ class RuntimeAgentRunStore(AgentRunStore):
         """Whether an execution still owns any local run producer."""
         return any(owner == execution_id for owner, _ in self._execution_producers.values())
 
-    async def require_active_producer(self, agent_run_id: str) -> None:
-        """Fence model admission against the run's current execution authority."""
+    async def require_active_producer(self, agent_run_id: str, *, authoritative: bool = False) -> None:
+        """Require retained ownership or fresh source control; writes keep their CAS."""
         producer = self._execution_producers.get(agent_run_id)
         if producer is None:
             return
+        await self._ensure_business()
+        if agent_run_id in self._atomic_step_runs and not authoritative:
+            self._step_boundary_guards[agent_run_id]()
+            return
+        if self._pending_producer_guard is not None and self._pending_producer_guard(*producer, False):
+            return
+        if type(self._execution_repository) is not ExecutionRepositoryImpl:
+            await self._require_active_execution_producer(
+                agent_run_id=agent_run_id, execution_id=producer[0],
+                producer_generation=producer[1], allow_cancelling=False, authoritative=True,
+            )
+            return
         await self._require_active_execution_producer(
             agent_run_id=agent_run_id, execution_id=producer[0],
-            producer_generation=producer[1], allow_cancelling=False,
-            authoritative=True,
+            producer_generation=producer[1], allow_cancelling=False, authoritative=True,
         )
+        # The entered scope owns deadline policy. Recheck its local permission
+        # after the source await rather than inventing a second freshness timer.
+        if self._pending_producer_guard is not None:
+            self._pending_producer_guard(*producer, False)
+        if self._execution_producers.get(agent_run_id) != producer:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def initialize(self) -> None:
+        self.checkpoint_persistence.reader.clear_confirmed_runs()
+        self._step_boundaries.clear()
+        self._step_boundary_guards.clear()
+        self._atomic_step_runs.clear()
+        self._checkpoint_transcript_starts.clear()
+        self._checkpoint_transcript_runs.clear()
         await self._staging.initialize()
         for archive in self._archives.values():
             await archive.initialize()
@@ -266,53 +355,46 @@ class RuntimeAgentRunStore(AgentRunStore):
                 await archive.validate_integrity()
 
     def register_context_baseline(
-        self,
-        agent_run_id: str,
-        context: LoadedModelContext,
+        self, agent_run_id: str, context: LoadedModelContext,
+        *, source_run: RunRecord | None = None,
     ) -> None:
+        if source_run is not None:
+            try:
+                raw_start = source_run.metadata["linktools.transcript_start"]
+                start = int(raw_start)
+                if str(start) != raw_start or start < 0:
+                    raise ValueError("invalid snapshot transcript boundary")
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            self._checkpoint_transcript_starts[agent_run_id] = start
+            self._checkpoint_transcript_runs[agent_run_id] = source_run.metadata.get(
+                "linktools.transcript_run_id", source_run.run_id,
+            )
         for archive in self._archives.values():
             if isinstance(archive, StateStepArchive):
                 archive.register_context_baseline(agent_run_id, context)
 
+    def checkpoint_transcript_start(self, agent_run_id: str, *, initial_history_count: int) -> int:
+        """Keep the original turn boundary even when sticky history was trimmed."""
+        return self._checkpoint_transcript_starts.get(agent_run_id, initial_history_count)
+
+    def checkpoint_transcript_run_id(self, agent_run_id: str) -> str:
+        """Identify the first native run in the logical turn, without an attempt chain."""
+        return self._checkpoint_transcript_runs.get(agent_run_id, agent_run_id)
+
     async def register_agent_run(
-        self,
-        record: AgentRunRecord,
-        *,
-        execution_id: str | None = None,
+        self, record: AgentRunRecord, *, execution_id: str | None = None,
     ) -> None:
         await self._ensure_business()
-        recovery = self._archive_for_run(PersistenceDomain.CHECKPOINT, record.agent_run_id)
-        restored: AgentRunCheckpoint | None = None
         observed_transcript: StagedTranscript | None = None
         events: Sequence[StepEvent] = ()
         offset: _ProjectionOffset | None = None
-        if recovery is not None:
-            durable = await recovery.get_agent_run(agent_run_id=record.agent_run_id)
-            if durable is not None:
-                if _agent_run_identity(durable) != _agent_run_identity(record):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                record = durable
-                restored = await recovery.latest_checkpoint(
-                    agent_run_id=record.agent_run_id, include_interrupted=True,
-                )
-        execution = self._archive_for_run(PersistenceDomain.TRACE, record.agent_run_id)
+        # Native recovery starts a new single-shot run. Its source history was
+        # already admitted before execution; this identity has no prior tail.
+        execution = (None if self.execution_persistence(record.agent_run_id)[1]
+                     else self._archive_for_run(PersistenceDomain.TRACE, record.agent_run_id))
         if execution is not None and execution_id is not None:
             public_run = await execution.get_agent_run(agent_run_id=record.agent_run_id)
-            if restored is not None and self._staging.get_agent_run_local(record.agent_run_id) is None:
-                published = tuple(
-                    [message async for message in execution.iter_messages(agent_run_id=record.agent_run_id)]
-                ) if public_run is not None else ()
-                common = min(len(published), len(restored.messages))
-                if encode_model_messages(published[:common]) != encode_model_messages(restored.messages[:common]):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if public_run is None or len(published) <= len(restored.messages):
-                    # Restore known completions before interrupting observations
-                    # whose request really was left unfinished by the old owner.
-                    await self.materialize_from_recovery(
-                        target=PersistenceDomain.TRACE, agent_run_id=record.agent_run_id,
-                        execution_id=execution_id,
-                    )
-                    public_run = await execution.get_agent_run(agent_run_id=record.agent_run_id)
             if public_run is not None:
                 if _agent_run_identity(public_run) != _agent_run_identity(record):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -332,17 +414,8 @@ class RuntimeAgentRunStore(AgentRunStore):
                     if head is not None:
                         pending, pending_keys = await execution.transcript_repository.load_pending(head)
                 observed_transcript = StagedTranscript(messages, pending, pending_keys)
-                checkpoint_published = restored is not None and (
-                    await execution.verify_checkpoint_projection(
-                        agent_run_id=record.agent_run_id, checkpoint=restored,
-                    ) if isinstance(execution, StateStepArchive)
-                    else await execution.latest_checkpoint(
-                        agent_run_id=record.agent_run_id, include_interrupted=True,
-                    ) == restored
-                )
                 offset = _ProjectionOffset(
-                    events=len(events), checkpoints=int(checkpoint_published),
-                    transcript_messages=len(messages),
+                    events=len(events), checkpoints=0, transcript_messages=len(messages),
                     interactions=await execution.model_interaction_count(agent_run_id=record.agent_run_id),
                 )
         async with self._history_lock.hold(record.agent_run_id):
@@ -350,8 +423,6 @@ class RuntimeAgentRunStore(AgentRunStore):
             new_registration = self._staging.get_agent_run_local(record.agent_run_id) is None
             self._staging.register_agent_run_local(record)
             if new_registration:
-                if restored is not None:
-                    self._staging.save_checkpoint_local(replace(restored, transcript_message_count_before=0))
                 if observed_transcript is not None:
                     self._staging.stage_transcript(record.agent_run_id, observed_transcript)
                 for event in events:
@@ -362,11 +433,8 @@ class RuntimeAgentRunStore(AgentRunStore):
                         offset.observation_batch_size = configured.observation_batch_size
                         offset.observation_flush_interval = configured.observation_flush_interval
                     self.trace_persistence.offsets[record.agent_run_id] = offset
-                if offset is None or restored is not None and offset.checkpoints == 0:
+                else:
                     self.trace_persistence.mark_dirty(record.agent_run_id)
-                    producer = self._execution_producers.get(record.agent_run_id)
-                    if offset is not None and producer is not None:
-                        offset.observation_execution_id, offset.observation_producer_generation = producer
         self._publish_model_interaction_change(record.agent_run_id)
 
     async def get_agent_run(self, *, agent_run_id: str) -> AgentRunRecord | None:
@@ -413,214 +481,28 @@ class RuntimeAgentRunStore(AgentRunStore):
         ))
 
     async def _save_checkpoint(
-        self,
-        checkpoint: AgentRunCheckpoint,
-        *,
-        execution_id: str | None = None,
+        self, checkpoint: AgentRunCheckpoint, *, execution_id: str | None = None,
         producer_generation: int | None = None,
     ) -> None:
+        """Stage the independent Trace/Conversation view, never a recovery write."""
         await self._ensure_business()
-        if execution_id is not None and producer_generation is not None and self._execution_repository is None:
-            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        if (execution_id is not None and producer_generation is not None
-                and self._archive_for_run(PersistenceDomain.CHECKPOINT, checkpoint.agent_run_id) is None):
-            await self._require_active_execution_producer(
-                agent_run_id=checkpoint.agent_run_id,
-                execution_id=execution_id, producer_generation=producer_generation,
-                allow_cancelling=checkpoint.state == "interrupted",
-            )
-        execution = (
-            self._execution_repository
-            if execution_id is not None and producer_generation is not None
-            and self._archive_for_run(PersistenceDomain.CHECKPOINT, checkpoint.agent_run_id) is not None else None
-        )
-        if execution is not None:
-            recovery = self._archives.get(PersistenceDomain.CHECKPOINT)
-            if (not isinstance(recovery, StateStepArchive)
-                    or execution.state_store.storage_group is not recovery.state_store.storage_group):
-                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
         while True:
-            completion: asyncio.Future[None] | None = None
-            recovery: AgentRunStore | None = None
-            recovery_run: AgentRunRecord | None = None
-            recovery_interactions_snapshot: tuple[StagedModelInteraction, ...] = ()
-            flight: _AgentRunDurabilityFlight | None = None
             async with self._history_lock.hold(checkpoint.agent_run_id):
+                # A revoked producer still captures its already-observed tail.
+                # This local view grants neither publication nor another dispatch.
+                if (execution_id is not None and producer_generation is not None
+                        and self._execution_producers.get(checkpoint.agent_run_id)
+                        != (execution_id, producer_generation)):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
                 existing = self._durability_flights.get(checkpoint.agent_run_id)
-                if existing is not None:
-                    completion = existing.completion
-                else:
+                if existing is None:
                     self._ensure_run_mutable(checkpoint.agent_run_id)
-                    if execution is not None:
-                        offset = self.trace_persistence.offsets.setdefault(checkpoint.agent_run_id, _ProjectionOffset())
-                        if (offset.observation_execution_id is not None
-                                and (offset.observation_execution_id != execution_id
-                                     or offset.observation_producer_generation != producer_generation)):
-                            raise AIError(ErrorCode.STORAGE_CONFLICT)
-                        offset.observation_execution_id = execution_id
-                        offset.observation_producer_generation = producer_generation
-                    checkpoint = self._staging.save_checkpoint_local(checkpoint)
-                    staged_checkpoint_offset = self._staging.checkpoint_count_local(checkpoint.agent_run_id)
+                    self._staging.save_checkpoint_local(checkpoint)
                     self.trace_persistence.mark_dirty(checkpoint.agent_run_id)
-                    recovery = self._archive_for_run(PersistenceDomain.CHECKPOINT, checkpoint.agent_run_id)
-                    recovery_run = self._staging.get_agent_run_local(checkpoint.agent_run_id)
-                    recovery_interactions_snapshot = self._staging.capture_interactions_local(checkpoint.agent_run_id)
-                    if recovery is not None:
-                        flight = self._install_durability_flight_locked(
-                            checkpoint.agent_run_id,
-                            _AgentRunDurabilityKind.CHECKPOINT,
-                        )
-            if completion is not None:
-                await asyncio.shield(completion)
-                continue
-            if recovery is None:
-                async with self._history_lock.hold(checkpoint.agent_run_id):
                     self._trim_checkpoint_staging_locked(checkpoint.agent_run_id)
-                return
-            if recovery_run is None or flight is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-
-            prepared_interactions: tuple[ModelInteractionRecord, ...] = ()
-            prepared_checkpoint: PreparedAgentRunCheckpoint | None = None
-            published_sequence: int | None = None
-            cancellation_requested = False
-            committed_checkpoint_records: Mapping[bytes, StoredRecord] | None = None
-
-            async def operation(
-                target_recovery: AgentRunStore = recovery,
-                target_agent_run: AgentRunRecord = recovery_run,
-                target_checkpoint: AgentRunCheckpoint = checkpoint,
-            ) -> None:
-                nonlocal prepared_interactions, prepared_checkpoint, published_sequence, cancellation_requested
-                nonlocal committed_checkpoint_records
-                committed_checkpoint_records = None
-                published_sequence = None
-                if isinstance(target_recovery, StateStepArchive):
-                    prepared_checkpoint, prepared_interactions, published_sequence = await self.checkpoint_persistence.prepare_checkpoint(
-                        target_recovery, target_agent_run, target_checkpoint, recovery_interactions_snapshot,
-                    )
-                    async def commit(transaction: StateTransaction) -> None:
-                        nonlocal published_sequence
-                        await target_recovery.transcript_repository.publish_archive(prepared_checkpoint.archive)
-                        sequence = await target_recovery.materialize_checkpoint_in_transaction(
-                            transaction, target_agent_run, prepared_checkpoint,
-                        )
-                        if sequence is not None:
-                            published_sequence = sequence
-                        if prepared_interactions:
-                            await target_recovery.sync_projection_in_transaction(
-                                transaction, target_agent_run, events=(), checkpoints=(),
-                                interactions=prepared_interactions,
-                            )
-                    if execution is not None:
-                        stores = (execution.state_store, target_recovery.state_store)
-                        publication_records = {}
-                        if isinstance(execution.state_store.storage_group, GroupRecordReader):
-                            publication_records = await target_recovery.checkpoint_publication_record_keys(
-                                target_agent_run, prepared_checkpoint,
-                                **({"interactions": prepared_interactions}
-                                   if type(target_recovery).checkpoint_publication_record_keys
-                                   is ModelInteractionStateStepArchive.checkpoint_publication_record_keys else {}),
-                            )
-                            stores = tuple(dict.fromkeys((*stores, *publication_records)))
-
-                        publication_snapshot: Mapping[bytes, StoredRecord] | None = None
-
-                        async def guarded_commit(group: StateGroupTransaction) -> None:
-                            nonlocal cancellation_requested, publication_snapshot
-                            try:
-                                await execution.require_open_history_head_in_transaction(
-                                    group.transaction(execution.state_store), execution_id,
-                                    expected_producer_generation=producer_generation,
-                                    allow_cancelling=checkpoint.state == "interrupted",
-                                )
-                            except AIError as error:
-                                if error.code is ErrorCode.EXECUTION_CANCELLED:
-                                    cancellation_requested = True
-                                raise
-                            if publication_records and isinstance(group, GroupRecordReader):
-                                await group.get_records(publication_records)
-                            await commit(group.transaction(target_recovery.state_store))
-                            if publication_records and isinstance(group, GroupRecordReader):
-                                captured = await group.get_records({
-                                    target_recovery.state_store: publication_records[target_recovery.state_store],
-                                })
-                                publication_snapshot = captured[target_recovery.state_store]
-
-                        await execution.state_store.storage_group.mutate(
-                            stores, guarded_commit,
-                        )
-                        committed_checkpoint_records = publication_snapshot
-                    else:
-                        await target_recovery.state_store.mutate(commit)
                     return
-                await _materialize_checkpoint(
-                    target_recovery,
-                    target_agent_run,
-                    target_checkpoint,
-                )
-
-            async def readback(
-                target_recovery: AgentRunStore = recovery,
-                target_agent_run: AgentRunRecord = recovery_run,
-                target_checkpoint: AgentRunCheckpoint = checkpoint,
-            ) -> CommitObservation[None]:
-                try:
-                    observed_run = await target_recovery.get_agent_run(
-                        agent_run_id=target_checkpoint.agent_run_id
-                    )
-                    if isinstance(target_recovery, StateStepArchive):
-                        sequence = published_sequence
-                        if sequence is None and prepared_checkpoint is not None:
-                            sequence, _ = await target_recovery.capture_checkpoint_progress(
-                                agent_run_id=target_checkpoint.agent_run_id, checkpoint=prepared_checkpoint,
-                            )
-                        checkpoint_visible = prepared_checkpoint is not None and sequence is not None and (
-                            await target_recovery.verify_checkpoint_range(
-                                agent_run_id=target_checkpoint.agent_run_id,
-                                after_sequence=sequence - 1,
-                                checkpoints=(prepared_checkpoint,),
-                            )
-                        )
-                        if checkpoint_visible and prepared_interactions:
-                            observed_interactions = await target_recovery.list_model_interactions(
-                                agent_run_id=target_agent_run.agent_run_id,
-                                after_model_request_seq=prepared_interactions[0].model_request_seq - 1,
-                                limit=len(prepared_interactions),
-                            )
-                            checkpoint_visible = tuple(observed_interactions) == prepared_interactions
-                    else:
-                        observed_checkpoint = await target_recovery.latest_checkpoint(
-                            agent_run_id=target_checkpoint.agent_run_id,
-                            include_interrupted=True,
-                        )
-                        checkpoint_visible = _relocated_checkpoint_matches(
-                            PersistenceDomain.CHECKPOINT,
-                            target_checkpoint,
-                            observed_checkpoint,
-                        )
-                except AIError as error:
-                    return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-                if observed_run == target_agent_run and checkpoint_visible:
-                    return CommitObservation(DurableCommitState.COMMITTED)
-                return CommitObservation(DurableCommitState.NOT_COMMITTED)
-
-            await self._settle_durability_flight(flight, operation, readback)
-            if isinstance(recovery, StateStepArchive) and prepared_checkpoint is not None:
-                if type(recovery).confirm_checkpoint_prefix is StateStepArchive.confirm_checkpoint_prefix:
-                    recovery.confirm_checkpoint_prefix(
-                        checkpoint, prepared_checkpoint, records=committed_checkpoint_records,
-                    )
-                else:
-                    recovery.confirm_checkpoint_prefix(checkpoint, prepared_checkpoint)
-            async with self._history_lock.hold(checkpoint.agent_run_id):
-                self._checkpoint_acknowledged[checkpoint.agent_run_id] = max(
-                    self._checkpoint_acknowledged.get(checkpoint.agent_run_id, 0), staged_checkpoint_offset,
-                )
-                self._trim_checkpoint_staging_locked(checkpoint.agent_run_id)
-            if cancellation_requested:
-                raise AIError(ErrorCode.EXECUTION_CANCELLED)
-            return
+                completion = existing.completion
+            await asyncio.shield(completion)
 
     async def _require_active_execution_producer(
         self, *, agent_run_id: str, execution_id: str, producer_generation: int,
@@ -634,44 +516,58 @@ class RuntimeAgentRunStore(AgentRunStore):
         if repository is None or self._tenant_id is None:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
-        async def read(
-            _transaction: StateTransaction,
-        ) -> tuple[ExecutionRecord | None, ExecutionHistoryHeadRecord | None]:
-            head = await repository.get_history_head(execution_id, tenant_id=self._tenant_id)
-            execution = await repository.get(execution_id, tenant_id=self._tenant_id)
-            return execution, head
-
-        _conversation, restart, _trace = self.execution_persistence(agent_run_id)
-        if not authoritative and not restart and type(repository) is ExecutionRepositoryImpl:
-            execution, head = await repository.observe_execution_control(execution_id, tenant_id=self._tenant_id)
-        else:
-            execution, head = await repository.state_store.read(read)
-        if head is None or execution is None:
+        execution = (await repository.get_fresh(execution_id, tenant_id=self._tenant_id)
+                     if authoritative and isinstance(repository, ExecutionRepositoryImpl) else
+                     await repository.get(execution_id, tenant_id=self._tenant_id))
+        if execution is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if (head.state is not ExecutionHistoryState.OPEN
-                or head.producer_generation != producer_generation):
+        if execution.producer_generation != producer_generation:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         if execution.status is ExecutionStatus.CANCELLING and not allow_cancelling:
             raise AIError(ErrorCode.EXECUTION_CANCELLED)
-        if execution.status not in {
-            ExecutionStatus.STARTED, ExecutionStatus.CANCELLING, ExecutionStatus.FINALIZING,
-        }:
+        allowed = ({ExecutionStatus.STARTED, ExecutionStatus.CANCELLING, ExecutionStatus.FINALIZING}
+                   if allow_cancelling else {ExecutionStatus.STARTED})
+        if execution.status not in allowed:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
 
 
     async def latest_checkpoint(self, *, agent_run_id: str, include_interrupted: bool = False) -> AgentRunCheckpoint | None:
         await self._ensure_business()
-        if self.trace_persistence.failed_admission_settled(agent_run_id):
-            for domain in (PersistenceDomain.CHECKPOINT, PersistenceDomain.TRACE):
-                archive = self._archive_for_run(domain, agent_run_id)
-                if archive is not None:
-                    checkpoint = await archive.latest_checkpoint(
-                        agent_run_id=agent_run_id, include_interrupted=include_interrupted,
-                    )
-                    if checkpoint is not None:
-                        return checkpoint
+        if not self.execution_persistence(agent_run_id)[1]:
+            return await self._staging.latest_checkpoint(
+                agent_run_id=agent_run_id, include_interrupted=include_interrupted,
+            )
+        return await self.checkpoint_persistence.reader.latest_checkpoint(
+            agent_run_id=agent_run_id, include_interrupted=include_interrupted,
+        )
+
+    async def conversation_checkpoint(
+        self, *, agent_run_id: str, include_interrupted: bool = False,
+    ) -> AgentRunCheckpoint | None:
+        """Publish Conversation's observations without inventing native transcript data."""
+        staged = await self._staging.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=include_interrupted)
+        if not self.execution_persistence(agent_run_id)[1]:
+            return staged
+        if staged is None or staged.context_messages is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        reader = self.checkpoint_persistence.reader
+        native_run = await reader.get_run(run_id=agent_run_id)
+        snapshot = await reader.latest_snapshot(run_id=agent_run_id, include_interrupted=include_interrupted)
+        if snapshot is None:
             return None
-        return await self._staging.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=include_interrupted)
+        if native_run is None or native_run.run_id != snapshot.run_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        checkpoint = reader.project_checkpoint(native_run, snapshot, include_transcript=False)
+        try:
+            messages = reader.project_checkpoint(native_run, snapshot).messages
+        except AIError as error:
+            if error.code is not ErrorCode.EXECUTION_HISTORY_UNAVAILABLE:
+                raise
+            # Sticky processors may remove the earlier native run's occurrences.
+            # Conversation still owns its actual current observations; these do
+            # not claim to reconstruct any deleted historical prefix.
+            messages = staged.messages
+        return replace(checkpoint, messages=messages, context_messages=staged.context_messages, idempotency_key=None)
 
     def stage_transcript(self, agent_run_id: str, transcript: StagedTranscript) -> None:
         self._staging.stage_transcript(agent_run_id, transcript)
@@ -750,7 +646,7 @@ class RuntimeAgentRunStore(AgentRunStore):
     async def model_interaction_count(self, *, agent_run_id: str) -> int:
         await self._ensure_business()
         high_water = await self._staging.model_interaction_count(agent_run_id=agent_run_id)
-        for domain in (PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT):
+        for domain in (PersistenceDomain.TRACE,):
             archive = self._archive_for_run(domain, agent_run_id)
             if archive is not None:
                 high_water = max(high_water, await archive.model_interaction_count(agent_run_id=agent_run_id))
@@ -893,7 +789,9 @@ class RuntimeAgentRunStore(AgentRunStore):
             values, include_client_requests=include_client_requests, include_content=include_content,
         )
 
-    def read_store(self, runtime_domain: PersistenceDomain, *, durable: bool = True) -> AgentRunStore:
+    def read_store(self, runtime_domain: PersistenceDomain, *, durable: bool = True) -> AgentRunStore | OfficialStepReader:
+        if runtime_domain is PersistenceDomain.CHECKPOINT:
+            return self.checkpoint_persistence.reader
         if not durable or runtime_domain not in self._archives:
             return self._staging
         return self._archives[runtime_domain]
@@ -903,6 +801,8 @@ class RuntimeAgentRunStore(AgentRunStore):
         runtime_domain: PersistenceDomain,
         owner_id: str,
     ) -> LoadedModelContext:
+        if runtime_domain is PersistenceDomain.CHECKPOINT:
+            return await self.checkpoint_persistence.reader.load_loaded_model_context(owner_id=owner_id)
         archive = self._archives.get(runtime_domain)
         if archive is None:
             archive = self._staging
@@ -932,10 +832,14 @@ class RuntimeAgentRunStore(AgentRunStore):
 
 
 
-    async def materialize_conversation(self, *, agent_run_id: str) -> None:
+    async def materialize_conversation(self, *, agent_run_id: str, include_interrupted: bool = False) -> None:
         run = await self._staging.get_agent_run(agent_run_id=agent_run_id)
-        checkpoint = await self._staging.latest_checkpoint(agent_run_id=agent_run_id)
-        archive = self._archive_for_run(PersistenceDomain.CONVERSATION, agent_run_id)
+        checkpoint = await self.conversation_checkpoint(agent_run_id=agent_run_id, include_interrupted=include_interrupted)
+        # A deferred continuation retains context without publishing session
+        # history or enabling optional Trace/native restart capabilities.
+        archive = (self._archives.get(PersistenceDomain.CONVERSATION)
+                   if include_interrupted and checkpoint is not None and checkpoint.state == "interrupted"
+                   else self._archive_for_run(PersistenceDomain.CONVERSATION, agent_run_id))
         if run is None or checkpoint is None or archive is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if isinstance(archive, StateStepArchive):
@@ -946,256 +850,24 @@ class RuntimeAgentRunStore(AgentRunStore):
         await _materialize_checkpoint(archive, run, checkpoint)
 
     async def materialize_from_recovery(
-        self,
-        *,
-        target: PersistenceDomain,
-        agent_run_id: str,
-        execution_id: str | None = None,
+        self, *, target: PersistenceDomain, agent_run_id: str, execution_id: str | None = None,
     ) -> None:
-        recovery = self._archives.get(PersistenceDomain.CHECKPOINT)
-        destination = self._archives.get(target)
-        producer = self._execution_producers.get(agent_run_id) if target is PersistenceDomain.TRACE else None
-        if recovery is None or destination is None:
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-        run = await recovery.get_agent_run(agent_run_id=agent_run_id)
-        checkpoint = await recovery.latest_checkpoint(
-            agent_run_id=agent_run_id,
-            include_interrupted=target is PersistenceDomain.TRACE,
-        )
-        if run is None or checkpoint is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        """Verify the independent projection published before a durable handoff.
+
+        A native snapshot cannot reconstruct Trace invocations or Conversation's
+        compacted context. Those owners must acknowledge their own publications.
+        """
+        if target not in {PersistenceDomain.TRACE, PersistenceDomain.CONVERSATION}:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if target is PersistenceDomain.TRACE and execution_id is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        while True:
-            completion: asyncio.Future[None] | None = None
-            flight: _AgentRunDurabilityFlight | None = None
-            async with self._history_lock.hold(agent_run_id):
-                existing = self._durability_flights.get(agent_run_id)
-                if existing is not None:
-                    completion = existing.completion
-                else:
-                    if target is PersistenceDomain.TRACE:
-                        self._ensure_run_mutable(agent_run_id)
-                    flight = self._install_durability_flight_locked(
-                        agent_run_id,
-                        _AgentRunDurabilityKind.RECOVERY_MATERIALIZATION,
-                    )
-            if completion is not None:
-                await asyncio.shield(completion)
-                continue
-            if flight is None:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-
-            prepared_projection: PreparedAgentRunCheckpointBatch | None = None
-            restored_observation = None
-            try:
-                source_values = await recovery.list_model_interactions(
-                    agent_run_id=agent_run_id
-                )
-                source_interactions = tuple(
-                    value
-                    for value in source_values
-                    if isinstance(value, ModelInteractionRecord)
-                )
-                if len(source_interactions) != len(source_values):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                async def resolve_for_target(archive: AgentRunStore, interactions: Sequence[ModelInteractionRecord]):
-                    # Recovery compares attempt metadata; existing Trace bodies
-                    # remain owned by Trace and cannot be reconstructed here.
-                    projections = await archive.resolve_model_interactions(interactions)
-                    return tuple([
-                        (*projection[:3], await resolve_client_requests(
-                            interaction.client_requests, target, include_bodies=False,
-                        ), None if interaction.stream_attempts is None else tuple(None for _ in interaction.stream_attempts))
-                        for interaction, projection in zip(interactions, projections, strict=True)
-                    ])
-
-                source_resolved = await resolve_for_target(recovery, source_interactions)
-                if not isinstance(destination, (StateStepArchive, InMemoryStepArchive)):
-                    raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-                if isinstance(destination, StateStepArchive):
-                    if target is PersistenceDomain.CONVERSATION:
-                        target_checkpoint, prepared_projection = await destination.prepare_conversation_checkpoint(
-                            run, checkpoint
-                        )
-                    else:
-                        target_checkpoint = await destination.relocate_run_checkpoint(
-                            run, checkpoint
-                        )
-                else:
-                    local_message_count = await destination.transcript_message_count(
-                        agent_run_id
-                    )
-                    if local_message_count > len(checkpoint.messages):
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    target_checkpoint = replace(
-                        checkpoint,
-                        transcript_message_count_before=local_message_count,
-                    )
-                interaction_archive = PreparedArchive()
-                relocated = await destination.prepare_relocated_interactions(
-                    source_interactions, source_resolved, prepared=interaction_archive,
-                )
-                existing_values = await destination.list_model_interactions(
-                    agent_run_id=agent_run_id
-                )
-                existing_interactions = tuple(
-                    value
-                    for value in existing_values
-                    if isinstance(value, ModelInteractionRecord)
-                )
-                if len(existing_interactions) != len(existing_values):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                existing_by_sequence = {
-                    value.model_request_seq: value for value in existing_interactions
-                }
-                source_by_sequence = {
-                    value.model_request_seq: (value, resolved)
-                    for value, resolved in zip(
-                        source_interactions,
-                        source_resolved,
-                        strict=True,
-                    )
-                }
-                if len(existing_by_sequence) != len(existing_interactions):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                missing_relocated: list[ModelInteractionRecord] = []
-                for value in relocated:
-                    existing_value = existing_by_sequence.get(
-                        value.model_request_seq
-                    )
-                    if existing_value is None:
-                        missing_relocated.append(value)
-                        continue
-                    source_value, source_projection = source_by_sequence[
-                        value.model_request_seq
-                    ]
-                    existing_projection = (
-                        await resolve_for_target(destination, (existing_value,))
-                    )[0]
-                    if existing_value.status == "RUNNING" and source_value.status != "RUNNING":
-                        if existing_value.request_context is not None:
-                            if (existing_projection[0], existing_projection[2]) != (source_projection[0], source_projection[2]):
-                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                            value = replace(
-                                value, request_context=existing_value.request_context,
-                                request_envelope=existing_value.request_envelope,
-                            )
-                        existing_value.validate_successor(value)
-                        missing_relocated.append(value)
-                    elif (
-                        _interaction_semantic_header(existing_value) != _interaction_semantic_header(source_value)
-                        or existing_projection != source_projection
-                    ):
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                relocated = tuple(missing_relocated)
-                checkpoint_published = _relocated_checkpoint_matches(
-                    target, checkpoint, await destination.latest_checkpoint(
-                        agent_run_id=agent_run_id, include_interrupted=True,
-                    ),
-                )
-                if checkpoint_published and not relocated:
-                    await self._finalize_durability_flight(flight)
-                    return
-                if target is PersistenceDomain.TRACE and isinstance(destination, StateStepArchive):
-                    public_head = await destination.transcript_repository.get_head(agent_run_id)
-                    published_count = 0 if public_head is None else public_head.message_count
-                    if published_count < len(target_checkpoint.messages):
-                        restored_observation = await destination.transcript_repository.prepare_observation(
-                            agent_run_id, target_checkpoint.messages[published_count:],
-                            first_message_index=published_count, pending=None, pending_keys=(),
-                        )
-                        prepared_projection = await destination.prepare_checkpoints(
-                            run, (target_checkpoint,),
-                            observed_message_count=restored_observation.target_message_count,
-                        )
-            except BaseException:
-                await self._abandon_durability_flight(flight)
-                raise
-
-            async def operation() -> None:
-                async def publish() -> None:
-                    if prepared_projection is not None and isinstance(destination, StateStepArchive):
-                        await destination.sync_prepared_projection(
-                            run, events=(), checkpoints=(
-                                () if target is PersistenceDomain.CONVERSATION and checkpoint_published
-                                else prepared_projection.checkpoints
-                            ),
-                            interactions=relocated, observation=restored_observation, execution_id=execution_id,
-                            archive=interaction_archive,
-                        )
-                    else:
-                        await destination.sync_projection(
-                            run, events=(), checkpoints=() if checkpoint_published else (target_checkpoint,),
-                            interactions=relocated, execution_id=execution_id, archive=interaction_archive,
-                        )
-
-                if target is PersistenceDomain.TRACE and isinstance(destination, StateStepArchive) and producer is not None:
-                    if producer[0] != execution_id:
-                        raise AIError(ErrorCode.STORAGE_CONFLICT)
-                    async def guarded_publish(group: StateGroupTransaction) -> None:
-                        await destination.guard_execution_producer(
-                            group.transaction(destination.state_store),
-                            execution_id=producer[0], producer_generation=producer[1],
-                        )
-                        await publish()
-                    await destination.state_store.storage_group.mutate(destination.transaction_stores, guarded_publish)
-                else:
-                    await publish()
-
-            async def readback() -> CommitObservation[None]:
-                try:
-                    observed_run = await destination.get_agent_run(agent_run_id=run.agent_run_id)
-                    observed_checkpoint = await destination.latest_checkpoint(
-                        agent_run_id=run.agent_run_id,
-                        include_interrupted=True,
-                    )
-                    observed_values = await destination.list_model_interactions(
-                        agent_run_id=run.agent_run_id
-                    )
-                    observed_interactions = tuple(
-                        value
-                        for value in observed_values
-                        if isinstance(value, ModelInteractionRecord)
-                    )
-                    if len(observed_interactions) != len(observed_values):
-                        return CommitObservation(
-                            DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                            error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
-                        )
-                    observed_by_sequence = {value.model_request_seq: value for value in observed_interactions}
-                    observed_interactions = tuple(
-                        observed_by_sequence[value.model_request_seq]
-                        for value in source_interactions if value.model_request_seq in observed_by_sequence
-                    )
-                    observed_resolved = tuple(
-                        await resolve_for_target(destination, observed_interactions)
-                    )
-                except AIError as error:
-                    return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-                checkpoint_matches = _relocated_checkpoint_matches(
-                    target,
-                    checkpoint,
-                    observed_checkpoint,
-                )
-                if (
-                    observed_run == run
-                    and checkpoint_matches
-                    and tuple(
-                        _interaction_semantic_header(value)
-                        for value in observed_interactions
-                    )
-                    == tuple(
-                        _interaction_semantic_header(value)
-                        for value in source_interactions
-                    )
-                    and observed_resolved == source_resolved
-                ):
-                    return CommitObservation(DurableCommitState.COMMITTED)
-                return CommitObservation(DurableCommitState.NOT_COMMITTED)
-
-            await self._settle_durability_flight(flight, operation, readback)
-            return
+        destination = self._archives.get(target)
+        if destination is None:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        run = await destination.get_agent_run(agent_run_id=agent_run_id)
+        checkpoint = await destination.latest_checkpoint(agent_run_id=agent_run_id)
+        if run is None or checkpoint is None or checkpoint.state != "complete":
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     def trace_buffer_failure_settled(
         self, agent_run_id: str, *, execution_id: str, producer_generation: int,
@@ -1592,8 +1264,6 @@ class RuntimeAgentRunStore(AgentRunStore):
         frontier = self._staging.checkpoint_count_local(agent_run_id)
         if self._archive_for_run(PersistenceDomain.TRACE, agent_run_id) is not None:
             frontier = min(frontier, self.trace_persistence.offsets.get(agent_run_id, _ProjectionOffset()).checkpoints)
-        if self._archive_for_run(PersistenceDomain.CHECKPOINT, agent_run_id) is not None:
-            frontier = min(frontier, self._checkpoint_acknowledged.get(agent_run_id, 0))
         self._staging.trim_checkpoints_local(agent_run_id, checkpoint_offset=frontier)
 
     def _capture_projection_checkpoint_locked(
@@ -1613,39 +1283,74 @@ class RuntimeAgentRunStore(AgentRunStore):
     async def capture_agent_run_checkpoint_payload(
         self, agent_run_id: str, *, execution_id: str, producer_generation: int,
         include_interrupted: bool = False,
-    ) -> bytes:
-        """Freeze only the run and latest checkpoint for a pending source boundary."""
+    ) -> bytes | None:
+        """Capture only an official snapshot reference for terminal admission."""
         await self._ensure_business()
         async with self._history_lock.hold(agent_run_id):
             self._ensure_run_mutable(agent_run_id)
             if (self._execution_producers.get(agent_run_id) != (execution_id, producer_generation)
                     or self.trace_persistence.failed_admission_settled(agent_run_id)):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            run = self._staging.get_agent_run_local(agent_run_id)
-            if run is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            checkpoint = self._staging.latest_checkpoint_local(agent_run_id, include_interrupted=include_interrupted)
-            checkpoints = () if checkpoint is None else (checkpoint,)
-            return encode_projection_payload(CapturedExecutionProjection(
-                run, (), checkpoints, 0, 0, 0, len(checkpoints), (), 0, 0,
-                None, 0, 0, producer_generation, (), (),
-            ))
+            if not self.execution_persistence(agent_run_id)[1]:
+                run = self._staging.get_agent_run_local(agent_run_id)
+                if run is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                checkpoint = self._staging.latest_checkpoint_local(agent_run_id, include_interrupted=include_interrupted)
+                checkpoints = () if checkpoint is None else (checkpoint,)
+                return encode_projection_payload(CapturedExecutionProjection(
+                    run, (), checkpoints, 0, 0, 0, len(checkpoints), (), 0, 0,
+                    None, 0, 0, producer_generation, (), (),
+                ))
+            snapshot = await self.checkpoint_persistence.reader.latest_snapshot(
+                run_id=agent_run_id, include_interrupted=include_interrupted,
+            )
+            if snapshot is None:
+                return None
+            return canonical_json_bytes({
+                "format": "step-snapshot-reference", "run_id": agent_run_id,
+                "producer_generation": producer_generation,
+                "snapshot_key": snapshot.idempotency_key, "snapshot_state": snapshot.state,
+            })
 
-    def decode_agent_run_checkpoint_payload(
+    async def decode_agent_run_checkpoint_payload(
         self, content: bytes, *, agent_run_id: str, producer_generation: int,
     ) -> tuple[AgentRunRecord, AgentRunCheckpoint | None]:
-        """Restore a buffer-owned checkpoint without looking up mutable staging."""
-        captured = decode_projection_payload(content)
-        if (captured.run.agent_run_id != agent_run_id
-                or captured.producer_generation != producer_generation
-                or captured.events or captured.interactions or captured.payloads or captured.local_messages
-                or captured.transcript is not None or len(captured.checkpoints) > 1
-                or (captured.base_event_offset, captured.target_event_offset,
-                    captured.base_checkpoint_offset, captured.base_interaction_offset,
-                    captured.target_interaction_offset, captured.base_message_index,
-                    captured.target_message_index) != (0, 0, 0, 0, 0, 0, 0)):
+        """Resolve a captured reference against its sole official snapshot owner."""
+        if not self.execution_persistence(agent_run_id)[1]:
+            projection = decode_projection_payload(content)
+            if (projection.run.agent_run_id != agent_run_id
+                    or projection.producer_generation != producer_generation
+                    or projection.events or projection.interactions or projection.payloads or projection.local_messages
+                    or projection.transcript is not None or len(projection.checkpoints) > 1
+                    or (projection.base_event_offset, projection.target_event_offset,
+                        projection.base_checkpoint_offset, projection.base_interaction_offset,
+                        projection.target_interaction_offset, projection.base_message_index,
+                        projection.target_message_index) != (0, 0, 0, 0, 0, 0, 0)):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return projection.run, None if not projection.checkpoints else projection.checkpoints[0]
+        try:
+            captured = json.loads(content)
+            if (not isinstance(captured, dict) or set(captured) != {
+                "format", "run_id", "producer_generation", "snapshot_key", "snapshot_state",
+            } or captured["format"] != "step-snapshot-reference"
+                    or captured["run_id"] != agent_run_id
+                    or type(captured["producer_generation"]) is not int
+                    or captured["producer_generation"] != producer_generation):
+                raise ValueError("invalid snapshot reference")
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        reader = self.checkpoint_persistence.reader
+        run = await reader.get_agent_run(agent_run_id=agent_run_id)
+        # A terminal reference verifies native context/state, never demands a
+        # raw transcript. Conversation has already selected its own observations.
+        checkpoint = await reader.latest_checkpoint(
+            agent_run_id=agent_run_id, include_interrupted=captured["snapshot_state"] == "interrupted",
+            include_transcript=False,
+        )
+        if (run is None or captured["snapshot_key"] != (None if checkpoint is None else checkpoint.idempotency_key)
+                or captured["snapshot_state"] != (None if checkpoint is None else checkpoint.state)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return captured.run, None if not captured.checkpoints else captured.checkpoints[0]
+        return run, checkpoint
 
     async def capture_buffered_execution_projection(
         self, agent_run_id: str, *, execution_id: str, producer_generation: int | None,
@@ -1801,6 +1506,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         captured: CapturedExecutionProjection,
         *,
         target_transcript_message_count: int | None = None,
+        request_projection: ContextProjection | None = None,
     ) -> None:
         """FINALIZE: advance offsets and clear dirty state after durable success."""
         async with self._history_lock.hold(flight.agent_run_id):
@@ -1811,6 +1517,8 @@ class RuntimeAgentRunStore(AgentRunStore):
                 flight.agent_run_id,
                 _ProjectionOffset(),
             )
+            if request_projection is not None:
+                offset.request_projection = request_projection
             offset.events = max(offset.events, captured.target_event_offset)
             offset.checkpoints = max(offset.checkpoints, captured.target_checkpoint_offset)
             offset.interactions = max(
@@ -1977,6 +1685,9 @@ class RuntimeAgentRunStore(AgentRunStore):
                 local_message_count=local_count,
                 local_messages=captured.local_messages,
                 prepared=interaction_archive,
+                baseline=self.trace_persistence.offsets.get(
+                    captured.run.agent_run_id, _ProjectionOffset(),
+                ).request_projection,
             )
             checkpoint_values, observation, interaction_archive = archive.combine_projection_archives(
                 prepared.checkpoints, observation, interaction_archive,
@@ -2094,6 +1805,8 @@ class RuntimeAgentRunStore(AgentRunStore):
                 flight,
                 captured,
                 target_transcript_message_count=result.value.transcript_message_count,
+                request_projection=next((value.request_context for value in reversed(interactions)
+                                         if value.request_context is not None), None),
             )
             if result.cancelled:
                 raise asyncio.CancelledError
@@ -2241,15 +1954,9 @@ class RuntimeAgentRunStore(AgentRunStore):
         for agent_run_id in dict.fromkeys(candidate_agent_run_ids):
             if required_agent_run_id != agent_run_id:
                 continue
-            checkpoint = await self._staging.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=True)
-            if checkpoint is None:
-                for archive in self._archives.values():
-                    checkpoint = await archive.latest_checkpoint(
-                        agent_run_id=agent_run_id,
-                        include_interrupted=True,
-                    )
-                    if checkpoint is not None:
-                        break
+            checkpoint = (await self.checkpoint_persistence.reader.latest_snapshot(run_id=agent_run_id, include_interrupted=True)
+                          if self.execution_persistence(agent_run_id)[1]
+                          else await self.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=True))
             if checkpoint is None or checkpoint.state != "complete":
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -2294,8 +2001,7 @@ class RuntimeAgentRunStore(AgentRunStore):
 
         async def require_absent(_transaction: StateTransaction) -> None:
             execution = await repository.get(execution_id, tenant_id=self._tenant_id)
-            head = await repository.get_history_head(execution_id, tenant_id=self._tenant_id)
-            if execution is not None or head is not None:
+            if execution is not None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
 
         await repository.state_store.read(require_absent)
@@ -2319,18 +2025,21 @@ class RuntimeAgentRunStore(AgentRunStore):
     async def discard_revoked_producer_staging(
         self, agent_run_id: str, *, execution_id: str, producer_generation: int,
         terminal_execution: ExecutionRecord | None = None,
+        terminal_publication: ExecutionTerminalPublication | None = None,
         settle_cleanup: bool = False,
     ) -> None:
         """Release a quiescent producer's uncommitted tail after revocation proof."""
         await self._settle_observation_boundary(self._discard_revoked_producer_staging(
             agent_run_id, execution_id=execution_id, producer_generation=producer_generation,
             terminal_execution=terminal_execution,
+            terminal_publication=terminal_publication,
             settle_cleanup=settle_cleanup,
         ))
 
     async def _discard_revoked_producer_staging(
         self, agent_run_id: str, *, execution_id: str, producer_generation: int,
         terminal_execution: ExecutionRecord | None = None,
+        terminal_publication: ExecutionTerminalPublication | None = None,
         settle_cleanup: bool = False,
     ) -> None:
         await self._ensure_business()
@@ -2350,6 +2059,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         await archive.require_revoked_execution_producer(
             execution_id=execution_id, producer_generation=producer_generation,
             terminal_execution=terminal_execution,
+            terminal_publication=terminal_publication,
         )
         await self.trace_persistence.discard(agent_run_id)
         if settle_cleanup:
@@ -2387,10 +2097,15 @@ class RuntimeAgentRunStore(AgentRunStore):
                         self._publish_model_interaction_change(agent_run_id)
                         self._staging.release_agent_run_local(agent_run_id)
                         producer = self._execution_producers.pop(agent_run_id, None)
+                        self._step_boundaries.pop(agent_run_id, None)
+                        self._step_boundary_guards.pop(agent_run_id, None)
+                        self._atomic_step_runs.discard(agent_run_id)
+                        self.invalidate_step_run(agent_run_id)
                         if producer is not None and self.capability_writes is not None:
                             self.capability_writes.release_run(agent_run_id, producer[0])
                         self._execution_persistence.pop(agent_run_id, None)
-                        self._checkpoint_acknowledged.pop(agent_run_id, None)
+                        self._checkpoint_transcript_starts.pop(agent_run_id, None)
+                        self._checkpoint_transcript_runs.pop(agent_run_id, None)
                         self.trace_persistence.offsets.pop(agent_run_id, None)
                         self.trace_persistence.release(agent_run_id)
                         self.trace_persistence.dirty.discard(agent_run_id)
@@ -2643,6 +2358,12 @@ class RuntimeAgentRunStore(AgentRunStore):
         for subscriptions in tuple(self._model_interaction_subscriptions.values()):
             for subscription in tuple(subscriptions):
                 await subscription.close()
+        self.checkpoint_persistence.reader.clear_confirmed_runs()
+        self._step_boundaries.clear()
+        self._step_boundary_guards.clear()
+        self._atomic_step_runs.clear()
+        self._checkpoint_transcript_starts.clear()
+        self._checkpoint_transcript_runs.clear()
         await self._staging.close()
         for archive in self._archives.values():
             await archive.close()
@@ -2653,24 +2374,6 @@ class RuntimeAgentRunStore(AgentRunStore):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
 
-def _relocated_checkpoint_matches(
-    target: PersistenceDomain,
-    source: AgentRunCheckpoint,
-    observed: AgentRunCheckpoint | None,
-) -> bool:
-    if observed is None:
-        return False
-    if target is PersistenceDomain.CONVERSATION:
-        return _conversation_relocated_checkpoint_matches(source, observed)
-    return replace(
-        observed,
-        transcript_message_count_before=None,
-    ) == replace(
-        source,
-        transcript_message_count_before=None,
-    )
-
-
 def _agent_run_identity(run: AgentRunRecord) -> tuple[object, ...]:
     return (
         run.agent_run_id,
@@ -2679,29 +2382,6 @@ def _agent_run_identity(run: AgentRunRecord) -> tuple[object, ...]:
         run.agent_id,
         tuple(sorted(run.metadata.items())),
     )
-
-
-def _interaction_semantic_header(
-    interaction: ModelInteractionRecord,
-) -> tuple[object, ...]:
-    return (
-        interaction.agent_run_id,
-        interaction.step_index,
-        interaction.model_request_seq,
-        interaction.purpose,
-        interaction.output_retry_index,
-        tuple(sorted(interaction.model.items())),
-        interaction.status,
-        interaction.error_code,
-        interaction.duration_ns,
-        interaction.usage,
-        interaction.attachments,
-        None if interaction.stream_attempts is None else tuple(
-            replace(attempt, response_context=None) for attempt in interaction.stream_attempts
-        ),
-    )
-
-
 
 
 from ._archive import ArchiveRoot, ContentArchive
@@ -2719,4 +2399,4 @@ from ._model_interaction_store import ModelInteractionStateStepArchive
 from ._step_contracts import AgentRunHistoryCapture, CheckpointState, StepEventType, TOOL_ERROR_CODE_METADATA_KEY
 from ._views import SESSION_HISTORY_VIEW_V1, project_execution_transcript_message, project_session_history_message
 
-__all__ = ['AgentRunCheckpoint', 'AgentRunHistoryCapture', 'AgentRunRecord', 'AgentRunStore', 'ArchiveFrontierReader', 'ArchiveNodeRead', 'ArchiveNodeSlot', 'ArchiveRoot', 'CheckpointPersistence', 'CheckpointState', 'ContentArchive', 'ConversationPersistence', 'ExecutionProjectionBatch', 'ExecutionTerminalSealPlan', 'InMemoryStepArchive', 'LockOrderError', 'ModelInteractionStateStepArchive', 'PreparedAgentRunCheckpoint', 'PreparedAgentRunCheckpointBatch', 'PreparedArchive', 'PreparedExecutionProjection', 'RuntimeAgentRunStore', 'SESSION_HISTORY_VIEW_V1', 'StagedContextProjection', 'StagedContextSpan', 'StagedModelInteraction', 'StagedStreamAttemptRecord', 'StagedTranscript', 'StagingAgentRunStore', 'StateStepArchive', 'StepEvent', 'StepEventType', 'TOOL_ERROR_CODE_METADATA_KEY', 'TracePersistence', 'build_context_projection', 'build_inline_context_projection', 'model_identity', 'project_execution_transcript_message', 'project_public_messages', 'project_session_history_message', 'request_envelope']
+__all__ = ['AgentRunCheckpoint', 'AgentRunHistoryCapture', 'AgentRunRecord', 'AgentRunStore', 'ArchiveFrontierReader', 'ArchiveNodeRead', 'ArchiveNodeSlot', 'ArchiveRoot', 'CheckpointPersistence', 'CheckpointState', 'ContentArchive', 'ConversationPersistence', 'ExecutionProjectionBatch', 'ExecutionTerminalSealPlan', 'InMemoryStepArchive', 'LockOrderError', 'ModelInteractionStateStepArchive', 'OfficialStepReader', 'PreparedAgentRunCheckpoint', 'PreparedAgentRunCheckpointBatch', 'PreparedArchive', 'PreparedExecutionProjection', 'RuntimeAgentRunStore', 'SESSION_HISTORY_VIEW_V1', 'StagedContextProjection', 'StagedContextSpan', 'StagedModelInteraction', 'StagedStreamAttemptRecord', 'StagedTranscript', 'StagingAgentRunStore', 'StateStepArchive', 'StepEvent', 'StepEventType', 'TOOL_ERROR_CODE_METADATA_KEY', 'TracePersistence', 'build_context_projection', 'build_inline_context_projection', 'model_identity', 'project_execution_transcript_message', 'project_public_messages', 'project_session_history_message', 'request_envelope']

@@ -15,6 +15,7 @@ from linktools.ai.persistence import Persistence, runs as _steps, _trace_persist
 from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent
 from linktools.ai.persistence._transcript_staging import StagedTranscript
 
+from ._runtime_test_helpers import native_checkpoint, seed_native_snapshot
 from .test_incremental_projection_boundaries import _storage
 from .test_step_projection import _execution
 
@@ -31,15 +32,14 @@ async def _setup(tmp_path: Path, backend: str, *, cache=_DEFAULT_CACHE):
     )
     execution = replace(_execution(), revision=1)
     repository = state.execution.executions
-    await repository.create_with_history_head(execution)
-    await repository.state_store.mutate(
-        lambda transaction: repository.admit_history_producer_in_transaction(transaction, execution)
-    )
+    execution = replace(execution, producer_generation=1)
+    await repository.create_execution(execution)
     state.run_store.trace_persistence.configure(
         "run", buffer=cache if isinstance(cache, WriteBufferBackend) else None,
         batch_size=_trace_persistence.DEFAULT_TRACE_BATCH_SIZE,
         flush_interval=_trace_persistence.DEFAULT_TRACE_FLUSH_INTERVAL,
     )
+    state.run_store.bind_step_store(native_checkpoint().store)
     state.run_store.bind_execution_producer("run", execution_id="execution", producer_generation=1)
     await state.run_store.register_agent_run(AgentRunRecord("run"), execution_id="execution")
     return state
@@ -53,10 +53,8 @@ async def _observe(store, index: int, *, run_id: str = "run", execution_id: str 
 async def _add_run(state, run_id: str, execution_id: str) -> None:
     execution = replace(_execution(), execution_id=execution_id, root_execution_id=execution_id, revision=1)
     repository = state.execution.executions
-    await repository.create_with_history_head(execution)
-    await repository.state_store.mutate(
-        lambda transaction: repository.admit_history_producer_in_transaction(transaction, execution)
-    )
+    execution = replace(execution, producer_generation=1)
+    await repository.create_execution(execution)
     state.run_store.trace_persistence.configure(
         run_id, buffer=state.run_store.trace_persistence._caches["run"],
         batch_size=_trace_persistence.DEFAULT_TRACE_BATCH_SIZE,
@@ -77,13 +75,14 @@ async def test_recovery_checkpoint_keeps_observations_queued_until_public_drain(
     try:
         store = state.run_store
         repository = state.execution.executions
-        before = await repository.get_history_head("execution", tenant_id="tenant")
+        before = await repository.get_observed("execution", tenant_id="tenant")
         archive = store.read_store(PersistenceDomain.TRACE)
         for index in range(8):
             await _observe(store, index)
         assert await archive.list_events(agent_run_id="run") == []
-        message = ModelRequest(parts=[UserPromptPart("one shared boundary")])
+        message = ModelRequest(parts=[UserPromptPart("one shared boundary")], run_id="run")
         if barrier == "checkpoint":
+            await seed_native_snapshot(store.step_store, run_id="run", messages=[message])
             store.stage_transcript("run", StagedTranscript((message,)))
             await store.save_checkpoint(
                 AgentRunCheckpoint("run", 1, [message], transcript_message_count_before=0),
@@ -94,18 +93,18 @@ async def test_recovery_checkpoint_keeps_observations_queued_until_public_drain(
             assert await archive.latest_checkpoint(agent_run_id="run") is None
             assert [item async for item in archive.iter_messages(agent_run_id="run")] == []
             assert await archive.list_events(agent_run_id="run") == []
-            assert await repository.get_history_head("execution", tenant_id="tenant") == before
+            assert await repository.get_observed("execution", tenant_id="tenant") == before
         else:
             await store.preflight_close()
         await store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
         if barrier == "checkpoint":
             saved = await archive.latest_checkpoint(agent_run_id="run")
             assert saved is not None and saved.messages == [message]
-        after = await repository.get_history_head("execution", tenant_id="tenant")
-        assert after.revision == before.revision + 1
+        after = await repository.get_observed("execution", tenant_id="tenant")
+        assert after.storage_revision == before.storage_revision + 1
         assert len(await archive.list_events(agent_run_id="run")) == 8
         await store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
-        assert await repository.get_history_head("execution", tenant_id="tenant") == after
+        assert await repository.get_observed("execution", tenant_id="tenant") == after
     finally:
         await state.close()
 
@@ -258,7 +257,7 @@ async def test_transient_observations_do_not_schedule_durability_tasks() -> None
     store = _steps.RuntimeAgentRunStore(
         StagingAgentRunStore(),
         conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
-        execution_archive=None, checkpoint_archive=None,
+        execution_archive=None,
     )
     await store.initialize()
     try:
@@ -297,26 +296,27 @@ async def test_recovery_checkpoint_does_not_force_a_public_sql_commit(
     event.listen(engine.sync_engine, "before_cursor_execute", changed)
     event.listen(engine.sync_engine, "commit", committed)
     try:
-        message = ModelRequest(parts=[UserPromptPart("one physical publication")])
+        message = ModelRequest(parts=[UserPromptPart("one physical publication")], run_id="run")
         store = state.run_store
+        await seed_native_snapshot(store.step_store, run_id="run", messages=[message])
         store.stage_transcript("run", StagedTranscript((message,)))
         await _observe(store, 1)
         await store.save_checkpoint(
             AgentRunCheckpoint("run", 1, [message], transcript_message_count_before=0),
             execution_id="execution", producer_generation=1,
         )
-        assert commits == 1
+        assert commits == 0
         saved = await store.read_store(PersistenceDomain.CHECKPOINT).latest_checkpoint(agent_run_id="run")
         assert saved is not None and saved.messages == [message]
         public = store.read_store(PersistenceDomain.TRACE)
         assert await public.latest_checkpoint(agent_run_id="run") is None
         assert [item async for item in public.iter_messages(agent_run_id="run")] == []
         await store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
-        assert commits == 2
+        assert commits == 1
         saved = await public.latest_checkpoint(agent_run_id="run")
         assert saved is not None and saved.messages == [message]
         await store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
-        assert commits == 2
+        assert commits == 1
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", changed)
         event.remove(engine.sync_engine, "commit", committed)
@@ -353,9 +353,9 @@ async def test_run_buffers_publish_independently_and_remain_idle_after_drain(
         await state.run_store.flush_execution_projection("other-run", execution_id="other-execution", producer_generation=1)
         assert [event.tool_call_id for event in await archive.list_events(agent_run_id="run")] == ["1"]
         assert [event.tool_call_id for event in await archive.list_events(agent_run_id="other-run")] == ["2"]
-        before = await state.execution.executions.get_history_head("execution", tenant_id="tenant")
+        before = await state.execution.executions.get("execution", tenant_id="tenant")
         await asyncio.sleep(0.12)
-        assert await state.execution.executions.get_history_head("execution", tenant_id="tenant") == before
+        assert await state.execution.executions.get("execution", tenant_id="tenant") == before
         assert not state.run_store._background_tasks
     finally:
         await state.close()
@@ -490,9 +490,9 @@ async def test_buffer_callback_settles_before_release_rebind_or_pressure_drain(
             await store.release_staging_many(candidate_agent_run_ids=("run",), execution_id="execution")
             if change == "rebind":
                 repository = state.execution.executions
-                await repository.state_store.mutate(
-                    lambda tx: repository.admit_history_producer_in_transaction(tx, replace(_execution(), revision=2))
-                )
+                current = await repository.get("execution", tenant_id="tenant")
+                await repository.compare_and_swap("execution", tenant_id="tenant", expected_revision=current.revision,
+                                                  next_record=replace(current, revision=current.revision + 1, producer_generation=2))
                 store.trace_persistence.configure("run", buffer=InMemoryCacheBackend(max_bytes=65536), flush_interval=60.0)
                 store.bind_execution_producer("run", execution_id="execution", producer_generation=2)
                 run = await archive.get_agent_run(agent_run_id="run")
@@ -510,9 +510,9 @@ async def test_buffer_callback_settles_before_release_rebind_or_pressure_drain(
         assert [event.tool_call_id for event in await archive.list_events(agent_run_id="run")] == expected
         assert not store.trace_persistence.dirty
         assert not store._durability_flights
-        before = await state.execution.executions.get_history_head("execution", tenant_id="tenant")
+        before = await state.execution.executions.get("execution", tenant_id="tenant")
         await asyncio.sleep(0.03)
-        assert await state.execution.executions.get_history_head("execution", tenant_id="tenant") == before
+        assert await state.execution.executions.get("execution", tenant_id="tenant") == before
     finally:
         release.set()
         if barrier is not None:

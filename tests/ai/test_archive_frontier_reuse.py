@@ -179,7 +179,7 @@ async def test_checkpoint_frontier_reuse_requires_fresh_exact_loaded_prefix(
     state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
     try:
-        owner = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+        owner = state.run_store.read_store(PersistenceDomain.TRACE)
         history = owner.transcript_repository
         archive = await history.content_archive(create=True)
         messages = (ModelRequest(parts=[UserPromptPart("aa")]), ModelRequest(parts=[UserPromptPart("bb")]))
@@ -210,10 +210,10 @@ async def test_checkpoint_frontier_reuse_requires_fresh_exact_loaded_prefix(
 
         monkeypatch.setattr(ContentArchive, "reuse_frontier", capture)
         state.run_store.register_context_baseline("run", loaded)
-        _, batch = await owner.prepare_run_checkpoint(AgentRunRecord("run"), AgentRunCheckpoint(
+        batch = await owner.prepare_checkpoints(AgentRunRecord("run"), (AgentRunCheckpoint(
             "run", 1, incoming_messages, transcript_message_count_before=0,
             context_messages=expected if change in {"reordered", "summary"} else None,
-        ))
+        ),))
         assert bool(seeded) == (change == "unchanged")
         await _publish(archive, batch[0].archive)
         observed = await history.load_projected_context("run", batch[0].projection)

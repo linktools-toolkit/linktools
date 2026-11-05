@@ -12,7 +12,7 @@ from enum import Enum
 from typing import Protocol
 from contextlib import AbstractContextManager
 from linktools.core import environ
-from ..core import (AuthorizationAction, AuthorizationPolicy, Principal, ResourceRef,
+from ..core import (AuthorizationAction, AuthorizationPolicy, TenantAuthorizationPolicy, Principal, ResourceRef,
     ResourceKind, ExecutionStatus, ExecutionEventType, IdempotencyStatus, JsonValue,
     OperationKind, OperationStatus, OperationLedgerInput, OperationLedgerRecord,
     StopReason, UsageMetrics, canonical_sha256, principal_identity_payload,
@@ -112,15 +112,11 @@ class ExecutionManager:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if identity.status is IdempotencyStatus.START_UNKNOWN:
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
-        header = await self._port.read_source_header(identity.resource_id, tenant_id=principal.tenant_id)
-        if header is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        await self._authorization.authorize(principal, AuthorizationAction.EXECUTION_RUN, header)
-        execution = await self._port.read_execution(identity.resource_id, tenant_id=principal.tenant_id)
+        execution = await self._port.read_source_execution(identity.resource_id, tenant_id=principal.tenant_id)
         if execution is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await self.authorize_loaded_execution(execution, principal, AuthorizationAction.EXECUTION_RUN,
-                                             owner_principal_id=header.owner_principal_id)
+                                             owner_principal_id=None)
         if execution.status is ExecutionStatus.START_UNKNOWN:
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
         return identity, execution
@@ -128,11 +124,20 @@ class ExecutionManager:
     async def _load_cancel_execution(
         self, execution_id: str, request: CancelExecutionRequest,
     ) -> ExecutionRecord:
+        tenant_id = request.principal.tenant_id
+        local_pending = self._port.has_local_pending(execution_id, tenant_id=tenant_id)
+        if not local_pending:
+            source = await self._port.read_source_execution(execution_id, tenant_id=tenant_id)
+            if source is not None:
+                await self.authorize_loaded_execution(
+                    source, request.principal, AuthorizationAction.EXECUTION_CANCEL,
+                    owner_principal_id=None,
+                )
+                return source
         execution = await self.load_authorized(
             execution_id, request.principal, AuthorizationAction.EXECUTION_CANCEL,
         )
-        tenant_id = request.principal.tenant_id
-        if self._port.has_local_pending(execution_id, tenant_id=tenant_id) or execution.status not in {
+        if local_pending or execution.status not in {
             ExecutionStatus.PENDING_START, ExecutionStatus.STARTED, ExecutionStatus.CANCELLING,
         }:
             return execution
@@ -241,6 +246,10 @@ class ExecutionManager:
         )
         if latest is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await self.authorize_loaded_execution(
+            latest, request.principal, AuthorizationAction.EXECUTION_CANCEL,
+            owner_principal_id=execution.principal_id,
+        )
         execution = latest
         prepared_before_claim = execution.status is ExecutionStatus.PENDING_START
         if execution.status is ExecutionStatus.FINALIZING:
@@ -308,6 +317,9 @@ class ExecutionManager:
                 if resolved is not None:
                     return resolved
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+            # Source cancellation is authoritative; wake the exact logical
+            # turn only after its intent is committed or observed.
+            await self._port.signal_remote_cancel(execution_id, tenant_id=request.principal.tenant_id)
             if self._port.driver is not None:
                 await self._port.driver.cancel_children(
                     cancelling.execution_id, request.principal
@@ -660,6 +672,7 @@ class ExecutionManager:
             except ValueError as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             raise AIError(code)
+        await self._port.signal_remote_cancel(execution.execution_id, tenant_id=request.principal.tenant_id)
         if request.force:
             outcome = await self.require_driver().cancel(execution, force=True)
             if outcome is CancelEffectOutcome.CONFIRMED:
@@ -818,30 +831,39 @@ class ExecutionManager:
     async def load_authorized(
         self, execution_id: str, principal: Principal, action: AuthorizationAction
     ) -> ExecutionRecord:
-        header = await self.authorize_execution(execution_id, principal, action)
         record = await self._port.read_execution(execution_id, tenant_id=principal.tenant_id)
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self.authorize_loaded_execution(
-            record, principal, action, owner_principal_id=header.owner_principal_id,
+            record, principal, action, owner_principal_id=None,
         )
-        return record
+        if type(self._authorization) is TenantAuthorizationPolicy:
+            return record
+        # Application policies may suspend while the canonical owner or result changes.
+        current = await self._port.read_execution(execution_id, tenant_id=principal.tenant_id)
+        if current is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if current.principal_id != record.principal_id:
+            await self.authorize_loaded_execution(
+                current, principal, action, owner_principal_id=record.principal_id,
+            )
+            authorized_owner = current.principal_id
+            current = await self._port.read_execution(execution_id, tenant_id=principal.tenant_id)
+            if current is None or current.principal_id != authorized_owner:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        return current
 
 
     async def authorize_loaded_execution(
         self, execution: ExecutionRecord, principal: Principal, action: AuthorizationAction,
         *, owner_principal_id: str | None,
     ) -> None:
-        if owner_principal_id is not None and execution.principal_id != owner_principal_id:
-            # A source winner retains its own authorization policy, even when
-            # an earlier remote observation described a different principal.
-            header = await self._port.read_source_header(execution.execution_id, tenant_id=principal.tenant_id)
-            if header is None:
-                header = ResourceRef(
-                    ResourceKind.EXECUTION, execution.execution_id, principal.tenant_id,
-                    execution.principal_id,
-                )
-            await self._authorization.authorize(principal, action, header)
+        if owner_principal_id is None or execution.principal_id != owner_principal_id:
+            await self._authorization.authorize(
+                principal, action,
+                ResourceRef(ResourceKind.EXECUTION, execution.execution_id, principal.tenant_id,
+                            execution.principal_id),
+            )
 
 
 def terminal_error(

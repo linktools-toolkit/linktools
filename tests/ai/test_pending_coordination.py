@@ -55,7 +55,8 @@ def _helper(cache: object, *, namespace: str = "namespace", tenant_id: str = "te
 
 
 async def _claim(helper: PendingTurnCoordination, *, execution_id: str = "execution", owner_id: str = "owner") -> TurnCoordination:
-    claim = await helper.claim(
+    claim = await helper._backend.claim_turn(
+        helper._scope,
         session_key="session", request_key="request", request_digest="digest",
         execution_id=execution_id, owner_id=owner_id, lease_seconds=30,
     )
@@ -97,14 +98,14 @@ async def test_shared_pending_view_replays_without_leaking_owner_token_or_persis
     assert await reader.read_execution(record.execution_id, tenant_id="tenant") == record
     assert await reader.read_session_execution("session", tenant_id="tenant") == record
     assert await reader.cancel(record.execution_id, tenant_id="tenant")
-    renewed = await writer.renew(owned.lease, lease_seconds=30)
+    renewed = await writer._backend.renew_turn(owned.lease, lease_seconds=30)
     assert renewed is not None and renewed.lease == owned.lease and renewed.cancel_requested
     assert await reader.read_execution(record.execution_id, tenant_id="tenant") == record
-    assert await writer.release(owned.lease)
+    assert await writer._backend.release_turn(owned.lease)
     assert await reader.read_execution(record.execution_id, tenant_id="tenant") is None
     assert await reader.read_session_execution("session", tenant_id="tenant") is None
-    assert await writer.renew(owned.lease, lease_seconds=30) is None
-    assert not await writer.release(owned.lease)
+    assert await writer._backend.renew_turn(owned.lease, lease_seconds=30) is None
+    assert not await writer._backend.release_turn(owned.lease)
 
 
 @pytest.mark.asyncio
@@ -123,7 +124,7 @@ async def test_scope_isolates_namespace_and_tenant_even_for_delimiter_like_names
     assert await left.read_session_execution("session", tenant_id="b:c") is None
     assert not await left.cancel("execution", tenant_id="b:c")
     assert right_claim.lease is not None
-    renewed = await right.renew(right_claim.lease, lease_seconds=30)
+    renewed = await right._backend.renew_turn(right_claim.lease, lease_seconds=30)
     assert renewed is not None and not renewed.cancel_requested
 
 
@@ -183,7 +184,7 @@ async def test_owner_release_during_suspended_byte_read_invalidates_captured_vie
     read = helper.read_execution if observation == "execution" else helper.read_stream
     pending = asyncio.create_task(read("execution", tenant_id="tenant"))
     await cache.read_started.wait()
-    assert owned.lease is not None and await helper.release(owned.lease)
+    assert owned.lease is not None and await helper._backend.release_turn(owned.lease)
     replacement = await _claim(helper, execution_id="new-execution", owner_id="new-owner")
     await helper.publish(replace(record, execution_id="new-execution"), replacement)
     cache.read_continue.set()
@@ -201,7 +202,8 @@ async def test_pending_stream_binding_requires_the_single_activated_run(agent_ru
     cache = _ObservedCache()
     writer, reader = _helper(cache), _helper(cache)
     owned = await _claim(writer)
-    record = _record(ExecutionStatus.STARTED, agent_run_seq)
+    record = replace(_record(ExecutionStatus.STARTED, agent_run_seq),
+                     producer_generation=2, producer_claim_id=owned.owner_id)
     await writer.publish(record, owned)
     stream = await reader.read_stream("execution", tenant_id="tenant")
     assert stream == ((record, 2, owned.owner_id) if agent_run_seq == 1 else None)
@@ -295,10 +297,10 @@ async def test_backend_failure_never_becomes_absence_or_permission_to_execute(
             await helper.publish(record, owned)
         elif operation == "renew":
             assert owned.lease is not None
-            await helper.renew(owned.lease, lease_seconds=30)
+            await helper._backend.renew_turn(owned.lease, lease_seconds=30)
         elif operation == "release":
             assert owned.lease is not None
-            await helper.release(owned.lease)
+            await helper._backend.release_turn(owned.lease)
         else:
             await helper.cancel("execution", tenant_id="tenant")
 
@@ -333,7 +335,7 @@ async def test_promotion_hint_is_scope_bound_and_does_not_extend_owner_expiry(
     assert await remote.request_promotion("execution", tenant_id="tenant") is None
     assert not await remote.remote_promotion_pending("execution", owned.owner_id, tenant_id="tenant")
     assert owned.lease is not None
-    assert await owner.renew(owned.lease, lease_seconds=30) is None
+    assert await owner._backend.renew_turn(owned.lease, lease_seconds=30) is None
 
 
 @pytest.mark.asyncio
@@ -362,7 +364,7 @@ async def test_late_promotion_hint_is_never_transferred_to_replacement_owner() -
     cache.pause_writes = True
     pending = asyncio.create_task(helper.request_promotion("execution", tenant_id="tenant"))
     await cache.write_started.wait()
-    assert owned.lease is not None and await helper.release(owned.lease)
+    assert owned.lease is not None and await helper._backend.release_turn(owned.lease)
     replacement = await _claim(helper, execution_id="replacement", owner_id="replacement-owner")
     cache.write_continue.set()
     assert await pending is None
@@ -385,7 +387,7 @@ async def test_remote_promotion_observation_rechecks_owner_after_suspended_hint_
     cache.paused_key = next(iter(cache.writes))
     pending = asyncio.create_task(helper.remote_promotion_pending("execution", owned.owner_id, tenant_id="tenant"))
     await cache.read_started.wait()
-    assert owned.lease is not None and await helper.release(owned.lease)
+    assert owned.lease is not None and await helper._backend.release_turn(owned.lease)
     replacement = await _claim(helper, execution_id="replacement", owner_id="replacement-owner")
     cache.read_continue.set()
     assert not await pending
@@ -492,7 +494,7 @@ async def test_request_lookup_does_not_report_absent_when_owner_changes_during_r
     read = asyncio.create_task(helper.read_request_execution("request", tenant_id="tenant"))
     await cache.read_started.wait()
     assert owner.lease is not None
-    await helper.release(owner.lease)
+    await helper._backend.release_turn(owner.lease)
     await _claim(helper, execution_id="next", owner_id="next-owner")
     cache.read_continue.set()
     with pytest.raises(AIError) as unknown:
@@ -517,6 +519,9 @@ async def test_request_lookup_backend_failure_propagates(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_existing_coordination_backend_remains_selected_without_admission_reader() -> None:
     class OwnershipCache(_ContentOnly):
+        def enter(self, *args, **kwargs):
+            raise NotImplementedError
+
         async def claim_turn(self, *args, **kwargs):
             raise NotImplementedError
 

@@ -11,7 +11,7 @@ from ..asset import build_asset_sql_metadata
 from ..observe import build_metrics_sql_metadata
 from ..persistence import PersistenceDomain
 from ..persistence.objects import runtime_domain_uses_object_store
-from ..persistence.schema import build_runtime_sql_metadata
+from ..persistence.schema import build_runtime_sql_metadata, build_step_sql_metadata
 from ..storage import build_object_sql_metadata, provision_sql
 
 _logger = environ.get_logger("ai.migrate.database")
@@ -29,6 +29,7 @@ def build_sql_schema_metadata() -> "MetaData":
 
     metadata = MetaData()
     build_runtime_sql_metadata(frozenset(PersistenceDomain), metadata=metadata)
+    build_step_sql_metadata(metadata=metadata)
     build_object_sql_metadata(metadata=metadata)
     build_asset_sql_metadata(metadata=metadata)
     build_metrics_sql_metadata(metadata=metadata)
@@ -57,6 +58,8 @@ async def provision_runtime_database(
 
     metadata = MetaData()
     build_runtime_sql_metadata(selected, metadata=metadata)
+    if PersistenceDomain.CHECKPOINT in selected:
+        build_step_sql_metadata(metadata=metadata)
     if object_store is None and any(
         runtime_domain_uses_object_store(domain) for domain in selected
     ):

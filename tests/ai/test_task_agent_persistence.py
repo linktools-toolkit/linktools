@@ -13,7 +13,9 @@ from pydantic_ai.models.function import AgentInfo
 
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import TaskStatus
-from linktools.ai.capability import TraceCapability, CheckpointCapability
+from linktools.ai.capability import TraceCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
@@ -26,7 +28,8 @@ from .test_optional_runtime_persistence import _start_delegated_execution
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("delegated", (False, True), ids=("agent", "delegated-agent"))
-async def test_task_agent_trace_survives_terminal_release_and_reopen(tmp_path, delegated: bool) -> None:
+@pytest.mark.parametrize("native_restart", (False, True))
+async def test_task_agent_trace_survives_terminal_release_and_reopen(tmp_path, delegated: bool, native_restart: bool) -> None:
     entered, release = asyncio.Event(), asyncio.Event()
     requests: list[str] = []
 
@@ -46,6 +49,8 @@ async def test_task_agent_trace_survives_terminal_release_and_reopen(tmp_path, d
         return ModelResponse(parts=[TextPart("answer")])
 
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
+    if native_restart:
+        group.capability(native_checkpoint(), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_subagents=("child",) if delegated else ())
     group.agent("child", model="default", allow_tools=(), allow_subagents=())
     models = _Models(_UsageFunctionModel(model))
@@ -70,7 +75,7 @@ async def test_task_agent_trace_survives_terminal_release_and_reopen(tmp_path, d
             identities.append(execution_id)
             record = await runtime._state.execution.executions.get(execution_id, tenant_id=runtime.tenant_id)
             assert record is not None and record.requires_task_invocation_capture
-            assert record.restart_checkpoints and record.durable_trace
+            assert record.restart_checkpoints is native_restart and record.durable_trace
             boundary = await _wait_for_committed(
                 lambda: runtime.history.capture_model_interaction_cutoffs(execution_id, principal=runtime.default_principal),
                 lambda value: bool(value.cutoffs),
@@ -88,7 +93,7 @@ async def test_task_agent_trace_survives_terminal_release_and_reopen(tmp_path, d
                 identities.append(child.execution_id)
                 child_record = await runtime._state.execution.executions.get(child.execution_id, tenant_id=runtime.tenant_id)
                 assert child_record is not None and not child_record.requires_task_invocation_capture
-                assert child_record.restart_checkpoints and child_record.durable_trace
+                assert child_record.restart_checkpoints is native_restart and child_record.durable_trace
             assert observed
         finally:
             release.set()
@@ -107,7 +112,9 @@ async def test_task_agent_trace_survives_terminal_release_and_reopen(tmp_path, d
 @pytest.mark.asyncio
 @pytest.mark.parametrize("restart", (False, True))
 @pytest.mark.parametrize("trace", (False, True))
-async def test_delegated_guarantees_follow_frozen_parent_across_runtime(tmp_path, restart: bool, trace: bool) -> None:
+async def test_delegated_guarantees_follow_frozen_parent_after_defaults_change(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, restart: bool, trace: bool,
+) -> None:
     entered = {prompt: asyncio.Event() for prompt in ("root", "child", "grandchild")}
     release = asyncio.Event()
 
@@ -123,31 +130,35 @@ async def test_delegated_guarantees_follow_frozen_parent_across_runtime(tmp_path
         group: RuntimeFeatures[None] = RuntimeFeatures("application")
         group.agent("default", model="default", allow_tools=())
         if with_guarantees and restart:
-            group.capability(CheckpointCapability(), scope="runtime")
+            group.capability(native_checkpoint(), scope="runtime")
         if with_guarantees and trace:
             group.capability(TraceCapability(), scope="runtime")
         return group
 
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "inherited-guarantees.db"
-    original, delegated = PersistenceStorage.sqlite(database), PersistenceStorage.sqlite(database)
+    original = PersistenceStorage.sqlite(database)
     async with Persistence.open('inheritance', storage=original) as persistence_133, Runtime.attach(persistence=persistence_133, features=model_features(models, capabilities(True))) as owner:
         root = await owner.agents.get().start("root", idempotency_key="root")
         try:
             await asyncio.wait_for(entered["root"].wait(), 5)
-            async with Persistence.open('inheritance', storage=delegated) as persistence_137, Runtime.attach(persistence=persistence_137, features=model_features(models, capabilities(False))) as borrower:
-                child_id = await _start_delegated_execution(borrower, borrower._state, root.execution_id, "child")
+            # This private admission test exercises inherited source guarantees,
+            # not a public nested-delegation or foreign-worker execution API.
+            with monkeypatch.context() as patch:
+                patch.setattr(owner._execution_service, "_restart_checkpoints", False)
+                patch.setattr(owner._execution_service, "_durable_trace", False)
+                child_id = await _start_delegated_execution(owner, owner._state, root.execution_id, "child")
                 await asyncio.wait_for(entered["child"].wait(), 5)
-                grandchild_id = await _start_delegated_execution(borrower, borrower._state, child_id, "grandchild")
+                grandchild_id = await _start_delegated_execution(owner, owner._state, child_id, "grandchild")
                 await asyncio.wait_for(entered["grandchild"].wait(), 5)
                 identities = (root.execution_id, child_id, grandchild_id)
                 for execution_id in identities:
-                    record = await borrower._state.execution.executions.get(execution_id, tenant_id=borrower.tenant_id)
+                    record = await owner._state.execution.executions.get(execution_id, tenant_id=owner.tenant_id)
                     assert record is not None
                     assert (record.restart_checkpoints, record.durable_trace) == (restart, trace)
                 release.set()
                 for execution_id in (child_id, grandchild_id):
-                    execution = await borrower.executions.get(execution_id)
+                    execution = await owner.executions.get(execution_id)
                     await execution.wait(timeout_seconds=10)
                 await root.wait(timeout_seconds=10)
         finally:
@@ -158,3 +169,40 @@ async def test_delegated_guarantees_follow_frozen_parent_across_runtime(tmp_path
             record = await reopened._state.execution.executions.get(execution_id, tenant_id=reopened.tenant_id)
             assert record is not None
             assert (record.restart_checkpoints, record.durable_trace) == (restart, trace)
+
+
+@pytest.mark.asyncio
+async def test_private_delegation_requires_the_live_parent_scope(tmp_path) -> None:
+    from linktools.ai.errors import AIError, ErrorCode
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def model(messages, info):
+        calls.append(messages)
+        entered.set()
+        await release.wait()
+        return ModelResponse(parts=[TextPart("root answer")])
+
+    group = RuntimeFeatures("parent-scope")
+    group.agent("default", model="default", allow_tools=())
+    models = _Models(_UsageFunctionModel(model))
+    database = tmp_path / "parent-scope.db"
+    async with Persistence.open("parent-scope", storage=PersistenceStorage.sqlite(database)) as first, Runtime.attach(
+        persistence=first, features=model_features(models, group),
+    ) as owner, Persistence.open("parent-scope", storage=PersistenceStorage.sqlite(database)) as second, Runtime.attach(
+        persistence=second, features=model_features(models, group),
+    ) as foreign:
+        root = await owner.agents.get().start("root", idempotency_key="root")
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            # Reading the source parent/generation is not a delegation grant.
+            with pytest.raises(AIError) as rejected:
+                await _start_delegated_execution(foreign, second, root.execution_id, "child")
+            assert rejected.value.code is ErrorCode.STORAGE_CONFLICT
+            assert rejected.value.safe_details["phase"] == "subagent_parent_unavailable"
+            assert await foreign.executions.list_children(root.execution_id, principal=foreign.default_principal) == ()
+            assert len(calls) == 1
+        finally:
+            release.set()
+        assert (await root.wait(timeout_seconds=10)).result.output == {"text": "root answer"}

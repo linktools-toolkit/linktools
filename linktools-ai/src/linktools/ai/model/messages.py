@@ -19,7 +19,7 @@ from typing import get_args
 from pydantic_ai.messages import (
     BinaryContent, FilePart, InstructionBaselinePart, InstructionDeltaPart, InstructionDigest,
     InstructionId, InstructionPart, SerializedInstructionId, ModelMessage, ModelMessagesTypeAdapter, ModelRequest,
-    ModelRequestAttempt, ModelResponse, NativeToolReturnPart, RetryPromptPart,
+    ModelRequestAttempt, ModelResponse, NativeToolReturnPart,
     SpeechPart, SystemPromptPart, TextContent, ToolReturnPart, UserContent, UserPromptPart,
 )
 
@@ -44,14 +44,13 @@ from ._tool_return_codec import decode_tool_return_content, encode_tool_return_c
 _MESSAGE_VERSION = 1
 _HOST_CONTENT = "linktools-content"
 _SUMMARY_KIND = "runtime-summary-prompt"
-_RETRY_ADAPTER = TypeAdapter(RetryPromptPart)
 _USAGE_ADAPTER = TypeAdapter(RequestUsage)
 _USER_CONTENT_ADAPTER = TypeAdapter(UserContent)
 _DURATION_ADAPTER = TypeAdapter(timedelta)
 _INSTRUCTION_ID_ADAPTER = TypeAdapter(SerializedInstructionId)
 _USAGE_TOKEN_FIELDS = tuple(field.name for field in fields(RequestUsage) if field.name.endswith("_tokens"))
 _CORRELATED_PARTS = frozenset({
-    "tool-call", "builtin-tool-call", "tool-return", "builtin-tool-return", "retry-prompt",
+    "tool-call", "builtin-tool-call", "tool-return", "builtin-tool-return",
 })
 
 
@@ -322,6 +321,59 @@ def decode_model_messages(raw: bytes) -> tuple[ModelMessage, ...]:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
+def native_checkpoint_messages(messages: Sequence[ModelMessage], *, restore: bool = False) -> list[ModelMessage]:
+    """Carry host input descriptors through native TextContent metadata.
+
+    Only explicit supported input positions are adapted. Opaque application JSON
+    is never inspected, and referenced bodies remain with the authorized loader.
+    """
+    def content(value: object) -> object:
+        if not restore and isinstance(value, (ReferencedContent, RetiredReferencedContent)):
+            return TextContent(value.content, metadata={_HOST_CONTENT: {
+                "type": "runtime-reference", "value": encode_user_content_item(value),
+            }})
+        # ToolReturnPart.content is SDK Any: a native TextContent serializes back
+        # to this plain object. Interpret only the exact tagged input envelope.
+        metadata = value.metadata if isinstance(value, TextContent) else (
+            value["metadata"] if isinstance(value, Mapping)
+            and set(value) == {"kind", "content", "metadata"}
+            and value["kind"] == "text-content" else None
+        )
+        if (restore and isinstance(metadata, Mapping) and set(metadata) == {_HOST_CONTENT}
+                and isinstance(metadata[_HOST_CONTENT], Mapping)
+                and metadata[_HOST_CONTENT].get("type") == "runtime-reference"):
+            try:
+                marker = metadata[_HOST_CONTENT]
+                if set(marker) != {"type", "value"}:
+                    raise ValueError("invalid native reference marker")
+                decoded = decode_user_content_item(marker["value"])
+                if not isinstance(decoded, (ReferencedContent, RetiredReferencedContent)):
+                    raise ValueError("native host input is not a reference descriptor")
+                return decoded
+            except (TypeError, ValueError, KeyError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        return value
+
+    result: list[ModelMessage] = []
+    for message in messages:
+        if not isinstance(message, ModelRequest):
+            result.append(message)
+            continue
+        parts = []
+        changed = False
+        for part in message.parts:
+            items = model_input_content(part)
+            projected = tuple(content(item) for item in items)
+            if any(left is not right for left, right in zip(items, projected, strict=True)):
+                value = (list(projected) if isinstance(part, UserPromptPart) or isinstance(part.content, list)
+                         else projected[0])
+                part = replace(part, content=value)
+                changed = True
+            parts.append(part)
+        result.append(replace(message, parts=parts) if changed else message)
+    return result
+
+
 def _system_prompt(part: SystemPromptPart) -> SystemPromptPart:
     return SystemPromptPart(**{
         field.name: getattr(part, field.name) for field in fields(SystemPromptPart) if field.init
@@ -478,12 +530,7 @@ def _encode_messages(messages: Sequence[ModelMessage]) -> list[JsonValue]:
             message = project_model_response_attempts(message)
         parts = []
         for pi, part in enumerate(message.parts):
-            if isinstance(part, RetryPromptPart):
-                # The native union upgrades this supported authoring type to retry feedback,
-                # losing its tool correlation. Its own adapter retains the recorded fact.
-                parts.append(UserPromptPart("", timestamp=part.timestamp))
-                patches.append((mi, pi, "retry", _dump_native(_RETRY_ADAPTER, part)))
-            elif ModelSettingsDeltaPart is not None and isinstance(part, ModelSettingsDeltaPart):
+            if ModelSettingsDeltaPart is not None and isinstance(part, ModelSettingsDeltaPart):
                 settings = _recorded_settings(part.settings)
                 parts.append(replace(part, settings={}))
                 patches.append((mi, pi, "settings", settings))
@@ -502,7 +549,7 @@ def _encode_messages(messages: Sequence[ModelMessage]) -> list[JsonValue]:
                         content.append(item)
                 parts.append(replace(part, content=content))
             elif isinstance(part, (ToolReturnPart, NativeToolReturnPart)):
-                patches.append((mi, pi, "tool", (encode_tool_return_content(part.content), part.tool_kind)))
+                patches.append((mi, pi, "tool", (encode_tool_return_content(part.content), part.tool_kind, part)))
                 # The content owner preserves host references and snapshots. Native kind
                 # promotion happens against restored content, never its JSON placeholder.
                 parts.append(_tool_return_with_content(part, "", None))
@@ -514,14 +561,12 @@ def _encode_messages(messages: Sequence[ModelMessage]) -> list[JsonValue]:
         part = wire[mi]["parts"][pi]
         if target == "summary":
             part["part_kind"] = _SUMMARY_KIND
-        elif target == "retry":
-            wire[mi]["parts"][pi] = value
         elif target == "settings":
             part["settings"] = value
         elif target == "tool":
-            original = messages[mi].parts[pi]
-            _tool_return_with_content(original, original.content, original.tool_kind)
-            part["content"], part["tool_kind"] = value
+            content, tool_kind, original = value
+            _tool_return_with_content(original, original.content, tool_kind)
+            part["content"], part["tool_kind"] = content, tool_kind
         else:
             part["content"][target] = value
     for message, original in zip(wire, lowered):
@@ -657,12 +702,7 @@ def _decode_message(value: object) -> ModelMessage:
                     raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if kind in _CORRELATED_PARTS and "tool_call_id" not in part:
             raise ValueError("durable tool correlation is required")
-        if kind == "retry-prompt":
-            restored = _RETRY_ADAPTER.validate_python(part)
-            _require_preserved_fields(part, _RETRY_ADAPTER.dump_python(restored, mode="json", warnings="error"))
-            patches.append((pi, "retry", restored))
-            wire["parts"][pi] = {"part_kind": "user-prompt", "content": ""}
-        elif kind == "model-settings-delta":
+        if kind == "model-settings-delta":
             patches.append((pi, "settings", _recorded_settings(part["settings"])))
             part["settings"] = {}
         elif kind == _SUMMARY_KIND:
@@ -699,8 +739,6 @@ def _decode_message(value: object) -> ModelMessage:
             message.parts[pi] = SummaryPromptPart(**{
                 field.name: getattr(part, field.name) for field in fields(SystemPromptPart) if field.init
             })
-        elif target == "retry":
-            message.parts[pi] = restored
         elif target == "settings":
             part.settings = restored
         elif target == "tool":
@@ -769,7 +807,7 @@ def _encode_datetime(value: datetime | None) -> JsonValue:
 
 
 
-__all__ = ['RetiredReferencedContent', 'SummaryPromptPart', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'combine_model_message_payloads', 'decode_model_message_payloads', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'model_input_content', 'model_response_usage', 'project_model_response_attempts', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_return_content_digest', 'without_history_system_prompts']
+__all__ = ['RetiredReferencedContent', 'SummaryPromptPart', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'combine_model_message_payloads', 'decode_model_message_payloads', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'model_input_content', 'native_checkpoint_messages', 'model_response_usage', 'project_model_response_attempts', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_return_content_digest', 'without_history_system_prompts']
 
 from ._attachment import (binary_attachment_text, bind_tool_return_attachments, file_tool_result_metadata, has_binary_attachment_metadata, input_attachment_views, is_binary_attachment_text, request_attachment_facts)
 

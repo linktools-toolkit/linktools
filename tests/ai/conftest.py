@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import hashlib
 import signal
 import sys
 from collections.abc import Generator
@@ -38,3 +39,14 @@ def pytest_runtest_protocol(
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
+
+
+@pytest.fixture(autouse=True)
+def native_step_database(
+    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep native checkpoints durable across recreated stores and subprocesses."""
+    identity = hashlib.sha256(request.node.nodeid.encode()).hexdigest()
+    database = tmp_path_factory.getbasetemp() / "native-steps" / (identity + ".db")
+    monkeypatch.setenv("LINKTOOLS_TEST_STEP_DATABASE", str(database))

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Conversation-domain repository implementations."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime
 from linktools.core import environ
@@ -689,6 +689,8 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             if source_stored is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             source = await self._decode(source_stored, SessionRecord)
+            if source.owner_principal_id != target.owner_principal_id:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             if source.revision != expected_source_revision:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if source.history_id is None or source.history_quality == "unavailable":
@@ -1019,20 +1021,22 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         error_code: str | None,
         safe_error_details: Mapping[str, JsonValue],
         allow_unadmitted: bool = False,
+        admitted_turn: SessionTurnRef | None = None,
     ) -> SessionTurnCommit | None:
         _require_repository_tenant(tenant_id, self._tenant_id)
-        subject = self._timeline_subject(execution_id)
-        turns = await transaction.list_facts(
-            FactQuery(
-                self._timeline_stream(session_id),
-                subject_digest=subject,
-            )
-        )
-        if not turns and allow_unadmitted:
-            return None
-        if len(turns) != 1:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        turn = self._decode_timeline_turn(session_id, turns[0])
+        if admitted_turn is None:
+            turns = await transaction.list_facts(FactQuery(
+                self._timeline_stream(session_id), subject_digest=self._timeline_subject(execution_id),
+            ))
+            if not turns and allow_unadmitted:
+                return None
+            if len(turns) != 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            turn = self._decode_timeline_turn(session_id, turns[0])
+        else:
+            turn = admitted_turn
+            if turn.session_id != session_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if turn.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         commit_key = self._timeline_commit_key(session_id, turn.turn_seq)
@@ -1178,6 +1182,8 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             if current is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             value = await self._decode(current, SessionRecord)
+            if value.owner_principal_id != next_record.owner_principal_id:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             if value.revision != expected_revision:
                 raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
             proposed = next_record
@@ -1241,12 +1247,14 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         tenant_id: str,
         execution_id: str,
         expected: ConversationCursor | None,
+        expected_session: SessionRecord | None = None,
     ) -> SessionRecord:
         return await self._admission(
             session_id,
             tenant_id=tenant_id,
             execution_id=execution_id,
             expected=expected,
+            expected_session=expected_session,
             release=False,
         )
 
@@ -1258,13 +1266,17 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         tenant_id: str,
         execution_id: str,
         expected: ConversationCursor | None,
+        expected_session: SessionRecord | None = None,
+        admitted_turn: Callable[[SessionTurnRef], None] | None = None,
     ) -> SessionRecord:
         return await self._admission(
             session_id,
             tenant_id=tenant_id,
             execution_id=execution_id,
             expected=expected,
+            expected_session=expected_session,
             release=False,
+            admitted_turn=admitted_turn,
             transaction=transaction,
         )
 
@@ -1316,9 +1328,11 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         execution_id: str,
         expected: ConversationCursor | None,
         release: bool,
+        expected_session: SessionRecord | None = None,
         history_unavailable: bool = False,
         require_turn_commit: bool = False,
         transaction: StateTransaction | None = None,
+        admitted_turn: Callable[[SessionTurnRef], None] | None = None,
     ) -> SessionRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
 
@@ -1348,6 +1362,15 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                         updated_at=await transaction.now(),
                     )
             else:
+                if expected_session is not None:
+                    if value.session_id != expected_session.session_id:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if value.owner_principal_id != expected_session.owner_principal_id:
+                        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                    if value.agent_id != expected_session.agent_id:
+                        raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
+                    if value.cwd != expected_session.cwd:
+                        raise AIError(ErrorCode.SESSION_CONFLICT)
                 if value.history_quality == "unavailable":
                     raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
                 if (
@@ -1382,6 +1405,8 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                         {"version": 1, "execution_id": execution_id},
                     )
                 )
+                if admitted_turn is not None:
+                    admitted_turn(SessionTurnRef(session_id, sequence, execution_id))
             return next_value
 
         if transaction is not None:
@@ -1407,6 +1432,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         next_status: SessionStatus,
         closed_at: datetime | None = None,
         require_no_active: bool = False,
+        expected_owner_principal_id: str | None = None,
     ) -> SessionRecord:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -1416,6 +1442,11 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             if record is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             current = await self._decode(record, SessionRecord)
+            if (
+                expected_owner_principal_id is not None
+                and current.owner_principal_id != expected_owner_principal_id
+            ):
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             if current.status not in expected:
                 raise AIError(ErrorCode.SESSION_CONFLICT)
             if require_no_active and current.active_execution_id is not None:

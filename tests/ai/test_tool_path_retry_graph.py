@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import (
-    ModelMessage, ModelResponse, RetryPromptPart, TextPart, ToolCallPart,
+    ModelMessage, ModelResponse, TextPart, ToolCallPart,
     ToolReturnPart, UserPromptPart,
 )
 from pydantic_ai.models.function import AgentInfo
@@ -43,7 +43,7 @@ async def test_workspace_path_correction_respects_graph_and_effect_boundaries(
     requests = 0
     effects = 0
     downstream_requests = 0
-    retries: list[RetryPromptPart | ToolReturnPart] = []
+    retries: list[ToolReturnPart] = []
     returns: list[ToolReturnPart] = []
 
     async def record_effect(_context: AgentContext[None]) -> str:

@@ -17,6 +17,7 @@ from linktools.ai.core import CommitPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.runtime._pending_turn import _PendingExecutionTurn
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 from .test_revoked_buffer_cleanup import _MissingPayloadBuffer
@@ -37,7 +38,7 @@ class _ScopedAckFailureBuffer(_MissingPayloadBuffer):
 @pytest.mark.parametrize("payload_format", ("execution-payload-v1", "trace-projection-v1"))
 @pytest.mark.parametrize("ack_failure", (False, True))
 async def test_failed_unsubmitted_turn_preserves_error_and_releases_exact_staging(
-    tmp_path: Path, payload_format: str, ack_failure: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload_format: str, ack_failure: bool,
 ) -> None:
     buffer = _ScopedAckFailureBuffer()
     foreign = ("other-owner", "entry")
@@ -67,6 +68,18 @@ async def test_failed_unsubmitted_turn_preserves_error_and_releases_exact_stagin
     async with Persistence.open("failed-pending", storage=storage) as state:
         async with Runtime.attach(persistence=state, features=features, metrics=None,
                                   auto_recover=False) as runtime:
+            backend = runtime._execution_service.runtime_backend()
+            cleanup_finished = asyncio.Event()
+            original_cleanup = backend._cleanup_failed_pending_turn
+
+            async def cleanup(turn: _PendingExecutionTurn, *, forget: bool = False) -> None:
+                try:
+                    await original_cleanup(turn, forget=forget)
+                finally:
+                    if not forget:
+                        cleanup_finished.set()
+
+            monkeypatch.setattr(backend, "_cleanup_failed_pending_turn", cleanup)
             session = await runtime.agents.get().create_session("session")
             other = await runtime.agents.get().create_session("other-session")
             failed = await session.start("first turn", idempotency_key="first")
@@ -74,19 +87,10 @@ async def test_failed_unsubmitted_turn_preserves_error_and_releases_exact_stagin
                 await failed.wait(timeout_seconds=10)
             assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
             assert await state.execution.executions.get(failed.execution_id, tenant_id=state.tenant_id) is None
-            assert await state.execution.executions.get_history_head(failed.execution_id, tenant_id=state.tenant_id) is None
+            assert await state.execution.executions.get(failed.execution_id, tenant_id=state.tenant_id) is None
             assert failed_entries
             assert buffer.close_calls == 0
-            backend = runtime._execution_service.runtime_backend()
-            worker = backend._tasks.get(failed.execution_id)
-            if worker is not None:
-                await asyncio.gather(worker, return_exceptions=True)
-            while True:
-                cleanup = tuple(task for task in backend._execution_task_map().get(failed.execution_id, ())
-                                if not task.done())
-                if not cleanup:
-                    break
-                await asyncio.gather(*cleanup, return_exceptions=True)
+            await asyncio.wait_for(cleanup_finished.wait(), 10)
             if ack_failure:
                 assert failed_entries & buffer.pending.keys()
             else:
@@ -118,4 +122,4 @@ async def test_failed_unsubmitted_turn_preserves_error_and_releases_exact_stagin
             assert set(buffer.pending) == {foreign}
             assert buffer.close_calls == 0
             assert await state.execution.executions.get(failed.execution_id, tenant_id=state.tenant_id) is None
-            assert await state.execution.executions.get_history_head(failed.execution_id, tenant_id=state.tenant_id) is None
+            assert await state.execution.executions.get(failed.execution_id, tenant_id=state.tenant_id) is None

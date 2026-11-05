@@ -55,8 +55,11 @@ class _Bridge:
         self.deferred.append(decision)
         return False
 
-    async def renew(self, decision):
-        return decision
+    async def require_active(self) -> None:
+        return None
+
+    async def require_fresh_control(self) -> None:
+        await self.require_active()
 
     async def complete(self, decision, result):
         self.completed.append((decision, result))

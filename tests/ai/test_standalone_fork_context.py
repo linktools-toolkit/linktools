@@ -85,7 +85,7 @@ async def test_standalone_fork_preserves_actual_tools_and_imported_context_after
         assert record is not None and not record.durable_trace and not record.restart_checkpoints
         run_id = agent_run_id(namespace=runtime.namespace, tenant_id=runtime.tenant_id,
                               execution_id=source_id, agent_run_seq=record.agent_run_seq)
-        archive = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)
+        archive = runtime._run_store.read_store(PersistenceDomain.CONVERSATION)
         checkpoint = await archive.latest_checkpoint(agent_run_id=run_id)
         assert checkpoint is not None
         assert encode_model_messages(tuple(checkpoint.context_messages or checkpoint.messages)) == expected
@@ -155,9 +155,12 @@ async def _damage_fork_context(store, damage: str) -> None:
             data = {"invalid": True}
             if damage != "corrupt":
                 checkpoint = _decode_step(fact.data)
-                values = {"agent_run_id": "wrong-run", "projection_digest": "0" * 64,
+                values = {"agent_run_id": "wrong-run", "projection": replace(checkpoint.projection, items=(
+                    replace(checkpoint.projection.items[0], raw_digest="0" * 64),
+                )),
                           "transcript_message_count": 1}
-                data = _encode_step(replace(checkpoint, **{damage: values[damage]}))
+                field = "projection" if damage == "projection_digest" else damage
+                data = _encode_step(replace(checkpoint, **{field: values[field]}))
             owner = await transaction.get_record(fact.owner_key_digest)
             await transaction.guard_record(owner.key_digest, expected_storage_revision=owner.storage_revision)
             await transaction.delete_fact_streams(fact.owner_key_digest)
@@ -172,7 +175,7 @@ async def test_pending_confirmation_rejects_missing_or_corrupt_fork_context(tmp_
     async with _turn_state("sqlite", tmp_path) as state:
         turn = _standalone(state)
         await _commit(state, turn)
-        await _damage_fork_context(state.storage.run_store.read_store(PersistenceDomain.CHECKPOINT).state_store, damage)
+        await _damage_fork_context(state.storage.run_store.read_store(PersistenceDomain.CONVERSATION).state_store, damage)
         with pytest.raises(AIError) as raised:
             await state.commands.read_pending_turn(turn.reservation, expected_session=None)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -199,7 +202,7 @@ async def test_reopened_standalone_fork_rejects_mismatched_checkpoint_binding(
         source = await runtime.agents.get().start("source")
         assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
         source_id = source.execution_id
-        await _damage_fork_context(runtime._run_store.read_store(PersistenceDomain.CHECKPOINT).state_store, damage)
+        await _damage_fork_context(runtime._run_store.read_store(PersistenceDomain.CONVERSATION).state_store, damage)
     reopened_group = None
     try:
         with pytest.raises(AIError) as raised:
@@ -215,7 +218,7 @@ async def test_reopened_standalone_fork_rejects_mismatched_checkpoint_binding(
             assert all(task.done() for task in backend._tasks.values())
             assert all(task.done() for task in backend._checkpoint_tasks)
             assert all(task.done() for tasks in backend._execution_task_map().values() for task in tasks)
-            assert not backend._pending_renewals
+            assert not backend._turn_monitors
             assert not backend._recovery_reconcile_tasks
             assert not backend._subagent_dispatcher.pending_background_tasks
             run_store = runtime._run_store
@@ -298,7 +301,7 @@ async def test_unfinished_standalone_run_never_publishes_a_complete_fork_seed(tm
                 finally:
                     run_id = agent_run_id(namespace=runtime.namespace, tenant_id=runtime.tenant_id,
                                           execution_id=source.execution_id, agent_run_seq=1)
-                    archive = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)
+                    archive = runtime._run_store.read_store(PersistenceDomain.CONVERSATION)
                     assert await archive.latest_checkpoint(agent_run_id=run_id) is None
                     if state == "running":
                         await source.cancel()

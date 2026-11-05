@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 
 import pytest
 from pydantic_ai_harness.memory import MemoryOperation
-from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import FilesystemSnapshotReader, Persistence, PersistenceDomain, PersistenceStorage
@@ -43,13 +42,6 @@ def _memory(state: Persistence) -> RuntimeMemoryStore:
     )
 
 
-def _retained_messages() -> list[ModelRequest]:
-    return [ModelRequest(parts=[UserPromptPart(
-        str(index) if index < 2 else "archived request body\n" * 5000,
-        timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
-    )]) for index in range(3)]
-
-
 async def _source(root: Path, *, external=None) -> tuple[str, MemoryOperation]:
     load_legacy_source(root)
     if external is not None:
@@ -64,7 +56,7 @@ async def _source(root: Path, *, external=None) -> tuple[str, MemoryOperation]:
 
 
 @pytest.mark.parametrize("external", (False, True, "false_valued"))
-async def test_legacy_reader_preserves_source_and_restores_typed_archive_and_memory(
+async def test_legacy_reader_preserves_source_and_rejects_retired_context(
     tmp_path: Path, external: bool | str,
 ) -> None:
     root, target = tmp_path / "source", tmp_path / "target"
@@ -93,30 +85,26 @@ async def test_legacy_reader_preserves_source_and_restores_typed_archive_and_mem
     assert manifest["archives"] and manifest["domains"]["checkpoint"]["facts"]
     assert any(item["domain"] == "memory" for item in manifest["objects"])
     assert any(item["source"]["key"].startswith("v1/archive/") for item in manifest["objects"])
-    await Persistence.restore_snapshot(reference, object_store=objects, root=target, limits=LIMITS, exclusive_writer=True)
-    async with Persistence.open(NAMESPACE, storage=PersistenceStorage.from_root(target, exclusive_writer=True),
-                                tenant_id=TENANT) as state:
-        checkpoint = await state.run_store.read_store(PersistenceDomain.CHECKPOINT).latest_checkpoint(agent_run_id="run")
-        assert checkpoint is not None and checkpoint.messages == _retained_messages()
-        captured = await _memory(state).capture()
-        assert captured["memory/note.md"]["content"] == content
-        receipt = await _memory(state).get_operation(operation)
-        replay = await _memory(state).write("memory/note.md", content, expected_version=None, operation=operation)
-        assert receipt is not None and receipt.replayed and replay.replayed and receipt.version == replay.version
-        assert await _memory(state).capture() == captured
+    with pytest.raises(AIError) as rejected:
+        await Persistence.restore_snapshot(reference, object_store=objects, root=target,
+                                           limits=LIMITS, exclusive_writer=True)
+    assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert not (target / "runtime.db").exists()
     assert _contents(root) == before
 
 
 async def test_legacy_reader_rejects_retired_control_data_before_export(tmp_path: Path) -> None:
     from dataclasses import replace
     from linktools.ai.persistence.codec import encode_record
-    from linktools.ai.persistence.contracts import ExecutionCheckpoint, ExecutionCheckpointState
+    from linktools.ai.persistence.contracts import ExecutionRecoveryDetail
+    from .test_execution_recovery_commands import _execution
+    from dataclasses import replace
     from linktools.ai.persistence._repository_common import project_record
     from linktools.ai.persistence.state import record_key_digest
 
     await _source(tmp_path)
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    value = ExecutionCheckpoint("execution", None, ExecutionCheckpointState.ADMITTED, 0, now, now)
+    value = replace(_execution(now), recovery=ExecutionRecoveryDetail())
     record = project_record(namespace=NAMESPACE, tenant_id=TENANT, domain=PersistenceDomain.CHECKPOINT,
                             kind="recovery_checkpoint", identity=value.execution_id, value=value)
     key = record_key_digest(NAMESPACE, TENANT, "recovery", record.kind, value.execution_id)

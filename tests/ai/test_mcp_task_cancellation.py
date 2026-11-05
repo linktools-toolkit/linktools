@@ -56,7 +56,7 @@ async def test_graph_cancel_closes_remote_client_and_preserves_unknown_effect_on
                     (TaskNode("echo", task=task, input=AgentTaskInput("write once")),),
                 )
                 run = await engine.with_definitions(task).start(
-                    graph, idempotency_key="start-remote-cancellation"
+                    graph, principal=runtime.default_principal, idempotency_key="start-remote-cancellation"
                 )
                 await asyncio.wait_for(remote.call_started.wait(), timeout=10)
                 assert remote.active_streams > 0

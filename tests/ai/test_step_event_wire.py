@@ -3,6 +3,7 @@
 """Step event wire values survive durable archives and portable snapshots."""
 
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from linktools.ai.persistence import Persistence
 from linktools.ai.persistence.codec import _decode_step_envelope, _encode_step_envelope
 from linktools.ai.persistence._step_contracts import AgentRunRecord, StepEvent, StepEventType
 from linktools.ai.storage import InMemoryObjectStore
+
+from .test_step_projection import _execution
 
 _EVENT_TYPES: tuple[StepEventType, ...] = (
     "AGENT_RUN_STARTED",
@@ -81,9 +84,12 @@ async def test_step_event_archive_and_idempotency_survive_snapshot(
     state = Persistence(_storage(root))
     await state.initialize(namespace="steps", tenant_id="tenant")
     try:
-        archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+        execution = replace(_execution(), revision=1, producer_generation=1, producer_claim_id="owner-claim")
+        repository = state.execution.executions
+        await repository.create_execution(execution)
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         run = AgentRunRecord("run", started_at=_NOW)
-        recorder = AgentRunRecorder(archive, execution_id=None, agent_run_id="run")
+        recorder = AgentRunRecorder(archive, execution_id="execution", agent_run_id="run")
         await recorder.register_agent_run(run)
         for event_type in _EVENT_TYPES:
             await recorder.record_event(event_type, 1, timestamp=_NOW)
@@ -92,7 +98,7 @@ async def test_step_event_archive_and_idempotency_survive_snapshot(
         assert [event.idempotency_key for event in events] == [
             f"{index}:1:{event_type}:" for index, event_type in enumerate(_EVENT_TYPES)
         ]
-        resumed = AgentRunRecorder(archive, execution_id=None, agent_run_id="run")
+        resumed = AgentRunRecorder(archive, execution_id="execution", agent_run_id="run")
         await resumed.register_agent_run(run)
         await resumed.record_event("AGENT_RUN_SUCCEEDED", 2, timestamp=_NOW)
         events = await archive.list_events(agent_run_id="run")
@@ -116,9 +122,9 @@ async def test_step_event_archive_and_idempotency_survive_snapshot(
     restored = Persistence(PersistenceStorage.from_root(restored_root))
     await restored.initialize(namespace="steps", tenant_id="tenant")
     try:
-        restored_archive = restored.run_store.read_store(PersistenceDomain.CHECKPOINT)
+        restored_archive = restored.run_store.read_store(PersistenceDomain.TRACE)
         assert await restored_archive.list_events(agent_run_id="run") == events
-        recorder = AgentRunRecorder(restored_archive, execution_id=None, agent_run_id="run")
+        recorder = AgentRunRecorder(restored_archive, execution_id="execution", agent_run_id="run")
         await recorder.register_agent_run(run)
         await recorder.record_event("AGENT_RUN_STARTED", 3, timestamp=_NOW)
         resumed_events = await restored_archive.list_events(agent_run_id="run")

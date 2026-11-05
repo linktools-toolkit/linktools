@@ -547,9 +547,31 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         self._client_recorders: dict[int, ModelClientRequestRecorder] = {}
         self._provider_errors: dict[int, Exception] = {}
         self._pending_model_failure: Callable[[Sequence[ModelMessage]], Awaitable[None]] | None = None
+        self._request_wrappers: tuple[AbstractCapability[Any], ...] = ()
+
+    def with_request_ordering(
+        self, capabilities: Sequence[AbstractCapability[Any]],
+    ) -> ModelObservationCapability:
+        wrappers: list[AbstractCapability[Any]] = []
+
+        def collect(capability: AbstractCapability[Any]) -> None:
+            cls = type(capability)
+            ordering = capability.get_ordering()
+            if (not isinstance(capability, ModelObservationCapability)
+                    and ordering is not None and ordering.position == "innermost"
+                    and cls.wrap_model_request is not AbstractCapability.wrap_model_request):
+                wrappers.append(capability)
+
+        for capability in capabilities:
+            capability.apply(collect)
+        bound = copy(self)
+        bound._request_wrappers = tuple(wrappers)
+        return bound
 
     def get_ordering(self) -> CapabilityOrdering:
-        return CapabilityOrdering(position="innermost")
+        # An inner handler can return a response without invoking the provider.
+        # Explicit edges preserve its observation through native recomposition.
+        return CapabilityOrdering(position="innermost", wraps=self._request_wrappers)
 
     async def wrap_node_run(
         self, ctx: PydanticRunContext[AgentContext[object]], *,

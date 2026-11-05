@@ -5,6 +5,8 @@
 import asyncio
 from abc import abstractmethod
 import hashlib
+import json
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
@@ -16,10 +18,10 @@ from typing import Protocol, TypeVar, runtime_checkable
 from linktools.core import environ
 from pydantic_ai.messages import ModelMessage
 
-from ..core import ExecutionStatus
+from ..core import ExecutionStatus, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..model import ModelClientRequest
-from ..storage import ObjectRef, ObjectStore, StoredPayload
+from ..storage import CacheBackend, ObjectRef, ObjectStore, StoredPayload
 from ..model.messages import decode_model_messages, encode_model_messages
 from ._transcript_staging import MessageArchive, MessageSnapshot, StagedTranscript
 from ._model_interaction import (
@@ -29,19 +31,22 @@ from ._model_interaction import (
     StagedModelInteraction,
     context_projection_to_durable,
 )
-from ._archive import PreparedArchive
+from ._archive import ArchiveRoot, PreparedArchive
 from .codec import (
     _decode_enveloped_domain,
     _decode_step_envelope,
     _encode_step_envelope,
+    encode_record,
+    decode_record,
 )
 from .contracts import (
     ArchivedContextBlock,
     ContextProjection,
     ConversationHistoryRepository,
-    ExecutionHistoryHeadRecord,
-    ExecutionHistoryState,
     ExecutionRecord,
+    ExecutionTerminalPublication,
+    ExecutionRecoveryState,
+    ExecutionInsertionReceipt,
     ExecutionRepository,
     ExecutionRunSealHead,
     HistoryQuality,
@@ -62,7 +67,6 @@ from ._history import (
     PreparedTranscriptObservation,
     TranscriptCapture,
     TranscriptRepository,
-    _exact_message_signature,
 )
 from ._model_client import prepare_client_requests, resolve_client_requests
 from ._plan import PersistenceDomain
@@ -130,6 +134,7 @@ class _ProjectionOffset:
     checkpoints: int = 0
     transcript_messages: int = 0
     interactions: int = 0
+    request_projection: ContextProjection | None = None
     observation_task: asyncio.Task[None] | None = None
     observation_batch_size: int | None = None
     observation_flush_interval: float | None = None
@@ -164,7 +169,7 @@ class PreparedAgentRunCheckpoint:
     projection: ContextProjection
     history_quality: HistoryQuality = HistoryQuality.COMPLETE
     archive: PreparedArchive = field(default_factory=PreparedArchive)
-    preparation_receipt: "_CheckpointPrefixReceipt | None" = field(default=None, repr=False, compare=False)
+    context_messages: Sequence[ModelMessage] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1102,13 +1107,6 @@ class InMemoryStepArchive(StagingAgentRunStore):
         ]
 
 
-@dataclass(frozen=True, slots=True)
-class _CheckpointPrefixReceipt:
-    checkpoint: StoredAgentRunCheckpoint
-    messages: MessageSnapshot
-    records: Mapping[bytes, StoredRecord] | None = field(default=None, repr=False, compare=False)
-
-
 class StateStepArchive(AgentRunStore):
     """Durable Step owner archive using StateStore Record and Fact primitives."""
 
@@ -1126,6 +1124,7 @@ class StateStepArchive(AgentRunStore):
         history_repository: "ConversationHistoryRepository | None" = None,
         execution_repository: "ExecutionRepository | None" = None,
         object_reader: "Callable[[PersistenceDomain, ObjectRef], Awaitable[bytes]] | None" = None,
+        cache: CacheBackend | None = None,
     ) -> None:
         self._store = store
         self._namespace = namespace
@@ -1145,7 +1144,8 @@ class StateStepArchive(AgentRunStore):
         )
         self._execution_repository = execution_repository
         self._context_baselines: dict[str, LoadedModelContext] = {}
-        self._checkpoint_prefix_receipts: dict[str, _CheckpointPrefixReceipt] = {}
+        self._context_cache = cache if isinstance(cache, CacheBackend) else None
+        self._context_cache_keys: OrderedDict[str, str] = OrderedDict()
         self._history_lock = _AgentRunHistoryLock()
         self._closed = False
 
@@ -1660,23 +1660,6 @@ class StateStepArchive(AgentRunStore):
         key = self._sequence(agent_run_id, "checkpoint")
         return (await self._store.read(lambda transaction: transaction.get_sequences((key,)))).get(key, 0)
 
-    async def capture_checkpoint_progress(
-        self, *, agent_run_id: str, checkpoint: PreparedAgentRunCheckpoint,
-    ) -> tuple[int, int]:
-        """Capture the checkpoint's durable position and model interaction high water."""
-        require_no_run_history_lock("StateStepArchive.capture_checkpoint_progress")
-        async def read(_transaction: StateTransaction) -> tuple[int, int]:
-            sequence = await self.checkpoint_count(agent_run_id=agent_run_id)
-            if not sequence or not await self.verify_checkpoint_range(
-                agent_run_id=agent_run_id, after_sequence=sequence - 1,
-                checkpoints=(checkpoint,),
-            ):
-                sequence += 1
-            high_water = await self.model_interaction_count(agent_run_id=agent_run_id)
-            return sequence, high_water
-
-        return await self._store.read(read)
-
     async def verify_checkpoint_range(
         self, *, agent_run_id: str, after_sequence: int,
         checkpoints: Sequence[PreparedAgentRunCheckpoint],
@@ -1727,27 +1710,6 @@ class StateStepArchive(AgentRunStore):
         context: LoadedModelContext,
     ) -> None:
         self._context_baselines[agent_run_id] = context
-
-    def confirm_checkpoint_prefix(
-        self, checkpoint: AgentRunCheckpoint, prepared: PreparedAgentRunCheckpoint,
-        *, records: Mapping[bytes, StoredRecord] | None = None,
-    ) -> None:
-        """Retain the immutable prefix after the producer confirms durable commit."""
-        if (self._runtime_domain is PersistenceDomain.CONVERSATION
-                or checkpoint.agent_run_id != prepared.stored.agent_run_id
-                or len(checkpoint.messages) != prepared.stored.transcript_message_count):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        # Staging already owns immutable encoded leaves. Keep that exact prefix
-        # rather than serializing its SDK values again after every commit.
-        messages = MessageArchive().snapshot(checkpoint.messages)
-        keys = (self._agent_run_key(checkpoint.agent_run_id),
-                self._history.head_key(checkpoint.agent_run_id),
-                self._history.projection_key(checkpoint.agent_run_id))
-        confirmed = ({key: records[key] for key in keys}
-                     if records is not None and all(key in records for key in keys) else None)
-        self._checkpoint_prefix_receipts[checkpoint.agent_run_id] = _CheckpointPrefixReceipt(
-            prepared.stored, messages, confirmed,
-        )
 
     async def transcript_message_count_for_run(
         self,
@@ -1912,124 +1874,6 @@ class StateStepArchive(AgentRunStore):
             transcript_message_count_before=before,
         )
 
-    async def relocate_run_checkpoint(
-        self,
-        run: AgentRunRecord,
-        checkpoint: AgentRunCheckpoint,
-    ) -> AgentRunCheckpoint:
-        """Rebase one cumulative checkpoint onto its run-owned archive."""
-        self._ensure_open()
-        require_no_run_history_lock(
-            "StateStepArchive.relocate_run_checkpoint"
-        )
-        if self._runtime_domain is PersistenceDomain.CONVERSATION:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        relocated, _records = await self._relocate_run_checkpoint(run, checkpoint)
-        return relocated
-
-    async def prepare_run_checkpoint(
-        self,
-        run: AgentRunRecord,
-        checkpoint: AgentRunCheckpoint,
-        *,
-        archive: PreparedArchive | None = None,
-    ) -> tuple[AgentRunCheckpoint, PreparedAgentRunCheckpointBatch]:
-        """Relocate and prepare a cumulative checkpoint in its run-owned archive."""
-        self._ensure_open()
-        require_no_run_history_lock("StateStepArchive.prepare_run_checkpoint")
-        if (
-            type(self).relocate_run_checkpoint is not StateStepArchive.relocate_run_checkpoint
-            or type(self).prepare_checkpoints is not StateStepArchive.prepare_checkpoints
-        ):
-            relocated = await self.relocate_run_checkpoint(run, checkpoint)
-            return relocated, await self.prepare_checkpoints(run, (relocated,))
-        if self._runtime_domain is PersistenceDomain.CONVERSATION:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        receipt = self._checkpoint_prefix_receipts.get(run.agent_run_id)
-        relocated, records = await self._relocate_run_checkpoint(run, checkpoint, use_confirmed_prefix=True)
-        batch = await self._prepare_explicit_checkpoints(
-            run,
-            (relocated,),
-            archive=archive,
-            observed_records=records,
-        )
-        if receipt is not None and records is not None and records is receipt.records:
-            batch = replace(batch, checkpoints=tuple(
-                replace(value, preparation_receipt=receipt) for value in batch.checkpoints
-            ))
-        return relocated, batch
-
-    async def _relocate_run_checkpoint(
-        self,
-        run: AgentRunRecord,
-        checkpoint: AgentRunCheckpoint,
-        *, use_confirmed_prefix: bool = False,
-    ) -> tuple[AgentRunCheckpoint, Mapping[bytes, StoredRecord] | None]:
-        receipt = self._checkpoint_prefix_receipts.get(run.agent_run_id) if use_confirmed_prefix else None
-        observed_checkpoint: StoredAgentRunCheckpoint | None = None
-
-        async def capture_metadata(
-            transaction: StateTransaction,
-        ) -> Mapping[bytes, StoredRecord]:
-            nonlocal observed_checkpoint
-            run_key = self._agent_run_key(run.agent_run_id)
-            head_key = self._history.head_key(run.agent_run_id)
-            projection_key = self._history.projection_key(run.agent_run_id)
-            keys = (run_key, head_key, projection_key) if use_confirmed_prefix else (run_key, head_key)
-            records = await transaction.get_records(keys)
-            if receipt is not None:
-                facts = await transaction.list_facts(FactQuery(self._stream(run.agent_run_id, "checkpoint"), latest=True))
-                observed = None if not facts else _decode_step(facts[0].data)
-                if isinstance(observed, StoredAgentRunCheckpoint):
-                    observed_checkpoint = observed
-            return records
-
-        if receipt is not None and receipt.records is not None:
-            records = receipt.records
-            observed_checkpoint = receipt.checkpoint
-        else:
-            records = await self._store.read(capture_metadata)
-        existing_run = records.get(self._agent_run_key(run.agent_run_id))
-        before, head = 0, None
-        if existing_run is not None:
-            if _decode_step(existing_run.data) != run:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            head_record = records.get(self._history.head_key(run.agent_run_id))
-            if head_record is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            head = self._history.decode_head(head_record)
-            before = head.message_count
-
-        source_messages = (checkpoint.messages if isinstance(checkpoint.messages, MessageSnapshot)
-                           else tuple(checkpoint.messages))
-        if before > len(source_messages):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if (before and receipt is not None and observed_checkpoint == receipt.checkpoint
-                and before == receipt.checkpoint.transcript_message_count):
-            prefix = MessageArchive().snapshot(source_messages[:before])
-            if prefix != receipt.messages:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return replace(checkpoint, transcript_message_count_before=before), records
-        if before:
-            with runtime_object_source_reads():
-                observed = await self._history.load_message_span(
-                    run.agent_run_id,
-                    0,
-                    before,
-                    observed_head=head,
-                )
-            if tuple(
-                _exact_message_signature(message) for message in observed
-            ) != tuple(
-                _exact_message_signature(message)
-                for message in source_messages[:before]
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return replace(
-            checkpoint,
-            transcript_message_count_before=before,
-        ), None if before else records
-
     async def prepare_checkpoints(
         self,
         run: AgentRunRecord,
@@ -2071,12 +1915,12 @@ class StateStepArchive(AgentRunStore):
     async def initialize(self) -> None:
         self._closed = False
         self._context_baselines.clear()
-        self._checkpoint_prefix_receipts.clear()
+        self._context_cache_keys.clear()
 
     async def close(self) -> None:
         self._closed = True
         self._context_baselines.clear()
-        self._checkpoint_prefix_receipts.clear()
+        self._context_cache_keys.clear()
 
     def _agent_run_key(self, agent_run_id: str) -> bytes:
         return record_key_digest(self._namespace, self._tenant_id, self._runtime_domain.value, "agent_run", agent_run_id)
@@ -2097,7 +1941,7 @@ class StateStepArchive(AgentRunStore):
         require_no_run_history_lock("StateStepArchive.register_agent_run")
 
         async def mutate(transaction: StateTransaction) -> None:
-            history_head_guard = await self._execution_history_guard_in_transaction(
+            execution_guard = await self._execution_history_guard_in_transaction(
                 transaction,
                 execution_id,
                 None,
@@ -2106,11 +1950,6 @@ class StateStepArchive(AgentRunStore):
                 transaction,
                 record,
             )
-            if created:
-                await self._advance_execution_history_head_in_transaction(
-                    transaction,
-                    history_head_guard,
-                )
 
         await self._mutate(mutate)
 
@@ -2316,7 +2155,7 @@ class StateStepArchive(AgentRunStore):
                         checkpoint.step_index,
                         checkpoint.timestamp,
                         checkpoint.state,
-                        projection.digest,
+                        projection,
                         archive_base + len(incoming),
                         checkpoint.context_messages is not None,
                         checkpoint.pending_request_index,
@@ -2325,6 +2164,7 @@ class StateStepArchive(AgentRunStore):
                     projection,
                     head.quality,
                     archive,
+                    projection_messages,
                 )
             )
             target_message_count += len(delta)
@@ -2390,112 +2230,102 @@ class StateStepArchive(AgentRunStore):
         self,
         transaction: StateTransaction,
         execution_id: str | None,
-        history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None,
+        execution_guard: tuple[ExecutionRecord, StoredRecord] | None,
         producer_generation: int | None = None,
         *,
         allow_cancelling: bool = True,
-    ) -> tuple[ExecutionHistoryHeadRecord, StoredRecord] | None:
+        inserted_terminal: ExecutionInsertionReceipt | None = None,
+    ) -> tuple[ExecutionRecord, StoredRecord] | None:
         if self._execution_repository is None:
             if self._runtime_domain is PersistenceDomain.TRACE:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            if history_head_guard is not None:
+            if execution_guard is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return None
         if not execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         core_transaction = self._execution_transaction(transaction)
-        if history_head_guard is not None:
-            head, _record = history_head_guard
-            if (
-                head.execution_id != execution_id
-                or head.state is not ExecutionHistoryState.OPEN
-                or producer_generation is not None and head.producer_generation != producer_generation
-            ):
+        if execution_guard is not None:
+            execution, record = execution_guard
+            if inserted_terminal is not None:
+                # The expected-absent terminal insertion owns this atomic publication.
+                if (inserted_terminal.transaction is not core_transaction
+                        or execution != inserted_terminal.execution or record != inserted_terminal.record
+                        or execution.execution_id != execution_id
+                        or execution.history_seal_digest is None or not execution.retention_closed
+                        or execution.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
+                        or record.storage_revision != 0
+                        or (producer_generation is not None and execution.producer_generation != producer_generation)
+                        or await core_transaction.get_record(record.key_digest) != record):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                return execution_guard
+            if (execution.execution_id != execution_id or execution.history_seal_digest is not None
+                    or execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
+                    or (producer_generation is not None and execution.producer_generation != producer_generation)):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            return history_head_guard
-        return await self._execution_repository.require_open_history_head_in_transaction(
-            core_transaction,
-            execution_id,
-            expected_producer_generation=producer_generation,
-            allow_cancelling=allow_cancelling,
+            return execution_guard
+        if inserted_terminal is not None:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if producer_generation is not None:
+            return await self._execution_repository.require_execution_producer_in_transaction(
+                core_transaction, execution_id,
+                expected_producer_generation=producer_generation,
+                allow_cancelling=allow_cancelling,
+            )
+        return await self._execution_repository.require_execution_history_write_in_transaction(
+            core_transaction, execution_id,
         )
 
     async def guard_execution_producer(
         self, transaction: StateTransaction, *, execution_id: str,
-        producer_generation: int,
-        allow_cancelling: bool = True,
+        producer_generation: int, allow_cancelling: bool = True,
     ) -> None:
-        guard = await self._execution_history_guard_in_transaction(
-            transaction, execution_id, None, producer_generation, allow_cancelling=allow_cancelling,
+        if self._execution_repository is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        await self._execution_repository.require_execution_producer_in_transaction(
+            self._execution_transaction(transaction), execution_id,
+            expected_producer_generation=producer_generation, allow_cancelling=allow_cancelling,
         )
-        if guard is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        _head, record = guard
-        if await self._execution_transaction(transaction).guard_record(
-            record.key_digest, expected_storage_revision=record.storage_revision,
-        ) is None:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def require_revoked_execution_producer(
         self, *, execution_id: str, producer_generation: int,
         terminal_execution: ExecutionRecord | None = None,
+        terminal_publication: ExecutionTerminalPublication | None = None,
     ) -> None:
-        """Prove that a newer generation or immutable seal revoked this producer."""
+        """Prove source control permanently revoked this producer's publication."""
         require_no_run_history_lock("StateStepArchive.require_revoked_execution_producer")
         repository = self._execution_repository
         if repository is None:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        batch_control_reads = (
-            type(repository) is ExecutionRepositoryImpl
-            and terminal_execution is not None
-            and terminal_execution.execution_id == execution_id
-            and terminal_execution.status in {
-                ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
-            }
-        )
-
+        if (terminal_publication is not None and terminal_execution is not None
+                and terminal_publication.execution == terminal_execution
+                and terminal_execution.execution_id == execution_id
+                and terminal_execution.producer_generation == producer_generation
+                and not terminal_execution.durable_trace
+                and terminal_execution.recovery_state is not ExecutionRecoveryState.HANDOFF
+                and terminal_execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}):
+            return
         async def read(_transaction: StateTransaction) -> None:
-            # The terminal record selects the read shape, never the revocation proof.
-            if batch_control_reads:
-                execution, head = await repository.observe_execution_control(execution_id, tenant_id=self._tenant_id)
-            else:
-                head = await repository.get_history_head(execution_id, tenant_id=self._tenant_id)
-            if (head is not None and head.state is ExecutionHistoryState.OPEN
-                    and head.producer_generation > producer_generation):
+            execution = await repository.get(execution_id, tenant_id=self._tenant_id)
+            if execution is None:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if execution.producer_generation > producer_generation:
                 return
-            if not batch_control_reads:
-                execution = await repository.get(execution_id, tenant_id=self._tenant_id)
-            if (execution is not None and not execution.durable_trace
-                    and execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
-                    and head is not None and head.state is ExecutionHistoryState.CLOSED
-                    and head.producer_generation >= producer_generation):
+            if (execution.producer_generation == producer_generation
+                    and execution.status is ExecutionStatus.RECOVERY_REQUIRED):
+                return
+            if (execution.producer_generation < producer_generation
+                    or execution.status not in {
+                        ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+                    }):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if not execution.durable_trace:
                 return
             seal = await repository.get_history_seal(execution_id, tenant_id=self._tenant_id)
-            if (execution is None or execution.status not in {
-                ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
-            } or head is None or head.state is not ExecutionHistoryState.SEALED
-                    or head.producer_generation < producer_generation):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if seal is None or seal.seal_digest != head.seal_digest:
+            if seal is None or seal.seal_digest != execution.history_seal_digest:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         await repository.state_store.read(read)
-
-    async def _advance_execution_history_head_in_transaction(
-        self,
-        transaction: StateTransaction,
-        history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None,
-    ) -> None:
-        if history_head_guard is None:
-            return
-        if self._execution_repository is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        head, record = history_head_guard
-        await self._execution_repository.replace_history_head_in_transaction(
-            self._execution_transaction(transaction),
-            record,
-            replace(head, revision=head.revision + 1),
-        )
 
     async def sync_projection(
         self,
@@ -2582,7 +2412,8 @@ class StateStepArchive(AgentRunStore):
         observation: PreparedTranscriptObservation | None = None,
         producer_generation: int | None = None,
         execution_id: str | None = None,
-        history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
+        execution_guard: tuple[ExecutionRecord, StoredRecord] | None = None,
+        inserted_terminal: ExecutionInsertionReceipt | None = None,
         prefetch_keys: Sequence[bytes] = (),
     ) -> bool:
         """Commit projection metadata and report whether its AgentRun was admitted."""
@@ -2600,12 +2431,12 @@ class StateStepArchive(AgentRunStore):
             ("checkpoint", checkpoint.stored, checkpoint.stored.state)
             for checkpoint in checkpoints
         )
-        supplied_history_head_guard = history_head_guard is not None
-        history_head_guard = await self._execution_history_guard_in_transaction(
+        execution_guard = await self._execution_history_guard_in_transaction(
             transaction,
             execution_id,
-            history_head_guard,
+            execution_guard,
             producer_generation,
+            inserted_terminal=inserted_terminal,
         )
         owner_record, created = await self._ensure_run_with_head_in_transaction(
             transaction,
@@ -2620,11 +2451,6 @@ class StateStepArchive(AgentRunStore):
         if observation is not None:
             await self._history.commit_observation(transaction, observation)
         if not facts:
-            if (created or observation is not None) and history_head_guard is not None and not supplied_history_head_guard:
-                await self._advance_execution_history_head_in_transaction(
-                    transaction,
-                    history_head_guard,
-                )
             return created
         owner = self._agent_run_key(run.agent_run_id)
         grouped: dict[str, list[object]] = {
@@ -2700,11 +2526,6 @@ class StateStepArchive(AgentRunStore):
         ) is None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         await _insert_facts(transaction, tuple(stored_facts))
-        if history_head_guard is not None and not supplied_history_head_guard:
-            await self._advance_execution_history_head_in_transaction(
-                transaction,
-                history_head_guard,
-            )
         return created
 
     async def materialize_checkpoint(
@@ -2747,15 +2568,14 @@ class StateStepArchive(AgentRunStore):
         checkpoint: PreparedAgentRunCheckpoint,
         *,
         execution_id: str | None = None,
-        history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
+        execution_guard: tuple[ExecutionRecord, StoredRecord] | None = None,
     ) -> int:
         if not isinstance(checkpoint, PreparedAgentRunCheckpoint):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        supplied_history_head_guard = history_head_guard is not None
-        history_head_guard = await self._execution_history_guard_in_transaction(
+        execution_guard = await self._execution_history_guard_in_transaction(
             transaction,
             execution_id,
-            history_head_guard,
+            execution_guard,
         )
         # Pin ownership before the fact read so READ COMMITTED races fail the CAS.
         owner_record, created = await self._ensure_run_with_head_in_transaction(
@@ -2766,20 +2586,12 @@ class StateStepArchive(AgentRunStore):
         )
         stream = self._stream(run.agent_run_id, "checkpoint")
         data = _encode_step(checkpoint.stored)
-        # A newly inserted run cannot own committed checkpoint facts.
         existing = () if created else await transaction.list_facts(
             FactQuery(stream, latest=True)
         )
         for fact in existing:
             if fact.data == data and fact.state == checkpoint.stored.state:
                 return fact.sequence
-        receipt = checkpoint.preparation_receipt
-        if receipt is not None:
-            current = await transaction.get_records(tuple(receipt.records))
-            latest = None if not existing else _decode_step(existing[0].data)
-            if current != receipt.records or latest != receipt.checkpoint:
-                self._checkpoint_prefix_receipts.pop(run.agent_run_id, None)
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
         owner = self._agent_run_key(run.agent_run_id)
         checkpoint_fact = StoredFact(
             stream, 0, owner, "step_checkpoint", None,
@@ -2812,11 +2624,6 @@ class StateStepArchive(AgentRunStore):
             await _insert_facts(transaction, (replace(checkpoint_fact, sequence=sequence),))
         else:
             sequence = await self.checkpoint_count(agent_run_id=run.agent_run_id)
-        if history_head_guard is not None and not supplied_history_head_guard:
-            await self._advance_execution_history_head_in_transaction(
-                transaction,
-                history_head_guard,
-            )
         return sequence
 
     async def materialize_checkpoint_in_transaction(
@@ -2826,7 +2633,7 @@ class StateStepArchive(AgentRunStore):
         checkpoint: PreparedAgentRunCheckpoint,
         *,
         execution_id: str | None = None,
-        history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
+        execution_guard: tuple[ExecutionRecord, StoredRecord] | None = None,
     ) -> int | None:
         """Materialize and return its exact position; legacy overrides may return None."""
         require_no_run_history_lock(
@@ -2837,7 +2644,7 @@ class StateStepArchive(AgentRunStore):
             run,
             checkpoint,
             execution_id=execution_id,
-            history_head_guard=history_head_guard,
+            execution_guard=execution_guard,
         )
 
     async def sync_projection_in_transaction(
@@ -2851,7 +2658,8 @@ class StateStepArchive(AgentRunStore):
         observation: PreparedTranscriptObservation | None = None,
         producer_generation: int | None = None,
         execution_id: str | None = None,
-        history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
+        execution_guard: tuple[ExecutionRecord, StoredRecord] | None = None,
+        inserted_terminal: ExecutionInsertionReceipt | None = None,
     ) -> None:
         require_no_run_history_lock(
             "StateStepArchive.sync_projection_in_transaction"
@@ -2865,7 +2673,8 @@ class StateStepArchive(AgentRunStore):
             observation=observation,
             producer_generation=producer_generation,
             execution_id=execution_id,
-            history_head_guard=history_head_guard,
+            execution_guard=execution_guard,
+            inserted_terminal=inserted_terminal,
         )
 
     async def _ensure_run_with_head_in_transaction(
@@ -3089,56 +2898,151 @@ class StateStepArchive(AgentRunStore):
             )
         ).model_messages()
 
-    async def load_committed_session_model_context(
-        self,
-        history_id: str,
-        *,
-        agent_run_id: str,
-        message_count: int,
-        tenant_id: str,
-    ) -> LoadedModelContext:
-        require_no_run_history_lock(
-            "StateStepArchive.load_committed_session_model_context"
-        )
-        if self._runtime_domain is not PersistenceDomain.CONVERSATION:
-            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        if (
-            isinstance(message_count, bool)
-            or not isinstance(message_count, int)
-            or message_count < 0
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        total = await self._history.history_message_count(
-            history_id,
-            tenant_id=tenant_id,
-        )
-        if message_count > total:
-            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+    async def latest_checkpoint_sequence(self, *, agent_run_id: str) -> int:
+        """Resolve the current immutable fact for an explicitly publishing caller."""
         values = await self._facts(agent_run_id, "checkpoint", latest=True)
         if not values:
             raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-        stored = _decode_step(values[0].data)
-        if (
-            not isinstance(stored, StoredAgentRunCheckpoint)
-            or stored.agent_run_id != agent_run_id
-        ):
+        return values[0].sequence
+
+    async def checkpoint_at_sequence(
+        self, *, agent_run_id: str, checkpoint_sequence: int,
+    ) -> StoredAgentRunCheckpoint:
+        self._ensure_open()
+        if isinstance(checkpoint_sequence, bool) or not isinstance(checkpoint_sequence, int) or checkpoint_sequence < 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        values = await self._store.read(lambda transaction: transaction.list_facts(FactQuery(
+            self._stream(agent_run_id, "checkpoint"), after_sequence=checkpoint_sequence - 1, limit=1,
+        )))
+        if not values or values[0].sequence != checkpoint_sequence:
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        stored = _decode_step(values[0].data)
+        if (not isinstance(stored, StoredAgentRunCheckpoint) or stored.agent_run_id != agent_run_id
+                or stored.state != values[0].state):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return stored
+
+    async def confirm_session_context(
+        self, *, checkpoint_sequence: int,
+        prepared: PreparedAgentRunCheckpoint, archive_records: PreparedArchive | None = None,
+    ) -> None:
+        """Publish a prepared context only after its Session/fact commit is confirmed."""
+        self._ensure_open()
+        if active_state_scope() is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (self._runtime_domain is not PersistenceDomain.CONVERSATION
+                or prepared.stored.state != "complete"
+                or isinstance(checkpoint_sequence, bool) or not isinstance(checkpoint_sequence, int)
+                or checkpoint_sequence < 1):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if self._context_cache is None:
+            return
+        blocks = prepared.stored.projection.items
+        if len(blocks) != 1 or not isinstance(blocks[0], ArchivedContextBlock):
+            return
+        block = blocks[0]
+        frozen = MessageArchive().snapshot(prepared.context_messages)
+        if frozen.encoded_digest() != (block.raw_digest, block.raw_size):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        archive = await self._history.content_archive()
+        frontier = archive.prepared_frontier(block.root, prepared.archive if archive_records is None else archive_records)
+        context = LoadedModelContext((), block.root, block.raw_digest, frontier)
+        key = await self._session_context_cache_key(prepared.stored.agent_run_id,
+            checkpoint_sequence, prepared.stored.projection_digest)
+        await self._remember_session_context(key, prepared.stored.agent_run_id, frozen, context)
+
+    async def _session_context_cache_key(
+        self, agent_run_id: str, sequence: int, digest: str,
+    ) -> str:
+        archive = await self._history.content_archive()
+        return "conversation-context:" + canonical_sha256([
+            archive.scope_id, self._namespace, self._tenant_id,
+            self._runtime_domain.value, agent_run_id, sequence, digest,
+        ])
+
+    async def _remember_session_context(
+        self, key: str, agent_run_id: str, frozen: MessageSnapshot, context: LoadedModelContext,
+    ) -> None:
+        if self._context_cache is None or context.archive_root is None:
+            return
+        content = canonical_json_bytes({
+            "root": context.archive_root.to_json(), "digest": context.archive_digest,
+            "frontier": [encode_record(value) for value in context.archive_frontier],
+            "messages": json.loads(encode_model_messages(frozen)),
+        })
+        try:
+            await self._context_cache.put(key, content)
+        except Exception:
+            return
+        self._context_cache_keys[key] = agent_run_id
+        self._context_cache_keys.move_to_end(key)
+        while len(self._context_cache_keys) > 4096:
+            self._context_cache_keys.popitem(last=False)
+
+    async def _cached_session_context(self, key: str, projection: ContextProjection) -> LoadedModelContext | None:
+        if self._context_cache is None:
+            return None
+        try:
+            content = await self._context_cache.get(key)
+        except Exception:
+            return None
+        if content is None:
+            return None
+        try:
+            value = json.loads(content)
+            root = ArchiveRoot.from_json(value["root"])
+            raw = canonical_json_bytes(value["messages"])
+            messages = decode_model_messages(raw)
+            block = ArchivedContextBlock(root, value["digest"], len(raw))
+            archive = await self._history.content_archive()
+            if (root.scope_id != archive.scope_id or root.content_scope != archive.content_scope
+                    or root.count != len(messages) or hashlib.sha256(raw).hexdigest() != block.raw_digest
+                    or projection != ContextProjection((block,))):
+                return None
+            frontier = tuple(decode_record(record) for record in value["frontier"])
+            if frontier:
+                archive.reuse_frontier(root, frontier, PreparedArchive())
+            return LoadedModelContext(tuple(LoadedContextMessage(message, None) for message in messages),
+                                      root, block.raw_digest, frontier)
+        except (AIError, KeyError, TypeError, ValueError):
+            return None
+
+    async def load_committed_session_model_context(
+        self, *, agent_run_id: str,
+        checkpoint_sequence: int, projection_digest: str, tenant_id: str,
+    ) -> LoadedModelContext:
+        require_no_run_history_lock("StateStepArchive.load_committed_session_model_context")
+        self._ensure_open()
+        if self._runtime_domain is not PersistenceDomain.CONVERSATION:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        if tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        if (isinstance(checkpoint_sequence, bool) or not isinstance(checkpoint_sequence, int)
+                or checkpoint_sequence < 1):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        stored = await self.checkpoint_at_sequence(
+            agent_run_id=agent_run_id, checkpoint_sequence=checkpoint_sequence,
+        )
         if stored.state != "complete":
             raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-        projection = await self._history.load_projection(history_id)
-        if (
-            projection is not None
-            and projection.digest == stored.projection_digest
-        ):
-            return await self._history.load_projected_context(
-                history_id,
-                projection,
+        if stored.projection_digest != projection_digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        key = None
+        if self._context_cache is not None:
+            key = await self._session_context_cache_key(
+                agent_run_id, checkpoint_sequence, projection_digest,
             )
-        return await self._history.load_session_raw_model_context(
-            history_id,
-            tenant_id=tenant_id,
-            message_count=message_count,
-        )
+            cached = await self._cached_session_context(key, stored.projection)
+            if cached is not None:
+                return cached
+        # The authorized Session cursor owns the branch's committed message cutoff.
+        # Fact transcript counts are local to their source branch, including on a fork;
+        # a mutable current head cannot redefine this selected context revision.
+        context = await self._history.load_projected_context(agent_run_id, stored.projection)
+        # A cold read observes an already committed immutable fact, never the mutable latest index.
+        if key is not None and all(message.source is None for message in context.messages):
+            await self._remember_session_context(key, agent_run_id, MessageArchive().snapshot(context.model_messages()), context)
+        return context
 
     async def verify_checkpoint_projection(
         self,
@@ -3163,11 +3067,8 @@ class StateStepArchive(AgentRunStore):
             if self._runtime_domain is PersistenceDomain.CONVERSATION
             else agent_run_id
         )
-        projection = await self._history.load_projection(owner_id)
-        if projection is None or projection.digest != stored.projection_digest:
-            return False
         with runtime_object_source_reads():
-            context = await self._history.load_model_context(owner_id)
+            context = await self._history.load_projected_context(owner_id, stored.projection)
         expected_messages = (
             checkpoint.messages
             if checkpoint.context_messages is None
@@ -3219,7 +3120,7 @@ class StateStepArchive(AgentRunStore):
             else agent_run_id
         )
         with runtime_object_source_reads():
-            messages = (await self._history.load_model_context(owner_id)).model_messages()
+            messages = (await self._history.load_projected_context(owner_id, latest.projection)).model_messages()
             raw_messages = await self._history.load_message_span(
                 owner_id, 0, latest.transcript_message_count,
             )
@@ -3250,8 +3151,17 @@ class StateStepArchive(AgentRunStore):
     ) -> None:
         require_no_run_history_lock("StateStepArchive.release_agent_run")
 
+        for key, cached_run in tuple(self._context_cache_keys.items()):
+            if cached_run == agent_run_id:
+                self._context_cache_keys.pop(key, None)
+                if self._context_cache is not None:
+                    try:
+                        await self._context_cache.delete(key)
+                    except Exception:
+                        pass
+
         async def mutate(transaction: StateTransaction) -> None:
-            history_head_guard = await self._execution_history_guard_in_transaction(
+            execution_guard = await self._execution_history_guard_in_transaction(
                 transaction,
                 execution_id,
                 None,
@@ -3269,18 +3179,12 @@ class StateStepArchive(AgentRunStore):
                     for family in ("event", "checkpoint", "interaction")
                 )
             )
-            await self._advance_execution_history_head_in_transaction(
-                transaction,
-                history_head_guard,
-            )
 
         await self._mutate(mutate)
         self._context_baselines.pop(agent_run_id, None)
-        self._checkpoint_prefix_receipts.pop(agent_run_id, None)
 
     def release_runtime_cache(self, agent_run_id: str) -> None:
         self._context_baselines.pop(agent_run_id, None)
-        self._checkpoint_prefix_receipts.pop(agent_run_id, None)
 
     async def _append(
         self,
@@ -3304,7 +3208,7 @@ class StateStepArchive(AgentRunStore):
             owner_record = await transaction.get_record(owner)
             if owner_record is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            history_head_guard = await self._execution_history_guard_in_transaction(
+            execution_guard = await self._execution_history_guard_in_transaction(
                 transaction,
                 execution_id,
                 None,
@@ -3321,10 +3225,6 @@ class StateStepArchive(AgentRunStore):
                 if not isinstance(run, AgentRunRecord):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await self.index_history_events_in_transaction(transaction, run, ((sequence, value),))
-            await self._advance_execution_history_head_in_transaction(
-                transaction,
-                history_head_guard,
-            )
 
         await self._mutate(mutate)
 
@@ -3700,7 +3600,6 @@ class StateStepArchive(AgentRunStore):
     def _ensure_open(self) -> None:
         if self._closed:
             raise AIError(ErrorCode.STORAGE_CLOSED)
-
 
 
 def _validate_interaction_page(

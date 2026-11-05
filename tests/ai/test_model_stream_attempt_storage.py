@@ -30,6 +30,7 @@ from linktools.ai.persistence.contracts import ModelInteractionRecord
 from linktools.ai.persistence._step_contracts import AgentRunRecord
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef
 
+from ._runtime_test_helpers import native_checkpoint, seed_native_snapshot
 from .test_evaluation_retention import Offline
 from .test_history_projection_conformance import _record
 
@@ -118,11 +119,11 @@ def _interrupted(status: str, *, large: bool = False):
 async def test_interrupted_stream_aggregate_stays_trace_only(
     tmp_path: Path, backend: str, status: str,
 ) -> None:
-    staged, payloads, _, response = _interrupted(status)
+    staged, payloads, request, response = _interrupted(status)
     run = _run()
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="stream-observation", tenant_id="tenant")
-    await state.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
+    await state.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
     try:
         trace = state.run_store.read_store(PersistenceDomain.TRACE)
         checkpoint = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
@@ -137,25 +138,24 @@ async def test_interrupted_stream_aggregate_stays_trace_only(
         with pytest.raises(AIError) as rejected:
             record.validate_storage_domain(PersistenceDomain.CHECKPOINT)
         assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-        for projected in (
-            await checkpoint.prepare_interactions(run, (staged,), payloads.__getitem__, prepared=prepared),
-            await checkpoint.prepare_relocated_interactions(records, resolved, prepared=prepared),
-        ):
-            assert projected[0].response_context is None
-            assert projected[0].usage == staged.usage
-            projected[0].validate_storage_domain(PersistenceDomain.CHECKPOINT)
-            await checkpoint.sync_projection(run, events=(), checkpoints=(), interactions=projected,
-                                             execution_id="execution", archive=prepared)
-            read = await checkpoint.resolve_model_interactions(projected, include_client_requests=True)
-            assert read[0][1] is None
-            restored = await trace.prepare_relocated_interactions(projected, read, prepared=prepared)
-            assert restored[0].response_context is None
+        native = native_checkpoint().store
+        state.run_store.bind_step_store(native)
+        continuation = [replace(request[0], run_id=_RUN)]
+        await seed_native_snapshot(native, run_id=_RUN, messages=continuation, state="interrupted")
+        saved = await checkpoint.latest_checkpoint(agent_run_id=_RUN, include_interrupted=True)
+        assert saved is not None and saved.messages == continuation
+        assert saved.context_messages == continuation
+        assert await checkpoint.list_model_interactions(agent_run_id=_RUN) == []
+        assert await checkpoint.model_interaction_count(agent_run_id=_RUN) == 0
         assert [message async for message in trace.iter_messages(agent_run_id=_RUN)] == []
-        legacy = replace(staged, model_request_seq=2, stream_attempts=None)
-        old = await checkpoint.prepare_interactions(run, (legacy,), payloads.__getitem__, prepared=prepared)
-        await checkpoint.sync_projection(run, events=(), checkpoints=(), interactions=old,
-                                         execution_id="execution", archive=prepared)
-        assert (await checkpoint.resolve_model_interactions(old))[0][1] == response
+        assert record.usage == staged.usage
+        assert await trace.resolve_model_interactions(records, include_client_requests=True) == resolved
+        unobserved = replace(staged, model_request_seq=2, stream_attempts=None)
+        old = await trace.prepare_interactions(run, (unobserved,), payloads.__getitem__, prepared=prepared)
+        await trace.sync_projection(run, events=(), checkpoints=(), interactions=old,
+                                    execution_id="execution", archive=prepared)
+        assert (await trace.resolve_model_interactions(old))[0][1] == response
+        assert await checkpoint.latest_checkpoint(agent_run_id=_RUN, include_interrupted=True) == saved
     finally:
         await state.close()
 
@@ -165,7 +165,7 @@ async def test_interrupted_stream_aggregate_stays_trace_only(
 async def test_stream_attempts_round_trip_relocate_and_omit_content(tmp_path: Path, backend: str) -> None:
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="stream-observation", tenant_id="tenant")
-    await state.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
+    await state.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
     staged, payloads, request, winner, partial = _staged()
     prepared = PreparedArchive()
     try:
@@ -197,14 +197,35 @@ async def test_stream_attempts_round_trip_relocate_and_omit_content(tmp_path: Pa
         light, = page.items
         assert all(attempt.response is None for attempt in light.stream_attempts)
         assert light.stream_attempts[0].usage == staged.stream_attempts[0].usage
-        for domain in (PersistenceDomain.CHECKPOINT,):
-            target = state.run_store.read_store(domain)
-            relocated = await target.prepare_relocated_interactions(records, resolved, prepared=prepared)
-            assert all(attempt.response_context is None for attempt in relocated[0].stream_attempts)
+        native = native_checkpoint().store
+        state.run_store.bind_step_store(native)
+        continuation = [replace(request[0], run_id=_RUN), replace(winner[0], run_id=_RUN)]
+        await seed_native_snapshot(native, run_id=_RUN, messages=continuation)
+        checkpoint = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+        saved = await checkpoint.latest_checkpoint(agent_run_id=_RUN)
+        assert saved is not None and saved.messages == continuation
+        assert saved.context_messages == continuation
+        assert await checkpoint.list_model_interactions(agent_run_id=_RUN) == []
+        with pytest.raises(AIError) as rejected:
+            record.validate_storage_domain(PersistenceDomain.CHECKPOINT)
+        assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        relocated_state = Persistence(_storage(backend, tmp_path / "relocated"))
+        await relocated_state.initialize(namespace="stream-observation", tenant_id="tenant")
+        try:
+            await relocated_state.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
+            target = relocated_state.run_store.read_store(PersistenceDomain.TRACE)
+            relocation = PreparedArchive()
+            relocated = await target.prepare_relocated_interactions(records, resolved, prepared=relocation)
+            await target.sync_projection(run, events=(), checkpoints=(), interactions=relocated,
+                                         execution_id="execution", archive=relocation)
             projected = await target.resolve_model_interactions(relocated, include_client_requests=True)
-            assert projected[0][-1] == (None, None)
-            restored = await trace.prepare_relocated_interactions(relocated, projected, prepared=prepared)
-            assert all(attempt.response_context is None for attempt in restored[0].stream_attempts)
+            assert projected == resolved
+            assert relocated[0].usage == record.usage
+            assert relocated[0].stream_attempts[0].response_context is not None
+            assert relocated[0].stream_attempts[1].response_context is None
+            assert await checkpoint.latest_checkpoint(agent_run_id=_RUN) == saved
+        finally:
+            await relocated_state.close()
         with pytest.raises(AIError) as changed:
             await trace.sync_projection(run, events=(), checkpoints=(),
                 interactions=(replace(record, stream_attempts=()),), execution_id="execution", archive=prepared)
@@ -266,7 +287,7 @@ async def test_failed_partial_survives_snapshot_and_owned_cleanup(
         attempt_responses = (partial, None)
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="stream-observation", tenant_id="tenant")
-    await state.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
+    await state.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
     try:
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
         prepared = PreparedArchive()
@@ -315,7 +336,7 @@ async def test_successful_continuation_segments_share_one_canonical_response() -
                      usage=UsageMetrics(3, 0, 26, 10))
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="stream-observation", tenant_id="tenant")
-    await state.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
+    await state.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
     try:
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
         prepared = PreparedArchive()

@@ -93,6 +93,7 @@ class _MemoryTransaction:
         self.operation_stream_changes: dict[bytes, dict[int, bytes | None]] = {}
         self.guarded_record_keys: set[bytes] = set()
         self._now = now
+        self.mutation_error: BaseException | None = None
 
     async def now(self) -> datetime:
         if self._now is None:
@@ -126,11 +127,14 @@ class _MemoryTransaction:
             self.guarded_record_keys.add(record.key_digest)
 
     async def guard_record(
-        self,
-        key: bytes,
-        *,
-        expected_storage_revision: int,
+        self, key: bytes, *, expected_storage_revision: int,
     ) -> StoredRecord | None:
+        revision = await self.guard_record_revision(key, expected_storage_revision=expected_storage_revision)
+        return None if revision is None else await self.get_record(key)
+
+    async def guard_record_revision(
+        self, key: bytes, *, expected_storage_revision: int,
+    ) -> int | None:
         if (
             isinstance(expected_storage_revision, bool)
             or not isinstance(expected_storage_revision, int)
@@ -138,14 +142,16 @@ class _MemoryTransaction:
         ):
             raise ValueError("expected_storage_revision must be a non-negative integer")
         current = self.records.get(key)
-        if current is None or current.storage_revision != expected_storage_revision:
-            if key in self.guarded_record_keys and current is not None:
-                return current
+        if current is None:
             return None
-        current = replace(current, storage_revision=expected_storage_revision + 1)
-        self.records[key] = current
+        if key in self.guarded_record_keys:
+            return current.storage_revision
+        if current.storage_revision != expected_storage_revision:
+            return None
+        revision = expected_storage_revision + 1
+        self.records[key] = replace(current, storage_revision=revision)
         self.guarded_record_keys.add(key)
-        return current
+        return revision
 
     async def replace_record(
         self,
@@ -167,15 +173,22 @@ class _MemoryTransaction:
         if len(keys) != len(set(keys)):
             raise ValueError("replace_records contains duplicate keys")
         candidates: list[StoredRecord] = []
-        for replacement in sorted(values, key=lambda value: value.record.key_digest):
-            current = self.records.get(replacement.record.key_digest)
-            if current is None or current.storage_revision != replacement.expected_storage_revision:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            validate_record_replacement(current, replacement.record)
+        ordered = sorted(values, key=lambda value: value.record.key_digest)
+        for replacement in ordered:
             validate_record_identity(replacement.record)
             if replacement.record.storage_revision != replacement.expected_storage_revision + 1:
                 raise ValueError("replacement must increment storage_revision exactly once")
-            candidates.append(replacement.record)
+        try:
+            for replacement in ordered:
+                current = self.records.get(replacement.record.key_digest)
+                if current is None or current.storage_revision != replacement.expected_storage_revision:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                validate_record_replacement(current, replacement.record)
+                candidates.append(replacement.record)
+        except (AIError, ValueError) as error:
+            if len(values) > 1 and self.mutation_error is None:
+                self.mutation_error = error
+            raise
         for record in candidates:
             self.records[record.key_digest] = record
             self.guarded_record_keys.add(record.key_digest)

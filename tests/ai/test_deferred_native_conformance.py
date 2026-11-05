@@ -5,7 +5,6 @@
 from pathlib import Path
 
 import pytest
-from linktools.ai.runtime._persistence_services import CheckpointService
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.exceptions import ApprovalRequired
@@ -21,7 +20,8 @@ from linktools.ai.persistence.runs import (
 
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._run_hooks import AgentRunCapture
-from linktools.ai.capability import CheckpointCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     BoundaryToolset,
@@ -41,8 +41,8 @@ class _Bridge:
         self.calls += 1
         raise AssertionError("deferred gate must run before tool-operation admission")
 
-    async def renew(self, decision):
-        return decision
+    async def require_active(self) -> None:
+        return None
 
     async def complete(self, decision, result):
         del decision, result
@@ -80,7 +80,7 @@ async def _read_file(path: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_approval_frontier_is_persisted_as_interrupted(tmp_path: Path) -> None:
+async def test_approval_is_required_before_tool_effect_admission(tmp_path: Path) -> None:
     agent_run_id = "deferred-run"
     store = _RecordingAgentRunStore()
     bridge = _Bridge()
@@ -123,7 +123,7 @@ async def test_approval_frontier_is_persisted_as_interrupted(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_ordinary_completed_checkpoint_behavior_is_unchanged() -> None:
+async def test_completed_run_publishes_native_snapshot() -> None:
     agent_run_id = "completed-run"
     store = _RecordingAgentRunStore()
     persistence = AgentRunCapture(
@@ -137,15 +137,15 @@ async def test_ordinary_completed_checkpoint_behavior_is_unchanged() -> None:
     )
     agent = Agent(TestModel(custom_output_text="ok"))
 
+    checkpoint = native_checkpoint()
     result = await agent.run(
         "finish",
         run_id=agent_run_id,
-        capabilities=(persistence, CheckpointCapability().bind(CheckpointService(persistence))),
+        capabilities=(persistence, checkpoint),
     )
 
     assert result.output == "ok"
-    assert store.saved_checkpoints
-    latest = await store.latest_checkpoint(agent_run_id=agent_run_id)
+    latest = await checkpoint.store.latest_snapshot(run_id=agent_run_id)
     assert latest is not None
     assert latest.state == "complete"
-    assert latest == store.saved_checkpoints[-1]
+    assert latest.messages == result.all_messages()

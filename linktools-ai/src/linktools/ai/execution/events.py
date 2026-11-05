@@ -61,6 +61,9 @@ _OBSERVATION_BOUNDARY_STATUSES = frozenset(
         ExecutionStatus.RECOVERY_REQUIRED,
     }
 )
+_SHARED_PRODUCER_STATUSES = frozenset(
+    {ExecutionStatus.STARTED, ExecutionStatus.CANCELLING, ExecutionStatus.FINALIZING}
+)
 
 
 _BOUNDARY_METADATA_FIELDS = {
@@ -1143,21 +1146,22 @@ class DefaultEventService:
     ) -> AsyncIterator[ExecutionStreamEvent]:
         shared = self._live.shared
         assert shared is not None
-        head = await self._executions.get_history_head(execution_id, tenant_id=principal.tenant_id)
+        execution = await self._executions.get(execution_id, tenant_id=principal.tenant_id)
         pending = (await self._pending_stream(execution_id, tenant_id=principal.tenant_id)
-                   if head is None and self._pending_stream is not None else None)
+                   if execution is None and self._pending_stream is not None else None)
         pending_execution = None
-        if head is None and pending is None and self._pending_execution is not None:
+        if execution is None and pending is None and self._pending_execution is not None:
             pending_execution = await self._pending_execution(execution_id, tenant_id=principal.tenant_id)
             if pending_execution is None:
                 # Promotion may commit between the SQL read and pending-owner lookup.
-                head = await self._executions.get_history_head(execution_id, tenant_id=principal.tenant_id)
+                execution = await self._executions.get(execution_id, tenant_id=principal.tenant_id)
         pending_observed = pending_observed or pending is not None or pending_execution is not None
         cursor = after_event_seq
         resumed = shared_stream_position(execution_id)
         if (not initial_admission and resumed is None and after_event_seq == 0
-                and ((head is not None and head.state.value == "open"
-                      and head.producer_generation == 0 and head.producer_claim_id is None)
+                and ((execution is not None
+                      and execution.status in {ExecutionStatus.PENDING_START, ExecutionStatus.STARTED}
+                      and execution.producer_generation == 0 and execution.producer_claim_id is None)
                      or (pending_execution is not None and pending_execution.agent_run_seq == 0))):
             # An observer before the first admission has not lost a preview.
             async with aclosing(self._stream_durable(
@@ -1168,10 +1172,10 @@ class DefaultEventService:
                     yield event
             return
         generation = (pending[1] if pending is not None
-                      else 0 if head is None else head.producer_generation)
+                      else 0 if execution is None else execution.producer_generation)
         position = 0 if resumed is None else resumed[1]
         claim = (pending[2] if pending is not None
-                 else None if head is None else head.producer_claim_id)
+                 else None if execution is None else execution.producer_claim_id)
         key = (b"" if not claim else stream_key(
             shared.namespace, principal.tenant_id, execution_id, generation, claim,
         ))
@@ -1179,9 +1183,10 @@ class DefaultEventService:
         gap = ((resumed is not None and resumed[0] != identity)
                or (resumed is None and after_event_seq > 0 and not initial_admission)
                or (initial_admission is not None and initial_admission != (generation, claim)))
-        if ((head is None and pending is None)
-                or (head is not None and head.state.value != "open") or generation < 1 or not claim):
-            gap = gap or resumed is not None or (head is None and self._pending_stream is not None)
+        if ((execution is None and pending is None)
+                or (execution is not None and execution.status not in _SHARED_PRODUCER_STATUSES)
+                or generation < 1 or not claim):
+            gap = gap or resumed is not None or (execution is None and self._pending_stream is not None)
         else:
             loop = asyncio.get_running_loop()
             backoff = 1.0
@@ -1329,19 +1334,19 @@ class DefaultEventService:
     async def _shared_owner_matches(
         self, execution_id: str, *, tenant_id: str, generation: int, claim: str,
     ) -> bool:
-        head = await self._executions.get_history_head(execution_id, tenant_id=tenant_id)
-        if head is not None:
-            return (head.state.value == "open" and head.producer_generation == generation
-                    and head.producer_claim_id == claim)
+        execution = await self._executions.get(execution_id, tenant_id=tenant_id)
+        if execution is not None:
+            return (execution.status in _SHARED_PRODUCER_STATUSES
+                    and execution.producer_generation == generation and execution.producer_claim_id == claim)
         if self._pending_stream is None:
             return False
         pending = await self._pending_stream(execution_id, tenant_id=tenant_id)
         if pending is not None:
             return (pending[1], pending[2]) == (generation, claim)
         # Read SQL again so completed promotion is not mistaken for owner loss.
-        head = await self._executions.get_history_head(execution_id, tenant_id=tenant_id)
-        return (head is not None and head.state.value == "open"
-                and head.producer_generation == generation and head.producer_claim_id == claim)
+        execution = await self._executions.get(execution_id, tenant_id=tenant_id)
+        return (execution is not None and execution.status in _SHARED_PRODUCER_STATUSES
+                and execution.producer_generation == generation and execution.producer_claim_id == claim)
 
     async def _stream_durable(
         self,
@@ -1383,16 +1388,7 @@ class DefaultEventService:
             failure = self._worker_failure(execution_id, tenant_id=tenant_id)
             if failure is not None:
                 raise failure
-            initial_head = None
-            if initial_shared:
-                async def capture(_transaction):
-                    execution = await self._executions.get(execution_id, tenant_id=tenant_id)
-                    head = await self._executions.get_history_head(execution_id, tenant_id=tenant_id)
-                    return execution, head
-
-                execution, initial_head = await self._executions.state_store.read(capture)
-            else:
-                execution = await self._executions.get(execution_id, tenant_id=tenant_id)
+            execution = await self._executions.get(execution_id, tenant_id=tenant_id)
             pending_execution = None
             if execution is None and self._pending_execution is not None:
                 pending_execution = await self._pending_execution(execution_id, tenant_id=tenant_id)
@@ -1431,12 +1427,11 @@ class DefaultEventService:
                         yield event
                 return
             if principal is not None and initial_shared:
-                head = initial_head
                 admission = None
                 if (execution is not None and execution.agent_run_seq == 1
-                        and head is not None and head.state.value == "open"
-                        and head.producer_generation > 0 and head.producer_claim_id):
-                    admission = (head.producer_generation, head.producer_claim_id)
+                        and execution.status in _SHARED_PRODUCER_STATUSES
+                        and execution.producer_generation > 0 and execution.producer_claim_id):
+                    admission = (execution.producer_generation, execution.producer_claim_id)
                 elif pending_execution is not None and self._pending_stream is not None:
                     pending = await self._pending_stream(execution_id, tenant_id=tenant_id)
                     if pending is not None:

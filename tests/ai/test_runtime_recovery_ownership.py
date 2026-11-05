@@ -202,7 +202,7 @@ async def test_explicit_recovery_does_not_adopt_a_newer_contender_revision(
             )
             await asyncio.wait_for(entered.wait(), 10)
             tenant = winner_runtime.default_principal.tenant_id
-            winner_head = await winner_runtime._state.execution.executions.get_history_head(
+            winner_head = await winner_runtime._state.execution.executions.get(
                 execution_id, tenant_id=tenant,
             )
             release_stale.set()
@@ -214,7 +214,7 @@ async def test_explicit_recovery_does_not_adopt_a_newer_contender_revision(
                     execution_id, principal=winner_runtime.default_principal,
                 )
             assert active.value.code is ErrorCode.STORAGE_CONFLICT
-            current_head = await winner_runtime._state.execution.executions.get_history_head(
+            current_head = await winner_runtime._state.execution.executions.get(
                 execution_id, tenant_id=tenant,
             )
             assert current_head.producer_generation == winner_head.producer_generation
@@ -269,86 +269,96 @@ async def test_superseded_live_producer_hands_wait_and_watch_to_winner(
     winner_state = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     try:
         async with Persistence.open(_NAMESPACE, storage=owner_state) as persistence_281, Runtime.attach(persistence=persistence_281, features=model_features(_Models(FunctionModel(stream_function=original_model)), _capabilities())) as owner, Persistence.open(_NAMESPACE, storage=winner_state) as persistence_284, Runtime.attach(persistence=persistence_284, features=model_features(_Models(FunctionModel(stream_function=recovered_model)), _capabilities())) as winner:
-            execution = await owner.agents.get("default").start("Wait", idempotency_key="start")
-            await asyncio.wait_for(owner_entered.wait(), 10)
+            try:
+                execution = await owner.agents.get("default").start("Wait", idempotency_key="start")
+                await asyncio.wait_for(owner_entered.wait(), 10)
 
-            async def watch() -> None:
-                async for item in execution.watch(include_content=True):
-                    observed.append(item.event)
-                    if item.event.payload.get("text") == "superseded prefix":
-                        prefix_observed.set()
+                async def watch() -> None:
+                    async for item in execution.watch(include_content=True):
+                        observed.append(item.event)
+                        if item.event.payload.get("text") == "superseded prefix":
+                            prefix_observed.set()
 
-            watched = asyncio.create_task(watch())
-            waited = asyncio.create_task(execution.wait(timeout_seconds=30))
-            consumers.extend((watched, waited))
-            emit_prefix.set()
-            await asyncio.wait_for(prefix_observed.wait(), 10)
-            backend = owner._execution_service.runtime_backend()
-            original_worker = backend._tasks[execution.execution_id]
-            original_pending = tuple(backend._pending_audit_events.get(execution.execution_id, ()))
-            if cancel_through_original:
-                assert original_pending, "The original producer must have an uncommitted audit prefix"
-            await winner.executions.recover(
-                execution.execution_id, principal=winner.default_principal,
-            )
-            await asyncio.wait_for(winner_entered.wait(), 10)
-            tenant = owner.default_principal.tenant_id
-            claimed_head = await winner._state.execution.executions.get_history_head(
-                execution.execution_id, tenant_id=tenant,
-            )
-            if cancel_through_original:
-                before_cancel = await winner._state.execution.executions.get(
+                watched = asyncio.create_task(watch())
+                waited = asyncio.create_task(execution.wait(timeout_seconds=30))
+                consumers.extend((watched, waited))
+                emit_prefix.set()
+                await asyncio.wait_for(prefix_observed.wait(), 10)
+                backend = owner._execution_service.runtime_backend()
+                original_worker = backend._tasks[execution.execution_id]
+                original_generation = owner._run_store.latest_local_producer_generation(
+                    execution_id=execution.execution_id,
+                )
+                assert original_generation is not None
+                original_pending = tuple(backend._pending_audit_events.get(execution.execution_id, ()))
+                if cancel_through_original:
+                    assert original_pending, "The original producer must have an uncommitted audit prefix"
+                await winner.executions.recover(
+                    execution.execution_id, principal=winner.default_principal,
+                )
+                await asyncio.wait_for(winner_entered.wait(), 10)
+                tenant = owner.default_principal.tenant_id
+                claimed_head = await winner._state.execution.executions.get(
                     execution.execution_id, tenant_id=tenant,
                 )
-                cancelled = await owner.executions.cancel(
-                    execution.execution_id,
-                    CancelExecutionRequest(owner.default_principal, "cancel-through-superseded-runtime"),
+                assert claimed_head.producer_generation > original_generation
+                if cancel_through_original:
+                    before_cancel = await winner._state.execution.executions.get(
+                        execution.execution_id, tenant_id=tenant,
+                    )
+                    cancelled = await owner.executions.cancel(
+                        execution.execution_id,
+                        CancelExecutionRequest(owner.default_principal, "cancel-through-superseded-runtime"),
+                    )
+                    assert cancelled.cancelled is False
+                    cancel_tail = await winner._state.execution.events.list(
+                        execution.execution_id, tenant_id=tenant,
+                        after_event_seq=before_cancel.event_seq, limit=100,
+                    )
+                    assert [event.event_type for event in cancel_tail.items] == [ExecutionEventType.CANCEL_REQUESTED]
+                    assert not any(
+                        event.event_type == pending.event_type and event.payload == pending.payload
+                        for event in cancel_tail.items for pending in original_pending
+                    )
+                release_owner.set()
+                await asyncio.wait_for(asyncio.shield(original_worker), 10)
+                current = await winner.executions.inspect(
+                    execution.execution_id, principal=winner.default_principal,
                 )
-                assert cancelled.cancelled is False
-                cancel_tail = await winner._state.execution.events.list(
+                expected_status = ExecutionStatus.CANCELLING if cancel_through_original else ExecutionStatus.STARTED
+                assert current.status is expected_status
+                current_head = await winner._state.execution.executions.get(
                     execution.execution_id, tenant_id=tenant,
-                    after_event_seq=before_cancel.event_seq, limit=100,
                 )
-                assert [event.event_type for event in cancel_tail.items] == [ExecutionEventType.CANCEL_REQUESTED]
-                assert not any(
-                    event.event_type == pending.event_type and event.payload == pending.payload
-                    for event in cancel_tail.items for pending in original_pending
+                assert current_head.producer_generation == claimed_head.producer_generation
+                assert current_head.producer_claim_id == claimed_head.producer_claim_id
+                assert (current_head.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and current_head.history_seal_digest is None)
+                if watched.done():
+                    await watched
+                    pytest.fail("Watch ended before the winning producer reached its boundary")
+                assert not waited.done()
+                assert owner._run_store.trace_persistence.dirty == set()
+                assert owner._run_store._durability_flights == {}
+                assert owner._run_store._execution_producers == {}
+                assert owner._run_store._staging._runs == {}
+                release_winner.set()
+                result = (await waited).result
+                await asyncio.wait_for(watched, 10)
+                assert result.status is (
+                    ExecutionStatus.CANCELLED if cancel_through_original else ExecutionStatus.SUCCEEDED
                 )
-            release_owner.set()
-            await asyncio.wait_for(asyncio.shield(original_worker), 10)
-            current = await winner.executions.inspect(
-                execution.execution_id, principal=winner.default_principal,
-            )
-            expected_status = ExecutionStatus.CANCELLING if cancel_through_original else ExecutionStatus.STARTED
-            assert current.status is expected_status
-            current_head = await winner._state.execution.executions.get_history_head(
-                execution.execution_id, tenant_id=tenant,
-            )
-            assert current_head.producer_generation == claimed_head.producer_generation
-            assert current_head.producer_claim_id == claimed_head.producer_claim_id
-            assert current_head.state.value == "open"
-            if watched.done():
-                await watched
-                pytest.fail("Watch ended before the winning producer reached its boundary")
-            assert not waited.done()
-            assert owner._run_store.trace_persistence.dirty == set()
-            assert owner._run_store._durability_flights == {}
-            assert owner._run_store._execution_producers == {}
-            assert owner._run_store._staging._runs == {}
-            release_winner.set()
-            result = (await waited).result
-            await asyncio.wait_for(watched, 10)
-            assert result.status is (
-                ExecutionStatus.CANCELLED if cancel_through_original else ExecutionStatus.SUCCEEDED
-            )
-            assert result.output == (None if cancel_through_original else {"text": "winner answer"})
-            assert calls == ["owner", "winner"]
-            assert any(event.event_type == ExecutionEventType.EXECUTION_RESUMED for event in observed)
-            assert observed[-1].event_type == (
-                ExecutionEventType.EXECUTION_CANCELLED if cancel_through_original else ExecutionEventType.EXECUTION_SUCCEEDED
-            )
-            sequences = [event.durable_seq for event in observed if event.durable_seq is not None]
-            assert sequences == sorted(set(sequences))
+                assert result.output == (None if cancel_through_original else {"text": "winner answer"})
+                assert calls == ["owner", "winner"]
+                assert any(event.event_type == ExecutionEventType.EXECUTION_RESUMED for event in observed)
+                assert observed[-1].event_type == (
+                    ExecutionEventType.EXECUTION_CANCELLED if cancel_through_original else ExecutionEventType.EXECUTION_SUCCEEDED
+                )
+                sequences = [event.durable_seq for event in observed if event.durable_seq is not None]
+                assert sequences == sorted(set(sequences))
+            finally:
+                emit_prefix.set()
+                release_owner.set()
+                release_winner.set()
         assert not any(record.levelname == "ERROR" for record in caplog.records)
     finally:
         emit_prefix.set()
@@ -369,8 +379,8 @@ async def test_recovery_required_transition_keeps_the_original_producer_fence(
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         execution = _execution(datetime.now(timezone.utc))
-        await state.execution.executions.create_with_history_head(execution)
-        original_head = await state.execution.executions.get_history_head(
+        await state.execution.executions.create_execution(execution)
+        original_head = await state.execution.executions.get(
             execution.execution_id, tenant_id="tenant",
         )
         commands = _recovery_commands(state)
@@ -382,7 +392,7 @@ async def test_recovery_required_transition_keeps_the_original_producer_fence(
             )
         assert stale.value.code is ErrorCode.STORAGE_CONFLICT
         assert await state.execution.executions.get(execution.execution_id, tenant_id="tenant") == resumed
-        winner_head = await state.execution.executions.get_history_head(
+        winner_head = await state.execution.executions.get(
             execution.execution_id, tenant_id="tenant",
         )
         recovered = await commands.commit_recovery_required(
@@ -432,13 +442,13 @@ async def test_concurrent_sql_startup_converges_on_one_deferred_resume(
     claims = 0
     original_claim = LocalExecutionBackend.claim_deferred_resume
 
-    async def synchronized_claim(backend, checkpoint, current):
+    async def synchronized_claim(backend, current):
         nonlocal claims
         claims += 1
         if claims == 2:
             both_claiming.set()
         await asyncio.wait_for(both_claiming.wait(), 10)
-        return await original_claim(backend, checkpoint, current)
+        return await original_claim(backend, current)
 
     monkeypatch.setattr(LocalExecutionBackend, "claim_deferred_resume", synchronized_claim)
     states = [PersistenceStorage.sqlite(tmp_path / "runtime.db") for _ in range(2)]

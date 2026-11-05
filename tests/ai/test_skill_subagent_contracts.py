@@ -5,6 +5,8 @@ from linktools.ai.model import create_model
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -19,8 +21,9 @@ from linktools.ai.capability import (
     SkillDefinition,
     SkillSourceRegistry,
 )
-from linktools.ai.core import Principal
+from linktools.ai.core import ExecutionStatus, Principal, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.execution import ExecutionHandle, ExecutionResult
 from linktools.ai.model import validate_model_inputs
 from pydantic_ai.messages import BinaryContent
 from pydantic_ai.models.test import TestModel
@@ -141,6 +144,7 @@ def test_durable_subagent_binding_does_not_fall_back_to_current_catalog() -> Non
     with pytest.raises(AIError) as raised:
         dispatcher.delegate_for(
             parent_execution_id="parent-execution",
+            parent_producer_generation=1,
             root_execution_id="parent-execution",
             memory_scope=None,
             principal=Principal("principal", "tenant"),
@@ -154,6 +158,7 @@ def test_durable_subagent_binding_does_not_fall_back_to_current_catalog() -> Non
     assert callable(
         dispatcher.delegate_for(
             parent_execution_id="parent-execution",
+            parent_producer_generation=1,
             root_execution_id="parent-execution",
             memory_scope=None,
             principal=Principal("principal", "tenant"),
@@ -370,3 +375,66 @@ def test_markdown_metadata_rejects_non_json_values() -> None:
             b"metadata: {published: 2026-01-02}\n---\nReview.\n"
         )
     assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("admission", ("start", "replay", "conflict"))
+async def test_subagent_delegate_captures_worker_generation_without_changing_identity(
+    admission: str,
+) -> None:
+    agents = {
+        "parent": AgentSpec("parent", allow_subagents=("child",)),
+        "child": AgentSpec("child", allow_subagents=()),
+    }
+    compiler = _compiler(agents)
+    catalog = AgentCatalog({key: compiler.compile(spec) for key, spec in agents.items()})
+    binding = compiler.bind(catalog.root_agent("parent")).binding_contract
+    handle = ExecutionHandle("child-execution")
+    replay_results = {
+        "start": [None, None],
+        "replay": [handle, handle],
+        "conflict": [None, handle, None, handle],
+    }
+    execution = SimpleNamespace(
+        replay_subagent=AsyncMock(side_effect=replay_results[admission]),
+        start_subagent=AsyncMock(
+            return_value=handle,
+            side_effect=(
+                AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                if admission == "conflict" else None
+            ),
+        ),
+        wait=AsyncMock(return_value=ExecutionResult(
+            handle.execution_id, ExecutionStatus.SUCCEEDED, {}, UsageMetrics(),
+        )),
+    )
+    dispatcher = SubagentDispatcher(catalog, compiler, execution)  # type: ignore[arg-type]
+    delegates = [
+        dispatcher.delegate_for(
+            parent_execution_id="parent-execution",
+            parent_producer_generation=generation,
+            root_execution_id="parent-execution",
+            memory_scope=None,
+            principal=Principal("principal", "tenant"),
+            refs=binding.subagents,
+            binding=binding,
+            mode="run",
+        )
+        for generation in (7, 8)
+    ]
+
+    # The old delegate remains bound to its worker even after a successor exists.
+    for delegate in delegates:
+        result = await delegate(
+            binding.subagents[0], "inspect", files=(), invocation_id="same-call",
+        )
+        assert result["execution_id"] == handle.execution_id
+
+    replay_calls = execution.replay_subagent.await_args_list
+    expected_generations = [7, 7, 8, 8] if admission == "conflict" else [7, 8]
+    assert [call.kwargs["parent_producer_generation"] for call in replay_calls] == expected_generations
+    assert len({call.kwargs["idempotency_key"] for call in replay_calls}) == 1
+    start_calls = execution.start_subagent.await_args_list
+    if admission != "replay":
+        assert [call.kwargs["parent_producer_generation"] for call in start_calls] == [7, 8]
+        assert start_calls[0].args[1] == start_calls[1].args[1]

@@ -18,6 +18,11 @@ from linktools.ai.model import messages as codec
 _STAMP = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
+def _retried_tool_message() -> sdk.ModelRequest:
+    part = sdk.ToolReturnPart('tool', 'retry', tool_call_id='call', timestamp=_STAMP, outcome='retried')
+    return sdk.ModelRequest(parts=[part], timestamp=_STAMP)
+
+
 def _fixtures():
     yield sdk.ModelRequest(parts=[], timestamp=_STAMP), (), sdk.ModelRequest
     yield sdk.ModelResponse(parts=[], timestamp=_STAMP), (), sdk.ModelResponse
@@ -25,7 +30,7 @@ def _fixtures():
         sdk.SystemPromptPart('system', timestamp=_STAMP),
         codec.SummaryPromptPart('summary', timestamp=_STAMP),
         sdk.UserPromptPart('prompt', timestamp=_STAMP),
-        sdk.RetryPromptPart('retry', tool_call_id='call', timestamp=_STAMP),
+        _retried_tool_message().parts[0],
         sdk.ToolReturnPart('tool', 'result', tool_call_id='call', timestamp=_STAMP),
         sdk.ToolAvailabilityDeltaPart(tools_added=['tool']),
         sdk.InstructionDeltaPart(id=None, content='content'),
@@ -99,7 +104,7 @@ def test_declared_defaults_apply_only_to_omitted_wire_fields(
     sdk.ModelResponse(parts=[sdk.NativeToolCallPart('tool', tool_call_id='call')], timestamp=_STAMP),
     sdk.ModelRequest(parts=[sdk.ToolReturnPart('tool', 'done', tool_call_id='call', timestamp=_STAMP)]),
     sdk.ModelResponse(parts=[sdk.NativeToolReturnPart('tool', 'done', tool_call_id='call', timestamp=_STAMP)], timestamp=_STAMP),
-    sdk.ModelRequest(parts=[sdk.RetryPromptPart('retry', tool_call_id='call', timestamp=_STAMP)]),
+    _retried_tool_message(),
 ])
 def test_durable_tool_identity_is_not_generated_during_decode(message: sdk.ModelMessage) -> None:
     wire = json.loads(codec.encode_model_messages((message,)))

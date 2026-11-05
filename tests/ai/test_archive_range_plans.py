@@ -81,7 +81,7 @@ async def test_empty_model_projection_does_not_open_archive_or_keep_baseline(
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="empty-projection", tenant_id="tenant")
     try:
-        repository = state.run_store.read_store(PersistenceDomain.CHECKPOINT).transcript_repository
+        repository = state.run_store.read_store(PersistenceDomain.TRACE).transcript_repository
         baseline = None
         if has_baseline:
             previous = PreparedArchive()
@@ -112,7 +112,7 @@ async def test_frozen_projection_reuses_encoded_bodies_and_preserves_rewrites(tm
     state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="frozen-projection", tenant_id="tenant")
     try:
-        repository = state.run_store.read_store(PersistenceDomain.CHECKPOINT).transcript_repository
+        repository = state.run_store.read_store(PersistenceDomain.TRACE).transcript_repository
         snapshots = MessageArchive()
         first = snapshots.snapshot([ModelRequest(parts=[UserPromptPart("original")])])
         appended = snapshots.concatenate(first, [ModelRequest(parts=[UserPromptPart("追加")])])

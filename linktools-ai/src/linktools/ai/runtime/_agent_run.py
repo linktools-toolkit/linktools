@@ -10,6 +10,7 @@ from ..core import JsonValue
 from ..errors import ErrorCode, ErrorDiagnostics
 from ..persistence import PersistenceDomain
 from ..persistence.runs import AgentRunCheckpoint, AgentRunRecord, CheckpointPersistence
+from ..persistence.contracts import ExecutionTerminalPublication
 from ..execution import ExecutionRecord
 from ..persistence.runs import ExecutionTerminalSealPlan
 
@@ -28,6 +29,7 @@ class _AgentRunLifecycle(Protocol):
     def execution_producer_generation(
         self, agent_run_id: str, *, execution_id: str,
     ) -> int | None: ...
+    def latest_local_producer_generation(self, *, execution_id: str) -> int | None: ...
     async def materialize_conversation(self, *, agent_run_id: str) -> None: ...
     async def materialize_from_recovery(
         self,
@@ -53,8 +55,8 @@ class _AgentRunLifecycle(Protocol):
     async def capture_agent_run_checkpoint_payload(
         self, agent_run_id: str, *, execution_id: str, producer_generation: int,
         include_interrupted: bool = False,
-    ) -> bytes: ...
-    def decode_agent_run_checkpoint_payload(
+    ) -> bytes | None: ...
+    async def decode_agent_run_checkpoint_payload(
         self, content: bytes, *, agent_run_id: str, producer_generation: int,
     ) -> tuple[AgentRunRecord, AgentRunCheckpoint | None]: ...
     def trace_buffer_failure_settled(
@@ -70,6 +72,7 @@ class _AgentRunLifecycle(Protocol):
     async def discard_revoked_producer_staging(
         self, agent_run_id: str, *, execution_id: str, producer_generation: int,
         terminal_execution: ExecutionRecord | None = None,
+        terminal_publication: ExecutionTerminalPublication | None = None,
         settle_cleanup: bool = False,
     ) -> None: ...
     async def wait_projection_flight(self, agent_run_id: str) -> None: ...

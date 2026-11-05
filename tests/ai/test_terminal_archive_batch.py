@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from linktools.ai.persistence import Persistence
 """Terminal archive sharing preserves owner facts and immutable caller plans."""
-from ._runtime_test_helpers import model_features
 
 import hashlib
 from contextvars import ContextVar
@@ -15,17 +13,18 @@ from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserProm
 import pytest
 from sqlalchemy import event
 
-from linktools.ai.capability import CheckpointCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
+from pydantic_ai_harness.step_persistence import ContinuableSnapshot, InMemoryStepStore, RunRecord
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, StopReason, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
-from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence import Persistence
+from linktools.ai.storage import StoredPayload
+from linktools.ai.persistence import Persistence, PersistenceDomain
 from linktools.ai.persistence._archive import ContentArchive, ContentRecord, PreparedArchive
 from linktools.ai.persistence._checkpoint_persistence import CheckpointPersistence
 from linktools.ai.persistence.contracts import (
-    ExecutionTerminalCommit, ExecutionTerminalCommitResult, ExecutionCheckpoint,
-    ExecutionCheckpointState, ResultRecord,
+    ConversationCursor, ExecutionTerminalCommit, ExecutionTerminalCommitResult, ExecutionRecoveryDetail,
+    ExecutionRecoveryState, ResultRecord,
 )
 from linktools.ai.persistence._runtime_commands import StateCommands
 from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
@@ -34,10 +33,12 @@ from linktools.ai.persistence._model_interaction import (
     StagedContextProjection, StagedContextSpan, StagedModelInteraction,
 )
 
+from ._runtime_test_helpers import model_features, native_checkpoint
 from ._session_tool_test_helpers import _application, _relevant_kinds, _split_sqlite_storage, _ToolModels
 from .test_checkpoint_metadata_snapshot_io import _checkpoint
 from .test_incremental_projection_boundaries import _storage
 from .test_step_projection import _execution
+from .test_session_admission import _session
 
 pytestmark = pytest.mark.asyncio
 
@@ -46,7 +47,7 @@ async def test_terminal_shared_preparation_reduces_reads_and_preserves_owner_val
     state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="terminal-preparation", tenant_id="tenant")
     conversation = state.run_store.read_store(PersistenceDomain.CONVERSATION)
-    recovery = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+    trace = state.run_store.read_store(PersistenceDomain.TRACE)
     run, checkpoint = AgentRunRecord("run"), _checkpoint(2)
     engine = conversation.state_store.storage_group.context.engine.sync_engine
     selected: list[str] = []
@@ -56,8 +57,9 @@ async def test_terminal_shared_preparation_reduces_reads_and_preserves_owner_val
             selected.append(statement)
 
     try:
+        await state.execution.executions.create_execution(_execution())
         await conversation.transcript_repository.content_archive(create=True)
-        await recovery.transcript_repository.content_archive(create=True)
+        await trace.transcript_repository.content_archive(create=True)
         batches, counts = [], []
         for shared in (False, True):
             bundle = PreparedArchive() if shared else None
@@ -65,7 +67,7 @@ async def test_terminal_shared_preparation_reduces_reads_and_preserves_owner_val
             event.listen(engine, "before_cursor_execute", capture)
             try:
                 _, first = await conversation.prepare_conversation_checkpoint(run, checkpoint, archive=bundle)
-                _, second = await recovery.prepare_run_checkpoint(run, checkpoint, archive=bundle)
+                second = await trace.prepare_checkpoints(run, (checkpoint,), archive=bundle)
                 batches.append((first, second))
             finally:
                 event.remove(engine, "before_cursor_execute", capture)
@@ -82,14 +84,15 @@ async def test_terminal_shared_preparation_reduces_reads_and_preserves_owner_val
 
         async def commit(transaction):
             await conversation.transcript_repository.publish_archive(bundle)
-            for owner, batch in zip((conversation, recovery), batches[1], strict=True):
+            for owner, batch in zip((conversation, trace), batches[1], strict=True):
                 await owner.materialize_checkpoint_in_transaction(
                     transaction.transaction(owner.state_store), run,
                     replace(batch[0], archive=PreparedArchive()),
+                    execution_id="execution" if owner is trace else None,
                 )
 
-        await group.mutate((conversation.state_store, recovery.state_store), commit)
-        for owner in (conversation, recovery):
+        await group.mutate((state.execution.executions.state_store, conversation.state_store, trace.state_store), commit)
+        for owner in (conversation, trace):
             latest = await owner.latest_checkpoint(agent_run_id="run")
             assert latest is not None and latest.messages == checkpoint.messages
             assert await owner.checkpoint_count(agent_run_id="run") == 1
@@ -97,8 +100,8 @@ async def test_terminal_shared_preparation_reduces_reads_and_preserves_owner_val
         await state.close()
 
 
-@pytest.mark.parametrize("domain", (PersistenceDomain.CONVERSATION, PersistenceDomain.CHECKPOINT))
-@pytest.mark.parametrize("override", ("relocate", "prepare"))
+@pytest.mark.parametrize(("domain", "override"), ((PersistenceDomain.CONVERSATION, "relocate"),
+    (PersistenceDomain.CONVERSATION, "prepare"), (PersistenceDomain.TRACE, "prepare")))
 async def test_terminal_shared_preparation_keeps_custom_owner_hooks(
     tmp_path: Path, domain: PersistenceDomain, override: str,
 ) -> None:
@@ -113,11 +116,6 @@ async def test_terminal_shared_preparation_keeps_custom_owner_hooks(
             result = await super().relocate_conversation_checkpoint(run, checkpoint)
             return replace(result, step_index=19) if override == "relocate" else result
 
-        async def relocate_run_checkpoint(self, run, checkpoint):
-            calls.append("relocate")
-            result = await super().relocate_run_checkpoint(run, checkpoint)
-            return replace(result, step_index=19) if override == "relocate" else result
-
         async def prepare_checkpoints(self, run, checkpoints):
             calls.append("prepare")
             result = await super().prepare_checkpoints(run, checkpoints)
@@ -128,10 +126,14 @@ async def test_terminal_shared_preparation_keeps_custom_owner_hooks(
         tenant_id="tenant", runtime_domain=domain,
     )
     try:
-        method = (custom.prepare_conversation_checkpoint if domain is PersistenceDomain.CONVERSATION
-                  else custom.prepare_run_checkpoint)
-        _, prepared = await method(AgentRunRecord("run"), _checkpoint(1), archive=PreparedArchive())
-        assert calls == ["relocate", "prepare"]
+        if domain is PersistenceDomain.CONVERSATION:
+            _, prepared = await custom.prepare_conversation_checkpoint(
+                AgentRunRecord("run"), _checkpoint(1), archive=PreparedArchive(),
+            )
+            assert calls == ["relocate", "prepare"]
+        else:
+            prepared = await custom.prepare_checkpoints(AgentRunRecord("run"), (_checkpoint(1),))
+            assert calls == ["prepare"]
         assert (prepared[0].stored.step_index if override == "relocate"
                 else prepared.target_transcript_message_count) == 19
     finally:
@@ -147,12 +149,13 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
                else _storage(backend, tmp_path))
     calls: list[str] = []
     application = _application(calls)
-    application.capability(CheckpointCapability(), scope="runtime")
+    native = native_checkpoint()
+    application.capability(native, scope="runtime")
     application.capability(TraceCapability(), scope="runtime")
     terminal = ContextVar("terminal_archive_test", default=False)
     publications: list[list[str]] = []
     run_publications: list[tuple[int, str]] = []
-    replayed_contexts: list[tuple[object, object]] = []
+    verified_snapshots: list[ContinuableSnapshot] = []
     original_recovery = CheckpointPersistence.materialize_recovery_checkpoint
     original_terminal = StateCommands.commit_terminal_checkpoint
     original_publish = ContentArchive.publish
@@ -165,20 +168,12 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
         return await original_publish(self, transaction, prepared)
 
     async def materialize_recovery(self, *, agent_run_id, require_complete, captured=None):
-        archive = self.archive
-        before = (await archive.list_model_interactions(agent_run_id=agent_run_id)
-                  if isinstance(archive, ModelInteractionStateStepArchive) else ())
+        before = await self.reader.latest_snapshot(run_id=agent_run_id, include_interrupted=True)
         await original_recovery(self, agent_run_id=agent_run_id, require_complete=require_complete, captured=captured)
-        if before:
-            after = {item.model_request_seq: item for item in await archive.list_model_interactions(
-                agent_run_id=agent_run_id,
-            )}
-            for previous in before:
-                if previous.status != "RUNNING":
-                    observed = after[previous.model_request_seq]
-                    assert observed.request_context == previous.request_context
-                    assert observed.response_context == previous.response_context
-                    replayed_contexts.append((previous.request_context, previous.response_context))
+        assert await self.reader.latest_snapshot(run_id=agent_run_id, include_interrupted=True) == before
+        if require_complete:
+            assert before is not None and before.state == "complete"
+            verified_snapshots.append(before)
 
     async def commit(self, value, **kwargs):
         nonlocal checked_plans
@@ -240,7 +235,7 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
         assert _relevant_kinds(history.items) == expected
         if backend == "split":
             retained_scopes = set()
-            for domain in (PersistenceDomain.TRACE, PersistenceDomain.CONVERSATION, PersistenceDomain.CHECKPOINT):
+            for domain in (PersistenceDomain.TRACE, PersistenceDomain.CONVERSATION):
                 owner = runtime._run_store.read_store(domain)
                 content = await owner.transcript_repository.content_archive()
                 retained_scopes.add((id(owner.state_store.storage_group), content.scope_id))
@@ -249,10 +244,12 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
                 assert await owner.list_agent_runs()
             assert len(retained_scopes) > 1
             assert retained_scopes.issubset(set(run_publications))
-            assert replayed_contexts
         else:
             assert checked_plans == 1
             assert [len(scopes) for scopes in publications] == [1]
+        assert verified_snapshots
+        for snapshot in verified_snapshots:
+            assert await native.store.latest_snapshot(run_id=snapshot.run_id) == snapshot
 
 
 @pytest.mark.parametrize("foreign_scope", (False, True))
@@ -263,26 +260,27 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
     state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="terminal-scopes", tenant_id="tenant")
     trace = state.run_store.read_store(PersistenceDomain.TRACE)
-    original = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
-    recovery = ModelInteractionStateStepArchive(
+    original = state.run_store.read_store(PersistenceDomain.CONVERSATION)
+    conversation = ModelInteractionStateStepArchive(
         original.state_store, object_store=None,
         namespace="foreign" if foreign_scope else "terminal-scopes",
-        tenant_id="tenant", runtime_domain=PersistenceDomain.CHECKPOINT,
+        tenant_id="tenant", runtime_domain=PersistenceDomain.CONVERSATION,
     )
-    current = _execution()
-    run, checkpoint = AgentRunRecord("run"), _checkpoint(2)
-    source = ExecutionCheckpoint(
-        "execution", "run", ExecutionCheckpointState.ACTIVE, 0,
-        current.created_at, current.updated_at,
-    )
-    target = replace(source, state=ExecutionCheckpointState.COMPLETED, revision=1)
-    result = ResultRecord(None, StopReason.ERROR, UsageMetrics(), current.updated_at)
+    current = replace(_execution(), session_id="session", conversation=True,
+                      conversation_agent_run_id="run", restart_checkpoints=True, recovery=ExecutionRecoveryDetail(agent_run_id="run"))
+    run = AgentRunRecord("run", metadata={"history_id": "history"})
+    checkpoint = _checkpoint(2)
+    result = ResultRecord(StoredPayload.inline_text("done"), StopReason.END_TURN, UsageMetrics(), current.updated_at)
     commit = ExecutionTerminalCommit(
         current.revision, current.event_seq,
-        replace(current, status=ExecutionStatus.FAILED, error_code=ErrorCode.EXECUTION_FAILED.value),
-        result, ExecutionEventType.EXECUTION_FAILED,
-        {"error_code": ErrorCode.EXECUTION_FAILED.value, "safe_error_details": {}},
+        replace(current, status=ExecutionStatus.SUCCEEDED),
+        result, ExecutionEventType.EXECUTION_SUCCEEDED, {"agent_run_id": "run"},
     )
+    native = InMemoryStepStore()
+    state.run_store.bind_step_store(native)
+    await native.register_run(RunRecord(run_id="run"))
+    snapshot = ContinuableSnapshot(run_id="run", step_index=2, messages=checkpoint.messages)
+    await native.save_snapshot(snapshot)
     published_scopes: list[str] = []
     publish = ContentArchive.publish
 
@@ -291,18 +289,24 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
         return await publish(self, transaction, prepared)
 
     try:
-        await state.execution.executions.create_with_history_head(current)
-        await state.checkpoint.checkpoints.create(source)
+        await state.execution.executions.create_execution(current)
+        await state.conversation.sessions.create(replace(_session(), history_id="history"))
+        await state.conversation.sessions.admit_execution(
+            "session", tenant_id="tenant", execution_id="execution", expected=None,
+        )
         commands = StateCommands(
             state.execution.executions, namespace="terminal-scopes", events=state.execution.events,
             checkpoint=state.checkpoint, execution_run_store=trace,
-            checkpoint_archive=recovery, background_tasks=set(),
+            conversation=state.conversation.sessions, conversation_history=state.conversation.histories,
+            conversation_run_store=conversation, background_tasks=set(),
         )
         monkeypatch.setattr(ContentArchive, "publish", capture)
+
         async def commit_terminal():
             return await commands.commit_terminal_checkpoint(
-                commit, expected_execution=current,
-                recovery_checkpoint=target, recovery_run=run, recovery_agent_run_checkpoint=checkpoint,
+                commit, expected_execution=current, session_id="session",
+                next_cursor=ConversationCursor("run", "history"),
+                conversation_agent_run=run, conversation_checkpoint=checkpoint,
                 execution_run=run, execution_checkpoints=(checkpoint,),
             )
 
@@ -310,26 +314,27 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
             async def reject_owner(*args, **kwargs):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
 
-            monkeypatch.setattr(recovery, "materialize_checkpoint_in_transaction", reject_owner)
+            monkeypatch.setattr(conversation, "materialize_checkpoint_in_transaction", reject_owner)
             with pytest.raises(AIError) as raised:
                 await commit_terminal()
             assert raised.value.code is ErrorCode.STORAGE_CONFLICT
-            for owner in (trace, recovery):
+            for owner in (trace, conversation):
                 content = await owner.transcript_repository.content_archive()
                 assert not await content.store.read(lambda tx: tx.scan_records())
                 assert await owner.get_agent_run(agent_run_id="run") is None
             assert await state.execution.executions.get("execution", tenant_id="tenant") == current
-            assert await state.checkpoint.checkpoints.get("execution", tenant_id="tenant") == source
-            return
-        committed = await commit_terminal()
-        assert committed.execution.status is ExecutionStatus.FAILED
-        assert len(published_scopes) == (2 if foreign_scope else 1)
-        assert len(set(published_scopes)) == (2 if foreign_scope else 1)
-        for owner in (trace, recovery):
-            latest = await owner.latest_checkpoint(agent_run_id="run")
-            assert latest is not None and latest.messages == checkpoint.messages
-            assert await owner.checkpoint_count(agent_run_id="run") == 1
-        assert await state.checkpoint.checkpoints.get("execution", tenant_id="tenant") == target
+            assert (await state.execution.executions.get("execution", tenant_id="tenant")).recovery == current.recovery
+        else:
+            committed = await commit_terminal()
+            assert committed.execution.status is ExecutionStatus.SUCCEEDED
+            assert len(published_scopes) == (2 if foreign_scope else 1)
+            assert len(set(published_scopes)) == (2 if foreign_scope else 1)
+            for owner in (trace, conversation):
+                latest = await owner.latest_checkpoint(agent_run_id="run")
+                assert latest is not None and latest.messages == checkpoint.messages
+                assert await owner.checkpoint_count(agent_run_id="run") == 1
+            assert committed.execution.recovery_state is ExecutionRecoveryState.COMPLETED
+        assert await state.run_store.checkpoint_persistence.reader.latest_snapshot(run_id="run") == snapshot
     finally:
         await state.close()
 
@@ -348,7 +353,7 @@ async def test_terminal_archive_batch_does_not_open_scope_without_preparation(
         {"error_code": ErrorCode.EXECUTION_FAILED.value, "safe_error_details": {}},
     )
     try:
-        await state.execution.executions.create_with_history_head(current)
+        await state.execution.executions.create_execution(current)
         group = state.execution.executions.state_store.storage_group
         scope_before = await group.open_archive()
         open_archive = group.open_archive
@@ -392,9 +397,10 @@ async def test_terminal_cold_replay_rejects_changed_facts_and_missing_context(
         StagedContextProjection((StagedContextSpan(1, 2),)), "SUCCEEDED", None, 1,
         UsageMetrics(model_requests=1, input_tokens=2, output_tokens=1), timestamp, timestamp,
     )
-    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+    archive = state.run_store.read_store(PersistenceDomain.TRACE)
     prepared = PreparedArchive()
     try:
+        await state.execution.executions.create_execution(_execution())
         interactions = await archive.prepare_interactions(
             run, (staged,), lambda _: envelope,
             local_message_count=2, local_messages=messages[:2], prepared=prepared,
@@ -409,11 +415,11 @@ async def test_terminal_cold_replay_rejects_changed_facts_and_missing_context(
         await archive.sync_projection(
             run, events=(), checkpoints=(AgentRunCheckpoint(
                 "run", 1, list(messages[:2]), timestamp=timestamp, transcript_message_count_before=0,
-            ),), interactions=interactions, archive=prepared,
+            ),), interactions=interactions, archive=prepared, execution_id="execution",
         )
         await archive.materialize_checkpoint(run, AgentRunCheckpoint(
             "run", 2, list(messages), timestamp=timestamp, transcript_message_count_before=2,
-        ))
+        ), execution_id="execution")
         original = await archive.list_model_interactions(agent_run_id="run")
         assert original[0].request_context.items[0].root.count == 1
     finally:
@@ -421,7 +427,7 @@ async def test_terminal_cold_replay_rejects_changed_facts_and_missing_context(
 
     cold = Persistence(_split_sqlite_storage(database))
     await cold.initialize(namespace="terminal-cold-replay", tenant_id="tenant")
-    archive = cold.run_store.read_store(PersistenceDomain.CHECKPOINT)
+    archive = cold.run_store.read_store(PersistenceDomain.TRACE)
     try:
         current_messages = messages
         if fault == "model":
@@ -433,7 +439,7 @@ async def test_terminal_cold_replay_rejects_changed_facts_and_missing_context(
                 "changed request", timestamp=timestamp,
             )]), *messages[1:])
         else:
-            objects = cold.archive_object_store(PersistenceDomain.CHECKPOINT)
+            objects = cold.archive_object_store(PersistenceDomain.TRACE)
             assert await objects.delete_object(request_object.key, expected_digest=request_object.digest)
             assert await objects.stat(request_object.key) is None
         content_write = PreparedArchive()
@@ -445,6 +451,7 @@ async def test_terminal_cold_replay_rejects_changed_facts_and_missing_context(
             )
             await archive.sync_projection(
                 run, events=(), checkpoints=(), interactions=replayed, archive=content_write,
+                execution_id="execution",
             )
         assert raised.value.code is (
             ErrorCode.STORAGE_NOT_FOUND if fault == "missing_body" else ErrorCode.STORAGE_INTEGRITY_ERROR

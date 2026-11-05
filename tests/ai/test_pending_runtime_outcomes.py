@@ -17,6 +17,8 @@ from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.storage._database import SqlStorageContext
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
+from .test_runtime_turn_lifecycle import _ObservedCache
+from .test_turn_scope_runtime_contract import _ProjectionAuthority
 
 
 @pytest.mark.asyncio
@@ -88,6 +90,7 @@ async def test_pending_source_dispatch_rechecks_ownership_after_context_material
     model_release = asyncio.Event()
     prepare_entered = asyncio.Event()
     prepare_release = asyncio.Event()
+    cancel_observed = asyncio.Event()
     if phase == "terminal":
         model_release.set()
 
@@ -99,8 +102,8 @@ async def test_pending_source_dispatch_rechecks_ownership_after_context_material
     features = RuntimeFeatures("pending-ownership")
     features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
     features.agent("default", model="default", allow_tools=())
-    storage = PersistenceStorage.sqlite(tmp_path / "state.db",
-        coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
+    cache = _ObservedCache()
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db", coordination=cache)
     persistence = Persistence(storage)
     await persistence.initialize(namespace="pending-ownership", tenant_id="default")
     source_group = persistence.execution.executions.state_store.storage_group
@@ -110,6 +113,13 @@ async def test_pending_source_dispatch_rechecks_ownership_after_context_material
         try:
             backend = runtime._execution_service.runtime_backend()
             original = backend._context_archive.prepare
+            original_cancel = backend._pending_cancel
+
+            async def observe_cancel(*args, **kwargs):
+                cancel_observed.set()
+                return await original_cancel(*args, **kwargs)
+
+            monkeypatch.setattr(backend, "_pending_cancel", observe_cancel)
 
             async def gated(*args, **kwargs):
                 prepare_entered.set()
@@ -126,8 +136,16 @@ async def test_pending_source_dispatch_rechecks_ownership_after_context_material
             coordination = backend._pending_turns.coordination
             if interference == "cancel":
                 assert await coordination.cancel(execution.execution_id, tenant_id=runtime.tenant_id)
+                await asyncio.wait_for(cancel_observed.wait(), 5)
             else:
-                assert await coordination.release(pending.coordination.lease)
+                owner = backend._turn_owners[execution.execution_id]
+                assert await cache.release_turn(pending.coordination.lease)
+
+                async def wait_for_owner_loss():
+                    while not owner.stopping:
+                        await asyncio.sleep(0)
+
+                await asyncio.wait_for(wait_for_owner_loss(), 5)
             prepare_release.set()
             if promotion is not None:
                 with pytest.raises(asyncio.CancelledError if interference == "cancel" else AIError):
@@ -145,30 +163,83 @@ async def test_pending_source_dispatch_rechecks_ownership_after_context_material
         finally:
             prepare_release.set()
             model_release.set()
-            if interference == "lease" and phase == "promotion":
-                with pytest.raises(AIError) as failed_close:
-                    await context.__aexit__(None, None, None)
-                assert failed_close.value.code is ErrorCode.STORAGE_CONFLICT
-            else:
-                await context.__aexit__(None, None, None)
-                if interference == "lease":
-                    assert await persistence.execution.executions.get(
-                        execution.execution_id, tenant_id=runtime.tenant_id,
-                    ) is None
-                    assert await persistence.execution.executions.get_history_head(
-                        execution.execution_id, tenant_id=runtime.tenant_id,
-                    ) is None
+            await context.__aexit__(None, None, None)
+            assert not backend._turn_owners
+            if interference == "lease":
+                assert await persistence.execution.executions.get(
+                    execution.execution_id, tenant_id=runtime.tenant_id,
+                ) is None
+                assert await persistence.execution.executions.get(
+                    execution.execution_id, tenant_id=runtime.tenant_id,
+                ) is None
     finally:
         try:
-            if interference == "lease" and phase == "promotion":
-                with pytest.raises(AIError) as persistence_error:
-                    await persistence.close()
-                assert persistence_error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
-                assert persistence.ready and len(persistence._runtime_owners) == 1
-            else:
-                assert not persistence._runtime_owners
-                await persistence.close()
+            assert not persistence._runtime_owners
+            await persistence.close()
         finally:
             await source_group.close()
             await source_group.context.close()
             assert source_group.context.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lost", (False, True))
+async def test_pending_tools_share_local_owner_without_per_call_renewal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lost: bool,
+) -> None:
+    from contextvars import ContextVar
+    from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+    from linktools.ai.capability import AgentContext
+
+    from linktools.ai.storage import TurnCoordination
+    tool_boundary = ContextVar("tool_boundary", default=False)
+    cache = _ProjectionAuthority()
+    renew = cache.renew_turn
+    effects = []
+
+    async def tracked_renew(*args: object, **kwargs: object) -> TurnCoordination | None:
+        assert not tool_boundary.get(), "tool admission must use its current local lease"
+        return await renew(*args, **kwargs)
+
+    monkeypatch.setattr(cache, "renew_turn", tracked_renew)
+
+    async def work(_context: AgentContext[None]) -> str:
+        effects.append(1)
+        return "done"
+
+    async def model(messages, info):
+        if not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
+            if lost:
+                cache.scopes[0].lost.set()
+            return ModelResponse(parts=[ToolCallPart("work", {}, tool_call_id=f"call-{i}") for i in range(3)])
+        return ModelResponse(parts=[TextPart("answer")])
+
+    features = RuntimeFeatures("pending-owner-local")
+    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    features.tool(work, effect_policy="replay_safe")
+    features.agent("default", model="default", allow_tools=("work",))
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db", coordination=cache)
+    async with Persistence.open("pending-owner-local", storage=storage) as persistence, Runtime.attach(
+        persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
+    ) as runtime:
+        backend = runtime._execution_service.runtime_backend()
+        original = backend.require_tool_authority
+
+        async def require_tool_authority(execution_id: str, agent_run_id: str) -> None:
+            token = tool_boundary.set(True)
+            try:
+                await original(execution_id, agent_run_id)
+            finally:
+                tool_boundary.reset(token)
+
+        monkeypatch.setattr(backend, "require_tool_authority", require_tool_authority)
+        session = await runtime.agents.get().create_session("session")
+        execution = await session.start("question", idempotency_key="once")
+        if lost:
+            with pytest.raises(AIError) as raised:
+                await execution.wait(timeout_seconds=10)
+            assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+            assert effects == []
+            return
+        assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
+        assert len(effects) == 3

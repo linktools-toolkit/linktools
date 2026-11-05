@@ -13,8 +13,8 @@ import pytest
 from pydantic_ai import Agent, RunContext, Tool
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability
 from pydantic_ai.exceptions import ModelRetry, ToolFailed
-from pydantic_ai.messages import ModelRequest, ModelResponse, RetryPromptPart, TextPart, ToolCallPart, ToolReturnPart
-from pydantic_ai.models.function import FunctionModel
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.capability import (
     AgentContext, PydanticToolControlCapability, SkillCapability, SkillSourceRegistry,
@@ -69,7 +69,7 @@ async def test_public_capabilities_allow_model_correction_without_runtime(kind: 
         corrected_call = ToolCallPart("list_files", {"path": "."}, tool_call_id="corrected")
     requests = 0
 
-    def respond(messages, _info):
+    def respond(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
         nonlocal requests
         requests += 1
         if requests == 1:
@@ -77,9 +77,7 @@ async def test_public_capabilities_allow_model_correction_without_runtime(kind: 
         assert isinstance(messages[-1], ModelRequest)
         feedback = messages[-1].parts[0]
         if requests == 2:
-            assert isinstance(feedback, RetryPromptPart) or (
-                isinstance(feedback, ToolReturnPart) and feedback.outcome == "retried"
-            )
+            assert isinstance(feedback, ToolReturnPart) and feedback.outcome == "retried"
             assert feedback.tool_call_id == "missing"
             return ModelResponse(parts=[corrected_call])
         assert isinstance(feedback, ToolReturnPart)
@@ -113,7 +111,7 @@ async def test_sdk_observer_sees_original_signal_before_public_conversion(signal
 
     requests = 0
 
-    def respond(messages, _info):
+    def respond(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
         nonlocal requests
         requests += 1
         if requests == 1:
@@ -123,7 +121,7 @@ async def test_sdk_observer_sees_original_signal_before_public_conversion(signal
         if signal_type is ToolCallFailed:
             assert isinstance(feedback, ToolReturnPart) and feedback.outcome == "failed"
         else:
-            assert isinstance(feedback, RetryPromptPart) or feedback.outcome == "retried"
+            assert isinstance(feedback, ToolReturnPart) and feedback.outcome == "retried"
         return ModelResponse(parts=[TextPart("done")])
 
     agent = Agent(FunctionModel(respond), tools=[fail], capabilities=[CombinedCapability([

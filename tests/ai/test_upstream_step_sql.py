@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Public upstream StepStore behavior over the project SQL adapter."""
+
+import asyncio
+import re
+import sqlite3
+from collections.abc import AsyncIterator
+from dataclasses import replace
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+import pytest_asyncio
+from pydantic_ai import Agent
+from pydantic_ai.messages import (
+    BinaryContent, ModelRequest, ModelResponse, ModelMessagesTypeAdapter,
+    TextPart, ToolCallPart, ToolReturnPart, UserPromptPart,
+)
+from pydantic_ai.models.function import FunctionModel
+from pydantic_ai_harness.media import DiskMediaStore
+from pydantic_ai_harness.step_persistence import (
+    ContinuableSnapshot, InMemoryStepStore, RunRecord, SqliteStepStore,
+    StepEvent, StepPersistence, StepStore, ToolEffectRecord, continue_run,
+)
+from sqlalchemy import event, text
+from sqlalchemy.dialects import mysql
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.schema import CreateIndex, CreateTable
+
+from linktools.ai.persistence._step_schema import build_step_sql_metadata
+from linktools.ai.persistence._step_store import SqlStepStore
+
+
+@pytest_asyncio.fixture(params=["sql", "upstream"])
+async def store(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator[StepStore]:
+    if request.param == "upstream":
+        yield SqliteStepStore(database=tmp_path / "official.db", media_store=None, max_snapshots_per_run=1)
+        return
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'adapter.db'}")
+    adapter = SqlStepStore(engine, namespace="steps", tenant_id="one",
+                           tool_effect_store=InMemoryStepStore(), max_snapshots_per_run=1)
+    await adapter.initialize(local=True)
+    try:
+        yield adapter
+    finally:
+        await adapter.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_run_lineage_filters_sort_by_instant_and_keep_original_records(store: StepStore) -> None:
+    records = [
+        RunRecord(run_id="later", conversation_id="conversation", parent_run_id="parent",
+                  started_at=datetime.fromisoformat("2026-01-01T01:30:00+00:00"),
+                  agent_name="agent", metadata={"label": "original"}, registration_id="registration"),
+        RunRecord(run_id="earlier", conversation_id="conversation", parent_run_id="parent",
+                  started_at=datetime.fromisoformat("2026-01-01T00:00:00+00:00")),
+        RunRecord(run_id="other", conversation_id="conversation", parent_run_id="other"),
+    ]
+    for record in records:
+        await store.register_run(record)
+    assert await store.get_run(run_id="later") == records[0]
+    assert await store.get_run(run_id="missing") is None
+    assert await store.list_runs(parent_run_id="parent", conversation_id="conversation") == [records[1], records[0]]
+    with pytest.raises((ValueError, sqlite3.IntegrityError)):
+        await store.register_run(records[0])
+
+
+@pytest.mark.asyncio
+async def test_boundary_events_are_append_only_and_keyed_retries_are_suppressed(store: StepStore) -> None:
+    first = StepEvent(run_id="run", kind="run_started", step_index=4,
+                      conversation_id="conversation", agent_name="agent",
+                      metadata={"test": "value"}, idempotency_key="same-key")
+    second = StepEvent(run_id="run", kind="tool_call_failed", step_index=0,
+                       tool_call_id="call", tool_name="tool", error="failed")
+    await store.append_event(first)
+    await store.append_event(replace(first, metadata={"test": "must-not-replace"}))
+    await store.append_event(second)
+    await store.append_event(second)
+    assert await store.list_events(run_id="run") == [first, second, second]
+    assert await store.list_events(run_id="missing") == []
+
+
+@pytest.mark.asyncio
+async def test_snapshot_retention_keeps_latest_complete_and_latest_interrupted(store: StepStore) -> None:
+    complete = ContinuableSnapshot(run_id="run", step_index=7, idempotency_key="7:complete",
+                                   messages=[ModelRequest(parts=[UserPromptPart("settled")])])
+    interrupted = replace(complete, step_index=0, idempotency_key="8:interrupted", state="interrupted")
+    newest = replace(interrupted, idempotency_key="9:interrupted")
+    await store.save_snapshot(complete)
+    await store.save_snapshot(interrupted)
+    await store.save_snapshot(newest)
+    assert await store.latest_snapshot(run_id="run") == complete
+    assert await store.latest_snapshot(run_id="run", include_interrupted=True) == newest
+    await store.save_snapshot(interrupted)
+    assert await store.latest_snapshot(run_id="run", include_interrupted=True) == newest
+    snapshots = await store.list_snapshots(run_id="run", include_interrupted=True)
+    assert snapshots == [complete, newest]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_preserves_native_messages_and_official_continue_run(store: StepStore) -> None:
+    messages = [
+        ModelRequest(parts=[UserPromptPart(["inspect", BinaryContent(data=b"binary", media_type="image/png")])]),
+        ModelResponse(parts=[ToolCallPart("work", {"x": 3}, tool_call_id="call")]),
+        ModelRequest(parts=[ToolReturnPart("work", {"answer": [3, 4]}, tool_call_id="call")]),
+        ModelResponse(parts=[TextPart("complete")]),
+    ]
+    snapshot = ContinuableSnapshot(run_id="native", step_index=3, messages=messages)
+    await store.save_snapshot(snapshot)
+    result = await continue_run(store, run_id="native")
+    assert ModelMessagesTypeAdapter.dump_json(result) == ModelMessagesTypeAdapter.dump_json(messages)
+    empty = ContinuableSnapshot(run_id="empty", step_index=0, messages=[])
+    await store.save_snapshot(empty)
+    assert await store.latest_snapshot(run_id="empty") == empty
+
+
+@pytest.mark.asyncio
+async def test_sql_partitions_isolate_run_and_message_keys(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'scopes.db'}")
+    stores = [SqlStepStore(engine, namespace=namespace, tenant_id=tenant, tool_effect_store=InMemoryStepStore())
+              for namespace, tenant in [("one", "a"), ("one", "b"), ("two", "a")]]
+    try:
+        await stores[0].initialize(local=True)
+        for index, item in enumerate(stores):
+            await item.register_run(RunRecord(run_id="run-" + "x" * 1024, metadata={"scope": str(index)}))
+            await item.save_snapshot(ContinuableSnapshot(run_id="same", step_index=0,
+                messages=[ModelRequest(parts=[UserPromptPart(str(index))])], idempotency_key="same"))
+        await stores[0].register_run(RunRecord(run_id="offset", parent_run_id="parent",
+            started_at=datetime.fromisoformat("2026-01-01T02:00:00+02:00")))
+        await stores[0].register_run(RunRecord(run_id="utc", parent_run_id="parent",
+            started_at=datetime.fromisoformat("2026-01-01T01:00:00+00:00")))
+        assert [run.run_id for run in await stores[0].list_runs(parent_run_id="parent")] == ["offset", "utc"]
+        for index, item in enumerate(stores):
+            assert (await item.get_run(run_id="run-" + "x" * 1024)).metadata == {"scope": str(index)}
+            snapshot = await item.latest_snapshot(run_id="same")
+            assert snapshot.messages[0].parts[0].content == str(index)
+    finally:
+        for item in stores:
+            await item.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_failed_reference_publication_rolls_back_snapshot_body_and_replay_key(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'atomic.db'}")
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one", tool_effect_store=InMemoryStepStore())
+    await store.initialize(local=True)
+    snapshot = ContinuableSnapshot(run_id="run", step_index=0, idempotency_key="atomic",
+                                    messages=[ModelRequest(parts=[UserPromptPart("message")])])
+
+    def fail_reference(connection, cursor, statement, parameters, context, many):
+        if statement.startswith("INSERT INTO ai_step_message_refs"):
+            raise RuntimeError("reference publication interrupted")
+
+    try:
+        event.listen(engine.sync_engine, "before_cursor_execute", fail_reference)
+        with pytest.raises(RuntimeError, match="reference publication interrupted"):
+            await store.save_snapshot(snapshot)
+        event.remove(engine.sync_engine, "before_cursor_execute", fail_reference)
+        assert await store.latest_snapshot(run_id="run") is None
+        async with engine.connect() as connection:
+            for table in ("snapshots", "messages", "message_refs"):
+                assert await connection.scalar(text(f"SELECT count(*) FROM ai_step_{table}")) == 0
+        await store.save_snapshot(snapshot)
+        assert await store.latest_snapshot(run_id="run") == snapshot
+    finally:
+        if event.contains(engine.sync_engine, "before_cursor_execute", fail_reference):
+            event.remove(engine.sync_engine, "before_cursor_execute", fail_reference)
+        await store.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_concurrent_boundary_retries_publish_once(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'concurrent.db'}")
+    stores = [SqlStepStore(engine, namespace="steps", tenant_id="one", tool_effect_store=InMemoryStepStore()) for _ in range(2)]
+    try:
+        await stores[0].initialize(local=True)
+        record = RunRecord(run_id="run")
+        results = await asyncio.gather(*(store.register_run(record) for store in stores), return_exceptions=True)
+        assert sum(result is None for result in results) == 1
+        assert sum(isinstance(result, ValueError) for result in results) == 1
+        boundary = StepEvent(run_id="run", kind="run_started", step_index=0, idempotency_key="key")
+        await asyncio.gather(*(store.append_event(boundary) for store in stores))
+        assert await stores[0].list_events(run_id="run") == [boundary]
+        snapshot = ContinuableSnapshot(run_id="run", step_index=0, messages=[], idempotency_key="key")
+        await asyncio.gather(*(store.save_snapshot(snapshot) for store in stores))
+        assert await stores[0].list_snapshots(run_id="run") == [snapshot]
+    finally:
+        for store in stores:
+            await store.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_media_round_trip_and_deduplicated_message_batches(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'media.db'}")
+    media = DiskMediaStore(directory=tmp_path / "media")
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one", tool_effect_store=InMemoryStepStore(), media_store=media)
+    try:
+        await store.initialize(local=True)
+        messages = [ModelRequest(parts=[UserPromptPart("x" * 81920)])]
+        messages.extend(ModelResponse(parts=[TextPart(str(i))]) for i in range(1100))
+        first = ContinuableSnapshot(run_id="run", step_index=0, messages=messages, idempotency_key="first")
+        second = replace(first, step_index=1, idempotency_key="second")
+        await store.save_snapshot(first)
+        await store.save_snapshot(second)
+        assert await store.latest_snapshot(run_id="run") == second
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == len(messages)
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_message_refs")) == len(messages) * 2
+    finally:
+        await store.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_corrupt_or_missing_message_reference_fails_closed(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'corrupt.db'}")
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one", tool_effect_store=InMemoryStepStore())
+    try:
+        await store.initialize(local=True)
+        snapshot = ContinuableSnapshot(run_id="run", step_index=0, messages=[ModelResponse(parts=[TextPart("original")])])
+        await store.save_snapshot(snapshot)
+        async with engine.begin() as connection:
+            await connection.execute(text("UPDATE ai_step_messages SET message = :body"), {"body": "{}"})
+        with pytest.raises(ValueError, match="missing or corrupt"):
+            await store.latest_snapshot(run_id="run")
+        assert await store.list_snapshots(run_id="run") == []
+        async with engine.begin() as connection:
+            await connection.execute(text("DELETE FROM ai_step_message_refs"))
+        with pytest.raises(ValueError, match="incomplete"):
+            await store.latest_snapshot(run_id="run")
+        assert await store.list_snapshots(run_id="run") == []
+    finally:
+        await store.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_effect_methods_delegate_without_another_durable_ledger(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'effects.db'}")
+    owner = InMemoryStepStore()
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one", tool_effect_store=owner)
+    try:
+        record = ToolEffectRecord(run_id="run", tool_call_id="call", tool_name="work", status="started",
+                                  idempotency_key="provider-key", effect_summary="write")
+        await store.record_tool_effect(record)
+        assert await owner.get_tool_effect(run_id="run", tool_call_id="call") == record
+        assert await store.list_unresolved_tool_effects(run_id="run") == [record]
+        done = replace(record, status="completed")
+        await owner.record_tool_effect(done)
+        assert await store.get_tool_effect(run_id="run", tool_call_id="call") == done
+        assert await store.list_unresolved_tool_effects(run_id="run") == []
+        async with engine.connect() as connection:
+            assert (await connection.execute(text("SELECT name FROM sqlite_master WHERE type = 'table'"))).all() == []
+    finally:
+        await store.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_initialize_does_not_create_or_inspect_external_schema(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'unprovisioned.db'}")
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one", tool_effect_store=InMemoryStepStore())
+    statements = []
+
+    def capture(connection, cursor, statement, parameters, context, many):
+        statements.append(statement.lower())
+
+    event.listen(engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        await store.initialize()
+        assert not any("create " in sql or "table_info" in sql or "sqlite_master" in sql for sql in statements)
+        async with engine.connect() as connection:
+            assert (await connection.execute(text("SELECT name FROM sqlite_master WHERE type = 'table'"))).all() == []
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", capture)
+        await store.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_cold_store_continues_official_capability_after_settled_tool(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'cold.db'}")
+    effects = InMemoryStepStore()
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one", tool_effect_store=effects)
+    await store.initialize(local=True)
+    calls = []
+
+    def failing_model(messages, info):
+        if any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
+            raise RuntimeError("model failed after tool")
+        return ModelResponse(parts=[ToolCallPart("work", {}, tool_call_id="call")])
+
+    agent = Agent(FunctionModel(failing_model), capabilities=[StepPersistence(store=store, capture_frontier=True)])
+
+    @agent.tool_plain
+    def work() -> str:
+        calls.append("effect")
+        return "saved-result"
+
+    try:
+        with pytest.raises(RuntimeError, match="model failed after tool"):
+            await agent.run("question", conversation_id="conversation")
+        original = (await store.list_runs())[0]
+        await store.close()
+        cold = SqlStepStore(engine, namespace="steps", tenant_id="one", tool_effect_store=effects)
+        history = await continue_run(cold, run_id=original.run_id)
+        assert [part.content for message in history for part in message.parts if isinstance(part, ToolReturnPart)] == ["saved-result"]
+        resumed = Agent(FunctionModel(lambda messages, info: ModelResponse(parts=[TextPart("done")])),
+                         capabilities=[StepPersistence(store=cold)])
+        assert (await resumed.run(message_history=history, conversation_id="conversation")).output == "done"
+        assert calls == ["effect"]
+        assert len(await cold.list_runs()) == 2
+        await cold.close()
+    finally:
+        await store.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_effect_binding_borrows_partition_without_owning_its_lifetime(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'binding.db'}")
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one")
+    first_owner, second_owner = InMemoryStepStore(), InMemoryStepStore()
+    record = ToolEffectRecord(run_id="run", tool_call_id="call", tool_name="tool", status="started")
+    try:
+        await store.initialize(local=True)
+        with pytest.raises(RuntimeError, match="requires a bound tool-effect store"):
+            await store.record_tool_effect(record)
+        with pytest.raises(RuntimeError, match="requires a bound tool-effect store"):
+            await store.get_tool_effect(run_id="run", tool_call_id="call")
+        with pytest.raises(RuntimeError, match="requires a bound tool-effect store"):
+            await store.list_unresolved_tool_effects(run_id="run")
+        first = store.with_tool_effect_store(first_owner)
+        second = store.with_tool_effect_store(second_owner)
+        await first.record_tool_effect(record)
+        assert await second.get_tool_effect(run_id="run", tool_call_id="call") is None
+        await first.register_run(RunRecord(run_id="run"))
+        assert await second.get_run(run_id="run") == await store.get_run(run_id="run")
+        await first.close()
+        await second.register_run(RunRecord(run_id="next"))
+        assert await store.get_run(run_id="next") is not None
+    finally:
+        await store.close()
+        await engine.dispose()
+
+
+def test_step_sql_metadata_compiles_for_mysql57_and_obeys_project_table_policy() -> None:
+    metadata = build_step_sql_metadata()
+    dialect = mysql.dialect()
+    dialect.server_version_info = (5, 7, 44)
+    for table in metadata.tables.values():
+        ddl = str(CreateTable(table).compile(dialect=dialect))
+        assert table.name.startswith("ai_") and table.comment
+        assert list(table.c)[-2].name == "updated_at" and list(table.c)[-1].name == "created_at"
+        assert "id BIGINT NOT NULL" in ddl and "AUTO_INCREMENT" in ddl
+        assert not table.foreign_keys and "FLOAT" not in ddl
+        assert "ON UPDATE CURRENT_TIMESTAMP" in ddl
+        indexes = [index for index in table.indexes if index.info.get("ddl_dialect") == "mysql"]
+        assert {"ix_updated_at", "ix_created_at"}.issubset({index.name for index in indexes})
+        for index in indexes:
+            assert len(index.columns) <= 3
+            assert index.name == ("uk_" if index.unique else "ix_") + "_".join(column.name for column in index.columns)
+            assert "(" in str(CreateIndex(index).compile(dialect=dialect))
+        for column in table.c:
+            assert column.comment
+            if column.name.endswith("digest") or column.name == "sha256":
+                assert "CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin" == column.type.compile(dialect=dialect)
+
+
+def test_step_development_ddl_and_complete_metadata_match_canonical_schema() -> None:
+    from linktools.ai.migrate import build_sql_schema_metadata
+
+    metadata = build_step_sql_metadata()
+    complete = build_sql_schema_metadata()
+    migration = (Path(__file__).resolve().parents[2] / "linktools-ai" / "migrations" / "init_schema.sql").read_text()
+    compact = " ".join(migration.split())
+    dialect = mysql.dialect()
+    for name, table in metadata.tables.items():
+        assert list(complete.tables[name].c.keys()) == list(table.c.keys())
+        ddl = str(CreateTable(table).compile(dialect=dialect))
+        # MySQL's independent table options may be emitted in any order.
+        columns = ddl.rsplit(")", 1)[0] + ")"
+        assert " ".join(columns.split()) in compact
+        assert f"COMMENT='{table.comment}'" in compact
+        expected_indexes = {
+            " ".join(str(CreateIndex(index).compile(dialect=dialect)).split())
+            for index in table.indexes
+            if index.info.get("ddl_dialect") == "mysql"
+        }
+        actual_indexes = {
+            " ".join(statement.split())
+            for statement in re.findall(
+                rf"CREATE (?:UNIQUE )?INDEX [^;]+ ON {re.escape(name)} \([^;]+\)",
+                migration,
+            )
+        }
+        assert actual_indexes == expected_indexes
+    assert all(line == line.rstrip() for line in migration.splitlines())

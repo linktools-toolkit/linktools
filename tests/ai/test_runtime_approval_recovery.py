@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Durable deferred-frontier approval recovery contracts."""
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -27,8 +28,8 @@ from linktools.ai.persistence.contracts import (
     ExecutionRecord,
     PendingDeferredCall,
     PendingToolContinuation,
-    ExecutionCheckpoint,
-    ExecutionCheckpointState,
+    ExecutionRecoveryDetail,
+    ExecutionRecoveryState,
     RecoveryHandoffPhase,
     StoredUserInput,
 )
@@ -106,16 +107,8 @@ def _continuation() -> PendingToolContinuation:
     )
 
 
-def _checkpoint(now: datetime) -> ExecutionCheckpoint:
-    return ExecutionCheckpoint(
-        execution_id="execution",
-        agent_run_id="step-1",
-        state=ExecutionCheckpointState.ACTIVE,
-        revision=0,
-        created_at=now,
-        updated_at=now,
-        handoff_phase=RecoveryHandoffPhase.NONE,
-    )
+def _checkpoint(now: datetime) -> ExecutionRecord:
+    return replace(_execution(now), recovery=ExecutionRecoveryDetail(agent_run_id="step-1"))
 
 
 def _approval(
@@ -155,7 +148,6 @@ def _commands(state: Persistence, namespace: str) -> StateCommands:
         tools=state.checkpoint.tools,
         conversation_run_store=state.run_store.read_store(PersistenceDomain.CONVERSATION),
         execution_run_store=state.run_store.read_store(PersistenceDomain.TRACE),
-        checkpoint_archive=state.run_store.read_store(PersistenceDomain.CHECKPOINT),
         background_tasks=set(),
     )
 
@@ -166,24 +158,23 @@ async def _enter_waiting(
     Persistence,
     StateCommands,
     ExecutionRecord,
-    ExecutionCheckpoint,
+    ExecutionRecord,
     PendingToolContinuation,
 ]:
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace=namespace, tenant_id="tenant")
     now = datetime.now(timezone.utc)
-    execution = _execution(now)
-    checkpoint = _checkpoint(now)
+    execution = _checkpoint(now)
+    checkpoint = execution
     continuation = _continuation()
-    await state.execution.executions.create_with_history_head(execution)
-    await state.checkpoint.checkpoints.create(checkpoint)
+    await state.execution.executions.create_execution(execution)
     commands = _commands(state, namespace)
     await commands.commit_deferred_checkpoint(
         execution_id=execution.execution_id,
         tenant_id="tenant",
         expected_execution_revision=execution.revision,
         expected_event_seq=execution.event_seq,
-        expected_recovery_revision=checkpoint.revision,
+
         expected_agent_run_seq=execution.agent_run_seq,
         continuation=continuation,
         approval_records=(_approval(execution, continuation, now),),
@@ -202,7 +193,7 @@ async def test_deferred_checkpoint_persists_approval_frontier_atomically() -> No
             execution.execution_id,
             tenant_id="tenant",
         )
-        checkpoint = await state.checkpoint.checkpoints.get(
+        checkpoint = await state.execution.executions.get(
             execution.execution_id,
             tenant_id="tenant",
         )
@@ -219,8 +210,8 @@ async def test_deferred_checkpoint_persists_approval_frontier_atomically() -> No
         assert current is not None
         assert current.status is ExecutionStatus.WAITING_DEFERRED
         assert checkpoint is not None
-        assert checkpoint.state is ExecutionCheckpointState.WAITING
-        assert checkpoint.pending_tools == continuation
+        assert checkpoint.recovery_state is ExecutionRecoveryState.WAITING
+        assert checkpoint.recovery.pending_tools == continuation
         assert approval is not None and approval.status is ApprovalStatus.PENDING
         events = await state.execution.events.list(
             execution.execution_id,
@@ -236,7 +227,7 @@ async def test_deferred_checkpoint_persists_approval_frontier_atomically() -> No
 
 
 @pytest.mark.asyncio
-async def test_deferred_resume_clears_frontier_and_advances_attempt_once() -> None:
+async def test_deferred_resume_retains_source_frontier_and_advances_attempt_once() -> None:
     state, commands, execution, checkpoint, continuation = await _enter_waiting(
         "approval-resume"
     )
@@ -259,20 +250,21 @@ async def test_deferred_resume_clears_frontier_and_advances_attempt_once() -> No
             decision_digest=canonical_sha256({"decision": "approve"}),
             decided_at=now,
         )
-        resumed, active = await commands.claim_deferred_resume_checkpoint(
+        resumed = await commands.claim_deferred_resume_checkpoint(
             execution_id=execution.execution_id,
             tenant_id="tenant",
             expected_execution_revision=execution.revision + 1,
             expected_event_seq=execution.event_seq + 1,
-            expected_recovery_revision=checkpoint.revision + 1,
+
             expected_agent_run_seq=execution.agent_run_seq,
             expected_pending_tools=continuation,
         )
         assert resumed.status is ExecutionStatus.STARTED
         assert resumed.agent_run_seq == 2
-        assert active.state is ExecutionCheckpointState.ACTIVE
-        assert active.pending_tools is None
-        assert active.agent_run_id != continuation.source_agent_run_id
+        assert resumed.recovery_state is ExecutionRecoveryState.ACTIVE
+        assert resumed.recovery.pending_tools == continuation
+        assert resumed.recovery.source_agent_run_id == continuation.source_agent_run_id
+        assert resumed.recovery.agent_run_id != continuation.source_agent_run_id
     finally:
         await state.close()
 
@@ -296,7 +288,7 @@ async def test_deferred_cancel_cancels_pending_approval_and_clears_frontier() ->
                 "cancel-operation",
                 datetime.now(timezone.utc),
             ),
-            expected_recovery_revision=checkpoint.revision + 1,
+
             expected_pending_tools=continuation,
         )
         assert committed.status is ExecutionStatus.CANCELLING
@@ -310,13 +302,13 @@ async def test_deferred_cancel_cancels_pending_approval_and_clears_frontier() ->
             ),
             tenant_id="tenant",
         )
-        active = await state.checkpoint.checkpoints.get(
+        active = await state.execution.executions.get(
             execution.execution_id,
             tenant_id="tenant",
         )
         assert approval is not None and approval.status is ApprovalStatus.CANCELLED
         assert active is not None
-        assert active.state is ExecutionCheckpointState.ACTIVE
-        assert active.pending_tools is None
+        assert active.recovery_state is ExecutionRecoveryState.ACTIVE
+        assert active.recovery.pending_tools is None
     finally:
         await state.close()

@@ -13,10 +13,14 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from typing import Generic, Literal, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, runtime_checkable
 
 from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes
 from ._archive_read import ArchiveFrontierReader, ArchiveNodeRead
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from ..storage import SqlStorageContext
 
 ValueT = TypeVar("ValueT")
 
@@ -604,13 +608,30 @@ class StateTransaction(Protocol):
     async def insert_record(self, record: StoredRecord) -> None: ...
     async def insert_records(self, records: Sequence[StoredRecord]) -> None: ...
     async def guard_record(
-        self,
-        key: bytes,
-        *,
-        expected_storage_revision: int,
-    ) -> StoredRecord | None: ...
+        self, key: bytes, *, expected_storage_revision: int,
+    ) -> StoredRecord | None:
+        """Protect a record once per transaction and return its source-backed view."""
+        ...
+    async def guard_record_revision(
+        self, key: bytes, *, expected_storage_revision: int,
+    ) -> int | None:
+        """Protect a record without loading or accepting its payload.
+
+        Return the provisional physical revision, or None on a missing/stale key.
+        Repeat guards of an already protected key return its current transaction
+        revision without another increment. This receipt proves no payload facts
+        and becomes confirmed only when the whole mutation group commits.
+        """
+        ...
     async def replace_record(self, record: StoredRecord, *, expected_storage_revision: int) -> bool: ...
-    async def replace_records(self, replacements: Sequence["RecordReplacement"]) -> None: ...
+    async def replace_records(self, replacements: Sequence["RecordReplacement"]) -> None:
+        """CAS known records without preloading; immutable identities must match.
+
+        A conditional conflict in a multi-record batch aborts the entire group,
+        even when caught by the callback. A single zero-match CAS is recoverable.
+        Caller receipts advance only after confirmed group commit.
+        """
+        ...
     async def transition_record_lease(
         self,
         key: bytes,
@@ -699,6 +720,21 @@ class StateTransaction(Protocol):
     async def delete_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]: ...
 
 
+@runtime_checkable
+class SqlStateTransaction(Protocol):
+    """Execute prepared SQL inside the current writable storage callback.
+
+    The callback must only write through the supplied session. It must not
+    begin, commit or close a transaction, nor perform external operations.
+    Receipts are provisional until the enclosing StateStore mutation confirms.
+    """
+
+    async def run_sql(
+        self, context: "SqlStorageContext",
+        callback: Callable[["AsyncSession"], Awaitable[ValueT]],
+    ) -> ValueT: ...
+
+
 class _ReadOnlyStateTransaction(StateTransaction):
     def __init__(self, transaction: StateTransaction) -> None:
         self._transaction = transaction
@@ -723,13 +759,17 @@ class _ReadOnlyStateTransaction(StateTransaction):
         return None
 
     async def guard_record(
-        self,
-        key: bytes,
-        *,
-        expected_storage_revision: int,
+        self, key: bytes, *, expected_storage_revision: int,
     ) -> StoredRecord | None:
         del key, expected_storage_revision
         self._reject("guard_record")
+        return None
+
+    async def guard_record_revision(
+        self, key: bytes, *, expected_storage_revision: int,
+    ) -> int | None:
+        del key, expected_storage_revision
+        self._reject("guard_record_revision")
         return None
 
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
@@ -1192,4 +1232,4 @@ def _validate_limit(limit: int | None) -> None:
         raise ValueError("limit must be between 1 and 1000")
 
 
-__all__ = ['FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sequence_key', 'sortable_id', 'sortable_identity', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'subject_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+__all__ = ['FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sequence_key', 'sortable_id', 'sortable_identity', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'subject_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

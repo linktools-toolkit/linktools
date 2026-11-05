@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """Focused regressions for durable composition and close ownership."""
 from linktools.ai.model import create_model
 
@@ -252,7 +253,6 @@ def _run_store_for_preflight() -> RuntimeAgentRunStore:
         StagingAgentRunStore(),
         conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
         execution_archive=None,
-        checkpoint_archive=None,
     )
 
 
@@ -358,6 +358,7 @@ async def test_execution_retention_releases_objects_after_execution_lookup() -> 
     )
     controller._conversation = SimpleNamespace()
     controller._namespace = "runtime"
+    controller._terminal_publications = {}
     controller._objects = SimpleNamespace(release_object_scope=release_object_scope)
     controller._transient_domains = frozenset({PersistenceDomain.TRACE})
 
@@ -427,7 +428,8 @@ async def test_local_execution_close_rejects_pending_command_owned_work() -> Non
     backend._run_store = None
     backend._live_broker = LiveExecutionEventBroker()
     backend._pending_turns = _PendingExecutionTurns()
-    backend._pending_renewals = {}
+    backend._turn_monitors = {}
+    backend._turn_owners = {}
     backend._accepting = True
     backend._tasks = {}
     backend._executor = SimpleNamespace(pending_background_tasks=())

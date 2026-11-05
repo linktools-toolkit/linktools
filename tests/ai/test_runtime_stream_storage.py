@@ -94,7 +94,7 @@ def test_noncallable_cache_capabilities_are_rejected(methods: tuple[str, ...]) -
 
 @pytest.mark.parametrize("methods", (
     ("get", "put", "delete"),
-    ("claim_turn", "read_turn", "renew_turn", "release_turn", "cancel_turn"),
+    ("claim_turn", "read_turn", "renew_turn", "release_turn", "cancel_turn", "enter"),
     ("open_stream", "read_stream"),
 ))
 def test_storage_accepts_each_complete_coordination_capability(methods: tuple[str, ...]) -> None:
@@ -107,7 +107,7 @@ def test_storage_accepts_each_complete_coordination_capability(methods: tuple[st
 
 @pytest.mark.parametrize("methods", (
     ("get", "put", "delete"),
-    ("claim_turn", "read_turn", "renew_turn", "release_turn", "cancel_turn"),
+    ("claim_turn", "read_turn", "renew_turn", "release_turn", "cancel_turn", "enter"),
     ("open_stream", "read_stream"),
 ))
 @pytest.mark.parametrize("invalid", (None, "not callable"))

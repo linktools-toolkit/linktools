@@ -18,7 +18,8 @@ from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, RunBudget, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import CheckpointCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
@@ -192,7 +193,7 @@ def _recovery_group(subagent: bool, change: str = "none") -> RuntimeFeatures:
         return value
 
     group = RuntimeFeatures("deadline-recovery")
-    group.capability(CheckpointCapability(), scope="runtime")
+    group.capability(native_checkpoint(), scope="runtime")
     group.tool(marker, effect_policy="non_replay_safe" if change == "tool" else "none")
     group.agent("default", model="default", allow_tools=(), allow_skills=(),
                 allow_subagents=("child",) if subagent else ())
@@ -364,7 +365,7 @@ async def test_agent_node_recovery_keeps_first_start_deadline(
             assert all(task.done() for task in backend._tasks.values())
             assert all(task.done() for task in backend._checkpoint_tasks)
             assert all(task.done() for tasks in backend._execution_task_map().values() for task in tasks)
-            assert not backend._pending_renewals
+            assert not backend._turn_monitors
             assert not backend._recovery_reconcile_tasks
             assert not backend._subagent_dispatcher.pending_background_tasks
             run_store = runtime._run_store

@@ -15,6 +15,7 @@ def test_persistence_root_contains_configuration_and_offline_snapshot_reader() -
     assert set(persistence.__all__) == {
         'Persistence', 'PersistenceStorage', 'PersistencePlan',
         'PersistenceStatus', 'PersistenceDomain', 'FilesystemSnapshotReader',
+        'SqlStepStore', 'PreparedStep', 'StepWriteReceipt',
     }
     assert not hasattr(persistence, 'RuntimeDomain')
     assert not hasattr(persistence, 'RuntimeStateCommands')

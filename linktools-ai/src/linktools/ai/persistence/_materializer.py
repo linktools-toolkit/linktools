@@ -62,7 +62,6 @@ if TYPE_CHECKING:
         IdempotencyRepository,
         MemoryRepository,
         OperationLedgerRepository,
-        ExecutionCheckpointRepository,
         SessionRepository,
         TaskAdmissionRepository,
         TaskRepository,
@@ -326,7 +325,6 @@ def _repositories(
             checkpoint=CheckpointRepositories(
                 cast("ApprovalRepository", bundles[PersistenceDomain.CHECKPOINT]["approvals"]),
                 cast("ExternalCallRepository", bundles[PersistenceDomain.CHECKPOINT]["external_calls"]),
-                cast("ExecutionCheckpointRepository", bundles[PersistenceDomain.CHECKPOINT]["checkpoints"]),
                 cast("OperationLedgerRepository", bundles[PersistenceDomain.CHECKPOINT]["operations"]),
                 cast("ToolStateRepository", bundles[PersistenceDomain.CHECKPOINT]["tools"]),
             ),

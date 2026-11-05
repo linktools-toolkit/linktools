@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TypeVar
 
 from linktools.core import environ
+from pydantic_ai_harness.step_persistence import StepPersistence
 from pydantic_ai.capabilities import AbstractCapability, WrapperCapability
 from pydantic_ai.workspaces import WorkspaceBackend
 
@@ -84,7 +85,7 @@ from ..persistence.capabilities import CapabilityPersistence
 from ..persistence.capabilities import RuntimeCapabilityWrites
 from ..observe.service import MetricsService
 from ._persistence_configuration import validate_persistence_capabilities, capability_persistence_ids
-from ..capability import TraceCapability, CheckpointCapability
+from ..capability import TraceCapability
 from ..history import History
 from ..core import token_seed
 from ._session import RuntimeSessionService
@@ -230,7 +231,7 @@ async def compose_runtime_components(
             if isinstance(capability, CapabilityPersistence):
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "Persistent capabilities require runtime scope")
             if isinstance(capability, (
-                CheckpointCapability,
+                StepPersistence,
                 TraceCapability,
                 ToolResponsesCapability,
                 SessionCapability,
@@ -385,7 +386,11 @@ async def compose_runtime_components(
         for identity in capability_ids:
             await persistence.capability_store(identity)
 
-        run_store = await persistence.create_agent_run_store()
+        step_features = [leaf for feature in runtime_capabilities for leaf in runtime_feature_leaves(feature)
+                         if isinstance(leaf, StepPersistence)]
+        run_store = await persistence.create_agent_run_store(
+            step_store=step_features[0].store if step_features else None,
+        )
         lifecycle.run_store = run_store
         if selected_state.capability_stores:
             run_store.capability_writes = RuntimeCapabilityWrites(
@@ -675,7 +680,7 @@ async def _build_local_components(
         for capability in runtime_capabilities:
             persistence_capabilities.extend(runtime_feature_leaves(capability))
         restart_checkpoints = any(
-            isinstance(value, CheckpointCapability) for value in persistence_capabilities
+            isinstance(value, StepPersistence) for value in persistence_capabilities
         )
         durable_trace = any(
             isinstance(value, TraceCapability) for value in persistence_capabilities
@@ -728,6 +733,8 @@ async def _build_local_components(
             history_reader=history_reader,
             history_service=history_service,
             release_terminal=release_execution_handoff,
+            retained_turn_confirmed=state.retention.terminal_publication_confirmed,
+            retained_publication=state.retention.terminal_publication,
             instruction_resolver=instruction_resolver,
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
@@ -843,6 +850,8 @@ async def _build_local_components(
             tool_operations=state.checkpoint.tools,
             metric_recorder=metric_buffer,
             worker_completed=worker_completed,
+            terminal_publication=state.retention.confirm_terminal_publication,
+            retained_publication=state.retention.terminal_publication,
             exclusive_execution_writer=exclusive_execution_writer,
             commit=commit,
             trace_commit=next((value.commit for value in persistence_capabilities
@@ -853,7 +862,11 @@ async def _build_local_components(
             ),
         )
         runtime_bridge.bind(backend)
+        runtime_bridge.prepare_reserved_start = backend.prepare_reserved_start
         runtime_bridge.pending_start = backend.start_pending
+        runtime_bridge.run_turn = backend.run_turn
+        runtime_bridge.run_existing_turn = backend.run_existing_turn
+        runtime_bridge.resume_subagent = backend.resume_subagent
         runtime_bridge.pending_promote = backend.promote_pending_execution
         lifecycle.backend = backend
         runtime_bridge.pending_cancel_promote = lambda execution_id: backend.promote_pending_execution(
@@ -908,7 +921,6 @@ async def _build_local_components(
         approval = DefaultApprovalService(
             state.checkpoint.approvals,
             state.execution.executions,
-            state.checkpoint.checkpoints,
             authorization,
             objects=state.object_store(PersistenceDomain.CHECKPOINT),
             continuation=backend,
@@ -916,7 +928,6 @@ async def _build_local_components(
         external = DefaultExternalService(
             state.checkpoint.external_calls,
             state.execution.executions,
-            state.checkpoint.checkpoints,
             authorization,
             objects=state.object_store(PersistenceDomain.CHECKPOINT),
             object_key_factory=object_key_factory,

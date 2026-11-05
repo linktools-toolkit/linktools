@@ -835,10 +835,12 @@ async def test_pending_cancel_delivers_terminal_metric_in_caller_after_admission
 ) -> None:
     prepared = asyncio.Event()
     release_prepare = asyncio.Event()
+    cancel_recorded = asyncio.Event()
     execution_ids: list[str] = []
     aborted: list[str] = []
     original_prepare = LocalExecutionBackend.prepare_start
     original_abort = LocalExecutionBackend.abort_start
+    original_cancel_checkpoint = LocalExecutionBackend.commit_cancel_checkpoint
 
     async def prepare(self: LocalExecutionBackend, request: object, execution: object, identity: object) -> object:
         execution_ids.append(execution.execution_id)
@@ -850,6 +852,12 @@ async def test_pending_cancel_delivers_terminal_metric_in_caller_after_admission
         await original_abort(self, execution)
         aborted.append(execution.execution_id)
 
+    async def record_cancel(self, commit, **kwargs):
+        result = await original_cancel_checkpoint(self, commit, **kwargs)
+        cancel_recorded.set()
+        return result
+
+    monkeypatch.setattr(LocalExecutionBackend, "commit_cancel_checkpoint", record_cancel)
     monkeypatch.setattr(LocalExecutionBackend, "prepare_start", prepare)
     monkeypatch.setattr(LocalExecutionBackend, "abort_start", abort)
 
@@ -870,6 +878,8 @@ async def test_pending_cancel_delivers_terminal_metric_in_caller_after_admission
 
     store = Store()
     async with Persistence.open('pending-cancel-metric', storage=PersistenceStorage.in_memory()) as persistence_907, Runtime.attach(persistence=persistence_907, metrics=Metrics.from_store(store), features=model_features(_TextModels(), _agent_group())) as runtime:
+        # Exercise an independently reserved execution, before start admission.
+        runtime._execution_service._runtime_bridge.prepare_reserved_start = None
         starter = asyncio.create_task(runtime.agents.get("default").start("hello"))
         cancellation: asyncio.Task[object] | None = None
         try:
@@ -877,6 +887,10 @@ async def test_pending_cancel_delivers_terminal_metric_in_caller_after_admission
             execution_id = execution_ids[0]
             request = CancelExecutionRequest(runtime.default_principal, "cancel-pending")
             cancellation = asyncio.create_task(runtime.executions.cancel(execution_id, request))
+            await asyncio.wait_for(cancel_recorded.wait(), timeout=2)
+            # Business cancel settles the real in-flight admission before
+            # releasing its owner and delivering the terminal metric.
+            release_prepare.set()
             await asyncio.wait_for(store.entered.wait(), timeout=2)
             assert store.caller is cancellation
             assert aborted == [execution_id]
@@ -891,6 +905,7 @@ async def test_pending_cancel_delivers_terminal_metric_in_caller_after_admission
             assert repeated.cancelled
             assert len(store.attempts) == 1
         finally:
+            release_prepare.set()
             starter.cancel()
             if cancellation is not None:
                 cancellation.cancel()

@@ -397,6 +397,16 @@ async def _export_snapshot(
             if not page:
                 break
             for value in page:
+                if domain is PersistenceDomain.EXECUTION and value.kind == "execution":
+                    from .contracts import ExecutionRecord
+                    execution = _decode_enveloped_domain(value.data, ExecutionRecord)
+                    from ..agent import AgentBindingContract
+                    if isinstance(execution.binding, AgentBindingContract) and execution.restart_checkpoints:
+                        raise AIError(
+                            ErrorCode.SNAPSHOT_UNSUPPORTED,
+                            "Native StepPersistence executions require a consistent database and StepStore backup; "
+                            "portable snapshots do not include the external StepStore.",
+                        )
                 domain_records.append(value)
                 encoded = encode_record(value)
                 raw_domain["records"].append(accept(encoded))

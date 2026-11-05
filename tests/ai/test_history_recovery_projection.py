@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Controlled public-ahead restart proof without production separation changes."""
+"""Trace observations and official recovery snapshots stay independent."""
 
 from dataclasses import replace
 from types import SimpleNamespace
@@ -25,14 +25,14 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.core import HmacCursorSigner, agent_run_id, agent_conversation_id
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime._persistence_services import CheckpointService
-from linktools.ai.runtime._run_hooks import AgentRunCapture
-from linktools.ai.capability import CheckpointCapability
+from tests.ai._runtime_test_helpers import native_checkpoint, seed_native_snapshot
 from linktools.ai.history._projection import StepExecutionHistoryReader
 from linktools.ai.observe.journal import ModelRequestJournal
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.persistence._runtime_commands import StateCommands
 from linktools.ai.persistence._archive import PreparedArchive
+from linktools.ai.persistence._model_interaction import StagedModelInteraction, build_inline_context_projection
+from hashlib import sha256
 from linktools.ai.persistence._step_contracts import (
     AgentRunCheckpoint,
     AgentRunRecord,
@@ -45,7 +45,7 @@ from .test_step_projection import _execution
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite",))
-async def test_public_response_ahead_then_distinct_sdk_response(
+async def test_trace_reopen_keeps_both_responses_when_native_snapshot_is_older(
     tmp_path: Path, backend: str
 ) -> None:
     namespace = "public-ahead-proof"
@@ -60,13 +60,11 @@ async def test_public_response_ahead_then_distinct_sdk_response(
     )
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace=namespace, tenant_id="tenant")
+    state.run_store.bind_step_store(native_checkpoint().store)
     try:
         repository = state.execution.executions
-        execution = replace(_execution(), revision=1)
-        await repository.create_with_history_head(execution)
-        await repository.state_store.mutate(
-            lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
-        )
+        execution = replace(_execution(), revision=1, producer_generation=1, producer_claim_id="owner-claim")
+        await repository.create_execution(execution)
         restored = state.run_store
         public = restored.read_store(PersistenceDomain.TRACE)
         recovery = restored.read_store(PersistenceDomain.CHECKPOINT)
@@ -74,13 +72,13 @@ async def test_public_response_ahead_then_distinct_sdk_response(
             StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant",
             conversation_archive=restored.read_store(PersistenceDomain.CONVERSATION),
             execution_archive=public,
-            checkpoint_archive=recovery,
         )
+        old.bind_step_store(native_checkpoint().store)
         await old.initialize()
 
         def recorder_for(store, generation, **kwargs):
             store.bind_execution_producer(
-                run_id, execution_id="execution", producer_generation=generation
+                run_id, execution_id="execution", producer_generation=generation, restart_checkpoints=False
             )
 
             async def boundary():
@@ -89,6 +87,12 @@ async def test_public_response_ahead_then_distinct_sdk_response(
                 )
 
             async def checkpoint(value):
+                await seed_native_snapshot(
+                    store.step_store, run_id=value.agent_run_id,
+                    messages=list(value.context_messages or value.messages),
+                    step_index=value.step_index, state=value.state,
+                    conversation_id=conversation, agent_name="agent", metadata={"agent_run_seq": "1"},
+                )
                 await store.save_checkpoint(
                     value, execution_id="execution", producer_generation=generation
                 )
@@ -110,9 +114,9 @@ async def test_public_response_ahead_then_distinct_sdk_response(
         )
         original = recorder_for(old, 1)
         await original.register_agent_run(run)
-        user = ModelRequest(parts=[UserPromptPart("original request")])
+        user = ModelRequest(run_id=run_id, parts=[UserPromptPart("original request")])
         a = ModelResponse(
-            parts=[
+            run_id=run_id, parts=[
                 TextPart("response A before checkpoint"),
                 ToolCallPart("tool", {"version": "a"}, tool_call_id="unused-a"),
             ]
@@ -172,14 +176,11 @@ async def test_public_response_ahead_then_distinct_sdk_response(
             await state.checkpoint.tools.list_by_agent_run(run_id, tenant_id="tenant")
             == ()
         )
-        updated = await repository.compare_and_swap(
+        await repository.compare_and_swap(
             "execution",
             tenant_id="tenant",
             expected_revision=1,
-            next_record=replace(execution, revision=2),
-        )
-        await repository.state_store.mutate(
-            lambda tx: repository.admit_history_producer_in_transaction(tx, updated)
+            next_record=replace(execution, revision=2, producer_generation=2, producer_claim_id="replacement-claim"),
         )
         loaded = await restored.load_loaded_model_context(
             PersistenceDomain.CHECKPOINT, run_id
@@ -189,16 +190,10 @@ async def test_public_response_ahead_then_distinct_sdk_response(
         recorder = recorder_for(
             restored, 2, initial_messages=sdk_input, initial_context=loaded
         )
-        capability = AgentRunCapture(
-            recorder=recorder,
-            agent_id="agent",
-            agent_run_id=run_id,
-            metadata={"agent_run_seq": "1"},
-        )
         ctx = SimpleNamespace(
             messages=sdk_input, conversation_id=conversation, run_step=2
         )
-        await capability.before_run(ctx)
+        await recorder.register_agent_run(run)
         assert recorder.transcript_messages() == (user, a)
         high_water = await restored.model_interaction_count(agent_run_id=run_id)
         assert high_water == 1
@@ -209,11 +204,13 @@ async def test_public_response_ahead_then_distinct_sdk_response(
             agent_run_id=run_id,
             next_model_request_seq=high_water + 1,
         )
-        request_context = await capability.before_model_request(ctx, SimpleNamespace())
-        await CheckpointCapability().bind(CheckpointService(capability)).before_model_request(ctx, request_context)
+        recorder.append_transcript_message(ctx.messages[-1])
+        await seed_native_snapshot(
+            restored.step_store, run_id=run_id, messages=list(ctx.messages), step_index=ctx.run_step,
+        )
         received = []
         b = ModelResponse(
-            parts=[
+            run_id=run_id, parts=[
                 TextPart("different response B"),
                 ToolCallPart("tool", {"version": "b"}, tool_call_id="effect-b"),
             ]
@@ -245,7 +242,7 @@ async def test_public_response_ahead_then_distinct_sdk_response(
             )
         )
         recovered = await recovery.latest_checkpoint(agent_run_id=run_id)
-        assert recovered.messages == [user, a, user, response]
+        assert recovered.messages == [user, response]
         assert recovered.context_messages == [user, response]
         commands = StateCommands(
             repository,
@@ -262,7 +259,7 @@ async def test_public_response_ahead_then_distinct_sdk_response(
             execution_id="execution",
             agent_run_id=run_id,
             binding_digest=execution.binding_digest,
-            owner="resumed",
+            owner="replacement-claim",
             background_tasks=set(),
             payload_policy=PayloadPolicy(),
             terminal_commands=commands,
@@ -270,7 +267,7 @@ async def test_public_response_ahead_then_distinct_sdk_response(
         )
         call = response.parts[1]
         effects = []
-        for attempt in range(2):
+        for _ in range(2):
             bridge = RuntimeToolOperationBridge(
                 state.checkpoint.tools,
                 state.object_store(PersistenceDomain.CHECKPOINT),
@@ -279,7 +276,7 @@ async def test_public_response_ahead_then_distinct_sdk_response(
                 execution_id="execution",
                 agent_run_id=run_id,
                 binding_digest=execution.binding_digest,
-                owner=f"resumed-{attempt}",
+                owner="replacement-claim",
                 background_tasks=set(),
                 payload_policy=PayloadPolicy(),
                 terminal_commands=commands,
@@ -338,7 +335,7 @@ async def test_public_response_ahead_then_distinct_sdk_response(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("published_state", (None, "RUNNING", "INTERRUPTED"))
-async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associations(
+async def test_trace_publication_is_atomic_and_does_not_invent_snapshot_associations(
     tmp_path: Path,
     backend: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -353,20 +350,18 @@ async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associati
     )
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace=namespace, tenant_id="tenant")
+    state.run_store.bind_step_store(native_checkpoint().store)
     try:
         repository = state.execution.executions
-        execution = replace(_execution(), revision=1)
-        await repository.create_with_history_head(execution)
-        await repository.state_store.mutate(
-            lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
-        )
+        execution = replace(_execution(), revision=1, producer_generation=1, producer_claim_id="owner-claim")
+        await repository.create_execution(execution)
         root_store = state.run_store
         store = RuntimeAgentRunStore(
             StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant",
             conversation_archive=root_store.read_store(PersistenceDomain.CONVERSATION),
             execution_archive=root_store.read_store(PersistenceDomain.TRACE),
-            checkpoint_archive=root_store.read_store(PersistenceDomain.CHECKPOINT),
         )
+        store.bind_step_store(native_checkpoint().store)
         await store.initialize()
         public = store.read_store(PersistenceDomain.TRACE)
         recovery = store.read_store(PersistenceDomain.CHECKPOINT)
@@ -382,7 +377,7 @@ async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associati
             run_id, execution_id="execution", producer_generation=1
         )
         await store.register_agent_run(run, execution_id="execution")
-        user = ModelRequest(parts=[UserPromptPart("recoverable input")])
+        user = ModelRequest(run_id=run_id, parts=[UserPromptPart("recoverable input")])
         await store.save_checkpoint(
             AgentRunCheckpoint(
                 run_id,
@@ -394,101 +389,53 @@ async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associati
             execution_id="execution",
             producer_generation=1,
         )
+        await seed_native_snapshot(
+            store.step_store, run_id=run_id, messages=[user],
+            conversation_id=run.agent_conversation_id, agent_name=run.agent_id, metadata=run.metadata,
+        )
         await store.flush_execution_projection(
             run_id, execution_id="execution", producer_generation=1
         )
-        # Use the existing recovery-only route to model a checkpoint that succeeds
-        # before the delayed public batch, then discard this process-local staging.
-        recovery_only = RuntimeAgentRunStore(
-            StagingAgentRunStore(),
-            conversation_archive=store.read_store(PersistenceDomain.CONVERSATION),
-            execution_archive=None,
-            checkpoint_archive=recovery,
+        response = ModelResponse(run_id=run_id, parts=[TextPart("completed while public lagged")])
+        await seed_native_snapshot(
+            store.step_store, run_id=run_id, messages=[user, response],
+            conversation_id=run.agent_conversation_id, agent_name=run.agent_id, metadata=run.metadata,
         )
-        await recovery_only.initialize()
-        recorder = AgentRunRecorder(
-            recovery_only, execution_id=None, agent_run_id=run_id
-        )
-        await recorder.register_agent_run(run)
-        response = ModelResponse(parts=[TextPart("completed while public lagged")])
-        model = TestModel()
-        journal = ModelRequestJournal(
-            source_namespace=namespace,
-            tenant_id="tenant",
-            execution_id="execution",
-            agent_run_id=run_id,
-        )
-        fact = journal.begin(1)
-        recorder.begin_model_interaction(
-            fact, model, [user], None, ModelRequestParameters(), False
-        )
-        recorder.prepare_model_interaction(
-            fact, model, [user], None, ModelRequestParameters(), False
-        )
-        await recorder.record_model_event(
-            fact, phase="started", include_observation=False
-        )
-        fact = journal.finish(fact.model_request_seq, status="SUCCEEDED")
-        recorder.finish_model_interaction(
-            fact,
-            model=model,
-            response=response,
-            status="SUCCEEDED",
-            error_code=None,
-            duration_ns=1,
-            usage=None,
-        )
-        await recorder.record_model_event(
-            fact, phase="completed", response=response, include_observation=False
-        )
-        await recorder.save_checkpoint(
-            AgentRunCheckpoint(
-                run_id,
-                1,
-                [user, response],
-                context_messages=[user, response],
-                transcript_message_count_before=1,
-            )
-        )
+        snapshot = await store.step_store.latest_snapshot(run_id=run_id)
         assert [m async for m in public.iter_messages(agent_run_id=run_id)] == [user]
         assert await public.model_interaction_count(agent_run_id=run_id) == 0
-        assert await recovery.model_interaction_count(agent_run_id=run_id) == 1
+        assert await recovery.model_interaction_count(agent_run_id=run_id) == 0
         published_request = None
         if published_state is not None:
-            source = await recovery.list_model_interactions(agent_run_id=run_id)
+            payloads = {}
+
+            def intern(raw):
+                digest = sha256(raw).hexdigest()
+                payloads[digest] = raw
+                return digest, len(raw)
+
+            unfinished = StagedModelInteraction(
+                agent_run_id=run_id, step_index=1, model_request_seq=1, purpose="agent",
+                output_retry_index=None, model={"model_name": "test"},
+                request_context=build_inline_context_projection((user,), intern),
+                request_envelope_digest=intern(b"{}")[0], response_context=None,
+                status=published_state, error_code=None, duration_ns=None, usage=None,
+                started_at=run.started_at, finished_at=None,
+            )
             prepared = PreparedArchive()
-            relocated = await public.prepare_relocated_interactions(
-                source, await recovery.resolve_model_interactions(source), prepared=prepared,
+            relocated = await public.prepare_interactions(
+                run, (unfinished,), payloads.__getitem__, local_message_count=1,
+                local_messages=(user,), prepared=prepared,
             )
-            unfinished = replace(
-                relocated[0],
-                status=published_state,
-                response_context=None,
-                error_code=None,
-                duration_ns=None,
-                usage=None,
-                finished_at=None,
-            )
-            published_request = unfinished.request_context
+            published_request = relocated[0].request_context
             await public.sync_projection(
-                run,
-                events=(),
-                checkpoints=(),
-                interactions=(unfinished,),
-                execution_id="execution",
-                archive=prepared,
+                run, events=(), checkpoints=(), interactions=relocated,
+                execution_id="execution", archive=prepared,
             )
+        observed = AgentRunCheckpoint(run_id, 2, [user, response], transcript_message_count_before=1)
         root_store.bind_execution_producer(
             run_id, execution_id="execution", producer_generation=1
         )
-        if published_state == "INTERRUPTED":
-            with pytest.raises(AIError) as conflict:
-                await root_store.register_agent_run(run, execution_id="execution")
-            assert conflict.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-            assert (await public.list_model_interactions(agent_run_id=run_id))[
-                0
-            ].status == "INTERRUPTED"
-            return
         before_events = await public.list_events(agent_run_id=run_id)
         group = public.state_store.storage_group
         original_mutate = group.mutate
@@ -507,10 +454,8 @@ async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associati
 
         monkeypatch.setattr(group, "mutate", failed_mutate)
         with pytest.raises(AIError, match="controlled pre-commit failure"):
-            await root_store.materialize_from_recovery(
-                target=PersistenceDomain.TRACE,
-                agent_run_id=run_id,
-                execution_id="execution",
+            await public.sync_projection(
+                run, events=(), checkpoints=(observed,), execution_id="execution",
             )
         assert [m async for m in public.iter_messages(agent_run_id=run_id)] == [user]
         assert await public.model_interaction_count(agent_run_id=run_id) == int(
@@ -519,20 +464,23 @@ async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associati
         if published_state is not None:
             assert (await public.list_model_interactions(agent_run_id=run_id))[
                 0
-            ].status == "RUNNING"
+            ].status == published_state
         fail[0] = False
-        await root_store.register_agent_run(run, execution_id="execution")
+        await public.sync_projection(
+            run, events=(), checkpoints=(observed,), execution_id="execution",
+        )
+        assert await store.step_store.latest_snapshot(run_id=run_id) == snapshot
         assert [m async for m in public.iter_messages(agent_run_id=run_id)] == [
             user,
             response,
         ]
         interactions = await public.list_model_interactions(agent_run_id=run_id)
-        assert len(interactions) == 1 and interactions[0].model_request_seq == 1
-        assert interactions[0].status == "SUCCEEDED"
-        if published_request is not None:
+        assert len(interactions) == int(published_state is not None)
+        if published_state is not None:
+            assert interactions[0].model_request_seq == 1
+            assert interactions[0].status == published_state
             assert interactions[0].request_context == published_request
-        resolved = await public.resolve_model_interactions(interactions)
-        assert resolved[0][0] == (user,) and resolved[0][1] == (response,)
+            assert interactions[0].response_context is None
         assert await public.list_events(agent_run_id=run_id) == before_events
         associations = await public.read_history_associations(
             agent_run_id=run_id,
@@ -566,7 +514,7 @@ async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associati
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite",))
-async def test_restored_completed_tool_group_consumes_published_pending_results(
+async def test_observed_completed_tool_group_consumes_published_pending_results(
     tmp_path: Path,
     backend: str,
 ) -> None:
@@ -574,39 +522,39 @@ async def test_restored_completed_tool_group_consumes_published_pending_results(
 
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="restored-tool-group", tenant_id="tenant")
+    state.run_store.bind_step_store(native_checkpoint().store)
     try:
         repository = state.execution.executions
-        execution = replace(_execution(), revision=1)
-        await repository.create_with_history_head(execution)
-        await repository.state_store.mutate(
-            lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
-        )
+        execution = replace(_execution(), revision=1, producer_generation=1, producer_claim_id="owner-claim")
+        await repository.create_execution(execution)
         restored = state.run_store
         public = restored.read_store(PersistenceDomain.TRACE)
         recovery = restored.read_store(PersistenceDomain.CHECKPOINT)
         run = AgentRunRecord("run")
-        user = ModelRequest(parts=[UserPromptPart("run tools")])
+        user = ModelRequest(run_id="run", parts=[UserPromptPart("run tools")])
         response = ModelResponse(
-            parts=[
+            run_id="run", parts=[
                 ToolCallPart("tool", {}, tool_call_id="quick"),
                 ToolCallPart("tool", {}, tool_call_id="slow"),
             ]
         )
         quick = ToolReturnPart("tool", "quick result", tool_call_id="quick")
         slow = ToolReturnPart("tool", "slow result", tool_call_id="slow")
-        completed = ModelRequest(parts=[quick, slow])
+        completed = ModelRequest(run_id="run", parts=[quick, slow])
         before = AgentRunCheckpoint(
             "run", 1, [user, response], transcript_message_count_before=0
         )
         await public.sync_projection(
             run, events=(), checkpoints=(before,), execution_id="execution"
         )
-        await recovery.materialize_checkpoint(run, before)
+        await seed_native_snapshot(
+            restored.step_store, run_id=run.agent_run_id, messages=before.messages,
+        )
         pending = await public.transcript_repository.prepare_observation(
             "run",
             (),
             first_message_index=2,
-            pending=ModelRequest(parts=[quick]),
+            pending=ModelRequest(run_id="run", parts=[quick]),
             pending_keys=("tool_result:quick",),
         )
         await public.sync_prepared_projection(
@@ -617,17 +565,19 @@ async def test_restored_completed_tool_group_consumes_published_pending_results(
             execution_id="execution",
             producer_generation=1,
         )
-        await recovery.materialize_checkpoint(
-            run,
-            AgentRunCheckpoint(
-                "run",
-                2,
-                [user, response, completed],
-                transcript_message_count_before=2,
-            ),
+        await seed_native_snapshot(
+            restored.step_store, run_id=run.agent_run_id,
+            messages=[user, response, completed], step_index=2,
+        )
+        observed = await public.transcript_repository.prepare_observation(
+            "run", (completed,), first_message_index=2, pending=None, pending_keys=(),
+        )
+        await public.sync_prepared_projection(
+            run, events=(), checkpoints=(), observation=observed,
+            execution_id="execution", producer_generation=1,
         )
         restored.bind_execution_producer(
-            "run", execution_id="execution", producer_generation=1
+            "run", execution_id="execution", producer_generation=1, restart_checkpoints=False,
         )
         await restored.register_agent_run(run, execution_id="execution")
         assert restored.staged_transcript("run") == StagedTranscript(
@@ -652,51 +602,47 @@ async def test_restored_completed_tool_group_consumes_published_pending_results(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite",))
-async def test_required_checkpoint_rejects_replaced_producer_before_recovery_write(
+async def test_trace_checkpoint_rejects_replaced_producer_before_public_write(
     tmp_path: Path,
     backend: str,
 ) -> None:
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="stale-recovery-checkpoint", tenant_id="tenant")
+    state.run_store.bind_step_store(native_checkpoint().store)
     try:
         repository = state.execution.executions
-        execution = replace(_execution(), revision=1)
-        await repository.create_with_history_head(execution)
-        await repository.state_store.mutate(
-            lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
-        )
+        execution = replace(_execution(), revision=1, producer_generation=1, producer_claim_id="owner-claim")
+        await repository.create_execution(execution)
         root = state.run_store
         old = RuntimeAgentRunStore(
             StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant",
             conversation_archive=root.read_store(PersistenceDomain.CONVERSATION),
             execution_archive=root.read_store(PersistenceDomain.TRACE),
-            checkpoint_archive=root.read_store(PersistenceDomain.CHECKPOINT),
         )
+        old.bind_step_store(native_checkpoint().store)
         await old.initialize()
         old.bind_execution_producer(
             "run", execution_id="execution", producer_generation=1
         )
         await old.register_agent_run(AgentRunRecord("run"), execution_id="execution")
-        updated = await repository.compare_and_swap(
+        await repository.compare_and_swap(
             "execution",
             tenant_id="tenant",
             expected_revision=1,
-            next_record=replace(execution, revision=2),
+            next_record=replace(execution, revision=2, producer_generation=2, producer_claim_id="replacement-claim"),
         )
-        await repository.state_store.mutate(
-            lambda tx: repository.admit_history_producer_in_transaction(tx, updated)
+        await old.save_checkpoint(
+            AgentRunCheckpoint(
+                "run",
+                1,
+                [ModelRequest(parts=[UserPromptPart("stale")])],
+                transcript_message_count_before=0,
+            ),
+            execution_id="execution",
+            producer_generation=1,
         )
         with pytest.raises(AIError) as stale:
-            await old.save_checkpoint(
-                AgentRunCheckpoint(
-                    "run",
-                    1,
-                    [ModelRequest(parts=[UserPromptPart("stale")])],
-                    transcript_message_count_before=0,
-                ),
-                execution_id="execution",
-                producer_generation=1,
-            )
+            await old.flush_execution_projection("run", execution_id="execution", producer_generation=1)
         assert stale.value.code is ErrorCode.STORAGE_CONFLICT
         assert (
             await root.read_store(PersistenceDomain.CHECKPOINT).latest_checkpoint(
@@ -712,3 +658,57 @@ async def test_required_checkpoint_rejects_replaced_producer_before_recovery_wri
         )
     finally:
         await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("publication", ("missing", "pending", "complete"))
+async def test_recovered_request_is_prior_attempt_input_not_new_raw_occurrence(publication: str) -> None:
+    from linktools.ai.persistence._transcript_staging import StagedTranscript
+
+    store = StagingAgentRunStore()
+    await store.initialize()
+    request = ModelRequest(parts=[ToolReturnPart("tool", "same value", tool_call_id="old-call")], run_id="old")
+    await store.register_agent_run(AgentRunRecord("old"))
+    if publication == "pending":
+        store.stage_transcript("old", StagedTranscript((), request, ("tool_result:old-call",)))
+    elif publication == "complete":
+        store.stage_transcript("old", StagedTranscript((request,)))
+    before = store.staged_transcript("old")
+    recorder = AgentRunRecorder(store, execution_id="execution", agent_run_id="new", initial_messages=(request,))
+    await recorder.register_agent_run(AgentRunRecord("new"))
+    assert recorder.request_already_captured((request,))
+    response = ModelResponse(parts=[TextPart("resumed response")], run_id="new")
+    recorder.append_transcript_message(response)
+    assert recorder.transcript_messages() == (response,)
+    assert store.staged_transcript("old") == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("origin", (None, "new", "old"))
+async def test_new_tool_return_occurrences_are_not_suppressed_by_equal_contents(origin: str | None) -> None:
+    store = StagingAgentRunStore()
+    await store.initialize()
+    original = ModelRequest(parts=[ToolReturnPart("tool", "same value", tool_call_id="old-call")], run_id=origin)
+    recorder = AgentRunRecorder(store, execution_id="execution", agent_run_id="new", initial_messages=(original,))
+    await recorder.register_agent_run(AgentRunRecord("new"))
+    request = (replace(original, parts=[ToolReturnPart("tool", "same value", tool_call_id="new-call")], run_id="new")
+               if origin == "old" else original)
+    assert not recorder.request_already_captured((request,))
+    recorder.append_transcript_message(request)
+    assert recorder.transcript_messages() == (request,)
+
+
+@pytest.mark.asyncio
+async def test_initial_request_occurrence_is_frozen_and_consumed_only_once() -> None:
+    store = StagingAgentRunStore()
+    await store.initialize()
+    original = ModelRequest(parts=[ToolReturnPart("tool", "value", tool_call_id="call")], run_id="old")
+    initial = replace(original, parts=list(original.parts))
+    recorder = AgentRunRecorder(store, execution_id="execution", agent_run_id="new", initial_messages=(original,))
+    original.parts.append(UserPromptPart("later SDK mutation"))
+    await recorder.register_agent_run(AgentRunRecord("new"))
+    assert recorder.request_already_captured((initial,))
+    assert not recorder.request_already_captured((initial,))
+    later = replace(initial, run_id="new")
+    recorder.append_transcript_message(later)
+    assert recorder.transcript_messages() == (later,)

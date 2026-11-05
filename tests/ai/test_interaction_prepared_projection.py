@@ -17,12 +17,14 @@ from linktools.ai.persistence._model_interaction import (
     StagedModelInteraction,
 )
 from linktools.ai.persistence._archive import PreparedArchive
-from linktools.ai.persistence._checkpoint_persistence import CheckpointPersistence
 from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
-from linktools.ai.persistence._step_archive import StagingAgentRunStore
+from linktools.ai.persistence._transcript_staging import StagedTranscript
 from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
 
 from .test_incremental_projection_boundaries import _storage
+from .test_observation_coalescing import _setup
+
+from .test_checkpoint_metadata_snapshot_io import _trace_archive
 
 pytestmark = pytest.mark.asyncio
 
@@ -33,7 +35,7 @@ async def test_prepared_projection_reuse_keeps_exact_request_and_response(
 ) -> None:
     state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="prepared-projection", tenant_id="tenant")
-    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+    archive = await _trace_archive(state)
     run = AgentRunRecord("run")
     now = run.started_at
     source = (
@@ -63,9 +65,9 @@ async def test_prepared_projection_reuse_keeps_exact_request_and_response(
         "SUCCEEDED", None, 1, UsageMetrics(model_requests=1), now, now,
     )
     try:
-        _, batch = await archive.prepare_run_checkpoint(run, AgentRunCheckpoint(
+        batch = await archive.prepare_checkpoints(run, (AgentRunCheckpoint(
             "run", 1, list(source), timestamp=now, transcript_message_count_before=0,
-        ))
+        ),))
         expected, = await archive.prepare_interactions(
             run, (staged,), lambda _: envelope, local_message_count=len(messages),
             local_messages=messages, prepared=PreparedArchive(),
@@ -77,7 +79,7 @@ async def test_prepared_projection_reuse_keeps_exact_request_and_response(
         )
         assert actual.request_context.digest == expected.request_context.digest
         assert actual.response_context.digest == expected.response_context.digest
-        await archive.sync_projection(run, events=(), checkpoints=(), interactions=(actual,), archive=bundle)
+        await archive.sync_projection(run, events=(), checkpoints=(), interactions=(actual,), archive=bundle, execution_id="execution")
         request, response, request_bytes, _, attempts = await archive.resolve_model_interaction(actual)
         assert attempts is None
         assert request == messages
@@ -87,34 +89,36 @@ async def test_prepared_projection_reuse_keeps_exact_request_and_response(
         await state.close()
 
 
-async def test_checkpoint_preparation_preserves_custom_interaction_signature(tmp_path: Path) -> None:
-    state = Persistence(_storage("memory", tmp_path))
-    await state.initialize(namespace="custom-interaction", tenant_id="tenant")
-    original = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+async def test_trace_publication_calls_current_interaction_override(tmp_path: Path) -> None:
+    state = await _setup(tmp_path, "memory")
+    original = await _trace_archive(state)
     calls = []
 
     class CustomArchive(ModelInteractionStateStepArchive):
         async def prepare_interactions(
             self, run, interactions, payload, *, local_message_base=0,
-            local_message_count=0, local_messages=(), prepared, replay=False,
+            local_message_count=0, local_messages=(), prepared, replay=False, baseline=None,
         ):
             calls.append(tuple(local_messages))
             return await super().prepare_interactions(
                 run, interactions, payload, local_message_base=local_message_base,
                 local_message_count=local_message_count, local_messages=local_messages,
-                prepared=prepared, replay=replay,
+                prepared=prepared, replay=replay, baseline=baseline,
             )
 
     custom = CustomArchive(
-        original.state_store, object_store=None, namespace="custom-interaction",
-        tenant_id="tenant", runtime_domain=PersistenceDomain.CHECKPOINT,
+        original.state_store, object_store=None, namespace="observation-batches",
+        tenant_id="tenant", runtime_domain=PersistenceDomain.TRACE,
+        execution_repository=state.execution.executions,
     )
     try:
-        run = AgentRunRecord("run")
+        state.run_store._archives[PersistenceDomain.TRACE] = custom
+        run = await state.run_store.get_agent_run(agent_run_id="run")
         messages = [ModelRequest(parts=[UserPromptPart("request", timestamp=run.started_at)])]
         checkpoint = AgentRunCheckpoint("run", 1, messages, timestamp=run.started_at, transcript_message_count_before=0)
-        persistence = CheckpointPersistence(StagingAgentRunStore(), custom, None)
-        await persistence.prepare_checkpoint(custom, run, checkpoint, captured_interactions=())
+        state.run_store.stage_transcript("run", StagedTranscript(tuple(messages)))
+        await state.run_store.save_checkpoint(checkpoint)
+        await state.run_store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
         assert calls == [tuple(messages)]
     finally:
         await state.close()

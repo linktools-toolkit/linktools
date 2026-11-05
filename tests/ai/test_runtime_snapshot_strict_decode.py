@@ -504,7 +504,6 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
         status=ToolOperationStatus.PENDING,
         owner=None,
         fence=0,
-        lease_expires_at=None,
         error_code=None,
         created_at=now,
         updated_at=now,

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Checkpoint controls and archives share one domain and transaction owner."""
+"""Control records share transactions independently of the native recovery owner."""
 
 import hashlib
 from dataclasses import replace
@@ -11,6 +11,8 @@ import pytest
 from linktools.ai.core import PersistenceDomain
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceStorage
+from linktools.ai.persistence._official_step_reader import OfficialStepReader
+from ._runtime_test_helpers import native_checkpoint
 from linktools.ai.persistence.codec import decode_domain, encode_domain
 from linktools.ai.persistence.contracts import RuntimePayloadRef
 from linktools.ai.storage import InMemoryCacheBackend, ObjectRef, ObjectStore, StorageRetentionMode, StorageRoute, read_object
@@ -26,15 +28,19 @@ async def _put(store: ObjectStore, content: bytes) -> ObjectRef:
     return ObjectRef(store.store_id, value.key, value.digest, value.size)
 
 @pytest.mark.asyncio
-async def test_checkpoint_controls_and_archives_share_the_same_state_store() -> None:
+async def test_checkpoint_controls_share_one_state_store_separate_from_native_snapshots() -> None:
     async with Persistence.open("checkpoint-sources", storage=PersistenceStorage.in_memory()) as state:
         assert {item["domain"] for item in state.status()} == set(state.plan.resolved_routes)
         assert len(state.status()) == 8
-        archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
-        assert state.checkpoint.checkpoints.state_store is archive.state_store
-        assert state.checkpoint.approvals.state_store is archive.state_store
-        assert state.checkpoint.external_calls.state_store is archive.state_store
-        assert state.checkpoint.tools.state_store is archive.state_store
+        native = native_checkpoint().store
+        state.run_store.bind_step_store(native)
+        reader = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+        assert isinstance(reader, OfficialStepReader) and reader.step_store is native
+        controls = state.checkpoint.approvals.state_store
+        assert controls.storage_group is state.execution.executions.state_store.storage_group
+        assert state.checkpoint.approvals.state_store is controls
+        assert state.checkpoint.external_calls.state_store is controls
+        assert state.checkpoint.tools.state_store is controls
         reference = await _put(state.object_store(PersistenceDomain.CHECKPOINT), b"control")
         assert await state.read_object(PersistenceDomain.CHECKPOINT, reference) == b"control"
 
@@ -65,9 +71,10 @@ async def test_checkpoint_cache_route_keeps_the_execution_transaction_group(tmp_
     checkpoint = execution.with_cache(InMemoryCacheBackend(max_bytes=65536))
     storage = PersistenceStorage(replace(PersistencePlan.from_default(execution), checkpoint=checkpoint))
     async with Persistence.open("checkpoint-routes", storage=storage) as state:
-        control_store = state.checkpoint.checkpoints.state_store
-        archive_store = state.run_store.read_store(PersistenceDomain.CHECKPOINT).state_store
-        assert control_store is archive_store
+        control_store = state.execution.executions.state_store
+        native = native_checkpoint().store
+        state.run_store.bind_step_store(native)
+        assert state.run_store.read_store(PersistenceDomain.CHECKPOINT).step_store is native
         assert control_store.storage_group is state.execution.executions.state_store.storage_group
         assert state.plan.route(PersistenceDomain.CHECKPOINT) == checkpoint
         assert state.plan.route(PersistenceDomain.CHECKPOINT).cache is checkpoint.cache

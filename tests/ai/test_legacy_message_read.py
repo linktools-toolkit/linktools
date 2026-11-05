@@ -24,7 +24,7 @@ _STAMP = datetime(2026, 1, 1, tzinfo=timezone.utc)
 _FIXTURE = Path(__file__).parent / 'fixtures' / 'persistence' / 'legacy_model_messages_v1.json'
 
 
-def _messages():
+def _messages() -> tuple[sdk.ModelMessage, ...]:
     reference = ReferencedContent(
         AssetVersionRef(AssetKey('document', 'retained'), 'layer', StorageEntryRevision(1),
                         hashlib.sha256(b'retained').hexdigest(), 8),
@@ -41,8 +41,7 @@ def _messages():
             sdk.UserPromptPart(['plain', sdk.BinaryContent(b'bytes', media_type='application/pdf'),
                 sdk.ImageUrl('https://example.invalid/image.png'), reference,
                 RetiredReferencedContent(reference, 'retained summary')], timestamp=_STAMP),
-            sdk.ToolReturnPart('read', [reference, {'ordinary': 'value'}], tool_call_id='call', timestamp=_STAMP),
-            sdk.RetryPromptPart('retry', tool_call_id='call', timestamp=_STAMP)], timestamp=_STAMP),
+            sdk.ToolReturnPart('read', [reference, {'ordinary': 'value'}], tool_call_id='call', timestamp=_STAMP)], timestamp=_STAMP),
         sdk.ModelResponse(parts=[sdk.TextPart('answer'), sdk.ToolCallPart('read', {'a': 1}, tool_call_id='call'),
             sdk.FilePart(sdk.BinaryContent(b'file', media_type='application/pdf'))], timestamp=_STAMP,
             usage=RequestUsage(input_tokens=3, provider_extra=7),
@@ -52,10 +51,18 @@ def _messages():
     )
 
 
-def test_real_legacy_writer_bytes_restore_all_retained_facts_and_keep_raw_archive_identity():
+def _filesystem_payload() -> bytes:
     raw = _FIXTURE.read_bytes()
     provenance = json.loads(_FIXTURE.with_suffix('.provenance.json').read_text())
     assert hashlib.sha256(raw).hexdigest() == provenance['sha256']
+    rows = json.loads(raw)
+    # The captured SDK retry part is outside the retained filesystem contract.
+    rows[1]['parts'] = rows[1]['parts'][:-1]
+    return canonical_json_bytes(rows)
+
+
+def test_recorded_filesystem_parts_restore_facts_and_keep_raw_archive_identity() -> None:
+    raw = _filesystem_payload()
     expected = _messages()
     restored = decode_model_messages(raw)
     assert encode_model_messages(restored) == encode_model_messages(expected)
@@ -66,11 +73,11 @@ def test_real_legacy_writer_bytes_restore_all_retained_facts_and_keep_raw_archiv
         assert encode_model_messages(decoded) == encode_model_messages(decode_model_messages(leaf))
     current = json.loads(encode_model_messages(restored))
     assert all('agent_conversation_id' not in row and 'conversation_id' in row for row in current)
-    assert _FIXTURE.read_bytes() == raw
+    assert _filesystem_payload() == raw
 
 
-def test_legacy_ordinary_content_keeps_its_additive_field_compatibility():
-    rows = json.loads(_FIXTURE.read_bytes())
+def test_legacy_ordinary_content_keeps_its_additive_field_compatibility() -> None:
+    rows = json.loads(_filesystem_payload())
     for item in rows[1]['parts'][2]['content']['items'][:3]:
         item['future_display_hint'] = 'optional'
     raw = canonical_json_bytes(rows)
@@ -84,8 +91,8 @@ def test_legacy_ordinary_content_keeps_its_additive_field_compatibility():
 
 @pytest.mark.parametrize('damage', ['dual_identity', 'prompt_extra', 'prompt_bad', 'reference_extra', 'usage_collision',
                                    'attempt_negative', 'attempt_overflow', 'attempt_dual', 'attempt_pairs', 'attempts_mapping', 'unknown_field'])
-def test_legacy_read_rejects_ambiguous_or_corrupt_values(damage):
-    rows = json.loads(_FIXTURE.read_bytes())
+def test_legacy_read_rejects_ambiguous_or_corrupt_values(damage: str) -> None:
+    rows = json.loads(_filesystem_payload())
     if damage == 'dual_identity': rows[0]['conversation_id'] = 'other'
     elif damage == 'prompt_extra': rows[0]['parts'][1]['content']['extra'] = 1
     elif damage == 'prompt_bad': rows[0]['parts'][1]['content']['value'] = 1

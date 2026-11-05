@@ -1,5 +1,10 @@
 # Runtime-wide capabilities
 
+The [complete capability composition program](capability-ownership.md) uses
+offline models to invoke real tools, inspect captured Skill resources, reopen
+admitted Memory, and compose native hooks, Planning, Session and Trace. It also
+maps declaration, execution, persistence and resource ownership.
+
 `RuntimeFeatures.capability(capability)` registers a native
 Pydantic AI `AbstractCapability[AgentContext[AppT]]` as host policy. The same
 `features=group` argument to `Runtime.open` supplies both Agent-selected
@@ -66,23 +71,26 @@ as completed. A recovered ordinary tool keeps its admitted effect policy even if
 the host's default has since changed; unrelated same-revision configuration
 continues to use the current declaration.
 
-Keep `CommitPolicy.sync()` with `CheckpointCapability` when a replacement worker
+Keep `CommitPolicy.sync()` with native `StepPersistence` when a replacement worker
 must recover the existing execution. `CommitPolicy.terminal()` without ongoing
 checkpoints is a different durability choice, not an equivalent recovery mode.
 Idempotent tools alone do not make an uncommitted execution recoverable.
 
 ## Capability and service ownership
 
-All public capability declarations are imported from `linktools.ai.capability`,
-including `ExecutionCapability`, `SessionCapability`,
-`CheckpointCapability`, and `TraceCapability`.
+Runtime capability declarations are imported from `linktools.ai.capability`,
+including `ExecutionCapability`, `SessionCapability`, and `TraceCapability`.
+Recovery uses `StepPersistence` directly from `pydantic_ai_harness.step_persistence`.
 `linktools.ai.runtime` owns Runtime entry points, services, and the
 `RuntimeFeatures` / `RuntimeFeaturesCapture` composition contracts; it does not
 provide duplicate capability exports.
 
 A captured declaration can be reused across Runtime instances. Runtime binds
-isolated `ConversationService`, `CheckpointService` and `TraceService` instances
-for each run without changing the declaration or its custom native hooks.
+isolated `ConversationService` and `TraceService` instances for each run.
+The native message models and continuation algorithm are reused, with a fresh
+native run ID for each execution attempt. The built-in declaration is bound to
+the [atomic node-boundary adapter](atomic-native-step-boundaries.md); custom
+`StepPersistence` subclasses retain their own hooks and separate writes.
 `MetricsService` owns one producer recording lifetime over a borrowed
 `MetricRecorderProvider` and enriches observations without creating a second
 queue. Agent and each independent TaskEngine own separate recorders; Evaluation
@@ -120,7 +128,8 @@ before capture or opening the Runtime.
 
 ```python
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.capability import ExecutionCapability, CheckpointCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability, TraceCapability
+from pydantic_ai_harness.step_persistence import StepPersistence, SqliteStepStore
 
 chat = RuntimeFeatures("chat")
 chat.agent("default", model="default")
@@ -129,7 +138,9 @@ chat.capability(ExecutionCapability(retain_history=True))
 
 persistent_work = RuntimeFeatures("persistent-work")
 persistent_work.agent("default", model="default")
-persistent_work.capability(CheckpointCapability())
+persistent_work.capability(StepPersistence(
+    store=SqliteStepStore(database="steps.db"), capture_frontier=True,
+))
 persistent_work.capability(TraceCapability())
 # Runtime.open(..., features=persistent_work) supports recovery and audit.
 ```
@@ -145,7 +156,11 @@ history unavailable, and later resume or Session fork fails with
 History retention enabled later cannot reconstruct that missing history. Execution forks
 require an admitted conversation guarantee; checkpoint or trace data alone does
 not grant it.
-`CheckpointCapability()` retains before-request and after-node recovery context.
+`StepPersistence` retains the official committed snapshots. `capture_frontier=True`
+also saves accepted input and model tool-call frontiers before tool dispatch.
+The supplied store is caller-owned. For a provisioned SQL database, use
+`linktools.ai.persistence.SqlStepStore(engine, namespace="app", tenant_id="default")`;
+it implements the official protocol using the project SQL schema.
 `TraceCapability()` retains execution transcript, step facts and model interactions;
 trace alone cannot resume an interrupted run. Register the combination required
 by the application. Each capability requires Runtime scope; duplicate registrations
@@ -202,13 +217,15 @@ For plan-based construction, caches live on the routes rather than a second
 `PersistenceStorage` cache argument. Convenience factories such as
 `PersistenceStorage.sqlite(path, cache=cache)` apply the cache to their generated routes.
 
-`PersistencePlan(checkpoint=route, trace=route, ...)` configures archive routes;
-`CheckpointCapability()` and `TraceCapability(commit=...)` only configure behavior.
-Omitted archive routes inherit the execution backend and cache
-with separate logical partitions. An explicit route supplies the complete
-resource: `cache=None` disables that route's cache instead of inheriting it.
-Trace and Checkpoint routes must share the execution StateStorageGroup;
-incompatible routes fail during opening. A separate root Conversation route
+`PersistencePlan(checkpoint=route, trace=route, ...)` configures Runtime control
+and Trace storage. `StepPersistence(store=...)` owns its explicit native store;
+its snapshots are not also written to a Runtime checkpoint archive. The Checkpoint
+control route retains approvals, external results and the single tool-effect/result
+ledger, and shares the execution transaction group. The native snapshot store may
+be separate: its successful write is confirmed before terminal state is published.
+Omitted Runtime routes inherit the execution backend and cache. An explicit route
+supplies the complete resource; `cache=None` disables its hot-read cache.
+A separate root Conversation route
 uses durable admission and recoverable prepared terminal handoffs rather than
 single-transaction deferred turns. Shared SQL engines, caches, and object stores
 remain borrowed resources.
@@ -279,7 +296,7 @@ silently convert recovery into cancellation. `auto_recover` still controls start
 reconciliation; it does not grant a missing execution guarantee.
 
 `Runtime.handoff()` keeps its separate eligibility: synchronous Execution policy,
-CheckpointCapability, and durable Execution, Recovery and Checkpoint routes.
+native StepPersistence, and durable Execution, Recovery and Checkpoint routes.
 An Execution terminal policy, with or without a buffer, does not enable handoff;
 the call reports `CAPABILITY_REQUIRED_MISSING` before closing. For recoverable
 handoff with delayed Trace publication, keep Execution synchronous and configure
@@ -416,7 +433,7 @@ lost lease never permits two canonical terminal results.
   identity. Reopening uses the newly supplied host policies while restoring
   historical Agent behavior. Put model-visible, versioned behavior in Agent scope.
 - For per-run history retention, Checkpoint and Trace, use `ExecutionCapability`,
-  `CheckpointCapability` and `TraceCapability` types in native `requires`, `wraps` and `wrapped_by` ordering declarations.
+  native `StepPersistence` and `TraceCapability` types in native `requires`, `wraps` and `wrapped_by` ordering declarations.
   References to an original instance do not survive per-run copies, as described
   by the native SDK ordering contract.
 - Native hook ordering, `for_agent` and `for_run` remain in effect. Instances are
@@ -545,3 +562,35 @@ Runtime-scoped native capabilities can opt into the structural
 [`CapabilityPersistence` protocol](capability-persistence.md) to submit run-local
 writes using `storage` and `commit`. Compatible participants share actual
 transactions; the guide specifies failure, forced-boundary and recovery limits.
+
+## Native recovery boundary
+
+Recovery resumes the latest snapshot actually committed by upstream StepPersistence.
+If a model has returned but an inner hook fails before that response is saved, Trace
+may contain the response while recovery still starts from the preceding request.
+That request can be sent to the model again, with additional cost and potentially
+a different response. Runtime does not manufacture a newer snapshot from Trace.
+
+A logical execution retains its execution ID across recovery; each `Agent.run`
+attempt receives a new native run ID. Tool authorization, permitted result
+projections and UNKNOWN effects remain in one Runtime tool-operation record.
+Result retention still follows `ToolResults` and the admitted privacy policy;
+knowing an effect completed does not authorize saving its original payload.
+The native tool-effect
+view projects that same record rather than maintaining a second outcome ledger.
+A completed tool is not blindly repeated when an attempt is recovered.
+
+`capture_frontier=False` is upstream's coarser default, not an equivalent substitute
+for pre-tool frontier retention. The Runtime-bound built-in capability prepares
+the events and snapshots belonging to one node boundary and confirms their short
+atomic commit before emitting `SnapshotSaved`. Completed model responses retain
+their own save point. Tool admission and known outcomes remain explicit effect
+boundaries. A separate caller-owned store or custom capability retains its
+documented split-write behavior; it is not silently treated as a shared SQL
+transaction. See [native turn boundaries](atomic-native-step-boundaries.md).
+
+## Native checkpoint message extensions
+
+Runtime retains the original StepPersistence declaration and native snapshot records. For host-only referenced inputs, its borrowed StepStore view carries existing Asset version and loader descriptors in native TextContent metadata, then restores them before Runtime continuation. Referenced bytes are still fetched through the admitted principal's authorized loader for each provider request and are not copied into snapshots.
+
+The `linktools-content` metadata entry with `type: runtime-reference` is reserved for that descriptor envelope. Ordinary metadata and nested tool-result JSON are not traversed or treated as references. Native callers outside Runtime need the corresponding host input adapter; the unmodified SDK serializer alone only retains the TextContent summary of a host subclass.

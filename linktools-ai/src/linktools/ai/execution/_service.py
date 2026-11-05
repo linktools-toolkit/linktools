@@ -156,6 +156,7 @@ class TaskExecutionService:
         operation_ids: Callable[[], str] | None = None,
         release_terminal: ExecutionReleaseCallback | None = None,
         payload_policy: PayloadPolicy | None = None,
+        retained_turn_confirmed: Callable[[ExecutionRecord], bool] | None = None,
     ) -> None:
         self._repositories = state
         self._policy = authorization
@@ -164,6 +165,7 @@ class TaskExecutionService:
         self._new_operation_id = operation_ids or (lambda: uuid.uuid4().hex)
         self._release_terminal = release_terminal or _no_release_terminal
         self._output_policy = payload_policy
+        self._retained_turn_confirmed = retained_turn_confirmed
         self._handoff = HandoffGate[tuple[str, str], bool]()
         self._port = port
         self._manager = ExecutionManager(port, authorization)
@@ -1260,6 +1262,8 @@ class TaskExecutionService:
         return result
 
     async def _require_retained_turn(self, execution: ExecutionRecord) -> None:
+        if self._retained_turn_confirmed is not None and self._retained_turn_confirmed(execution):
+            return
         if (not execution.retention_closed and execution.conversation
                 and execution.session_id is not None and self._session_repository is not None):
             await self._session_repository.state_store.read(

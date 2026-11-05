@@ -9,6 +9,7 @@ import base64
 import hashlib
 import json
 import multiprocessing
+import os
 from collections.abc import Awaitable, Callable
 from multiprocessing.connection import Connection
 from pathlib import Path
@@ -33,9 +34,10 @@ from linktools.ai.asset import AssetKey, AssetVersionRef
 from linktools.ai.spec import CapabilityRef
 from linktools.ai.storage import StorageEntryRevision
 from linktools.ai.capability import (
-    AgentContext, CheckpointCapability, ExecutionCapability,
-    ReferencedInputsCapability, TraceCapability,
-)
+    AgentContext, ExecutionCapability,
+    ReferencedInputsCapability, TraceCapability)
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.core import (
     AuthorizationAction, ExecutionStatus, Principal, ResourceRef,
     TenantAuthorizationPolicy, service_principal,
@@ -174,7 +176,7 @@ def _recovery_features(
     if text_loader is not None:
         group.capability(ReferencedInputsCapability(text_loader), id=_TEXT_SOURCE.id,
                          revision=_TEXT_SOURCE.revision, scope="agent")
-    group.capability(CheckpointCapability(), scope="runtime")
+    group.capability(native_checkpoint(), scope="runtime")
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     group.agent("default", allow_tools=(), allow_skills=(), allow_subagents=())
@@ -255,7 +257,7 @@ async def test_pending_reference_reopens_from_checkpoint_with_original_principal
         return _TEXT_BODY
 
     async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.from_root(path, exclusive_writer=True)) as persistence_260, Runtime.attach(persistence=persistence_260, authorization=_RecoveryAuthorization(), features=_recovery_features(authorized_load, authorized_text if multiple_sources else None), auto_recover=False) as runtime:
-        checkpoint = await runtime._state.checkpoint.checkpoints.get(
+        checkpoint = await runtime._state.execution.executions.get(
             execution_id, tenant_id=_ADMITTED.tenant_id,
         )
         assert checkpoint is not None
@@ -276,5 +278,9 @@ async def test_pending_reference_reopens_from_checkpoint_with_original_principal
         assert _content().ref.digest.encode() in history_bytes
         assert _BODY not in history_bytes and base64.b64encode(_BODY) not in history_bytes
     assert loaded == ([(_ADMITTED, _text_content())] if multiple_sources else []) + [(_ADMITTED, _content())]
-    stored = b"\n".join(file.read_bytes() for file in path.rglob("*") if file.is_file())
+    native_database = Path(os.environ["LINKTOOLS_TEST_STEP_DATABASE"])
+    assert native_database.is_file()
+    durable_files = [file for file in path.rglob("*") if file.is_file()]
+    durable_files.extend(file for file in native_database.parent.glob(native_database.name + "*") if file.is_file())
+    stored = b"\n".join(file.read_bytes() for file in durable_files)
     assert _BODY not in stored and base64.b64encode(_BODY) not in stored

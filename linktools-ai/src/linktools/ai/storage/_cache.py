@@ -30,7 +30,8 @@ from uuid import uuid4
 from ..errors import AIError, ErrorCode
 from ._files import sync_directory
 from ._lock import FilesystemMutationLock, Lease
-from ._turn import TurnCoordination
+from ._turn import TurnCoordination, TurnScope
+from ._turn_scope import RenewingTurnScope
 from ..core import WriteBufferEntry
 
 ContentCacheKey: TypeAlias = str
@@ -282,6 +283,15 @@ class InMemoryCacheBackend:
                 self._pending.pop(scope, None)
             self._changed.notify_all()
 
+
+    def enter(
+        self, scope: str, *, session_key: str, request_key: str,
+        request_digest: str, execution_id: str, owner_id: str,
+    ) -> TurnScope:
+        return RenewingTurnScope(
+            self, scope, session_key=session_key, request_key=request_key,
+            request_digest=request_digest, execution_id=execution_id, owner_id=owner_id,
+        )
 
     async def claim_turn(
         self,

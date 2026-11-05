@@ -43,7 +43,7 @@ async def _seed(state, status=ExecutionStatus.SUCCEEDED, *, admitted=True, commi
     )
     record = _execution("execution", status=status, prompt="question", error_code=error_code)
     record = replace(record, started_at=record.created_at)
-    await state.execution.executions.create_with_history_head(record)
+    await state.execution.executions.create_execution(record)
     if admitted:
         await state.conversation.sessions.admit_execution(
             record.session_id, tenant_id="tenant",

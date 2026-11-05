@@ -30,8 +30,8 @@ from linktools.ai.persistence.contracts import (
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
     ResultRecord,
-    ExecutionCheckpoint,
-    ExecutionCheckpointState,
+    ExecutionRecoveryDetail,
+    ExecutionRecoveryState,
     RecoveryHandoffPhase,
     RecoveryTerminalHandoff,
     RecoveryTerminalOutcome,
@@ -154,7 +154,7 @@ async def test_terminal_preserves_concurrent_hold_metadata(
         else:
             handle = await agent.start("hello", principal=PRINCIPAL)
         result = (await handle.wait(timeout_seconds=20)).result
-        assert changed
+        assert changed, (result.error_diagnostics.traceback if result.error_diagnostics is not None else result)
         assert result.status is ExecutionStatus.SUCCEEDED
         observed = await runtime._state.execution.executions.get(
             handle.execution_id, tenant_id=runtime.tenant_id
@@ -198,7 +198,6 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
         await state.conversation.sessions.create(
             replace(_session(), active_execution_id="execution")
         )
-    await repository.create_with_history_head(current)
     result = ResultRecord(None, StopReason.ERROR, UsageMetrics(), current.updated_at)
     terminal = replace(
         current,
@@ -213,13 +212,7 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
         ExecutionEventType.EXECUTION_FAILED,
         {"error_code": ErrorCode.EXECUTION_FAILED.value, "safe_error_details": {}},
     )
-    source_recovery = ExecutionCheckpoint(
-        "execution",
-        None,
-        ExecutionCheckpointState.HANDOFF,
-        0,
-        current.created_at,
-        current.updated_at,
+    source_recovery = ExecutionRecoveryDetail(
         handoff_phase=RecoveryHandoffPhase.PREPARED,
         terminal_handoff=RecoveryTerminalHandoff(
             RecoveryTerminalOutcome(
@@ -238,14 +231,14 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
             None,
         ),
     )
-    await state.checkpoint.checkpoints.create(source_recovery)
     target_recovery = replace(
         source_recovery,
-        revision=1,
-        state=ExecutionCheckpointState.COMPLETED,
         handoff_phase=RecoveryHandoffPhase.COMPLETED,
         terminal_handoff=None,
     )
+    current = replace(current, recovery=source_recovery)
+    commit = replace(commit, execution=replace(commit.execution, recovery=target_recovery))
+    await repository.create_execution(current)
     commands = StateCommands(
         repository,
         namespace="terminal-readback",
@@ -271,11 +264,11 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
                     "execution", tenant_id="tenant", hold_id="after"
                 )
             elif post_commit_change == "recovery":
-                await state.checkpoint.checkpoints.compare_and_swap(
+                await repository.compare_and_swap(
                     "execution",
                     tenant_id="tenant",
-                    expected_revision=1,
-                    next_record=replace(source_recovery, revision=2),
+                    expected_revision=value.execution.revision,
+                    next_record=replace(value.execution, recovery=source_recovery, revision=value.execution.revision + 1),
                 )
             elif post_commit_change == "seal":
 
@@ -336,7 +329,6 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
                 commit,
                 expected_execution=current,
                 session_id=current.session_id,
-                recovery_checkpoint=target_recovery,
             )
             assert observed.execution.status is ExecutionStatus.FAILED
             assert observed.result == result
@@ -350,8 +342,7 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
                     commit,
                     expected_execution=current,
                     session_id=current.session_id,
-                    recovery_checkpoint=target_recovery,
-                )
+                    )
             assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         assert len(written) == 1
     finally:
@@ -369,7 +360,7 @@ async def test_terminal_rebase_rejects_semantic_changes_without_writes(
     await state.initialize(namespace="terminal-conflict", tenant_id="tenant")
     repository = state.execution.executions
     current = _record(ExecutionStatus.STARTED, 0)
-    await repository.create_with_history_head(current)
+    await repository.create_execution(current)
     result = ResultRecord(None, StopReason.ERROR, UsageMetrics(), current.updated_at)
     terminal = replace(
         current,
@@ -413,21 +404,16 @@ async def test_terminal_rebase_rejects_semantic_changes_without_writes(
             )
         else:
             from linktools.ai.persistence.contracts import (
-                ExecutionCheckpoint,
-                ExecutionCheckpointState,
+                ExecutionRecoveryDetail,
+                ExecutionRecoveryState,
                 RecoveryHandoffPhase,
             )
 
-            recovery = ExecutionCheckpoint(
-                "execution",
-                None,
-                ExecutionCheckpointState.COMPLETED,
-                1,
-                current.created_at,
-                current.updated_at,
-                handoff_phase=RecoveryHandoffPhase.COMPLETED,
-            )
-            await state.checkpoint.checkpoints.create(recovery)
+            recovery = replace(current, revision=current.revision + 1,
+                               recovery=ExecutionRecoveryDetail(handoff_phase=RecoveryHandoffPhase.COMPLETED))
+            await repository.compare_and_swap("execution", tenant_id="tenant",
+                                              expected_revision=current.revision, next_record=recovery)
+
 
         async def abort_mutation(stores, callback):
             raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
@@ -458,11 +444,11 @@ async def test_terminal_rebase_rejects_semantic_changes_without_writes(
     try:
         with pytest.raises(AIError) as raised:
             await commands.commit_terminal_checkpoint(
-                commit, expected_execution=current, recovery_checkpoint=recovery
+                commit, expected_execution=current
             )
         assert raised.value.code is (
             ErrorCode.STORAGE_INTEGRITY_ERROR
-            if drift in {"sealed", "recovery"}
+            if drift == "sealed"
             else ErrorCode.EXECUTION_RESULT_CONFLICT
         )
         assert await repository.get("execution", tenant_id="tenant") == before
@@ -484,11 +470,12 @@ async def test_stale_cancelled_worker_cannot_seal_resumed_attempt_before_run_reg
     await state.initialize(namespace="unregistered-terminal-fence", tenant_id="tenant")
     try:
         repository = state.execution.executions
-        original = replace(_record(ExecutionStatus.STARTED, 1), revision=1)
-        await repository.create_with_history_head(original)
-        await repository.state_store.mutate(
-            lambda transaction: repository.admit_history_producer_in_transaction(transaction, original)
+        original = replace(
+            _record(ExecutionStatus.STARTED, 1), revision=1,
+            producer_generation=1, producer_claim_id="original-producer",
         )
+        original = replace(original, recovery=ExecutionRecoveryDetail(agent_run_id="run"))
+        await repository.create_execution(original)
         resumed = await _commands(state).commit_resumed(original)
         commands = StateCommands(
             repository, namespace="unregistered-terminal-fence",
@@ -507,13 +494,9 @@ async def test_stale_cancelled_worker_cannot_seal_resumed_attempt_before_run_reg
             producer_generation=original.revision,
         )
         assert decode_domain(encode_domain(commit), ExecutionTerminalCommit) == commit
-        checkpoint = ExecutionCheckpoint(
-            original.execution_id, "run", ExecutionCheckpointState.ACTIVE, 0,
-            resumed.created_at, resumed.updated_at,
-        )
-        await state.checkpoint.checkpoints.create(checkpoint)
+        checkpoint = resumed
         handoff = replace(
-            checkpoint, state=ExecutionCheckpointState.HANDOFF, revision=1,
+            checkpoint, revision=checkpoint.revision + 1, recovery=replace(checkpoint.recovery,
             handoff_phase=RecoveryHandoffPhase.PREPARED,
             terminal_handoff=RecoveryTerminalHandoff(
                 RecoveryTerminalOutcome(
@@ -523,14 +506,14 @@ async def test_stale_cancelled_worker_cannot_seal_resumed_attempt_before_run_reg
                 ),
                 "run", None,
             ),
-        )
+        ))
         with pytest.raises(AIError) as stale_handoff:
             await commands.commit_recovery_handoff(
                 handoff, expected_revision=checkpoint.revision,
                 producer_generation=original.revision,
             )
         assert stale_handoff.value.code is ErrorCode.STORAGE_CONFLICT
-        assert await state.checkpoint.checkpoints.get(original.execution_id, tenant_id="tenant") == checkpoint
+        assert await repository.get(original.execution_id, tenant_id="tenant") == checkpoint
         # Rereading the latest execution revision does not grant the old worker
         # authority over the replacement attempt, even before any run exists.
         with pytest.raises(AIError) as caught:

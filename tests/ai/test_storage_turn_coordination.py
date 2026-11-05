@@ -293,10 +293,11 @@ async def test_session_lookup_rejects_invalid_identity(scope: str, session_key: 
 
 
 @pytest.mark.asyncio
-async def test_session_lookup_capability_does_not_change_legacy_coordination_or_request_readers() -> None:
+async def test_session_lookup_is_independent_of_coordination_and_request_readers() -> None:
     cache = InMemoryCacheBackend(max_bytes=1)
 
-    class LegacyBackend:
+    class CoordinationBackend:
+        enter = cache.enter
         claim_turn = cache.claim_turn
         read_turn = cache.read_turn
         renew_turn = cache.renew_turn
@@ -311,7 +312,7 @@ async def test_session_lookup_capability_does_not_change_legacy_coordination_or_
     assert isinstance(reader, TurnAdmissionReader)
     assert not isinstance(reader, TurnSessionReader)
     assert not isinstance(reader, TurnCoordinationBackend)
-    backend = LegacyBackend()
+    backend = CoordinationBackend()
     assert isinstance(backend, TurnCoordinationBackend)
     assert isinstance(backend, TurnAdmissionReader)
     assert not isinstance(backend, TurnSessionReader)

@@ -3,13 +3,16 @@
 """Repository instruction partition recovery contracts."""
 
 from types import SimpleNamespace
+from dataclasses import replace
+from datetime import datetime, timezone
+from .test_execution_recovery_commands import _execution
 
 import pytest
 from linktools.ai.core import canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._recovery_coordinator import _RecoveryCoordinator
 from linktools.ai.persistence.contracts import (
-    ExecutionCheckpointState,
+    ExecutionRecoveryDetail,
     RepositoryInstructionBarrier,
 )
 from linktools.ai.spec import (
@@ -25,7 +28,7 @@ class _Port:
         self.checkpoint = checkpoint
         self.overlay = overlay
 
-    async def load_recovery_checkpoint(
+    async def load_recovery_execution(
         self, execution_id: str, *, tenant_id: str
     ) -> object:
         assert execution_id == "execution"
@@ -33,7 +36,7 @@ class _Port:
         return self.checkpoint
 
     async def load_repository_instructions(self, reference: object) -> RepositoryInstructions:
-        assert reference is self.checkpoint.repository_instruction_overlay
+        assert reference is self.checkpoint.recovery.repository_instruction_overlay
         return self.overlay
 
 
@@ -82,12 +85,11 @@ def _checkpoint(
             )
         )
     )
-    checkpoint = SimpleNamespace(
-        state=ExecutionCheckpointState.ACTIVE,
+    checkpoint = replace(_execution(datetime.now(timezone.utc)), recovery=ExecutionRecoveryDetail(
         agent_run_id="step",
         repository_instruction_overlay=reference,
         repository_instruction_barriers=(first_barrier, latest_barrier),
-    )
+    ))
     return checkpoint, arguments
 
 
@@ -182,18 +184,14 @@ async def test_dynamic_instruction_union_limits_precede_barrier_commit(tmp_path,
         max_repository_instruction_documents=1 if kind != "bytes" else 2,
         max_repository_instruction_bytes=len(full.render().encode("utf-8")) - 1 if kind == "bytes" else 256 * 1024,
     )
-    checkpoint = SimpleNamespace(
-        state=ExecutionCheckpointState.ACTIVE, agent_run_id="run",
-        repository_instruction_overlay=None, repository_instruction_barriers=(),
-    )
+    checkpoint = replace(_execution(datetime.now(timezone.utc)), recovery=ExecutionRecoveryDetail(agent_run_id="run"))
 
     persisted = None
     if kind == "overlay":
         persisted = RepositoryInstructions((child,))
-        checkpoint.repository_instruction_overlay = SimpleNamespace(payload=SimpleNamespace(
-            digest=canonical_sha256(persisted.to_payload()),
-        ))
-        checkpoint.repository_instruction_barriers = (RepositoryInstructionBarrier("earlier", "first", "a" * 64),)
+        checkpoint = replace(checkpoint, recovery=replace(checkpoint.recovery,
+            repository_instruction_overlay=SimpleNamespace(payload=SimpleNamespace(digest=canonical_sha256(persisted.to_payload()))),
+            repository_instruction_barriers=(RepositoryInstructionBarrier("earlier", "first", "a" * 64),)))
 
     class Port(_Port):
         async def commit_repository_instruction_barrier(self, *args, **kwargs):
@@ -222,10 +220,7 @@ async def test_pinned_sources_are_not_recounted_or_revalidated_without_discovery
 
     initial = RepositoryInstructions((RepositoryInstructionDocument("agents:AGENTS.md", ".", "pinned root"),))
     (tmp_path / "AGENTS.md").write_bytes(b"\xff")  # A pinned source must not be read again.
-    checkpoint = SimpleNamespace(
-        state=ExecutionCheckpointState.ACTIVE, agent_run_id="run",
-        repository_instruction_overlay=None, repository_instruction_barriers=(),
-    )
+    checkpoint = replace(_execution(datetime.now(timezone.utc)), recovery=ExecutionRecoveryDetail(agent_run_id="run"))
     coordinator = _RecoveryCoordinator(
         _Port(checkpoint, None),
         WorkspaceInstructionResolver(tmp_path, WorkspacePolicy(max_repository_instruction_bytes=1), RepositoryInstructions()),

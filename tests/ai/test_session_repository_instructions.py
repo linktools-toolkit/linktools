@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+from pydantic_ai_harness.step_persistence import StepPersistence
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
@@ -19,11 +20,11 @@ from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ApprovalDecision, ApprovalStatus, CommitPolicy, ExecutionStatus, SessionStatus, WorkspaceFileInput
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceStorage
+from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceStorage, SqlStepStore
 from linktools.ai.persistence.codec import decode_domain, encode_domain
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime._local import LocalExecutionBackend
-from linktools.ai.persistence.contracts import RepositoryInstructionBarrier
+from linktools.ai.execution import ExecutionRecoveryDetail, RepositoryInstructionBarrier
 from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
 from linktools.ai.storage import InMemoryCacheBackend, StorageOverlay, StorageRoute
 from linktools.ai.session import SessionRecord
@@ -35,6 +36,7 @@ from ._runtime_test_helpers import (
     _wait_for_committed,
     is_tool_retry,
     model_features,
+    native_checkpoint,
     workspace_features,
 )
 
@@ -64,8 +66,9 @@ async def _storage(root: Path, backend: str) -> AsyncIterator[PersistenceStorage
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite", "sql", "split"))
+@pytest.mark.parametrize("restart", (False, True))
 async def test_session_reloads_known_scopes_before_first_model_request(
-    tmp_path: Path, backend: str,
+    tmp_path: Path, backend: str, restart: bool,
 ) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
@@ -122,6 +125,17 @@ async def test_session_reloads_known_scopes_before_first_model_request(
 
     async with _storage(tmp_path, backend) as storage:
         async with Persistence.open("scope-memory", storage=storage) as persistence:
+            if restart:
+                if backend == "sql":
+                    steps = SqlStepStore(
+                        persistence.execution.executions.state_store.context,
+                        namespace="scope-memory", tenant_id=persistence.tenant_id,
+                    )
+                    await steps.initialize()
+                    capability = StepPersistence(store=steps, capture_frontier=True)
+                else:
+                    capability = native_checkpoint(database=tmp_path / "native.db")
+                features.capability(capability, scope="runtime")
             async with Runtime.attach(persistence=persistence, features=features) as runtime:
                 session = await runtime.agents.get("reader").create_session("session")
                 await run(session, "learn", discover="PACKAGE-V1")
@@ -292,9 +306,9 @@ async def test_session_execution_recovery_keeps_pinned_instructions_and_permissi
             )
             approvals = await persistence.checkpoint.approvals.list_pending(execution.execution_id, tenant_id=tenant)
             assert len(approvals) == 1 and requests == pause_requests
-            checkpoint = await persistence.checkpoint.checkpoints.get(execution.execution_id, tenant_id=tenant)
-            assert checkpoint is not None and checkpoint.pending_tools is not None
-            assert len(checkpoint.pending_tools.approvals[0].metadata["linktools"]["repository_instruction_frontier"]) == 64
+            checkpoint = await persistence.execution.executions.get_recovery(execution.execution_id, tenant_id=tenant)
+            assert checkpoint is not None and checkpoint.recovery is not None and checkpoint.recovery.pending_tools is not None
+            assert len(checkpoint.recovery.pending_tools.approvals[0].metadata["linktools"]["repository_instruction_frontier"]) == 64
             rules.write_text("LATER-RULE", encoding="utf-8")
             await persistence.checkpoint.approvals.decide(
                 approvals[0].approval_id, tenant_id=tenant, expected_status=ApprovalStatus.PENDING,
@@ -340,14 +354,14 @@ async def test_discovery_scope_commit_precedes_execution_pin_across_storage_grou
             if failure == "scope":
                 monkeypatch.setattr(sessions, "remember_repository_instruction_scopes_in_transaction", fail_scope)
             port = SimpleNamespace(
-                _tenant_id="tenant", _conversation=persistence.conversation,
+                _tenant_id="tenant", _conversation=persistence.conversation, _turn_owners={},
                 promote_pending_execution=promote, _store_repository_instructions=store_pin,
             )
             with pytest.raises(AIError) as interrupted:
                 await LocalExecutionBackend.commit_repository_instruction_barrier(
                     port,
-                    SimpleNamespace(execution_id="active", session_id="session"),
-                    SimpleNamespace(repository_instruction_barriers=()),
+                    SimpleNamespace(execution_id="active", session_id="session",
+                                    recovery=ExecutionRecoveryDetail(agent_run_id="run")),
                     overlay, RepositoryInstructionBarrier("run", "call", "a" * 64),
                 )
             assert interrupted.value.code is ErrorCode.STORAGE_UNAVAILABLE
@@ -545,6 +559,9 @@ async def test_native_and_custom_approvals_restore_observed_frontier_with_valida
                 lambda: persistence.execution.executions.get(execution.execution_id, tenant_id=tenant),
                 lambda record: record is not None and record.status is ExecutionStatus.WAITING_DEFERRED,
             )
+            waiting = await persistence.execution.executions.get(execution.execution_id, tenant_id=tenant)
+            assert waiting is not None
+            assert not waiting.conversation and not waiting.restart_checkpoints and not waiting.durable_trace
             approvals = await persistence.checkpoint.approvals.list_pending(execution.execution_id, tenant_id=tenant)
             assert len(approvals) == 1 and calls == [] and requests == 1
         await persistence.checkpoint.approvals.decide(

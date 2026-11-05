@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 from pydantic_ai.models.test import TestModel
 
-from linktools.ai.capability import CheckpointCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.core import (
     AuthorizationAction, ExecutionContext, ExecutionStatus, JsonValue, Principal,
     ResourceRef, TaskStatus, service_principal,
@@ -405,7 +406,7 @@ async def test_explicit_external_agent_keeps_its_owner_and_authorization() -> No
 @pytest.mark.asyncio
 async def test_handoff_supports_idle_task_and_evaluation_domains(tmp_path: Path) -> None:
     features = _features()
-    features.capability(CheckpointCapability())
+    features.capability(native_checkpoint())
     runtime = Runtime.open("handoff", storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), features=features)
     async with runtime:
         engine = await runtime.tasks.bind()
@@ -420,7 +421,7 @@ async def test_handoff_rejects_inflight_evaluation_without_closing_other_domains
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     features = _features()
-    features.capability(CheckpointCapability())
+    features.capability(native_checkpoint())
     runtime = Runtime.open("handoff-admission", storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), features=features)
     entered, release = asyncio.Event(), asyncio.Event()
     async with runtime:

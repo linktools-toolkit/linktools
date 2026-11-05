@@ -21,10 +21,24 @@ class ExecutionHandoffScope:
         self.stopping = False
         self.cancelled = False
         self._tools: set[asyncio.Task[object]] = set()
+        self._child_waits: set[asyncio.Task[object]] = set()
 
     def require_accepting(self) -> None:
         if self.stopping:
             raise ToolEntryStopped
+
+    def stop(self) -> None:
+        self.stopping = True
+        for task in tuple(self._child_waits):
+            task.cancel()
+
+    def register_child_wait(self, task: asyncio.Task[object]) -> None:
+        if self.stopping:
+            raise asyncio.CancelledError
+        self._child_waits.add(task)
+
+    def unregister_child_wait(self, task: asyncio.Task[object]) -> None:
+        self._child_waits.discard(task)
 
     def cancel_tools(self) -> None:
         self.cancelled = True

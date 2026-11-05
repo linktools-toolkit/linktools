@@ -70,7 +70,7 @@ async def _publish(state, *, execution_id="execution", run_sequence=1, request_s
 
 
 async def _seed(state):
-    await state.execution.executions.create_with_history_head(_execution())
+    await state.execution.executions.create_execution(_execution())
     return await _publish(state)
 
 
@@ -267,20 +267,20 @@ async def test_capture_releases_metadata_scope_after_observer_cancellation(
         await state.close()
 
 
-async def test_terminal_capture_observes_late_flush_and_new_run() -> None:
+async def test_capture_observes_preterminal_flush_and_new_run_but_rejects_terminal_writes() -> None:
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
         repository = state.execution.executions
+        service = _service(state)
+        first = await service.capture_model_interaction_cutoffs("execution", principal=_PRINCIPAL)
+        await _publish(state, request_sequence=2)
         current = await repository.get("execution", tenant_id="tenant")
         await repository.compare_and_swap(
             "execution", tenant_id="tenant", expected_revision=current.revision,
             next_record=replace(current, status=ExecutionStatus.FAILED, revision=current.revision + 1),
         )
-        service = _service(state)
-        first = await service.capture_model_interaction_cutoffs("execution", principal=_PRINCIPAL)
-        await _publish(state, request_sequence=2)
         second = await service.capture_model_interaction_cutoffs("execution", principal=_PRINCIPAL)
         assert first.cutoffs == (UsageReadCutoff("execution", 1, 1),)
         assert second.cutoffs == (UsageReadCutoff("execution", 1, 2),)
@@ -292,6 +292,16 @@ async def test_terminal_capture_observes_late_flush_and_new_run() -> None:
         await _publish(state, run_sequence=2)
         third = await service.capture_model_interaction_cutoffs("execution", principal=_PRINCIPAL)
         assert third.cutoffs == (UsageReadCutoff("execution", 1, 2), UsageReadCutoff("execution", 2, 1))
+        current = await repository.get("execution", tenant_id="tenant")
+        await repository.compare_and_swap(
+            "execution", tenant_id="tenant", expected_revision=current.revision,
+            next_record=replace(current, status=ExecutionStatus.FAILED, revision=current.revision + 1),
+        )
+        with pytest.raises(AIError) as raised:
+            await _publish(state, run_sequence=2, request_sequence=2)
+        assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+        final = await service.capture_model_interaction_cutoffs("execution", principal=_PRINCIPAL)
+        assert final.cutoffs == third.cutoffs
     finally:
         await state.close()
 
@@ -439,7 +449,7 @@ async def test_model_reads_keep_requested_execution_as_lookup_scope(
     try:
         await _seed(state)
         repository = state.execution.executions
-        await repository.create_with_history_head(replace(
+        await repository.create_execution(replace(
             _execution(), execution_id="other", root_execution_id="other",
         ))
         other_run = await _publish(state, execution_id="other")

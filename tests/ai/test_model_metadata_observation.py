@@ -162,14 +162,12 @@ async def test_model_metadata_disabled_archive_does_not_certify_empty_remote_his
 
 @pytest.mark.asyncio
 async def test_model_metadata_subscription_preserves_capture_races_and_isolates_executions() -> None:
-    from linktools.ai.persistence.contracts import ExecutionHistoryHeadRecord, ExecutionHistoryState
+    from .test_step_projection import _execution
 
     storage = Persistence(PersistenceStorage.in_memory())
     await storage.initialize(namespace="history", tenant_id="tenant")
     repository = storage.execution.executions
-    await repository.state_store.mutate(lambda transaction: repository.insert_history_head_in_transaction(
-        transaction, ExecutionHistoryHeadRecord("root", ExecutionHistoryState.OPEN, 0, None),
-    ))
+    await repository.create_execution(replace(_execution(), execution_id="root", root_execution_id="root"))
     store = storage.run_store
     conversation_id = agent_conversation_id(namespace="history", tenant_id="tenant", execution_id="root")
     subscription = store.subscribe_model_interactions(conversation_id)

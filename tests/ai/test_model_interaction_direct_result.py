@@ -9,7 +9,7 @@ from dataclasses import fields
 from pathlib import Path
 
 import pytest
-from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
+from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, DynamicCapability
 from pydantic_ai.capabilities.abstract import WrapModelRequestHandler
 from pydantic_ai.messages import BinaryContent, ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models import Model, ModelRequestContext
@@ -72,9 +72,10 @@ class _DirectResponse(AbstractCapability):
 
 
 def _features(
-    provider_calls: list[str], *, direct: _DirectResponse | None = None,
+    provider_calls: list[str], *, direct: AbstractCapability[object] | None = None,
     provider_entered: asyncio.Event | None = None,
     provider_release: asyncio.Event | None = None,
+    direct_last: bool = False,
 ) -> RuntimeFeatures:
     features = RuntimeFeatures("direct-results")
     for name in ("direct", "provider"):
@@ -91,9 +92,12 @@ def _features(
 
         features.agent(name, model=name, allow_tools=(), allow_skills=(), allow_subagents=())
         features.model(name, _InputBinding(model(name)))
-    features.capability(direct or _DirectResponse(), id="direct-response")
+    if not direct_last:
+        features.capability(direct or _DirectResponse(), id="direct-response")
     features.capability(ExecutionCapability(retain_history=True))
     features.capability(TraceCapability())
+    if direct_last:
+        features.capability(direct or _DirectResponse(), id="direct-response")
     return features
 
 
@@ -152,14 +156,15 @@ async def _assert_interaction(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("direct", "model_id"), ((False, None), (True, None), (True, "returned:model")))
+@pytest.mark.parametrize("direct_last", (False, True))
 async def test_response_kind_survives_sqlite_reopen_without_invented_request(
-    tmp_path: Path, direct: bool, model_id: str | None,
+    tmp_path: Path, direct: bool, model_id: str | None, direct_last: bool,
 ) -> None:
     calls: list[str] = []
     name = "direct" if direct else "provider"
     storage = PersistenceStorage.sqlite(tmp_path / "state.sqlite")
     async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.attach(
-        persistence=persistence, features=_features(calls, direct=_DirectResponse(model_id=model_id)),
+        persistence=persistence, features=_features(calls, direct=_DirectResponse(model_id=model_id), direct_last=direct_last),
     ) as runtime:
         session = await runtime.agents.get(name).create_session("session")
         execution = await session.start(
@@ -207,6 +212,68 @@ async def test_parallel_direct_and_provider_interactions_remain_distinct(tmp_pat
         assert first.execution_id != second.execution_id
         assert first.request == {} and second.request["messages"]
     assert calls == ["provider"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("binding", ("static", "clone", "dynamic"))
+@pytest.mark.parametrize("outer_subclass", (False, True))
+async def test_direct_observation_distinguishes_bound_wrappers_with_different_positions(
+    tmp_path: Path, binding: str, outer_subclass: bool,
+) -> None:
+    calls: list[str] = []
+    wrappers: list[str] = []
+    bindings: list[str] = []
+    factories: list[str] = []
+
+    class PositionedResponse(_DirectResponse):
+        def __init__(self, position: str) -> None:
+            super().__init__()
+            self.position = position
+
+        def get_ordering(self) -> CapabilityOrdering:
+            return CapabilityOrdering(position=self.position)
+
+        async def for_run(self, ctx: RunContext[object]) -> AbstractCapability[object]:
+            bindings.append(self.position)
+            return type(self)(self.position) if binding == "clone" else self
+
+        async def wrap_model_request(
+            self, ctx: RunContext[object], *, request_context: ModelRequestContext,
+            handler: WrapModelRequestHandler,
+        ) -> ModelResponse:
+            wrappers.append(self.position)
+            if self.position == "outermost":
+                return await handler(request_context)
+            return await super().wrap_model_request(ctx, request_context=request_context, handler=handler)
+
+    class OuterResponse(PositionedResponse):
+        pass
+
+    async def factory(ctx: RunContext[object]) -> AbstractCapability[object]:
+        factories.append(ctx.run_id)
+        return PositionedResponse("innermost")
+
+    inner = (DynamicCapability(factory, id="direct-response") if binding == "dynamic"
+             else PositionedResponse("innermost"))
+    outer = (OuterResponse if outer_subclass else PositionedResponse)("outermost")
+    features = _features(calls, direct=inner, direct_last=True)
+    features.capability(outer, id="outer-response")
+    storage = PersistenceStorage.sqlite(tmp_path / "positions.sqlite")
+    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.attach(
+        persistence=persistence, features=features,
+    ) as runtime:
+        execution = await runtime.agents.get("direct").start("hello")
+        assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
+        original = await _assert_interaction(runtime, execution.execution_id, runtime.default_principal, direct=True)
+        execution_id, principal = execution.execution_id, runtime.default_principal
+    assert calls == []
+    assert wrappers == ["outermost", "innermost"]
+    assert sorted(bindings) == ["innermost", "outermost"]
+    assert len(factories) == int(binding == "dynamic")
+    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.attach(
+        persistence=persistence, features=features,
+    ) as runtime:
+        assert await _assert_interaction(runtime, execution_id, principal, direct=True) == original
 
 
 @pytest.mark.asyncio

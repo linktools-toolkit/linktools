@@ -10,9 +10,9 @@ import sys
 import pytest
 
 from linktools.ai.capability import (
-    CheckpointCapability,
-    TraceCapability,
-)
+    TraceCapability)
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.persistence import PersistencePlan
 
 from .test_explicit_runtime_features import _features
@@ -23,8 +23,8 @@ def test_capability_import_does_not_initialize_runtime_package() -> None:
         [
             sys.executable,
             "-c",
-            "import sys; from linktools.ai.capability import ExecutionCapability, "
-            "CheckpointCapability, TraceCapability; "
+            "import sys; from linktools.ai.capability import ExecutionCapability, TraceCapability; "
+            "from pydantic_ai_harness.step_persistence import StepPersistence; "
             "assert 'linktools.ai.runtime' not in sys.modules",
         ],
         check=True,
@@ -36,7 +36,7 @@ def test_runtime_has_no_duplicate_capability_exports() -> None:
 
     for name in (
         "ExecutionCapability",
-        "CheckpointCapability",
+        "StepPersistence",
         "TraceCapability",
         "MetricsCapability",
     ):
@@ -58,7 +58,7 @@ def test_invalid_module_route_is_rejected_before_storage_initialization(
         pytest.fail("invalid declarations must fail before model resolution")
 
     monkeypatch.setattr(Persistence, "initialize", unexpected_initialize)
-    features = _features(CheckpointCapability() if route == "checkpoint" else TraceCapability())
+    features = _features(native_checkpoint() if route == "checkpoint" else TraceCapability())
     features.model("default", unexpected_model_capture)
     with pytest.raises(ValueError, match="PersistencePlan contains an invalid route"):
         PersistencePlan(**{route: object()})

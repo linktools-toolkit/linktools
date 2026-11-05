@@ -4,7 +4,7 @@
 
 import asyncio
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -12,12 +12,12 @@ from linktools.ai.persistence import Persistence
 from linktools.ai.core import ExecutionStatus, ToolOperationStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
+from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationDecision, ToolOperationRecord
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence.commands import StateCommands
 from linktools.ai.persistence.contracts import ToolOperationAdmission
-from linktools.ai.persistence.repositories import ToolRepositoryImpl
-from linktools.ai.storage import FilesystemObjectStore, StoredPayload
+from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, PayloadPolicy, StoredPayload
+from linktools.ai.persistence.state import Observed
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
@@ -56,11 +56,6 @@ def _record(
         status=status,
         owner=owner,
         fence=fence,
-        lease_expires_at=(
-            now + timedelta(seconds=60)
-            if status is ToolOperationStatus.CLAIMED
-            else None
-        ),
         error_code=error_code,
         created_at=now,
         updated_at=now,
@@ -82,12 +77,11 @@ def _admission(*, owner: str = "tool-owner") -> ToolOperationAdmission:
         binding_digest=canonical_sha256({"binding": True}),
         replay_safe=True,
         owner=owner,
-        lease_seconds=60,
     )
 
 
 @pytest.mark.asyncio
-async def test_sqlite_materializes_convergent_tool_repository(tmp_path) -> None:
+async def test_sqlite_parallel_admissions_share_one_effect_record(tmp_path) -> None:
     database = tmp_path / "state.sqlite"
     engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
     await provision_runtime_database(engine)
@@ -100,7 +94,6 @@ async def test_sqlite_materializes_convergent_tool_repository(tmp_path) -> None:
     await state.initialize(namespace="tool-cas", tenant_id="tenant")
     try:
         repository = state.checkpoint.tools
-        assert type(repository) is ToolRepositoryImpl
 
         request = _admission()
         first, second = await asyncio.gather(
@@ -120,137 +113,18 @@ async def test_sqlite_materializes_convergent_tool_repository(tmp_path) -> None:
             tenant_id="tenant",
         ) == ()
 
-        renewed = await repository.renew(
-            request.tool_operation_id,
-            tenant_id="tenant",
-            owner=request.owner,
-            fence=first.fence,
-            lease_seconds=60,
-        )
         payload = StoredPayload.inline_bytes(b"result")
         terminal = await repository.complete_payload(
             request.tool_operation_id,
             tenant_id="tenant",
             owner=request.owner,
-            fence=renewed.fence,
+            fence=first.fence,
             result_payload=payload,
         )
         assert terminal.status is ToolOperationStatus.COMPLETED
         assert terminal.result_payload == payload
     finally:
         await state.close()
-
-
-@pytest.mark.asyncio
-async def test_expired_tool_claim_becomes_effect_unknown_without_replay(
-    tmp_path,
-) -> None:
-    state = Persistence(PersistenceStorage.sqlite(tmp_path / "expired-tool-claim.db"))
-    await state.initialize(namespace="tool-expired-claim", tenant_id="tenant")
-    try:
-        repository = state.checkpoint.tools
-        expired = replace(
-            _record(replay_safe=False),
-            lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
-        )
-        await repository.reserve(expired)
-
-        reconciled = await repository.reconcile_expired_claim(
-            expired.tool_operation_id,
-            tenant_id="tenant",
-        )
-
-        assert reconciled.status is ToolOperationStatus.EFFECT_UNKNOWN
-        assert reconciled.owner == expired.owner
-        assert reconciled.fence == expired.fence
-        assert reconciled.lease_expires_at is None
-        assert reconciled.error_code == ErrorCode.TOOL_EFFECT_UNKNOWN.value
-    finally:
-        await state.close()
-
-
-@pytest.mark.asyncio
-async def test_expired_replay_safe_claim_returns_to_pending() -> None:
-    state = Persistence(PersistenceStorage.in_memory())
-    await state.initialize(namespace="tool-expired-replay-safe", tenant_id="tenant")
-    try:
-        repository = state.checkpoint.tools
-        expired = replace(
-            _record(replay_safe=True),
-            lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
-        )
-        await repository.reserve(expired)
-
-        reconciled = await repository.reconcile_expired_claim(
-            expired.tool_operation_id,
-            tenant_id="tenant",
-        )
-
-        assert reconciled.status is ToolOperationStatus.PENDING
-        assert reconciled.owner is None
-        assert reconciled.fence == expired.fence
-        assert reconciled.lease_expires_at is None
-        assert reconciled.error_code is None
-    finally:
-        await state.close()
-
-
-@pytest.mark.asyncio
-async def test_live_tool_claim_is_not_reconciled_early() -> None:
-    state = Persistence(PersistenceStorage.in_memory())
-    await state.initialize(namespace="tool-live-claim", tenant_id="tenant")
-    try:
-        repository = state.checkpoint.tools
-        claimed = _record()
-        await repository.reserve(claimed)
-
-        reconciled = await repository.reconcile_expired_claim(
-            claimed.tool_operation_id,
-            tenant_id="tenant",
-        )
-
-        assert reconciled == claimed
-    finally:
-        await state.close()
-
-
-@pytest.mark.asyncio
-async def test_tool_repository_retries_raw_storage_conflict() -> None:
-    repository = object.__new__(ToolRepositoryImpl)
-    committed = _record(
-        status=ToolOperationStatus.COMPLETED,
-        result_payload=StoredPayload.inline_bytes(b"result"),
-    )
-    attempts = 0
-
-    async def operation() -> ToolOperationRecord:
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        return committed
-
-    result = await repository._retry_storage_conflict(operation)
-
-    assert result == committed
-    assert attempts == 2
-
-
-@pytest.mark.asyncio
-async def test_tool_repository_does_not_retry_semantic_conflict() -> None:
-    repository = object.__new__(ToolRepositoryImpl)
-    attempts = 0
-
-    async def operation() -> ToolOperationRecord:
-        nonlocal attempts
-        attempts += 1
-        raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-
-    with pytest.raises(AIError) as raised:
-        await repository._retry_storage_conflict(operation)
-
-    assert raised.value.code is ErrorCode.TOOL_OPERATION_CONFLICT
-    assert attempts == 1
 
 
 class _GroupTransaction:
@@ -299,6 +173,9 @@ class _CommandTools:
         del tool_operation_id, tenant_id
         return self.current
 
+    async def observe_operation(self, tool_operation_id: str, *, tenant_id: str) -> Observed[ToolOperationRecord]:
+        return Observed(await self.get_operation(tool_operation_id, tenant_id=tenant_id), 0)
+
     async def complete_in_transaction(
         self,
         transaction: object,
@@ -308,7 +185,8 @@ class _CommandTools:
         owner: str,
         fence: int,
         result_payload: StoredPayload,
-    ) -> ToolOperationRecord:
+        observed: Observed[ToolOperationRecord] | None = None,
+    ) -> Observed[ToolOperationRecord]:
         del transaction, tool_operation_id, tenant_id
         self.complete_calls += 1
         self.current = replace(
@@ -316,10 +194,9 @@ class _CommandTools:
             status=ToolOperationStatus.COMPLETED,
             owner=owner,
             fence=fence,
-            lease_expires_at=None,
             result_payload=result_payload,
         )
-        return self.current
+        return Observed(self.current, 1)
 
     async def fail_in_transaction(
         self,
@@ -331,7 +208,8 @@ class _CommandTools:
         fence: int,
         error_code: str,
         error_payload: StoredPayload | None,
-    ) -> ToolOperationRecord:
+        observed: Observed[ToolOperationRecord] | None = None,
+    ) -> Observed[ToolOperationRecord]:
         del transaction, tool_operation_id, tenant_id
         self.fail_calls += 1
         self.current = replace(
@@ -339,11 +217,10 @@ class _CommandTools:
             status=ToolOperationStatus.FAILED,
             owner=owner,
             fence=fence,
-            lease_expires_at=None,
             error_code=error_code,
             error_payload=error_payload,
         )
-        return self.current
+        return Observed(self.current, 1)
 
 
 @pytest.mark.asyncio
@@ -366,8 +243,8 @@ async def test_tool_terminal_command_retries_after_outer_transaction_exits() -> 
 
     assert tools.group.attempts == 2
     assert tools.complete_calls == 1
-    assert result.status is ToolOperationStatus.COMPLETED
-    assert result.result_payload == payload
+    assert result.value.status is ToolOperationStatus.COMPLETED
+    assert result.value.result_payload == payload
     assert not cancellation_requested
 
 
@@ -408,6 +285,10 @@ class _ReadbackRepository:
         return self.record
 
 
+    async def observe_operation(self, tool_operation_id: str, *, tenant_id: str) -> Observed[ToolOperationRecord]:
+        return Observed(await self.get_operation(tool_operation_id, tenant_id=tenant_id), 0)
+
+
 class _BlockingUnknownRepository(_ReadbackRepository):
     def __init__(self) -> None:
         super().__init__(_record())
@@ -433,29 +314,32 @@ class _BlockingUnknownRepository(_ReadbackRepository):
             status=ToolOperationStatus.EFFECT_UNKNOWN,
             owner=owner,
             fence=fence,
-            lease_expires_at=None,
             error_code=error_code,
         )
         return self.record
 
 
+def _readback_bridge(repository: _ReadbackRepository) -> RuntimeToolOperationBridge:
+    return RuntimeToolOperationBridge(
+        repository, InMemoryObjectStore(), namespace="tool-cas", tenant_id="tenant",
+        execution_id="execution", agent_run_id="agent-run", owner="tool-owner",
+        binding_digest=repository.record.binding_digest, background_tasks=set(), payload_policy=PayloadPolicy(),
+    )
+
+
 @pytest.mark.asyncio
 async def test_tool_unknown_resolves_durable_truth_before_propagating_cancellation() -> None:
     repository = _BlockingUnknownRepository()
-    bridge = object.__new__(RuntimeToolOperationBridge)
-    bridge._repository = repository
-    bridge._tenant_id = "tenant"
-    bridge._execution_id = "execution"
-    bridge._owner = "tool-owner"
-    bridge._background_tasks = set()
-    decision = SimpleNamespace(
+    bridge = _readback_bridge(repository)
+    decision = ToolOperationDecision(
         operation_id="tool-operation",
         owner="tool-owner",
         fence=1,
+        replay_safe=True,
     )
 
     task = asyncio.create_task(bridge.unknown(decision, RuntimeError("boom")))
-    await repository.started.wait()
+    await asyncio.wait_for(repository.started.wait(), 5)
     task.cancel()
     repository.release.set()
 
@@ -467,6 +351,7 @@ async def test_tool_unknown_resolves_durable_truth_before_propagating_cancellati
     assert repository.record.owner == decision.owner
     assert repository.record.fence == decision.fence
     assert repository.record.error_code == ErrorCode.TOOL_EFFECT_UNKNOWN.value
+    assert await bridge._repository.get_operation("tool-operation", tenant_id="tenant") == repository.record
 
 
 @pytest.mark.asyncio
@@ -476,15 +361,12 @@ async def test_tool_bridge_preserves_result_conflict_instead_of_integrity_error(
         status=ToolOperationStatus.COMPLETED,
         result_payload=StoredPayload.inline_bytes(b"different"),
     )
-    bridge = object.__new__(RuntimeToolOperationBridge)
-    bridge._repository = _ReadbackRepository(observed)
-    bridge._tenant_id = "tenant"
-    bridge._execution_id = "execution"
-    bridge._background_tasks = set()
-    decision = SimpleNamespace(
+    bridge = _readback_bridge(_ReadbackRepository(observed))
+    decision = ToolOperationDecision(
         operation_id="tool-operation",
         owner="tool-owner",
         fence=1,
+        replay_safe=True,
     )
 
     async def failed_commit() -> ToolOperationRecord:
@@ -510,15 +392,12 @@ async def test_tool_bridge_requires_terminal_owner_and_fence_identity() -> None:
         fence=2,
         result_payload=payload,
     )
-    bridge = object.__new__(RuntimeToolOperationBridge)
-    bridge._repository = _ReadbackRepository(observed)
-    bridge._tenant_id = "tenant"
-    bridge._execution_id = "execution"
-    bridge._background_tasks = set()
-    decision = SimpleNamespace(
+    bridge = _readback_bridge(_ReadbackRepository(observed))
+    decision = ToolOperationDecision(
         operation_id="tool-operation",
         owner="tool-owner",
         fence=1,
+        replay_safe=True,
     )
 
     async def failed_commit() -> ToolOperationRecord:
@@ -533,27 +412,3 @@ async def test_tool_bridge_requires_terminal_owner_and_fence_identity() -> None:
         )
 
     assert raised.value.code is ErrorCode.TOOL_OPERATION_CONFLICT
-
-
-@pytest.mark.asyncio
-async def test_expired_non_replay_safe_admission_commits_unknown_before_raising() -> None:
-    state = Persistence(PersistenceStorage.in_memory())
-    await state.initialize(namespace="tool-cas", tenant_id="tenant")
-    try:
-        repository = state.checkpoint.tools
-        expired = replace(
-            _record(),
-            replay_safe=False,
-            lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
-        )
-        await repository.reserve(expired)
-        with pytest.raises(AIError) as raised:
-            await repository.admit(replace(_admission(owner="replacement"), replay_safe=False))
-        assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
-        observed = await repository.get_operation("tool-operation", tenant_id="tenant")
-        assert observed is not None
-        assert observed.status is ToolOperationStatus.EFFECT_UNKNOWN
-        assert observed.fence == expired.fence
-        assert observed.owner == expired.owner
-    finally:
-        await state.close()

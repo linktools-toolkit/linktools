@@ -29,9 +29,11 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload
 from ._archive import ContentArchive, PreparedArchive
+from ..session import SessionTurnRef
 from .contracts import (
     deferred_resource_id,
     AgentAttemptClaim,
+    BudgetRepository,
     ApprovalRecord,
     ConversationCursor,
     ConversationHistoryRecord,
@@ -39,25 +41,31 @@ from .contracts import (
     EventRepository,
     ExecutionCancelRequestCommit,
     ExecutionEventAppend,
-    ExecutionHistoryState,
     ExecutionRecord,
     ResultRecord,
     ExecutionRepository,
     ExecutionStartClaim,
     ExecutionStartReservation,
+    ExecutionStartReservationResult,
+    ExecutionStartReceipt,
+    ExecutionTerminalPublication,
+    IdempotencyRecord,
     RuntimePayloadRef,
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
     ExternalCallRecord,
     PendingToolContinuation,
     OperationLedgerRepository,
-    ExecutionCheckpoint,
+    ExecutionRecoveryDetail,
     CheckpointRepositories,
-    ExecutionCheckpointState,
+    ExecutionRecoveryState,
     RecoveryHandoffPhase,
+    RecoveryTerminalHandoff,
+    RecoveryTerminalOutcome,
     SessionRecord,
     SessionRepository,
     ToolOperationAdmission,
+    ToolBoundaryReceipt,
     ToolOperationRecord,
     decode_tool_operation_failure,
 )
@@ -75,7 +83,6 @@ from ._conversation_repositories import (
     SessionRepositoryImpl,
 )
 from ._checkpoint_repositories import (
-    ExecutionCheckpointRepositoryImpl,
     tool_admission_matches as _tool_admission_matches,
 )
 from ._step_contracts import (
@@ -90,7 +97,7 @@ from ._step_archive import (
     StateStepArchive,
 )
 from ._repository_common import operation_identity_matches, validate_recovery_operation
-from .state import GroupRecordReader, StateGroupTransaction, StateStore, StateTransaction
+from .state import Observed, GroupRecordReader, StateGroupTransaction, StateStore, StateTransaction
 
 _logger = environ.get_logger("ai.runtime.state.commands")
 
@@ -164,9 +171,9 @@ class StateCommands:
         checkpoint: CheckpointRepositories | None = None,
         conversation_history: ConversationHistoryRepository | None = None,
         tools: object | None = None,
+        budgets: BudgetRepository | None = None,
         conversation_run_store: StateStepArchive | None = None,
         execution_run_store: StateStepArchive | None = None,
-        checkpoint_archive: StateStepArchive | None = None,
         background_tasks: "set[asyncio.Task[object]]",
         observe_cancellation: bool = True,
         capability_writes: "RuntimeCapabilityWrites | None" = None,
@@ -180,9 +187,9 @@ class StateCommands:
         self._checkpoint = checkpoint
         self._conversation_history = conversation_history
         self._tools = tools
+        self._budgets = budgets
         self._conversation_run_store = conversation_run_store
         self._execution_run_store = execution_run_store
-        self._checkpoint_archive = checkpoint_archive
         self._background_tasks = background_tasks
         self._observe_cancellation = observe_cancellation
         self._capability_writes = capability_writes
@@ -207,7 +214,6 @@ class StateCommands:
         tenant_id: str,
         expected_execution_revision: int,
         expected_event_seq: int,
-        expected_recovery_revision: int,
         expected_agent_run_seq: int,
         continuation: PendingToolContinuation,
         audit_events: Sequence[ExecutionEventAppend] = (),
@@ -216,7 +222,7 @@ class StateCommands:
         occurred_at: datetime,
         background_tasks: "set[asyncio.Task[object]] | None" = None,
         producer_generation: int | None = None,
-    ) -> tuple[ExecutionRecord, ExecutionCheckpoint]:
+    ) -> ExecutionRecord:
         self._require_checkpoint()
         approvals = self._checkpoint.approvals
         external_calls = self._checkpoint.external_calls
@@ -292,7 +298,7 @@ class StateCommands:
         stores = _dedupe_stores(
             (
                 self._execution.state_store,
-                self._checkpoint.checkpoints.state_store,
+                self._execution.state_store,
                 approvals.state_store,
                 external_calls.state_store,
             )
@@ -300,38 +306,35 @@ class StateCommands:
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
-        async def operation() -> tuple[ExecutionRecord, ExecutionCheckpoint]:
+        async def operation() -> ExecutionRecord:
             async def mutate(
                 group: StateGroupTransaction,
-            ) -> tuple[ExecutionRecord, ExecutionCheckpoint]:
+            ) -> ExecutionRecord:
                 execution_tx = group.transaction(self._execution.state_store)
-                recovery_tx = group.transaction(self._checkpoint.checkpoints.state_store)
+                recovery_tx = group.transaction(approvals.state_store)
                 if producer_generation is not None:
-                    await self._execution.require_open_history_head_in_transaction(
+                    current_execution, _ = await self._execution.require_execution_producer_in_transaction(
                         execution_tx, execution_id,
                         expected_producer_generation=producer_generation, allow_cancelling=False,
                     )
-                current_execution = await self._execution.get_in_transaction(
-                    execution_tx,
-                    execution_id,
-                    tenant_id=tenant_id,
-                )
-                current_checkpoint = await self._checkpoint.checkpoints.get_in_transaction(
-                    recovery_tx,
-                    execution_id,
-                    tenant_id=tenant_id,
-                )
+                else:
+                    current_execution = await self._execution.get_in_transaction(
+                        execution_tx,
+                        execution_id,
+                        tenant_id=tenant_id,
+                    )
+                current_checkpoint = current_execution
                 if (
                     current_execution is None
                     or current_checkpoint is None
+                    or current_checkpoint.recovery is None
                     or current_execution.status is not ExecutionStatus.STARTED
                     or current_execution.revision != expected_execution_revision
                     or current_execution.event_seq != expected_event_seq
                     or current_execution.agent_run_seq
                     != expected_agent_run_seq
-                    or current_checkpoint.revision != expected_recovery_revision
-                    or current_checkpoint.state is not ExecutionCheckpointState.ACTIVE
-                    or current_checkpoint.agent_run_id
+                    or current_checkpoint.recovery_state is not ExecutionRecoveryState.ACTIVE
+                    or current_checkpoint.recovery.agent_run_id
                     != continuation.source_agent_run_id
                 ):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -350,36 +353,23 @@ class StateCommands:
                         audit_events=audit_events,
                         deferred_events=request_events,
                         occurred_at=occurred_at,
+                        recovery=replace(current_checkpoint.recovery, pending_tools=continuation),
                     )
                 )
-                updated_checkpoint = await self._checkpoint.checkpoints.compare_and_swap_in_transaction(
-                    recovery_tx,
-                    execution_id,
-                    tenant_id=tenant_id,
-                    expected_revision=expected_recovery_revision,
-                    next_record=replace(
-                        current_checkpoint,
-                        state=ExecutionCheckpointState.WAITING,
-                        pending_tools=continuation,
-                        revision=expected_recovery_revision + 1,
-                        updated_at=occurred_at,
-                    ),
-                )
-                return updated_execution, updated_checkpoint
+                return updated_execution
 
             return await stores[0].storage_group.mutate(stores, mutate)
 
-        async def readback() -> CommitObservation[tuple[ExecutionRecord, ExecutionCheckpoint]]:
+        async def readback() -> CommitObservation[ExecutionRecord]:
             execution = await self._load_execution(execution_id, tenant_id=tenant_id)
-            checkpoint = await self._checkpoint.checkpoints.get(execution_id, tenant_id=tenant_id)
-            if execution is None or checkpoint is None:
+            checkpoint = execution
+            if execution is None or checkpoint is None or checkpoint.recovery is None:
                 return CommitObservation(
                     DurableCommitState.PARTIAL_INTEGRITY_ERROR,
                     error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
                 )
             if producer_generation is not None:
-                head = await self._execution.get_history_head(execution_id, tenant_id=tenant_id)
-                if head is not None and head.producer_generation > producer_generation:
+                if execution.producer_generation > producer_generation:
                     return CommitObservation(
                         DurableCommitState.NOT_COMMITTED, error=AIError(ErrorCode.STORAGE_CONFLICT),
                     )
@@ -410,18 +400,17 @@ class StateCommands:
             if (
                 execution.status is ExecutionStatus.WAITING_DEFERRED
                 and execution.agent_run_seq == expected_agent_run_seq
-                and checkpoint.state is ExecutionCheckpointState.WAITING
-                and checkpoint.pending_tools == continuation
+                and checkpoint.recovery_state is ExecutionRecoveryState.WAITING
+                and checkpoint.recovery.pending_tools == continuation
             ):
                 return CommitObservation(
                     DurableCommitState.COMMITTED,
-                    value=(execution, checkpoint),
+                    value=execution,
                 )
             if (
                 execution.status is ExecutionStatus.STARTED
                 and execution.revision == expected_execution_revision
                 and execution.event_seq == expected_event_seq
-                and checkpoint.revision == expected_recovery_revision
             ):
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
             return CommitObservation(
@@ -435,13 +424,12 @@ class StateCommands:
             readback,
             background_tasks=owner_tasks,
         )
-        return _require_durable_pair(outcome)
+        return _require_durable_record(outcome)
 
     async def commit_deferred_cancel_checkpoint(
         self,
         commit: ExecutionCancelRequestCommit,
         *,
-        expected_recovery_revision: int,
         expected_pending_tools: PendingToolContinuation,
         background_tasks: "set[asyncio.Task[object]] | None" = None,
     ) -> ExecutionRecord:
@@ -451,7 +439,7 @@ class StateCommands:
         stores = _dedupe_stores(
             (
                 self._execution.state_store,
-                self._checkpoint.checkpoints.state_store,
+                self._execution.state_store,
                 approvals.state_store,
                 external_calls.state_store,
             )
@@ -482,26 +470,22 @@ class StateCommands:
         async def operation() -> ExecutionRecord:
             async def mutate(group: StateGroupTransaction) -> ExecutionRecord:
                 execution_tx = group.transaction(self._execution.state_store)
-                recovery_tx = group.transaction(self._checkpoint.checkpoints.state_store)
+                recovery_tx = group.transaction(approvals.state_store)
                 execution = await self._execution.get_in_transaction(
                     execution_tx,
                     commit.execution_id,
                     tenant_id=self._tenant_id,
                 )
-                checkpoint = await self._checkpoint.checkpoints.get_in_transaction(
-                    recovery_tx,
-                    commit.execution_id,
-                    tenant_id=self._tenant_id,
-                )
+                checkpoint = execution
                 if (
                     execution is None
                     or checkpoint is None
+                    or checkpoint.recovery is None
                     or execution.status is not ExecutionStatus.WAITING_DEFERRED
                     or execution.revision != commit.expected_revision
                     or execution.event_seq != commit.expected_event_seq
-                    or checkpoint.revision != expected_recovery_revision
-                    or checkpoint.state is not ExecutionCheckpointState.WAITING
-                    or checkpoint.pending_tools != expected_pending_tools
+                    or checkpoint.recovery_state is not ExecutionRecoveryState.WAITING
+                    or checkpoint.recovery.pending_tools != expected_pending_tools
                 ):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 await approvals.cancel_pending_in_transaction(
@@ -522,19 +506,7 @@ class StateCommands:
                     execution_tx,
                     commit,
                     expected_status=ExecutionStatus.WAITING_DEFERRED,
-                )
-                await self._checkpoint.checkpoints.compare_and_swap_in_transaction(
-                    recovery_tx,
-                    commit.execution_id,
-                    tenant_id=self._tenant_id,
-                    expected_revision=expected_recovery_revision,
-                    next_record=replace(
-                        checkpoint,
-                        state=ExecutionCheckpointState.ACTIVE,
-                        pending_tools=None,
-                        revision=expected_recovery_revision + 1,
-                        updated_at=commit.requested_at,
-                    ),
+                    recovery=replace(checkpoint.recovery, pending_tools=None),
                 )
                 return updated
 
@@ -545,11 +517,8 @@ class StateCommands:
                 commit.execution_id,
                 tenant_id=self._tenant_id,
             )
-            checkpoint = await self._checkpoint.checkpoints.get(
-                commit.execution_id,
-                tenant_id=self._tenant_id,
-            )
-            if execution is None or checkpoint is None:
+            checkpoint = execution
+            if execution is None or checkpoint is None or checkpoint.recovery is None:
                 return CommitObservation(
                     DurableCommitState.PARTIAL_INTEGRITY_ERROR,
                     error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
@@ -593,15 +562,14 @@ class StateCommands:
                 }
                 and execution.event_seq
                 >= commit.expected_event_seq + 1
-                and checkpoint.state
+                and checkpoint.recovery_state
                 in {
-                    ExecutionCheckpointState.ACTIVE,
-                    ExecutionCheckpointState.COMPLETED,
+                    ExecutionRecoveryState.ACTIVE,
+                    ExecutionRecoveryState.COMPLETED,
                 }
-                and checkpoint.pending_tools is None
-                and checkpoint.handoff_phase is RecoveryHandoffPhase.NONE
-                and checkpoint.terminal_handoff is None
-                and checkpoint.revision >= expected_recovery_revision + 1
+                and checkpoint.recovery.pending_tools is None
+                and checkpoint.recovery.handoff_phase is RecoveryHandoffPhase.NONE
+                and checkpoint.recovery.terminal_handoff is None
             ):
                 return CommitObservation(
                     DurableCommitState.COMMITTED,
@@ -611,8 +579,7 @@ class StateCommands:
                 execution.status is ExecutionStatus.WAITING_DEFERRED
                 and execution.revision == commit.expected_revision
                 and execution.event_seq == commit.expected_event_seq
-                and checkpoint.revision == expected_recovery_revision
-                and checkpoint.pending_tools == expected_pending_tools
+                and checkpoint.recovery.pending_tools == expected_pending_tools
             ):
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
             return CommitObservation(
@@ -635,16 +602,11 @@ class StateCommands:
         tenant_id: str,
         expected_execution_revision: int,
         expected_event_seq: int,
-        expected_recovery_revision: int,
         expected_agent_run_seq: int,
         expected_pending_tools: PendingToolContinuation,
         background_tasks: "set[asyncio.Task[object]] | None" = None,
-    ) -> tuple[ExecutionRecord, ExecutionCheckpoint]:
-        stores = _dedupe_stores(
-            (self._execution.state_store, self._checkpoint.checkpoints.state_store)
-        )
-        if not _same_group(stores):
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    ) -> ExecutionRecord:
+        stores = (self._execution.state_store,)
         next_sequence = expected_agent_run_seq + 1
         producer_claim_id = uuid4().hex
         producer_generation = expected_execution_revision + 1
@@ -655,32 +617,27 @@ class StateCommands:
             agent_run_seq=next_sequence,
         )
 
-        async def operation() -> tuple[ExecutionRecord, ExecutionCheckpoint]:
+        async def operation() -> ExecutionRecord:
             async def mutate(
                 group: StateGroupTransaction,
-            ) -> tuple[ExecutionRecord, ExecutionCheckpoint]:
+            ) -> ExecutionRecord:
                 execution_tx = group.transaction(self._execution.state_store)
-                recovery_tx = group.transaction(self._checkpoint.checkpoints.state_store)
                 execution = await self._execution.get_in_transaction(
                     execution_tx,
                     execution_id,
                     tenant_id=tenant_id,
                 )
-                checkpoint = await self._checkpoint.checkpoints.get_in_transaction(
-                    recovery_tx,
-                    execution_id,
-                    tenant_id=tenant_id,
-                )
+                checkpoint = execution
                 if (
                     execution is None
                     or checkpoint is None
+                    or checkpoint.recovery is None
                     or execution.status is not ExecutionStatus.WAITING_DEFERRED
                     or execution.revision != expected_execution_revision
                     or execution.event_seq != expected_event_seq
                     or execution.agent_run_seq != expected_agent_run_seq
-                    or checkpoint.revision != expected_recovery_revision
-                    or checkpoint.state is not ExecutionCheckpointState.WAITING
-                    or checkpoint.pending_tools != expected_pending_tools
+                    or checkpoint.recovery_state is not ExecutionRecoveryState.WAITING
+                    or checkpoint.recovery.pending_tools != expected_pending_tools
                 ):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 updated_execution = (
@@ -691,58 +648,42 @@ class StateCommands:
                         expected_revision=expected_execution_revision,
                         expected_event_seq=expected_event_seq,
                         expected_agent_run_seq=expected_agent_run_seq,
+                        producer_claim_id=producer_claim_id,
+                        recovery=replace(checkpoint.recovery, agent_run_id=next_agent_run_id,
+                                         source_agent_run_id=expected_pending_tools.source_agent_run_id),
                     )
                 )
-                await self._execution.admit_history_producer_in_transaction(
-                    execution_tx, updated_execution,
-                    producer_claim_id=producer_claim_id,
-                )
-                updated_checkpoint = await self._checkpoint.checkpoints.compare_and_swap_in_transaction(
-                    recovery_tx,
-                    execution_id,
-                    tenant_id=tenant_id,
-                    expected_revision=expected_recovery_revision,
-                    next_record=replace(
-                        checkpoint,
-                        state=ExecutionCheckpointState.ACTIVE,
-                        agent_run_id=next_agent_run_id,
-                        pending_tools=None,
-                        revision=expected_recovery_revision + 1,
-                        updated_at=updated_execution.updated_at,
-                    ),
-                )
-                return updated_execution, updated_checkpoint
+                return updated_execution
 
             return await stores[0].storage_group.mutate(stores, mutate)
 
-        async def readback() -> CommitObservation[tuple[ExecutionRecord, ExecutionCheckpoint]]:
+        async def readback() -> CommitObservation[ExecutionRecord]:
             execution = await self._load_execution(execution_id, tenant_id=tenant_id)
-            checkpoint = await self._checkpoint.checkpoints.get(execution_id, tenant_id=tenant_id)
-            if execution is None or checkpoint is None:
+            checkpoint = execution
+            if execution is None or checkpoint is None or checkpoint.recovery is None:
                 return _partial_integrity()
-            head = await self._execution.get_history_head(execution_id, tenant_id=tenant_id)
             own_claim = (
-                head is not None
-                and head.producer_generation == producer_generation
-                and head.producer_claim_id == producer_claim_id
+                execution is not None
+                and execution.producer_generation == producer_generation
+                and execution.producer_claim_id == producer_claim_id
             )
             if (
                 own_claim
                 and execution.status is ExecutionStatus.STARTED
                 and execution.agent_run_seq == next_sequence
-                and checkpoint.state is ExecutionCheckpointState.ACTIVE
-                and checkpoint.agent_run_id == next_agent_run_id
-                and checkpoint.pending_tools is None
+                and checkpoint.recovery_state is ExecutionRecoveryState.ACTIVE
+                and checkpoint.recovery.agent_run_id == next_agent_run_id
+                and checkpoint.recovery.source_agent_run_id == expected_pending_tools.source_agent_run_id
+                and checkpoint.recovery.pending_tools == expected_pending_tools
             ):
                 return CommitObservation(
                     DurableCommitState.COMMITTED,
-                    value=(execution, checkpoint),
+                    value=execution,
                 )
             if (
                 execution.status is ExecutionStatus.WAITING_DEFERRED
                 and execution.revision == expected_execution_revision
-                and checkpoint.revision == expected_recovery_revision
-                and checkpoint.pending_tools == expected_pending_tools
+                and checkpoint.recovery.pending_tools == expected_pending_tools
             ):
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
             if not own_claim:
@@ -758,7 +699,7 @@ class StateCommands:
             readback,
             background_tasks=owner_tasks,
         )
-        return _require_durable_pair(outcome)
+        return _require_durable_record(outcome)
 
     async def _commit_or_raise(
         self,
@@ -838,7 +779,7 @@ class StateCommands:
                 return await self._execution.request_cancel(commit, pending_events=audit_events)
 
             async def mutate(transaction: StateTransaction) -> ExecutionRecord:
-                await self._execution.require_open_history_head_in_transaction(
+                await self._execution.require_execution_producer_in_transaction(
                     transaction, commit.execution_id,
                     expected_producer_generation=producer_generation,
                 )
@@ -968,35 +909,127 @@ class StateCommands:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from outcome.error
         raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from outcome.error
 
+    async def reserve_start_checkpoint(
+        self, reservation: ExecutionStartReservation, *,
+        expected_cursor: ConversationCursor | None,
+        expected_session: SessionRecord | None = None,
+    ) -> ExecutionStartReservationResult | None:
+        """Reserve and admit a new local execution without publishing a worker."""
+        initial = reservation.execution
+        if (type(self._execution) is not ExecutionRepositoryImpl
+                or initial.parent_execution_id is not None):
+            return None
+        stores = [self._execution.state_store]
+        if initial.session_id is not None:
+            self._require_conversation()
+            if type(self._conversation) is not SessionRepositoryImpl:
+                return None
+            stores.append(self._conversation.state_store)
+        if not _same_group(stores):
+            return None
+        identity = reservation.idempotency
+        claim = ExecutionStartClaim(initial.execution_id, initial.revision, initial.event_seq,
+                                    identity.scope, identity.idempotency_key_digest,
+                                    identity.request_digest, initial.created_at)
+
+        async def mutate(group: StateGroupTransaction) -> ExecutionStartReservationResult | None:
+            # Busy, stale-owner and changed-cursor admissions retain the existing
+            # reservation/rejection path, including durable failed request keys.
+            if initial.session_id is not None:
+                session = await self._conversation.get_in_transaction(
+                    group.transaction(self._conversation.state_store), initial.session_id,
+                    tenant_id=self._tenant_id,
+                )
+                if session is not None and expected_session is not None:
+                    _require_session_capture(session, expected_session)
+                if (session is None or session.status is not SessionStatus.OPEN
+                        or session.active_execution_id is not None
+                        or session.continuation != expected_cursor
+                        or session.history_quality == "unavailable"):
+                    return None
+            reserved = await self._execution.reserve_start(reservation)
+            if not reserved.created:
+                return reserved
+            turns: list[SessionTurnRef] = []
+            started = await self.commit_start_attempt_checkpoint(
+                claim, session_id=initial.session_id,
+                expected_cursor=expected_cursor,
+                expected_session=expected_session, admitted_turn=turns.append,
+            )
+            started_identity = await self._execution.get_start_idempotency(claim)
+            if started_identity is None or started_identity.status is not IdempotencyStatus.STARTED:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            admitted_session = (None if initial.session_id is None else
+                await self._conversation.get_in_transaction(
+                    group.transaction(self._conversation.state_store), initial.session_id,
+                    tenant_id=self._tenant_id,
+                ))
+            observed = await self._execution.get_observed_in_transaction(
+                group.transaction(self._execution.state_store), initial.execution_id, tenant_id=self._tenant_id,
+            )
+            if observed is None or observed.value != started:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return ExecutionStartReceipt(
+                started, started_identity, True, session=admitted_session,
+                observed=observed, turn=turns[0] if turns else None,
+            )
+
+        for attempt in range(2):
+            try:
+                return await stores[0].storage_group.mutate(stores, mutate)
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                    raise
+                observed_identity = await self._execution.get_start_idempotency(claim)
+                own = await self._execution.get(initial.execution_id, tenant_id=self._tenant_id)
+                if observed_identity is None:
+                    if own is not None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                    if attempt == 0:
+                        continue
+                    raise
+                if (observed_identity.request_digest != identity.request_digest
+                        or observed_identity.resource_kind != identity.resource_kind):
+                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
+                if observed_identity.resource_id != initial.execution_id:
+                    winner = await self._execution.get(observed_identity.resource_id, tenant_id=self._tenant_id)
+                    if winner is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                    return ExecutionStartReservationResult(winner, observed_identity, False)
+                started = await self._reconcile_start_unknown(
+                    claim, session_id=initial.session_id,
+                    expected_cursor=expected_cursor, expected_session=expected_session,
+                )
+                if started is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                session = (None if initial.session_id is None else
+                           await self._load_session(initial.session_id, tenant_id=self._tenant_id))
+                if initial.session_id is not None and (session is None or session.active_execution_id != initial.execution_id):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                return ExecutionStartReservationResult(started, observed_identity, True, session=session)
+        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+
     async def commit_start_checkpoint(
         self,
         claim: ExecutionStartClaim,
         *,
-        recovery_checkpoint: ExecutionCheckpoint | None = None,
         session_id: str | None = None,
         expected_cursor: ConversationCursor | None = None,
+        expected_session: SessionRecord | None = None,
+        admitted_turn: Callable[[SessionTurnRef], None] | None = None,
     ) -> ExecutionRecord:
         _logger.debug(
-            "start checkpoint requested: execution=%s session=%s recovery=%s",
+            "start checkpoint requested: execution=%s session=%s",
             claim.execution_id,
             session_id,
-            recovery_checkpoint is not None,
         )
         stores = [self._execution.state_store]
-        if recovery_checkpoint is not None:
-            self._require_checkpoint()
-            stores.append(self._checkpoint.checkpoints.state_store)
         if session_id is not None:
             self._require_conversation()
             stores.append(self._conversation.state_store)
         if _same_group(stores):
             async def callback(group: StateGroupTransaction) -> ExecutionRecord:
                 transaction = group.transaction(self._execution.state_store)
-                if recovery_checkpoint is not None:
-                    await self._checkpoint.checkpoints.admit_in_transaction(
-                        group.transaction(self._checkpoint.checkpoints.state_store),
-                        recovery_checkpoint,
-                    )
                 if session_id is not None:
                     session_transaction = group.transaction(self._conversation.state_store)
                     session = await self._conversation.get_in_transaction(
@@ -1004,6 +1037,10 @@ class StateCommands:
                         session_id,
                         tenant_id=self._tenant_id,
                     )
+                    if session is not None and expected_session is not None:
+                        _require_session_capture(session, expected_session)
+                    if session is None:
+                        raise AIError(ErrorCode.STORAGE_NOT_FOUND)
                     if session.active_execution_id not in {None, claim.execution_id}:
                         owner = await self._execution.get_in_transaction(
                             transaction,
@@ -1038,6 +1075,8 @@ class StateCommands:
                         tenant_id=self._tenant_id,
                         execution_id=claim.execution_id,
                         expected=expected_cursor,
+                        expected_session=expected_session,
+                        **({"admitted_turn": admitted_turn} if type(self._conversation) is SessionRepositoryImpl else {}),
                     )
                 return await self._execution.claim_start_in_transaction(transaction, claim)
 
@@ -1048,32 +1087,12 @@ class StateCommands:
                     raise
                 observed = await self._reconcile_start_unknown(
                     claim,
-                    recovery_checkpoint=recovery_checkpoint,
                     session_id=session_id,
-                    expected_cursor=expected_cursor,
+                    expected_cursor=expected_cursor, expected_session=expected_session,
                 )
                 if observed is not None:
                     return observed
                 return await stores[0].storage_group.mutate(stores, callback)
-        if recovery_checkpoint is not None:
-            for attempt in range(2):
-                try:
-                    await self._checkpoint.checkpoints.state_store.mutate(
-                        lambda transaction: self._checkpoint.checkpoints.admit_in_transaction(
-                            transaction,
-                            recovery_checkpoint,
-                        )
-                    )
-                    break
-                except AIError as error:
-                    if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or attempt == 1:
-                        raise
-                    actual = await self._checkpoint.checkpoints.get(
-                        recovery_checkpoint.execution_id,
-                        tenant_id=self._tenant_id,
-                    )
-                    if actual == recovery_checkpoint:
-                        break
         if session_id is not None:
             for attempt in range(2):
                 try:
@@ -1082,6 +1101,7 @@ class StateCommands:
                         tenant_id=self._tenant_id,
                         execution_id=claim.execution_id,
                         expected=expected_cursor,
+                        expected_session=expected_session,
                     )
                     break
                 except AIError as error:
@@ -1104,25 +1124,33 @@ class StateCommands:
         claim: AgentAttemptClaim,
         *,
         recovery_operation: OperationLedgerInput | None = None,
-    ) -> tuple[ExecutionRecord, ExecutionCheckpoint]:
-        return await self._commit_agent_attempt_checkpoint(claim, recovery_operation=recovery_operation)
+        source_agent_run_id: str | None = None,
+        completed_tool_call_ids: frozenset[str] = frozenset(),
+    ) -> Observed[ExecutionRecord]:
+        return await self._commit_agent_attempt_checkpoint(
+            claim, recovery_operation=recovery_operation, source_agent_run_id=source_agent_run_id,
+            completed_tool_call_ids=completed_tool_call_ids,
+        )
 
     async def commit_prepared_agent_attempt_checkpoint(
         self, claim: AgentAttemptClaim, input_context: RuntimePayloadRef, *,
         context_write: tuple[ContentArchive, PreparedArchive] | None = None,
-    ) -> tuple[ExecutionRecord, ExecutionCheckpoint]:
-        return await self._commit_agent_attempt_checkpoint(claim, prepared_input_context=input_context, context_write=context_write)
+        observed: Observed[ExecutionRecord] | None = None,
+    ) -> Observed[ExecutionRecord]:
+        return await self._commit_agent_attempt_checkpoint(claim, prepared_input_context=input_context, context_write=context_write, observed=observed)
 
     async def _commit_agent_attempt_checkpoint(
         self, claim: AgentAttemptClaim, *,
         recovery_operation: OperationLedgerInput | None = None,
+        source_agent_run_id: str | None = None,
+        completed_tool_call_ids: frozenset[str] = frozenset(),
         prepared_input_context: RuntimePayloadRef | None = None,
         context_write: tuple[ContentArchive, PreparedArchive] | None = None,
+        observed: Observed[ExecutionRecord] | None = None,
         producer_claim_id: str | None = None,
-    ) -> tuple[ExecutionRecord, ExecutionCheckpoint]:
+    ) -> Observed[ExecutionRecord]:
         """Atomically publish the execution sequence and active recovery run."""
-        self._require_checkpoint()
-        stores = [self._execution.state_store, self._checkpoint.checkpoints.state_store]
+        stores = [self._execution.state_store]
         operations = self._operations
         if recovery_operation is not None:
             if operations is None:
@@ -1145,9 +1173,8 @@ class StateCommands:
 
         async def callback(
             group: StateGroupTransaction,
-        ) -> tuple[ExecutionRecord, ExecutionCheckpoint]:
+        ) -> Observed[ExecutionRecord]:
             execution_transaction = group.transaction(self._execution.state_store)
-            recovery_transaction = group.transaction(self._checkpoint.checkpoints.state_store)
             existing_operation = None
             if recovery_operation is not None:
                 if operations is None:
@@ -1167,36 +1194,72 @@ class StateCommands:
                         recovery_operation, execution_id=claim.execution_id,
                         tenant_id=self._tenant_id, producer=True,
                     )
-            current_execution = await self._execution.get_in_transaction(
-                execution_transaction,
-                claim.execution_id,
-                tenant_id=self._tenant_id,
-            )
-            if current_execution is None:
+            current_observed = observed
+            if (current_observed is None or recovery_operation is not None
+                    or current_observed.value.execution_id != claim.execution_id
+                    or current_observed.value.revision != claim.expected_execution_revision
+                    or current_observed.value.agent_run_seq != claim.expected_agent_run_seq
+                    or type(self._execution) is not ExecutionRepositoryImpl):
+                current_observed = await self._execution.get_observed_in_transaction(
+                    execution_transaction, claim.execution_id, tenant_id=self._tenant_id,
+                )
+            if current_observed is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            current_recovery = await self._checkpoint.checkpoints.get_in_transaction(
-                recovery_transaction,
-                claim.execution_id,
-                tenant_id=self._tenant_id,
-            )
-            if current_recovery is None:
+            current_execution = current_observed.value
+            current_recovery = current_execution
+            if current_recovery.recovery is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             if existing_operation is not None:
-                return current_execution, current_recovery
+                return current_observed
             if (
                 current_execution.revision != claim.expected_execution_revision
                 or current_execution.agent_run_seq
                 != claim.expected_agent_run_seq
-                or current_recovery.revision != claim.expected_recovery_revision
-                or current_recovery.state is not claim.expected_recovery_state
+                or current_recovery.recovery_state is not claim.expected_recovery_state
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if current_recovery.state is not ExecutionCheckpointState.ADMITTED:
+            if current_recovery.recovery_state not in {
+                ExecutionRecoveryState.ADMITTED, ExecutionRecoveryState.ACTIVE,
+            }:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if current_execution.status not in (
+                {ExecutionStatus.STARTED, ExecutionStatus.RECOVERY_REQUIRED}
+                if current_recovery.recovery_state is ExecutionRecoveryState.ACTIVE
+                else {ExecutionStatus.STARTED}
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if source_agent_run_id not in {
+                current_recovery.recovery.agent_run_id, current_recovery.recovery.source_agent_run_id,
+            }:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if context_write is not None:
                 content_archive, archive_records = context_write
                 await content_archive.store.mutate(lambda tx: content_archive.publish(tx, archive_records))
-            if prepared_input_context is not None:
+            pending_tools = current_recovery.recovery.pending_tools
+            if pending_tools is not None:
+                approvals = tuple(call for call in pending_tools.approvals
+                                  if call.tool_call_id not in completed_tool_call_ids)
+                calls = tuple(call for call in pending_tools.calls
+                              if call.tool_call_id not in completed_tool_call_ids)
+                pending_tools = (replace(pending_tools, approvals=approvals, calls=calls)
+                                 if approvals or calls else None)
+            updated_recovery = replace(
+                current_recovery.recovery,
+                agent_run_id=next_agent_run_id,
+                source_agent_run_id=source_agent_run_id,
+                pending_tools=pending_tools,
+            )
+            if current_recovery.recovery_state is ExecutionRecoveryState.ACTIVE:
+                updated_execution = await self._execution.transition_recovery_in_transaction(
+                    execution_transaction, current_execution,
+                    next_status=ExecutionStatus.STARTED,
+                    event_type=ExecutionEventType.EXECUTION_RESUMED,
+                    event_payload={"producer_claim_id": producer_claim_id},
+                    next_error_code=None, next_safe_error_details={},
+                    agent_run_seq=next_sequence,
+                    recovery=updated_recovery,
+                )
+            elif prepared_input_context is not None:
                 if type(self._execution) is not ExecutionRepositoryImpl:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                 updated_execution = await self._execution.claim_prepared_agent_run_in_transaction(
@@ -1204,6 +1267,7 @@ class StateCommands:
                     expected_revision=claim.expected_execution_revision,
                     expected_agent_run_seq=claim.expected_agent_run_seq,
                     input_context=prepared_input_context, producer_claim_id=producer_claim_id,
+                    recovery=updated_recovery, observed=current_observed,
                 )
             else:
                 updated_execution = await self._execution.claim_next_agent_run_in_transaction(
@@ -1212,35 +1276,24 @@ class StateCommands:
                     tenant_id=self._tenant_id,
                     expected_revision=claim.expected_execution_revision,
                     expected_agent_run_seq=claim.expected_agent_run_seq,
-                )
-                await self._execution.admit_history_producer_in_transaction(
-                    execution_transaction, updated_execution,
                     producer_claim_id=producer_claim_id,
+                    recovery=updated_recovery,
                 )
-            updated_recovery = replace(
-                current_recovery,
-                agent_run_id=next_agent_run_id,
-                state=ExecutionCheckpointState.ACTIVE,
-                revision=current_recovery.revision + 1,
-                updated_at=updated_execution.updated_at,
-            )
-            updated_recovery = await self._checkpoint.checkpoints.compare_and_swap_in_transaction(
-                recovery_transaction,
-                claim.execution_id,
-                tenant_id=self._tenant_id,
-                expected_revision=claim.expected_recovery_revision,
-                next_record=updated_recovery,
-            )
             if recovery_operation is not None:
                 if operations is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                 await operations.append_in_transaction(
                     group.transaction(operations.state_store), recovery_operation,
                 )
-            return updated_execution, updated_recovery
+            confirmed = await self._execution.get_observed_in_transaction(
+                execution_transaction, claim.execution_id, tenant_id=self._tenant_id,
+            )
+            if confirmed is None or confirmed.value != updated_execution:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return confirmed
 
         if recovery_operation is not None:
-            async def readback() -> CommitObservation[tuple[ExecutionRecord, ExecutionCheckpoint]]:
+            async def readback() -> CommitObservation[Observed[ExecutionRecord]]:
                 if operations is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                 existing = await operations.get(
@@ -1256,20 +1309,17 @@ class StateCommands:
                         DurableCommitState.NOT_COMMITTED,
                         error=AIError(ErrorCode.IDEMPOTENCY_CONFLICT),
                     )
-                current_execution = await self._load_execution(
+                current_observed = await self._execution.get_observed(
                     claim.execution_id, tenant_id=self._tenant_id,
                 )
-                current_recovery = await self._checkpoint.checkpoints.get(
-                    claim.execution_id, tenant_id=self._tenant_id,
-                )
-                if current_execution is None or current_recovery is None:
+                if current_observed is None:
                     return CommitObservation(
                         DurableCommitState.PARTIAL_INTEGRITY_ERROR,
                         error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
                     )
                 return CommitObservation(
                     DurableCommitState.COMMITTED,
-                    value=(current_execution, current_recovery),
+                    value=current_observed,
                 )
 
             outcome = await run_durable_commit(
@@ -1299,21 +1349,23 @@ class StateCommands:
         try:
             return await stores[0].storage_group.mutate(stores, callback)
         except AIError as error:
+            if error.code is ErrorCode.STORAGE_CONFLICT and observed is not None:
+                return await self._commit_agent_attempt_checkpoint(
+                    claim, prepared_input_context=prepared_input_context, context_write=context_write,
+                    producer_claim_id=producer_claim_id,
+                )
             if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
                 raise
-            execution = await self._load_execution(
+            observed = await self._execution.get_observed(
                 claim.execution_id,
                 tenant_id=self._tenant_id,
             )
-            recovery = await self._checkpoint.checkpoints.get(
-                claim.execution_id,
-                tenant_id=self._tenant_id,
-            )
-            head = await self._execution.get_history_head(claim.execution_id, tenant_id=self._tenant_id)
+            execution = None if observed is None else observed.value
+            recovery = execution
             own_claim = (
-                head is not None
-                and head.producer_generation == producer_generation
-                and head.producer_claim_id == producer_claim_id
+                execution is not None
+                and execution.producer_generation == producer_generation
+                and execution.producer_claim_id == producer_claim_id
             )
             execution_target = (
                 execution is not None
@@ -1323,9 +1375,10 @@ class StateCommands:
             )
             recovery_target = (
                 recovery is not None
-                and recovery.revision >= claim.expected_recovery_revision + 1
-                and recovery.state is ExecutionCheckpointState.ACTIVE
-                and recovery.agent_run_id == next_agent_run_id
+                and recovery.recovery is not None
+                and recovery.recovery_state is ExecutionRecoveryState.ACTIVE
+                and recovery.recovery.agent_run_id == next_agent_run_id
+                and recovery.recovery.source_agent_run_id == source_agent_run_id
             )
             execution_predecessor = (
                 execution is not None
@@ -1334,9 +1387,8 @@ class StateCommands:
             )
             recovery_predecessor = (
                 recovery is not None
-                and recovery.revision == claim.expected_recovery_revision
-                and recovery.state is claim.expected_recovery_state
-                and recovery.agent_run_id is None
+                and recovery.recovery is not None
+                and recovery.recovery_state is claim.expected_recovery_state
             )
             if own_claim and execution_target and recovery_target:
                 _logger.warning(
@@ -1344,7 +1396,7 @@ class StateCommands:
                     claim.execution_id,
                     next_sequence,
                 )
-                return execution, recovery
+                return observed
             if not (execution_predecessor and recovery_predecessor):
                 if not own_claim:
                     raise AIError(ErrorCode.STORAGE_CONFLICT, retryable=False) from error
@@ -1355,16 +1407,17 @@ class StateCommands:
         self,
         claim: ExecutionStartClaim,
         *,
-        recovery_checkpoint: ExecutionCheckpoint | None = None,
         session_id: str | None = None,
         expected_cursor: ConversationCursor | None = None,
+        expected_session: SessionRecord | None = None,
+        admitted_turn: Callable[[SessionTurnRef], None] | None = None,
     ) -> ExecutionRecord:
         """Commit the initial execution start and optional recovery admission."""
         return await self.commit_start_checkpoint(
             claim,
-            recovery_checkpoint=recovery_checkpoint,
             session_id=session_id,
             expected_cursor=expected_cursor,
+            expected_session=expected_session, admitted_turn=admitted_turn,
         )
 
     async def commit_tool_terminal(
@@ -1374,10 +1427,11 @@ class StateCommands:
         tenant_id: str,
         owner: str,
         fence: int,
+        observed: Observed[ToolOperationRecord] | None = None,
         result_payload: StoredPayload | None = None,
         error_code: str | None = None,
         error_payload: StoredPayload | None = None,
-    ) -> tuple[ToolOperationRecord, bool]:
+    ) -> tuple[Observed[ToolOperationRecord], bool]:
         tools = self._tools
         if tools is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -1406,7 +1460,7 @@ class StateCommands:
         cancelled = False
         cancellation_requested = False
 
-        async def callback(group: StateGroupTransaction) -> ToolOperationRecord:
+        async def callback(group: StateGroupTransaction) -> Observed[ToolOperationRecord]:
             nonlocal cancellation_requested
             transaction = group.transaction(tools.state_store)
             if result_payload is not None:
@@ -1416,6 +1470,7 @@ class StateCommands:
                     tenant_id=tenant_id,
                     owner=owner,
                     fence=fence,
+                    observed=observed,
                     result_payload=result_payload,
                 )
             else:
@@ -1425,26 +1480,26 @@ class StateCommands:
                     tenant_id=tenant_id,
                     owner=owner,
                     fence=fence,
+                    observed=observed,
                     error_code=terminal_error_code,
                     error_payload=terminal_error_payload,
                 )
             if self._observe_cancellation:
                 execution = await self._execution.get_in_transaction(
-                    group.transaction(self._execution.state_store), record.execution_id, tenant_id=tenant_id,
+                    group.transaction(self._execution.state_store), record.value.execution_id, tenant_id=tenant_id,
                 )
-                if execution is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                cancellation_requested = execution.status in {
+                cancellation_requested = execution is None or execution.status in {
                     ExecutionStatus.CANCELLING, ExecutionStatus.CANCELLED,
                 }
             return record
 
-        async def readback() -> CommitObservation[ToolOperationRecord]:
+        async def readback() -> CommitObservation[Observed[ToolOperationRecord]]:
             nonlocal cancellation_requested
-            observed = await tools.get_operation(
+            receipt = await tools.observe_operation(
                 tool_operation_id,
                 tenant_id=tenant_id,
             )
+            observed = None if receipt is None else receipt.value
             if observed is None:
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
             if observed.status is expected_status:
@@ -1469,20 +1524,15 @@ class StateCommands:
                     )
                 if self._observe_cancellation:
                     execution = await self._load_execution(observed.execution_id, tenant_id=tenant_id)
-                    if execution is None:
-                        return CommitObservation(
-                            DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                            error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
-                        )
-                    cancellation_requested = execution.status in {
+                    cancellation_requested = execution is None or execution.status in {
                         ExecutionStatus.CANCELLING, ExecutionStatus.CANCELLED,
                     }
                 return CommitObservation(
                     DurableCommitState.COMMITTED,
-                    value=observed,
+                    value=receipt,
                 )
             if (
-                observed.status is ToolOperationStatus.CLAIMED
+                observed.status in {ToolOperationStatus.CLAIMED, ToolOperationStatus.EFFECT_UNKNOWN}
                 and observed.owner == owner
                 and observed.fence == fence
             ):
@@ -1515,6 +1565,7 @@ class StateCommands:
                     isinstance(result.error, AIError)
                     and result.error.code is ErrorCode.STORAGE_CONFLICT
                 ):
+                    observed = None
                     await asyncio.sleep(0)
                     continue
                 if result.error is not None:
@@ -1562,7 +1613,6 @@ class StateCommands:
             if (
                 observed.status is ToolOperationStatus.PENDING
                 and observed.owner is None
-                and observed.lease_expires_at is None
                 and observed.fence == fence
             ):
                 return CommitObservation(
@@ -1593,11 +1643,402 @@ class StateCommands:
             raise result.error
         raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
 
+    async def commit_external_tool_result(
+        self, expected: ToolOperationRecord, supplied: ExternalCallRecord, *,
+        source_agent_run_id: str,
+        result_payload: StoredPayload | None = None, error_code: str | None = None,
+        error_payload: StoredPayload | None = None,
+    ) -> ToolOperationRecord:
+        tools = self._tools
+        if tools is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        external = self._checkpoint.external_calls
+        stores = [tools.state_store, external.state_store]
+        if not _same_group(stores):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if (supplied.execution_id != expected.execution_id or supplied.call_id != deferred_resource_id(
+                "external-call-v1", self._tenant_id, expected.execution_id,
+                source_agent_run_id, expected.tool_call_id)):
+            raise AIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
+        async def mutate(group: StateGroupTransaction) -> ToolOperationRecord:
+            source = await external.get_in_transaction(
+                group.transaction(external.state_store), supplied.call_id, tenant_id=self._tenant_id,
+            )
+            if source != supplied or source.status is not ExternalCallStatus.SUPPLIED:
+                raise AIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
+            return await tools.settle_deferred_result_in_transaction(
+                group.transaction(tools.state_store), expected, result_payload=result_payload,
+                error_code=error_code, error_payload=error_payload,
+            )
+        while True:
+            try:
+                return await stores[0].storage_group.mutate(stores, mutate)
+            except AIError as error:
+                if error.code not in {ErrorCode.STORAGE_CONFLICT, ErrorCode.STORAGE_COMMIT_UNKNOWN}:
+                    raise
+                # Repeating this exact supplied result is an idempotent source-checked CAS.
+                await asyncio.sleep(0)
+
+    async def commit_denied_tool_result(
+        self, expected: ToolOperationRecord, decision: ApprovalRecord, *,
+        source_agent_run_id: str, error_payload: StoredPayload,
+    ) -> ToolOperationRecord:
+        tools = self._tools
+        if tools is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        approvals = self._checkpoint.approvals
+        stores = [tools.state_store, approvals.state_store]
+        if not _same_group(stores):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if (decision.execution_id != expected.execution_id or decision.approval_id != deferred_resource_id(
+                "approval-v1", self._tenant_id, expected.execution_id,
+                source_agent_run_id, expected.tool_call_id)):
+            raise AIError(ErrorCode.APPROVAL_CONFLICT)
+        async def mutate(group: StateGroupTransaction) -> ToolOperationRecord:
+            source = await approvals.get_in_transaction(
+                group.transaction(approvals.state_store), decision.approval_id, tenant_id=self._tenant_id,
+            )
+            if source != decision or source.status not in {ApprovalStatus.DENIED, ApprovalStatus.CANCELLED}:
+                raise AIError(ErrorCode.APPROVAL_CONFLICT)
+            return await tools.settle_deferred_result_in_transaction(
+                group.transaction(tools.state_store), expected, result_payload=None,
+                error_code=ErrorCode.TOOL_EXECUTION_FAILED.value, error_payload=error_payload,
+            )
+        while True:
+            try:
+                return await stores[0].storage_group.mutate(stores, mutate)
+            except AIError as error:
+                if error.code not in {ErrorCode.STORAGE_CONFLICT, ErrorCode.STORAGE_COMMIT_UNKNOWN}:
+                    raise
+                await asyncio.sleep(0)
+
+    async def reconcile_tool_turn_takeover(
+        self, tool_operation_id: str, *, execution_id: str,
+        producer_generation: int, producer_claim_id: str,
+    ) -> ToolOperationRecord:
+        tools = self._tools
+        if tools is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        stores = [self._execution.state_store, tools.state_store]
+        if not _same_group(stores):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        async def mutate(group: StateGroupTransaction) -> ToolOperationRecord:
+            execution, _ = await self._execution.require_execution_producer_in_transaction(
+                group.transaction(self._execution.state_store), execution_id,
+                expected_producer_generation=producer_generation, allow_cancelling=False,
+            )
+            if execution.producer_claim_id != producer_claim_id:
+                raise AIError(ErrorCode.STORAGE_CONFLICT, retryable=False)
+            return await tools.reconcile_turn_claim_in_transaction(
+                group.transaction(tools.state_store), tool_operation_id,
+                execution_id=execution_id, producer_generation=producer_generation,
+                producer_claim_id=producer_claim_id, turn_stopping=False,
+            )
+        while True:
+            try:
+                return await stores[0].storage_group.mutate(stores, mutate)
+            except AIError as error:
+                if error.code not in {ErrorCode.STORAGE_CONFLICT, ErrorCode.STORAGE_COMMIT_UNKNOWN}:
+                    raise
+                execution = await self._load_execution(execution_id, tenant_id=self._tenant_id)
+                if (execution is None or execution.status is not ExecutionStatus.STARTED
+                        or execution.producer_generation != producer_generation
+                        or execution.producer_claim_id != producer_claim_id):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT, retryable=False) from error
+                if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                    observed = await tools.get_operation(tool_operation_id, tenant_id=self._tenant_id)
+                    if observed is not None and observed.status is not ToolOperationStatus.CLAIMED:
+                        return observed
+                await asyncio.sleep(0)
+
+
+    async def reconcile_tool_turn_cancellation(
+        self, tool_operation_id: str, *, execution_id: str,
+        producer_generation: int, producer_claim_id: str,
+    ) -> ToolOperationRecord:
+        tools = self._tools
+        if tools is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        stores = [self._execution.state_store, tools.state_store]
+        if not _same_group(stores):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        async def mutate(group: StateGroupTransaction) -> ToolOperationRecord:
+            execution, _ = await self._execution.require_execution_producer_in_transaction(
+                group.transaction(self._execution.state_store), execution_id,
+                expected_producer_generation=producer_generation, allow_cancelling=True,
+            )
+            if (execution.status is not ExecutionStatus.CANCELLING
+                    or execution.producer_claim_id != producer_claim_id):
+                raise AIError(ErrorCode.STORAGE_CONFLICT, retryable=False)
+            return await tools.reconcile_turn_claim_in_transaction(
+                group.transaction(tools.state_store), tool_operation_id,
+                execution_id=execution_id, producer_generation=producer_generation,
+                producer_claim_id=producer_claim_id, turn_stopping=True,
+            )
+        while True:
+            try:
+                return await stores[0].storage_group.mutate(stores, mutate)
+            except AIError as error:
+                if error.code not in {ErrorCode.STORAGE_CONFLICT, ErrorCode.STORAGE_COMMIT_UNKNOWN}:
+                    raise
+                execution = await self._load_execution(execution_id, tenant_id=self._tenant_id)
+                if (execution is None or execution.status is not ExecutionStatus.CANCELLING
+                        or execution.producer_generation != producer_generation
+                        or execution.producer_claim_id != producer_claim_id):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT, retryable=False) from error
+                if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                    observed = await tools.get_operation(tool_operation_id, tenant_id=self._tenant_id)
+                    if observed is not None and observed.status is not ToolOperationStatus.CLAIMED:
+                        return observed
+                await asyncio.sleep(0)
+
+    def _tool_budget_repository(self, execution: ExecutionRecord) -> BudgetRepository | None:
+        if execution.budget_scope_id is None:
+            return None
+        if self._budgets is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                          safe_details={"reason": "run_budget_owner_missing"})
+        return self._budgets
+
+    def _tool_budget_call_id(self, operation: ToolOperationRecord) -> str:
+        return canonical_sha256({
+            "execution_id": operation.execution_id,
+            "tool_operation_id": operation.tool_operation_id,
+            "fence": operation.fence,
+        })
+
+    async def commit_tool_admission_boundary(
+        self, request: ToolOperationAdmission, *, execution: Observed[ExecutionRecord],
+        observed: Observed[ToolOperationRecord] | None = None,
+        next_execution: ExecutionRecord | None = None,
+        known_new: bool = False,
+        write: Callable[[StateGroupTransaction], Awaitable[None]] | None = None,
+        readback_write: Callable[[], Awaitable[bool]] | None = None,
+        stores: Sequence[StateStore] = (),
+    ) -> ToolBoundaryReceipt:
+        """Fence final leaf admission and publish its prepared native event once."""
+        tools = self._tools
+        if tools is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        current = execution.value
+        if (request.execution_id != current.execution_id
+                or request.producer_generation != current.producer_generation
+                or request.owner != current.producer_claim_id):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        target = current if next_execution is None else next_execution
+        budget = self._tool_budget_repository(current)
+        participants = _dedupe_stores((self._execution.state_store, tools.state_store,
+                                      *((budget.state_store,) if budget is not None else ()), *stores))
+        if not _same_group(participants):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+        control_conflict = False
+        retry_execution: Observed[ExecutionRecord] | None = None
+        cancelled = False
+        admission_id = uuid4().hex
+        budget_call_id: str | None = None
+
+        async def operation() -> ToolBoundaryReceipt:
+            async def mutate(group: StateGroupTransaction) -> ToolBoundaryReceipt:
+                nonlocal control_conflict, budget_call_id
+                try:
+                    control = await self._execution.commit_boundary_in_transaction(
+                        group.transaction(self._execution.state_store), execution,
+                        next_record=target, expected_producer_generation=current.producer_generation,
+                        expected_producer_claim_id=request.owner,
+                    )
+                except AIError as error:
+                    control_conflict = error.code is ErrorCode.STORAGE_CONFLICT
+                    raise
+                effect = await tools.admit_in_transaction(
+                    group.transaction(tools.state_store), request, observed=observed, known_new=known_new,
+                )
+                usage = None
+                if budget is not None and effect.value.status is ToolOperationStatus.CLAIMED:
+                    budget_call_id = self._tool_budget_call_id(effect.value)
+                    usage = await budget.admit_tool_in_transaction(
+                        group.transaction(budget.state_store), current.budget_scope_id, budget_call_id,
+                        admission_id=admission_id,
+                    )
+                if write is not None:
+                    await write(group)
+                return ToolBoundaryReceipt(control, effect, usage)
+            async def commit() -> ToolBoundaryReceipt:
+                return await participants[0].storage_group.mutate(participants, mutate)
+            return await commit() if budget is None else await budget.retry_admission(commit)
+
+        async def readback() -> CommitObservation[ToolBoundaryReceipt]:
+            nonlocal retry_execution
+            control = await self._execution.get_observed(current.execution_id, tenant_id=self._tenant_id)
+            if control is None:
+                return _partial_integrity()
+            if control_conflict:
+                if (control.value == current and control.value.status is ExecutionStatus.STARTED
+                        and control.storage_revision > execution.storage_revision):
+                    retry_execution = control
+                return CommitObservation(DurableCommitState.NOT_COMMITTED,
+                                         error=AIError(ErrorCode.STORAGE_CONFLICT))
+            effect = await tools.observe_operation(request.tool_operation_id, tenant_id=self._tenant_id)
+            if effect is not None and not _tool_admission_matches(effect.value, request):
+                return CommitObservation(DurableCommitState.NOT_COMMITTED,
+                                         error=AIError(ErrorCode.IDEMPOTENCY_CONFLICT))
+            if (control.value == target and control.storage_revision >= execution.storage_revision + 1
+                    and effect is not None):
+                usage = None
+                if (budget is not None and effect.value.status is ToolOperationStatus.CLAIMED
+                        and budget_call_id is None):
+                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                if budget is not None and budget_call_id is not None:
+                    if self._tool_budget_call_id(effect.value) != budget_call_id:
+                        return CommitObservation(DurableCommitState.NOT_COMMITTED,
+                                                 error=AIError(ErrorCode.TOOL_OPERATION_CONFLICT))
+                    usage = await budget.read_tool_admission(
+                        current.budget_scope_id, budget_call_id, admission_id=admission_id,
+                    )
+                    if usage is None:
+                        return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                if write is not None and (readback_write is None or not await readback_write()):
+                    return CommitObservation(DurableCommitState.UNRESOLVED,
+                                             error=AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN))
+                return CommitObservation(DurableCommitState.COMMITTED, value=ToolBoundaryReceipt(control, effect, usage))
+            if control.value == current and control.storage_revision == execution.storage_revision:
+                return CommitObservation(DurableCommitState.NOT_COMMITTED)
+            return CommitObservation(DurableCommitState.NOT_COMMITTED,
+                                     error=AIError(ErrorCode.STORAGE_CONFLICT))
+
+        while True:
+            control_conflict = False
+            retry_execution = None
+            result = await run_durable_commit(operation, readback, background_tasks=self._background_tasks)
+            cancelled = cancelled or result.cancelled
+            if result.state is DurableCommitState.COMMITTED and result.value is not None:
+                if cancelled:
+                    raise asyncio.CancelledError
+                return result.value
+            if (result.state is DurableCommitState.NOT_COMMITTED and retry_execution is not None
+                    and isinstance(result.error, AIError) and result.error.code is ErrorCode.STORAGE_CONFLICT):
+                if cancelled:
+                    raise asyncio.CancelledError
+                execution = retry_execution
+                continue
+            if result.error is not None:
+                raise result.error
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+
+    async def commit_tool_terminal_boundary(
+        self, tool_operation_id: str, *, tenant_id: str, owner: str, fence: int,
+        execution: Observed[ExecutionRecord], observed: Observed[ToolOperationRecord] | None = None,
+        result_payload: StoredPayload | None = None, error_code: str | None = None,
+        error_payload: StoredPayload | None = None,
+        write: Callable[[StateGroupTransaction], Awaitable[None]] | None = None,
+        readback_write: Callable[[], Awaitable[bool]] | None = None,
+        stores: Sequence[StateStore] = (),
+    ) -> ToolBoundaryReceipt:
+        """Settle a permitted certain effect independently of the live producer."""
+        tools = self._tools
+        if tools is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if (result_payload is None) == (error_code is None or error_payload is None):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if result_payload is not None and (error_code is not None or error_payload is not None):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if result_payload is None:
+            decode_tool_operation_failure(error_code, error_payload)
+        if observed is not None and observed.value.execution_id != execution.value.execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        participants = _dedupe_stores((tools.state_store, *stores))
+        if not _same_group(participants):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        write_error: BaseException | None = None
+        retry_observed: Observed[ToolOperationRecord] | None = None
+        cancelled = False
+
+        async def settle(transaction: StateTransaction) -> Observed[ToolOperationRecord]:
+            if result_payload is not None:
+                return await tools.complete_in_transaction(
+                    transaction, tool_operation_id, tenant_id=tenant_id, owner=owner, fence=fence,
+                    observed=observed, result_payload=result_payload,
+                )
+            return await tools.fail_in_transaction(
+                transaction, tool_operation_id, tenant_id=tenant_id, owner=owner, fence=fence,
+                observed=observed, error_code=error_code, error_payload=error_payload,
+            )
+
+        async def operation() -> ToolBoundaryReceipt:
+            async def mutate(group: StateGroupTransaction) -> ToolBoundaryReceipt:
+                nonlocal write_error
+                effect = await settle(group.transaction(tools.state_store))
+                if effect.value.execution_id != execution.value.execution_id:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if write is not None:
+                    try:
+                        await write(group)
+                    except BaseException as error:
+                        write_error = error
+                        raise
+                return ToolBoundaryReceipt(execution, effect)
+            return await participants[0].storage_group.mutate(participants, mutate)
+
+        async def readback() -> CommitObservation[ToolBoundaryReceipt]:
+            nonlocal retry_observed
+            effect = await tools.observe_operation(tool_operation_id, tenant_id=tenant_id)
+            if effect is None:
+                return CommitObservation(DurableCommitState.NOT_COMMITTED)
+            value = effect.value
+            if value.owner != owner or value.fence != fence or value.execution_id != execution.value.execution_id:
+                return CommitObservation(DurableCommitState.NOT_COMMITTED,
+                                         error=AIError(ErrorCode.TOOL_OPERATION_CONFLICT))
+            expected_status = ToolOperationStatus.COMPLETED if result_payload is not None else ToolOperationStatus.FAILED
+            if value.status is expected_status:
+                if (value.result_payload != result_payload or value.error_code != error_code
+                        or value.error_payload != error_payload):
+                    return CommitObservation(DurableCommitState.NOT_COMMITTED,
+                                             error=AIError(ErrorCode.TOOL_RESULT_CONFLICT))
+                if write is not None and (readback_write is None or not await readback_write()):
+                    return CommitObservation(DurableCommitState.UNRESOLVED,
+                                             error=AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN))
+                return CommitObservation(DurableCommitState.COMMITTED, value=ToolBoundaryReceipt(execution, effect))
+            if value.status in {ToolOperationStatus.CLAIMED, ToolOperationStatus.EFFECT_UNKNOWN}:
+                retry_observed = effect
+                return CommitObservation(DurableCommitState.NOT_COMMITTED)
+            return CommitObservation(DurableCommitState.NOT_COMMITTED,
+                                     error=AIError(ErrorCode.TOOL_OPERATION_CONFLICT))
+
+        while True:
+            result = await run_durable_commit(operation, readback, background_tasks=self._background_tasks)
+            cancelled = cancelled or result.cancelled
+            if result.state is DurableCommitState.COMMITTED and result.value is not None:
+                if cancelled:
+                    raise asyncio.CancelledError
+                return result.value
+            if write_error is not None:
+                # Failure to publish an SDK event cannot erase a permitted external outcome.
+                # This is a new short transaction after the failed group has rolled back.
+                await self.commit_tool_terminal(
+                    tool_operation_id, tenant_id=tenant_id, owner=owner, fence=fence,
+                    observed=None, result_payload=result_payload, error_code=error_code, error_payload=error_payload,
+                )
+                raise write_error
+            if (result.state is DurableCommitState.NOT_COMMITTED
+                    and isinstance(result.error, AIError) and result.error.code is ErrorCode.STORAGE_CONFLICT
+                    and retry_observed is not None):
+                observed = retry_observed
+                retry_observed = None
+                continue
+            if result.error is not None:
+                raise result.error
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+
     async def commit_tool_admission(
         self,
         request: ToolOperationAdmission,
-    ) -> ToolOperationRecord:
-        async def attempt() -> ToolOperationRecord:
+        *, observed: Observed[ToolOperationRecord] | None = None,
+    ) -> Observed[ToolOperationRecord]:
+        admission_id = uuid4().hex
+        budget_scope_id: str | None = None
+        budget_call_id: str | None = None
+
+        async def attempt() -> Observed[ToolOperationRecord]:
             if self._tools is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             _logger.debug(
@@ -1607,130 +2048,144 @@ class StateCommands:
             stores = [self._tools.state_store]
             if request.producer_generation is not None:
                 stores.append(self._execution.state_store)
+                if self._budgets is not None:
+                    stores.append(self._budgets.state_store)
                 if not _same_group(stores):
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
-            async def callback(group: StateGroupTransaction) -> ToolOperationRecord:
+            async def callback(group: StateGroupTransaction) -> Observed[ToolOperationRecord]:
+                nonlocal budget_scope_id, budget_call_id
+                execution = None
                 if request.producer_generation is not None:
                     execution_transaction = group.transaction(self._execution.state_store)
-                    await self._execution.require_open_history_head_in_transaction(
+                    execution, _ = await self._execution.require_execution_producer_in_transaction(
                         execution_transaction,
                         request.execution_id,
                         expected_producer_generation=request.producer_generation,
                         allow_cancelling=False,
                     )
+                    if execution.producer_claim_id != request.owner:
+                        raise AIError(ErrorCode.STORAGE_CONFLICT, retryable=False)
                 operation = await self._tools.admit_in_transaction(
                     group.transaction(self._tools.state_store),
-                    request,
+                    request, observed=observed,
                 )
+                budget = None if execution is None else self._tool_budget_repository(execution)
+                if budget is not None and operation.value.status is ToolOperationStatus.CLAIMED:
+                    budget_scope_id = execution.budget_scope_id
+                    budget_call_id = self._tool_budget_call_id(operation.value)
+                    await budget.admit_tool_in_transaction(
+                        group.transaction(budget.state_store), budget_scope_id, budget_call_id,
+                        admission_id=admission_id,
+                    )
                 return operation
 
-            try:
+            async def commit() -> Observed[ToolOperationRecord]:
                 return await stores[0].storage_group.mutate(stores, callback)
+
+            try:
+                return await commit() if self._budgets is None else await self._budgets.retry_admission(commit)
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
                     raise
-                observed = await self._tools.get_operation(
+                receipt = await self._tools.observe_operation(
                     request.tool_operation_id,
                     tenant_id=self._tools.tenant_id,
                 )
-                if observed is None:
+                source = None if receipt is None else receipt.value
+                if source is None:
                     return await stores[0].storage_group.mutate(stores, callback)
-                if not _tool_admission_matches(observed, request):
+                if not _tool_admission_matches(source, request):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-                if observed.status is ToolOperationStatus.EFFECT_UNKNOWN:
+                if budget_call_id is not None:
+                    if self._tool_budget_call_id(source) != budget_call_id:
+                        raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT) from error
+                    usage = await self._budgets.read_tool_admission(
+                        budget_scope_id, budget_call_id, admission_id=admission_id,
+                    )
+                    if usage is None:
+                        return await commit()
+                if source.status is ToolOperationStatus.EFFECT_UNKNOWN:
                     raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
-                if observed.status is ToolOperationStatus.CANCELLED:
+                if source.status is ToolOperationStatus.CANCELLED:
                     raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT) from error
-                if observed.status in {
+                if source.status in {
                     ToolOperationStatus.CLAIMED,
                     ToolOperationStatus.COMPLETED,
                     ToolOperationStatus.FAILED,
                 }:
-                    return observed
-                return await stores[0].storage_group.mutate(stores, callback)
+                    return receipt
+                raise AIError(ErrorCode.STORAGE_CONFLICT) from error
 
         while True:
             try:
                 result = await attempt()
-                if result.status is ToolOperationStatus.EFFECT_UNKNOWN:
+                if result.value.status is ToolOperationStatus.EFFECT_UNKNOWN:
                     raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
                 return result
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
                     raise
                 if request.producer_generation is not None:
-                    head = await self._execution.get_history_head(
-                        request.execution_id, tenant_id=self._tenant_id,
-                    )
                     execution = await self._load_execution(request.execution_id, tenant_id=self._tenant_id)
                     if (
-                        head is None
-                        or head.state is not ExecutionHistoryState.OPEN
-                        or head.producer_generation != request.producer_generation
-                        or execution is None
-                        or execution.status not in {
-                            ExecutionStatus.STARTED,
-                            ExecutionStatus.CANCELLING,
-                            ExecutionStatus.FINALIZING,
-                        }
+                        execution is None
+                        or execution.producer_generation != request.producer_generation
+                        or execution.producer_claim_id != request.owner
+                        or execution.status is not ExecutionStatus.STARTED
                     ):
                         raise AIError(ErrorCode.STORAGE_CONFLICT, retryable=False) from error
                 tools = self._tools
                 if tools is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
-                observed = await tools.get_operation(
+                receipt = await tools.observe_operation(
                     request.tool_operation_id,
                     tenant_id=tools.tenant_id,
                 )
-                if observed is None:
+                source = None if receipt is None else receipt.value
+                if source is None:
                     await asyncio.sleep(0)
                     continue
-                if not _tool_admission_matches(observed, request):
+                if not _tool_admission_matches(source, request):
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
-                if observed.status is ToolOperationStatus.EFFECT_UNKNOWN:
+                if source.status is ToolOperationStatus.EFFECT_UNKNOWN:
                     raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
-                if observed.status is ToolOperationStatus.CANCELLED:
+                if source.status is ToolOperationStatus.CANCELLED:
                     raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT) from error
-                if observed.status in {
+                if source.status in {
                     ToolOperationStatus.COMPLETED,
                     ToolOperationStatus.FAILED,
                 }:
-                    return observed
-                # CLAIMED/PENDING must be classified by a fresh repository
-                # transaction so lease expiry and owner takeover semantics are
-                # never guessed from an out-of-transaction readback.
+                    return receipt
+                observed = None
                 await asyncio.sleep(0)
 
     async def commit_recovery_handoff(
         self,
-        checkpoint: ExecutionCheckpoint,
+        checkpoint: ExecutionRecord,
         *,
         expected_revision: int,
         producer_generation: int,
-    ) -> ExecutionCheckpoint:
+    ) -> ExecutionRecord:
         """Publish a worker's terminal handoff while its producer fence is held."""
-        self._require_checkpoint()
         if (
-            checkpoint.state is not ExecutionCheckpointState.HANDOFF
-            or checkpoint.handoff_phase is not RecoveryHandoffPhase.PREPARED
-            or checkpoint.terminal_handoff is None
+            checkpoint.recovery_state is not ExecutionRecoveryState.HANDOFF
+            or checkpoint.recovery.handoff_phase is not RecoveryHandoffPhase.PREPARED
+            or checkpoint.recovery.terminal_handoff is None
             or checkpoint.revision != expected_revision + 1
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        stores = _dedupe_stores((self._execution.state_store, self._checkpoint.checkpoints.state_store))
-        if not _same_group(stores):
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        stores = (self._execution.state_store,)
 
-        async def operation() -> ExecutionCheckpoint:
-            async def mutate(group: StateGroupTransaction) -> ExecutionCheckpoint:
-                await self._execution.require_open_history_head_in_transaction(
+        async def operation() -> ExecutionRecord:
+            async def mutate(group: StateGroupTransaction) -> ExecutionRecord:
+                await self._execution.require_execution_producer_in_transaction(
                     group.transaction(self._execution.state_store),
                     checkpoint.execution_id,
                     expected_producer_generation=producer_generation,
                 )
-                return await self._checkpoint.checkpoints.compare_and_swap_in_transaction(
-                    group.transaction(self._checkpoint.checkpoints.state_store),
+                return await self._execution.compare_and_swap_in_transaction(
+                    group.transaction(self._execution.state_store),
                     checkpoint.execution_id,
                     tenant_id=self._tenant_id,
                     expected_revision=expected_revision,
@@ -1739,7 +2194,7 @@ class StateCommands:
             return await stores[0].storage_group.mutate(stores, mutate)
 
         async def readback() -> CommitObservation[object]:
-            observed = await self._checkpoint.checkpoints.get(checkpoint.execution_id, tenant_id=self._tenant_id)
+            observed = await self._execution.get_recovery(checkpoint.execution_id, tenant_id=self._tenant_id)
             if observed == checkpoint:
                 return CommitObservation(DurableCommitState.COMMITTED)
             return CommitObservation(DurableCommitState.NOT_COMMITTED)
@@ -1747,18 +2202,53 @@ class StateCommands:
         await self._commit_or_raise(operation, readback)
         return checkpoint
 
+    def _pending_tool_store(self, operations: Sequence[ToolOperationRecord]) -> tuple[StateStore, ...]:
+        if not operations:
+            return ()
+        if self._tools is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return (self._tools.state_store,)
+
+    async def _materialize_pending_tools(
+        self, execution: ExecutionRecord, operations: Sequence[ToolOperationRecord], *,
+        read_only: bool, terminal: bool,
+    ) -> None:
+        if not operations:
+            return
+        if self._tools is None or execution.agent_run_seq != 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        expected_run = agent_run_id(namespace=self._namespace, tenant_id=self._tenant_id,
+                                    execution_id=execution.execution_id, agent_run_seq=1)
+        if len({value.tool_operation_id for value in operations}) != len(operations):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for value in operations:
+            if (value.execution_id != execution.execution_id or value.agent_run_id != expected_run
+                    or value.binding_digest != execution.binding_digest or not value.replay_safe
+                    or value.producer_generation != execution.producer_generation
+                    or value.owner != (None if value.status is ToolOperationStatus.PENDING else execution.producer_claim_id)
+                    or isinstance(value.fence, bool) or not isinstance(value.fence, int) or value.fence < 1
+                    or terminal and value.status not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            actual = (await self._tools.get_operation(value.tool_operation_id, tenant_id=self._tenant_id)
+                      if read_only else await self._tools.reserve(value))
+            if actual != value:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
     async def read_pending_turn(
         self, reservation: ExecutionStartReservation, *, expected_session: SessionRecord | None,
+        tool_operations: Sequence[ToolOperationRecord] = (),
     ) -> ExecutionTerminalCommitResult | None:
         """Confirm a terminal turn from source without retrying its write."""
         if (not reservation.execution.conversation
                 or reservation.execution.session_id != (None if expected_session is None else expected_session.session_id)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        stores = [self._execution.state_store, self._checkpoint.checkpoints.state_store]
+        stores = [self._execution.state_store, *self._pending_tool_store(tool_operations)]
         if expected_session is not None:
             stores.append(self._conversation.state_store)
-        elif self._checkpoint_archive is not None:
-            stores.extend(self._checkpoint_archive.transaction_stores)
+        elif not reservation.execution.durable_trace:
+            if self._conversation_run_store is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            stores.extend(self._conversation_run_store.transaction_stores)
         if reservation.execution.durable_trace:
             if self._execution_run_store is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -1767,13 +2257,13 @@ class StateCommands:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
         async def read(group: StateGroupTransaction) -> ExecutionTerminalCommitResult | None:
-            return await self._read_pending_turn_in_group(group, reservation, expected_session)
+            return await self._read_pending_turn_in_group(group, reservation, expected_session, tool_operations=tool_operations)
 
         return await stores[0].storage_group.read_many(stores, read)
 
     async def _read_pending_turn_in_group(
         self, group: StateGroupTransaction, reservation: ExecutionStartReservation,
-        expected_session: SessionRecord | None,
+        expected_session: SessionRecord | None, *, tool_operations: Sequence[ToolOperationRecord] = (),
     ) -> ExecutionTerminalCommitResult | None:
         result = await self._execution.pending_turn_result_in_transaction(
             group.transaction(self._execution.state_store), reservation,
@@ -1784,22 +2274,19 @@ class StateCommands:
         if (not execution.conversation or not execution.retention_closed
                 or execution.session_id != reservation.execution.session_id):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        recovery = await self._checkpoint.checkpoints.get_in_transaction(
-            group.transaction(self._checkpoint.checkpoints.state_store), execution.execution_id, tenant_id=self._tenant_id,
-        )
+        recovery = execution.recovery
         expected_run_id = (None if execution.agent_run_seq == 0 else agent_run_id(
             namespace=self._namespace, tenant_id=self._tenant_id,
             execution_id=execution.execution_id, agent_run_seq=execution.agent_run_seq,
         ))
-        if (recovery is None or recovery.state is not ExecutionCheckpointState.COMPLETED
+        if (recovery is None or execution.recovery_state is not ExecutionRecoveryState.COMPLETED
                 or recovery.agent_run_id != expected_run_id):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if execution.durable_trace:
             seal = await self._execution.get_history_seal(execution.execution_id, tenant_id=self._tenant_id)
-            head = await self._execution.get_history_head(execution.execution_id, tenant_id=self._tenant_id)
             run_ids = () if expected_run_id is None else (expected_run_id,)
             heads = await self._execution_run_store.execution_history_heads(run_ids)
-            if (seal is None or head is None or head.seal_digest != seal.seal_digest
+            if (seal is None or execution.history_seal_digest != seal.seal_digest
                     or seal.execution_event_high_water != execution.event_seq):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             empty_failure = not seal.run_heads and execution.status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
@@ -1809,21 +2296,20 @@ class StateCommands:
                 run = await self._execution_run_store.get_agent_run(agent_run_id=run_id)
                 if (run is None) != empty_failure:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if expected_session is None and execution.status is ExecutionStatus.SUCCEEDED:
-            if self._checkpoint_archive is None:
+        if (expected_session is None and not execution.durable_trace
+                and execution.status is ExecutionStatus.SUCCEEDED):
+            archive = self._conversation_run_store
+            if archive is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            run = await self._checkpoint_archive.get_agent_run(agent_run_id=recovery.agent_run_id)
-            checkpoint = await self._checkpoint_archive.latest_checkpoint(agent_run_id=recovery.agent_run_id)
-            if (run is None or checkpoint is None or checkpoint.pending_request_index is not None
-                    or checkpoint.agent_run_id != run.agent_run_id
-                    or run.parent_agent_run_id is not None
-                    or run.agent_id != execution.agent_id):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if (await self._checkpoint_archive.checkpoint_count(agent_run_id=run.agent_run_id) != 1
-                    or not await self._checkpoint_archive.verify_checkpoint_projection(
+            run = await archive.get_agent_run(agent_run_id=expected_run_id)
+            checkpoint = await archive.latest_checkpoint(agent_run_id=expected_run_id)
+            if (run is None or checkpoint is None or checkpoint.state != "complete"
+                    or checkpoint.pending_request_index is not None or checkpoint.agent_run_id != run.agent_run_id
+                    or run.parent_agent_run_id is not None or run.agent_id != execution.agent_id
+                    or not await archive.verify_checkpoint_projection(
                         agent_run_id=run.agent_run_id, checkpoint=checkpoint,
                     )
-                    or await self._checkpoint_archive.transcript_message_count_for_run(run) != len(checkpoint.messages)):
+                    or await archive.transcript_message_count_for_run(run) != len(checkpoint.messages)):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if expected_session is not None:
             transaction = group.transaction(self._conversation.state_store)
@@ -1849,19 +2335,22 @@ class StateCommands:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             elif committed.start_message_index != 0 or committed.end_message_index != 0:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if execution.execution_id == reservation.execution.execution_id:
+            await self._materialize_pending_tools(execution, tool_operations, read_only=True, terminal=True)
         return result
 
     async def read_pending_turn_promotion(
         self, reservation: ExecutionStartReservation, *, expected_session: SessionRecord | None,
         captured_input_context: RuntimePayloadRef | None, producer_claim_id: str,
-    ) -> tuple[ExecutionRecord, ExecutionCheckpoint] | None:
+        tool_operations: Sequence[ToolOperationRecord] = (),
+    ) -> ExecutionRecord | None:
         """Confirm only the caller's first durable promotion receipt."""
         if not isinstance(producer_claim_id, str) or not producer_claim_id.strip():
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         initial, identity = reservation.execution, reservation.idempotency
         if initial.session_id != (None if expected_session is None else expected_session.session_id):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        stores = [self._execution.state_store, self._checkpoint.checkpoints.state_store]
+        stores = [self._execution.state_store, *self._pending_tool_store(tool_operations)]
         if expected_session is not None:
             stores.append(self._conversation.state_store)
         if not _same_group(stores):
@@ -1869,7 +2358,7 @@ class StateCommands:
         claim = ExecutionStartClaim(initial.execution_id, 0, 0, identity.scope,
                                     identity.idempotency_key_digest, identity.request_digest, initial.created_at)
 
-        async def read(group: StateGroupTransaction) -> tuple[ExecutionRecord, ExecutionCheckpoint] | None:
+        async def read(group: StateGroupTransaction) -> ExecutionRecord | None:
             idempotency = await self._execution.get_start_idempotency(claim)
             if idempotency is None:
                 return None
@@ -1882,25 +2371,20 @@ class StateCommands:
             execution = await self._execution.get_in_transaction(
                 group.transaction(self._execution.state_store), initial.execution_id, tenant_id=self._tenant_id,
             )
-            recovery = await self._checkpoint.checkpoints.get_in_transaction(
-                group.transaction(self._checkpoint.checkpoints.state_store), initial.execution_id, tenant_id=self._tenant_id,
-            )
-            head = await self._execution.get_history_head(initial.execution_id, tenant_id=self._tenant_id)
+            recovery = None if execution is None else execution.recovery
             prepared = captured_input_context is not None
-            if (execution is None or recovery is None or head is None
+            if (execution is None or recovery is None
                     or execution.status is not ExecutionStatus.STARTED
                     or execution.session_id != initial.session_id or execution.event_seq != 1
                     or execution.revision != (3 if prepared else 1)
                     or execution.agent_run_seq != (1 if prepared else 0)
                     or execution.input_context != (captured_input_context if prepared else initial.input_context)
-                    or recovery.revision != (1 if prepared else 0)
-                    or recovery.state is not (ExecutionCheckpointState.ACTIVE if prepared else ExecutionCheckpointState.ADMITTED)
+                    or execution.recovery_state is not (ExecutionRecoveryState.ACTIVE if prepared else ExecutionRecoveryState.ADMITTED)
                     or recovery.agent_run_id != (agent_run_id(namespace=self._namespace, tenant_id=self._tenant_id,
                                                               execution_id=initial.execution_id, agent_run_seq=1)
                                                  if prepared else None)
-                    or head.state is not ExecutionHistoryState.OPEN
-                    or (prepared and (head.producer_generation != 2 or head.producer_claim_id != producer_claim_id))
-                    or (not prepared and (head.producer_claim_id is not None or head.producer_generation != 0))):
+                    or (prepared and (execution.producer_generation != 2 or execution.producer_claim_id != producer_claim_id))
+                    or (not prepared and (execution.producer_claim_id is not None or execution.producer_generation != 0))):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if expected_session is not None:
                 session = await self._conversation.get_in_transaction(
@@ -1909,7 +2393,8 @@ class StateCommands:
                 if (session.active_execution_id != initial.execution_id
                         or session.continuation != expected_session.continuation):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-            return execution, recovery
+            await self._materialize_pending_tools(execution, tool_operations, read_only=True, terminal=False)
+            return execution
 
         return await stores[0].storage_group.read_many(stores, read)
 
@@ -1918,9 +2403,9 @@ class StateCommands:
         expected_session: SessionRecord | None, captured_input_context: RuntimePayloadRef | None,
         producer_claim_id: str | None = None,
         context_write: tuple[ContentArchive, PreparedArchive] | None = None,
-    ) -> tuple[ExecutionRecord, ExecutionCheckpoint]:
+        tool_operations: Sequence[ToolOperationRecord] = (),
+    ) -> ExecutionRecord:
         """Confirm durable producer ownership before a local turn performs effects."""
-        self._require_checkpoint()
         producer_claim_id = uuid4().hex if producer_claim_id is None else producer_claim_id
         if not isinstance(producer_claim_id, str) or not producer_claim_id.strip():
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1928,8 +2413,7 @@ class StateCommands:
             self._require_conversation()
         initial = reservation.execution
         if (type(self._execution) is not ExecutionRepositoryImpl
-                or (expected_session is not None and type(self._conversation) is not SessionRepositoryImpl)
-                or type(self._checkpoint.checkpoints) is not ExecutionCheckpointRepositoryImpl):
+                or (expected_session is not None and type(self._conversation) is not SessionRepositoryImpl)):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if (initial.status is not ExecutionStatus.PENDING_START or initial.revision != 0
                 or initial.event_seq != 0 or initial.agent_run_seq != 0
@@ -1944,7 +2428,7 @@ class StateCommands:
         elif (initial.session_id != expected_session.session_id
               or expected_session.active_execution_id is not None):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        stores = [self._execution.state_store, self._checkpoint.checkpoints.state_store]
+        stores = [self._execution.state_store, *self._pending_tool_store(tool_operations)]
         if expected_session is not None:
             stores.append(self._conversation.state_store)
         stores = tuple(_dedupe_stores(stores))
@@ -1954,14 +2438,11 @@ class StateCommands:
         claim = ExecutionStartClaim(initial.execution_id, 0, 0, identity.scope,
                                     identity.idempotency_key_digest, identity.request_digest,
                                     initial.created_at)
-        admitted = ExecutionCheckpoint(initial.execution_id, None, ExecutionCheckpointState.ADMITTED,
-                                      0, initial.created_at, initial.created_at)
-        resolved: tuple[ExecutionRecord, ExecutionCheckpoint] | None = None
-        confirmed_head = None
+        resolved: ExecutionRecord | None = None
         rejected = False
 
-        async def mutate(group: StateGroupTransaction) -> tuple[ExecutionRecord, ExecutionCheckpoint]:
-            nonlocal resolved, confirmed_head, rejected
+        async def mutate(group: StateGroupTransaction) -> ExecutionRecord:
+            nonlocal resolved, rejected
             if expected_session is not None:
                 session = await self._conversation.get_in_transaction(
                     group.transaction(self._conversation.state_store),
@@ -1980,27 +2461,26 @@ class StateCommands:
                 rejected = True
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             started = await self.commit_start_attempt_checkpoint(
-                claim, recovery_checkpoint=admitted,
+                claim,
                 session_id=None if expected_session is None else expected_session.session_id,
                 expected_cursor=None if expected_session is None else expected_session.continuation,
             )
             if captured_input_context is None:
-                resolved = (started, admitted)
+                resolved = started
             else:
-                resolved = await self._commit_agent_attempt_checkpoint(
-                    AgentAttemptClaim(initial.execution_id, started.revision, 0, 0,
-                                      ExecutionCheckpointState.ADMITTED),
+                activated = await self._commit_agent_attempt_checkpoint(
+                    AgentAttemptClaim(initial.execution_id, started.revision, 0,
+                                      ExecutionRecoveryState.ADMITTED),
                     prepared_input_context=captured_input_context, producer_claim_id=producer_claim_id,
                     context_write=context_write,
                 )
-            confirmed_head = await self._execution.get_history_head(
-                initial.execution_id, tenant_id=self._tenant_id,
-            )
-            if (confirmed_head is None
-                    or (captured_input_context is not None
-                        and (confirmed_head.producer_claim_id is None
-                             or confirmed_head.producer_generation != 2))):
+                resolved = activated.value
+            confirmed_execution = resolved
+            if (captured_input_context is not None
+                    and (confirmed_execution.producer_claim_id != producer_claim_id
+                         or confirmed_execution.producer_generation != 2)):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._materialize_pending_tools(confirmed_execution, tool_operations, read_only=False, terminal=False)
             return resolved
 
         async def operation() -> object:
@@ -2014,6 +2494,7 @@ class StateCommands:
                 observed = await self.read_pending_turn_promotion(
                     reservation, expected_session=expected_session,
                     captured_input_context=captured_input_context, producer_claim_id=producer_claim_id,
+                    tool_operations=tool_operations,
                 )
             except AIError as error:
                 if error.code is ErrorCode.IDEMPOTENCY_CONFLICT:
@@ -2057,19 +2538,18 @@ class StateCommands:
         expected_session: SessionRecord | None = None, next_cursor: ConversationCursor | None = None,
         conversation_agent_run: AgentRunRecord | None = None,
         conversation_checkpoint: AgentRunCheckpoint | None = None,
-        recovery_run: AgentRunRecord | None = None,
-        recovery_agent_run_checkpoint: AgentRunCheckpoint | None = None,
         execution_projections: Sequence[PreparedExecutionProjection] = (),
         audit_events: Sequence[ExecutionEventAppend] = (),
         capability_run_id: str | None = None,
         context_write: tuple[ContentArchive, PreparedArchive] | None = None,
+        tool_operations: Sequence[ToolOperationRecord] = (),
     ) -> ExecutionTerminalCommitResult:
-        """Materialize one effect-free local turn at its final atomic boundary."""
+        """Materialize one volatile turn and its replay-safe outcomes atomically."""
+        tool_operations = tuple(tool_operations)
         audit_events = tuple(audit_events)
         execution_projections = tuple(execution_projections)
         archive = self._conversation_run_store
-        if (type(self._execution) is not ExecutionRepositoryImpl
-                or type(self._checkpoint.checkpoints) is not ExecutionCheckpointRepositoryImpl):
+        if type(self._execution) is not ExecutionRepositoryImpl:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         execution = commit.execution
         successful = execution.status is ExecutionStatus.SUCCEEDED
@@ -2113,11 +2593,11 @@ class StateCommands:
             commit, audit_events=audit_events, projections=execution_projections,
             current_run=None, current_events=(), current_batch=None,
         ) if execution.durable_trace else None)
-        stores = [self._execution.state_store, self._checkpoint.checkpoints.state_store]
+        stores = [self._execution.state_store, *self._pending_tool_store(tool_operations)]
         if execution.durable_trace:
             stores.extend(self._execution_run_store.transaction_stores)
         if expected_session is None:
-            if any(value is not None for value in (next_cursor, conversation_agent_run, conversation_checkpoint)):
+            if next_cursor is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             for candidate in (reservation.execution, execution):
                 if (candidate.session_id is not None or candidate.conversation_agent_run_id is not None
@@ -2125,23 +2605,23 @@ class StateCommands:
                         or candidate.lineage_kind is not ExecutionLineageKind.RUN
                         or candidate.root_execution_id != candidate.execution_id):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if successful:
-                if (recovery_run is None or recovery_agent_run_checkpoint is None
-                        or recovery_agent_run_checkpoint.state != "complete"
-                        or recovery_agent_run_checkpoint.pending_request_index is not None
-                        or recovery_run.parent_agent_run_id is not None
-                        or recovery_run.agent_id != execution.agent_id
-                        or recovery_run.agent_run_id != agent_run_id(
+            if successful and not execution.durable_trace:
+                if (conversation_agent_run is None or conversation_checkpoint is None
+                        or conversation_checkpoint.state != "complete"
+                        or conversation_checkpoint.pending_request_index is not None
+                        or conversation_agent_run.parent_agent_run_id is not None
+                        or conversation_agent_run.agent_id != execution.agent_id
+                        or conversation_agent_run.agent_run_id != agent_run_id(
                             namespace=self._namespace, tenant_id=self._tenant_id,
                             execution_id=execution.execution_id, agent_run_seq=1,
                         )
-                        or any(getattr(recovery_run, name) != getattr(recovery_agent_run_checkpoint, name)
+                        or any(getattr(conversation_agent_run, name) != getattr(conversation_checkpoint, name)
                                for name in ("agent_run_id", "agent_conversation_id", "agent_id", "parent_agent_run_id"))):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if self._checkpoint_archive is None:
+                if archive is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-                stores.extend(self._checkpoint_archive.transaction_stores)
-            elif recovery_run is not None or recovery_agent_run_checkpoint is not None:
+                stores.extend(archive.transaction_stores)
+            elif conversation_agent_run is not None or conversation_checkpoint is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         else:
             if type(self._conversation) is not SessionRepositoryImpl:
@@ -2149,8 +2629,6 @@ class StateCommands:
             if execution.session_id != expected_session.session_id or expected_session.active_execution_id is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if successful:
-                if recovery_run is not None or recovery_agent_run_checkpoint is not None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if (next_cursor is None or conversation_agent_run is None or conversation_checkpoint is None):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if (type(archive) not in {StateStepArchive, ModelInteractionStateStepArchive}
@@ -2171,20 +2649,18 @@ class StateCommands:
             else:
                 if any(value is not None for value in (
                     next_cursor, conversation_agent_run, conversation_checkpoint,
-                    recovery_run, recovery_agent_run_checkpoint,
                 )) or execution.conversation_agent_run_id is not None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 stores.append(self._conversation.state_store)
-        if successful and execution_projections:
-            expected_run = recovery_run if expected_session is None else conversation_agent_run
-            if execution_projections[0].run != expected_run:
+        if successful and execution_projections and expected_session is not None:
+            if execution_projections[0].run != conversation_agent_run:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         stores = tuple(_dedupe_stores(stores))
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         repository = self._execution
 
-        existing = await self.read_pending_turn(reservation, expected_session=expected_session)
+        existing = await self.read_pending_turn(reservation, expected_session=expected_session, tool_operations=tool_operations)
         if existing is not None:
             if self._capability_writes is not None:
                 prefix = await self._capability_writes.prepare_terminal(
@@ -2199,7 +2675,6 @@ class StateCommands:
             return existing
         turn_payloads = None if expected_session is None else await self.retain_conversation_turn_payloads(execution, commit.result)
         prepared = None
-        prepared_recovery = None
         history = None
         final_cursor = None
         start = end = 0
@@ -2215,20 +2690,21 @@ class StateCommands:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             start, end = _timeline_turn_message_range(history, prepared, expected_session.continuation)
             final_cursor = replace(next_cursor, message_count=end)
-        elif successful:
-            assert self._checkpoint_archive is not None and recovery_run is not None
-            assert recovery_agent_run_checkpoint is not None
-            _checkpoint, prepared_recovery = await self._checkpoint_archive.prepare_run_checkpoint(
-                recovery_run, recovery_agent_run_checkpoint,
+        elif successful and conversation_agent_run is not None and conversation_checkpoint is not None:
+            assert archive is not None
+            _checkpoint, prepared = await archive.prepare_conversation_checkpoint(
+                conversation_agent_run, conversation_checkpoint,
             )
-        recovered = ExecutionCheckpoint(
-            execution.execution_id, (None if execution.agent_run_seq == 0 else agent_run_id(
+        execution = replace(execution, recovery=ExecutionRecoveryDetail(
+            agent_run_id=(None if execution.agent_run_seq == 0 else agent_run_id(
                 namespace=self._namespace, tenant_id=self._tenant_id,
                 execution_id=execution.execution_id, agent_run_seq=execution.agent_run_seq,
             )),
-            ExecutionCheckpointState.COMPLETED, 2, reservation.execution.created_at, execution.updated_at,
-        )
+        ), history_seal_digest=None if seal is None else seal.seal_digest)
+        commit = replace(commit, execution=execution)
         resolved: ExecutionTerminalCommitResult | None = None
+        publication_confirmed = False
+        candidate_published = False
         capability_prefix = (await self._capability_writes.prepare_terminal(
             execution.execution_id, capability_run_id, stores[0].storage_group,
         ) if self._capability_writes is not None else None)
@@ -2244,7 +2720,6 @@ class StateCommands:
                 (repository.state_store, repository.pending_turn_record_keys(reservation)),
                 (self._conversation.state_store, (self._conversation.session_record_key(expected_session.session_id),
                  self._conversation_history.history_record_key(expected_session.history_id))),
-                (self._checkpoint.checkpoints.state_store, (self._checkpoint.checkpoints.checkpoint_record_key(execution.execution_id),)),
                 *(await archive.checkpoint_publication_record_keys(conversation_agent_run, prepared[0])).items(),
             ]
             if all(store.storage_group is stores[0].storage_group for store, _keys in entries):
@@ -2253,6 +2728,8 @@ class StateCommands:
                 stores = tuple(_dedupe_stores((*stores, *fresh_record_keys)))
 
         async def mutate(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
+            nonlocal final_cursor, candidate_published
+            candidate_published = False
             if context_write is not None:
                 content_archive, archive_records = context_write
                 await content_archive.store.mutate(lambda tx: content_archive.publish(tx, archive_records))
@@ -2260,7 +2737,7 @@ class StateCommands:
                 # Mutable owners still use their CAS; immutable records still compare complete bytes.
                 await group.get_records(fresh_record_keys)
             execution_transaction = group.transaction(repository.state_store)
-            winner = await self._read_pending_turn_in_group(group, reservation, expected_session)
+            winner = await self._read_pending_turn_in_group(group, reservation, expected_session, tool_operations=tool_operations)
             if winner is not None:
                 if capability_prefix is not None and not await capability_prefix.readback():
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2279,7 +2756,7 @@ class StateCommands:
                     )
                     if current_history != history:
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
-            final = await repository.insert_pending_turn_in_transaction(
+            final, insertion = await repository.insert_pending_turn_in_transaction(
                 execution_transaction, reservation, commit, audit_events=tuple(audit_events),
             )
             if seal is not None:
@@ -2287,10 +2764,6 @@ class StateCommands:
                 for run_id in expected_runs:
                     if await self._execution_run_store.get_agent_run(agent_run_id=run_id) is not None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                # Only the reservation's expected-absent insertion creates this head.
-                head, head_record = await repository.require_open_history_head_in_transaction(
-                    execution_transaction, execution.execution_id,
-                )
                 for projection in execution_projections:
                     await self._execution_run_store.transcript_repository.publish_archive(projection.archive)
                     await self._execution_run_store.sync_projection_in_transaction(
@@ -2298,23 +2771,20 @@ class StateCommands:
                         events=projection.events, checkpoints=projection.checkpoints,
                         interactions=projection.interactions, observation=projection.observation,
                         producer_generation=projection.producer_generation, execution_id=execution.execution_id,
-                        history_head_guard=(head, head_record),
+                        execution_guard=(insertion.execution, insertion.record),
+                        inserted_terminal=insertion,
                     )
                     if not await self._execution_run_store.verify_execution_projection_head(projection):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await repository.put_history_seal_in_transaction(execution_transaction, seal)
-                await repository.replace_history_head_in_transaction(
-                    execution_transaction, head_record,
-                    replace(head, state=ExecutionHistoryState.SEALED, revision=head.revision + 1,
-                            seal_digest=seal.seal_digest),
-                )
             if expected_session is not None:
                 if successful:
                     assert archive is not None and conversation_agent_run is not None and prepared is not None
                     assert final_cursor is not None
-                    await archive.materialize_checkpoint_in_transaction(
+                    sequence = await archive.materialize_checkpoint_in_transaction(
                         group.transaction(archive.state_store), conversation_agent_run, prepared[0],
                     )
+                    final_cursor = await self._pin_conversation_cursor(archive, final_cursor, prepared[0], sequence)
                 await self._conversation.commit_pending_turn_in_transaction(
                     conversation_transaction, expected=expected_session, execution_id=execution.execution_id,
                     next_cursor=final_cursor, start_message_index=start, end_message_index=end,
@@ -2323,26 +2793,27 @@ class StateCommands:
                     updated_at=commit.execution.updated_at, error_code=commit.execution.error_code,
                     safe_error_details=commit.execution.safe_error_details,
                 )
-            elif successful:
-                assert self._checkpoint_archive is not None and recovery_run is not None
-                assert prepared_recovery is not None
-                await self._checkpoint_archive.materialize_checkpoint_in_transaction(
-                    group.transaction(self._checkpoint_archive.state_store), recovery_run, prepared_recovery[0],
+            elif prepared is not None:
+                assert archive is not None and conversation_agent_run is not None
+                await archive.materialize_checkpoint_in_transaction(
+                    group.transaction(archive.state_store), conversation_agent_run, prepared[0],
                 )
-            await self._checkpoint.checkpoints.admit_in_transaction(group.transaction(self._checkpoint.checkpoints.state_store), recovered)
+            await self._materialize_pending_tools(final.execution, tool_operations, read_only=False, terminal=True)
             if capability_prefix is not None:
                 await capability_prefix.apply(group)
+            candidate_published = True
             return final
 
         async def operation() -> object:
-            nonlocal resolved
+            nonlocal resolved, publication_confirmed
             resolved = await stores[0].storage_group.mutate(stores, mutate)
+            publication_confirmed = candidate_published
             return resolved
 
         async def readback() -> CommitObservation[object]:
             nonlocal resolved
             try:
-                resolved = await self.read_pending_turn(reservation, expected_session=expected_session)
+                resolved = await self.read_pending_turn(reservation, expected_session=expected_session, tool_operations=tool_operations)
             except AIError as error:
                 if error.code is ErrorCode.IDEMPOTENCY_CONFLICT:
                     return CommitObservation(DurableCommitState.NOT_COMMITTED, error=error)
@@ -2363,6 +2834,8 @@ class StateCommands:
                 assert resolved is not None
                 if capability_prefix is not None:
                     await capability_prefix.settle()
+                if publication_confirmed and final_cursor is not None and prepared is not None:
+                    await self._confirm_conversation_context(archive, final_cursor, prepared[0])
                 if outcome.cancelled:
                     raise asyncio.CancelledError
                 return resolved
@@ -2376,6 +2849,29 @@ class StateCommands:
         finally:
             if capability_prefix is not None:
                 await capability_prefix.abort()
+
+    async def _pin_conversation_cursor(
+        self, archive: StateStepArchive, cursor: ConversationCursor,
+        prepared: PreparedAgentRunCheckpoint, sequence: int | None,
+    ) -> ConversationCursor:
+        if sequence is None:
+            sequence = await archive.latest_checkpoint_sequence(agent_run_id=cursor.agent_run_id)
+            stored = await archive.checkpoint_at_sequence(
+                agent_run_id=cursor.agent_run_id, checkpoint_sequence=sequence,
+            )
+            if stored != prepared.stored:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return replace(cursor, checkpoint_sequence=sequence, projection_digest=prepared.stored.projection_digest)
+
+    async def _confirm_conversation_context(
+        self, archive: StateStepArchive, cursor: ConversationCursor, prepared: PreparedAgentRunCheckpoint,
+        *, archive_records: PreparedArchive | None = None,
+    ) -> None:
+        if cursor.history_id is None or cursor.message_count is None or cursor.checkpoint_sequence is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await archive.confirm_session_context(
+            checkpoint_sequence=cursor.checkpoint_sequence, prepared=prepared, archive_records=archive_records,
+        )
 
     async def _prepare_conversation_checkpoint(
         self,
@@ -2428,6 +2924,8 @@ class StateCommands:
         commit: ExecutionTerminalCommit,
         *,
         expected_execution: ExecutionRecord | None = None,
+        start_identity: IdempotencyRecord | None = None,
+        session_turn: SessionTurnRef | None = None,
         capability_run_id: str | None = None,
         session_id: str | None = None,
         expected_cursor: ConversationCursor | None = None,
@@ -2435,9 +2933,6 @@ class StateCommands:
         conversation_agent_run: AgentRunRecord | None = None,
         conversation_checkpoint: AgentRunCheckpoint | None = None,
         conversation_message_range: tuple[int, int] | None = None,
-        recovery_checkpoint: ExecutionCheckpoint | None = None,
-        recovery_run: AgentRunRecord | None = None,
-        recovery_agent_run_checkpoint: AgentRunCheckpoint | None = None,
         execution_run: AgentRunRecord | None = None,
         execution_events: Sequence[StepEvent] = (),
         execution_checkpoints: Sequence[AgentRunCheckpoint] = (),
@@ -2462,17 +2957,15 @@ class StateCommands:
             self._execution_run_store is None or execution_run is None
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if session_id is None and (conversation_agent_run is not None or conversation_checkpoint is not None):
+        if (conversation_agent_run is None) != (conversation_checkpoint is None):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if recovery_checkpoint is None and (recovery_run is not None or recovery_agent_run_checkpoint is not None):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if (recovery_run is None) != (recovery_agent_run_checkpoint is None):
+        if conversation_agent_run is not None and not commit.execution.conversation:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _logger.debug(
             "terminal checkpoint requested: execution=%s session=%s recovery=%s",
             commit.execution.execution_id,
             session_id,
-            recovery_agent_run_checkpoint is not None,
+            commit.execution.recovery is not None,
         )
         owner_tasks = (
             self._background_tasks
@@ -2483,9 +2976,6 @@ class StateCommands:
         if session_id is not None:
             self._require_conversation()
             stores.append(self._conversation.state_store)
-        if recovery_checkpoint is not None:
-            self._require_checkpoint()
-            stores.append(self._checkpoint.checkpoints.state_store)
         if execution_run is not None:
             if self._execution_run_store is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2494,15 +2984,10 @@ class StateCommands:
             if self._conversation_run_store is None or conversation_agent_run is None or conversation_checkpoint is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             stores.extend(self._conversation_run_store.transaction_stores)
-        if recovery_run is not None or recovery_agent_run_checkpoint is not None:
-            if self._checkpoint_archive is None or recovery_run is None or recovery_agent_run_checkpoint is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            stores.extend(self._checkpoint_archive.transaction_stores)
         terminal_archives = tuple(
             archive for archive, participates in (
                 (self._execution_run_store, execution_run is not None and bool(execution_projections or execution_checkpoints)),
                 (self._conversation_run_store, conversation_agent_run is not None),
-                (self._checkpoint_archive, recovery_run is not None),
             ) if participates and archive is not None
         )
         shared_archive = None
@@ -2527,14 +3012,19 @@ class StateCommands:
             and conversation_agent_run is not None
             and conversation_checkpoint is not None
         ):
-            if next_cursor is None or next_cursor.history_id is None or self._conversation_history is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            conversation_checkpoint, prepared_conversation, timeline_history = await self._prepare_conversation_checkpoint(
-                self._conversation_run_store, conversation_agent_run, conversation_checkpoint,
-                next_cursor.history_id, archive=shared_archive,
-            )
+            if session_id is None:
+                conversation_checkpoint, prepared_conversation = await self._conversation_run_store.prepare_conversation_checkpoint(
+                    conversation_agent_run, conversation_checkpoint, archive=shared_archive,
+                )
+            else:
+                if next_cursor is None or next_cursor.history_id is None or self._conversation_history is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                conversation_checkpoint, prepared_conversation, timeline_history = await self._prepare_conversation_checkpoint(
+                    self._conversation_run_store, conversation_agent_run, conversation_checkpoint,
+                    next_cursor.history_id, archive=shared_archive,
+                )
         timeline_range: tuple[int, int] | None = conversation_message_range
-        if prepared_conversation:
+        if prepared_conversation and session_id is not None:
             if (session_id is None or next_cursor is None or timeline_history is None
                     or timeline_history.session_id != session_id):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2548,17 +3038,6 @@ class StateCommands:
                 message_count=timeline_range[1],
             )
 
-        prepared_recovery = ()
-        if (
-            self._checkpoint_archive is not None
-            and recovery_run is not None
-            and recovery_agent_run_checkpoint is not None
-        ):
-            recovery_agent_run_checkpoint, prepared_recovery = await self._checkpoint_archive.prepare_run_checkpoint(
-                recovery_run,
-                recovery_agent_run_checkpoint,
-                archive=shared_archive,
-            )
         prepared_execution: PreparedAgentRunCheckpointBatch | tuple[()] = ()
         if (
             not execution_projections
@@ -2583,22 +3062,22 @@ class StateCommands:
                 else None
             ),
         ) if commit.execution.durable_trace else None
+        commit = replace(commit, execution=replace(
+            commit.execution, history_seal_digest=None if seal is None else seal.seal_digest,
+        ))
+        effective_commit = commit
         if _same_group(stores):
             terminal_projections = execution_projections
             if shared_archive is not None:
                 shared_archive = _copy_archive_union((
                     shared_archive,
                     *(checkpoint.archive for batch in (
-                        prepared_conversation, prepared_recovery, prepared_execution,
+                        prepared_conversation, prepared_execution,
                     ) for checkpoint in batch),
                 ))
                 if prepared_conversation:
                     prepared_conversation = replace(prepared_conversation, checkpoints=tuple(
                         replace(checkpoint, archive=PreparedArchive()) for checkpoint in prepared_conversation
-                    ))
-                if prepared_recovery:
-                    prepared_recovery = replace(prepared_recovery, checkpoints=tuple(
-                        replace(checkpoint, archive=PreparedArchive()) for checkpoint in prepared_recovery
                     ))
                 if prepared_execution:
                     prepared_execution = replace(prepared_execution, checkpoints=tuple(
@@ -2623,7 +3102,6 @@ class StateCommands:
                     and type(self._execution) is ExecutionRepositoryImpl
                     and type(self._conversation) is SessionRepositoryImpl
                     and type(self._conversation_history) is ConversationHistoryRepositoryImpl
-                    and type(self._checkpoint.checkpoints) is ExecutionCheckpointRepositoryImpl
                     and type(self._conversation_run_store) in {StateStepArchive, ModelInteractionStateStepArchive}
                     and conversation_agent_run is not None and prepared_conversation
                     and session_id is not None and next_cursor is not None):
@@ -2641,17 +3119,22 @@ class StateCommands:
                         conversation_agent_run, prepared_conversation[0],
                     )).items(),
                 ]
-                if recovery_checkpoint is not None:
-                    entries.append((self._checkpoint.checkpoints.state_store, (
-                        self._checkpoint.checkpoints.checkpoint_record_key(recovery_checkpoint.execution_id),
-                    )))
                 if all(store.storage_group is stores[0].storage_group for store, _keys in entries):
                     for store, keys in entries:
                         fresh_record_keys[store] = tuple(dict.fromkeys((*fresh_record_keys.get(store, ()), *keys)))
                     stores = list(_dedupe_stores((*stores, *fresh_record_keys)))
+            if fresh_record_keys:
+                if start_identity is not None:
+                    store = self._execution.state_store
+                    fresh_record_keys[store] = (*fresh_record_keys.get(store, ()), self._execution.start_idempotency_record_key(start_identity))
+                if session_turn is not None and session_id is not None:
+                    store = self._conversation.state_store
+                    fresh_record_keys[store] = (*fresh_record_keys.get(store, ()), *self._conversation.timeline_commit_record_keys(
+                        session_id, start_turn_seq=session_turn.turn_seq, end_turn_seq=session_turn.turn_seq + 1,
+                    ))
             try:
                 async def callback(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
-                    nonlocal effective_commit
+                    nonlocal effective_commit, next_cursor
                     if fresh_record_keys and isinstance(group, GroupRecordReader):
                         await group.get_records(fresh_record_keys)
                     execution_transaction = group.transaction(self._execution.state_store)
@@ -2659,7 +3142,7 @@ class StateCommands:
                     if (type(self._execution) is ExecutionRepositoryImpl
                             and not commit.execution.durable_trace and execution_run is None):
                         effective_commit = await self._effective_terminal_commit(
-                            execution_transaction, commit, expected_execution=expected_execution,
+                            execution_transaction, commit, expected_execution=expected_execution, start_identity=start_identity,
                         )
                         # Establish the execution-first fence and final control CAS
                         # before dependent writes in this same atomic transaction.
@@ -2667,15 +3150,19 @@ class StateCommands:
                             execution_transaction, effective_commit, pending_events=audit_events,
                         )
                     else:
-                        head, head_record = await self._execution.require_open_history_head_in_transaction(
-                            execution_transaction,
-                            commit.execution.execution_id,
-                            expected_producer_generation=commit.producer_generation,
-                        )
+                        if commit.producer_generation is not None:
+                            execution_guard = await self._execution.require_execution_producer_in_transaction(
+                                execution_transaction, commit.execution.execution_id,
+                                expected_producer_generation=commit.producer_generation,
+                            )
+                        else:
+                            execution_guard = await self._execution.require_execution_history_write_in_transaction(
+                                execution_transaction, commit.execution.execution_id,
+                            )
                         effective_commit = await self._effective_terminal_commit(
                             execution_transaction,
                             commit,
-                            expected_execution=expected_execution,
+                            expected_execution=expected_execution, start_identity=start_identity,
                         )
                     if shared_archive is not None:
                         await terminal_archives[0].transcript_repository.publish_archive(shared_archive)
@@ -2692,7 +3179,7 @@ class StateCommands:
                                     status=effective_commit.execution.status, created_at=effective_commit.execution.created_at,
                                     updated_at=effective_commit.execution.updated_at, error_code=effective_commit.execution.error_code,
                                     safe_error_details=effective_commit.execution.safe_error_details,
-                                    allow_unadmitted=commit.execution.started_at is None,
+                                    allow_unadmitted=commit.execution.started_at is None, admitted_turn=session_turn,
                                 )
                             await self._conversation.release_execution_in_transaction(
                                 conversation_transaction,
@@ -2705,10 +3192,13 @@ class StateCommands:
                         else:
                             if next_cursor is None or self._conversation_run_store is None:
                                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                            await self._conversation_run_store.materialize_checkpoint_in_transaction(
+                            sequence = await self._conversation_run_store.materialize_checkpoint_in_transaction(
                                 group.transaction(self._conversation_run_store.state_store),
                                 conversation_agent_run,
                                 prepared_conversation[0],
+                            )
+                            next_cursor = await self._pin_conversation_cursor(
+                                self._conversation_run_store, next_cursor, prepared_conversation[0], sequence,
                             )
                             session = await self._conversation.get_in_transaction(
                                 conversation_transaction,
@@ -2741,23 +3231,12 @@ class StateCommands:
                                 stored_user_input=turn_payloads[0], output=turn_payloads[1],
                                 status=effective_commit.execution.status, created_at=effective_commit.execution.created_at,
                                 updated_at=effective_commit.execution.updated_at, error_code=effective_commit.execution.error_code,
-                                safe_error_details=effective_commit.execution.safe_error_details,
+                                safe_error_details=effective_commit.execution.safe_error_details, admitted_turn=session_turn,
                             )
-                    if recovery_checkpoint is not None:
-                        if recovery_run is not None or recovery_agent_run_checkpoint is not None:
-                            if self._checkpoint_archive is None or recovery_run is None or recovery_agent_run_checkpoint is None:
-                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                            await self._checkpoint_archive.materialize_checkpoint_in_transaction(
-                                group.transaction(self._checkpoint_archive.state_store),
-                                recovery_run,
-                                prepared_recovery[0],
-                            )
-                        await self._checkpoint.checkpoints.compare_and_swap_in_transaction(
-                            group.transaction(self._checkpoint.checkpoints.state_store),
-                            recovery_checkpoint.execution_id,
-                            tenant_id=self._tenant_id,
-                            expected_revision=recovery_checkpoint.revision - 1,
-                            next_record=recovery_checkpoint,
+                    elif conversation_agent_run is not None:
+                        await self._conversation_run_store.materialize_checkpoint_in_transaction(
+                            group.transaction(self._conversation_run_store.state_store),
+                            conversation_agent_run, prepared_conversation[0],
                         )
                     if execution_run is not None:
                         execution_transaction_for_steps = group.transaction(
@@ -2775,7 +3254,7 @@ class StateCommands:
                                     observation=projection.observation,
                                     producer_generation=projection.producer_generation,
                                     execution_id=commit.execution.execution_id,
-                                    history_head_guard=(head, head_record),
+                                    execution_guard=execution_guard,
                                 )
                         else:
                             await self._execution_run_store.sync_projection_in_transaction(
@@ -2791,28 +3270,26 @@ class StateCommands:
                                     else ()
                                 ),
                                 execution_id=commit.execution.execution_id,
-                                history_head_guard=(head, head_record),
+                                execution_guard=execution_guard,
                             )
                     if prepared is not None:
                         await prepared.apply(group)
-                    if closed_result is not None:
+                    if closed_result is None:
+                        if seal is not None:
+                            await self._execution.put_history_seal_in_transaction(execution_transaction, seal)
+                        closed_result = await self._execution.commit_terminal_in_transaction(
+                            execution_transaction, effective_commit, pending_events=audit_events,
+                        )
+                    if closed_result.execution.recovery_state is ExecutionRecoveryState.HANDOFF:
                         return closed_result
-                    if seal is not None:
-                        await self._execution.put_history_seal_in_transaction(execution_transaction, seal)
-                    await self._execution.replace_history_head_in_transaction(
-                        execution_transaction,
-                        head_record,
-                        replace(
-                            head,
-                            state=ExecutionHistoryState.SEALED if seal is not None else ExecutionHistoryState.CLOSED,
-                            revision=head.revision + 1,
-                            seal_digest=None if seal is None else seal.seal_digest,
-                        ),
+                    observed = await self._execution.get_observed_in_transaction(
+                        execution_transaction, closed_result.execution.execution_id, tenant_id=self._tenant_id,
                     )
-                    return await self._execution.commit_terminal_in_transaction(
-                        execution_transaction,
-                        effective_commit,
-                        pending_events=audit_events,
+                    if observed is None or observed.value != closed_result.execution:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    return ExecutionTerminalPublication(
+                        closed_result.execution, closed_result.result, observed=observed,
+                        session_released=session_id is not None,
                     )
 
                 async def readback() -> CommitObservation[ExecutionTerminalCommitResult]:
@@ -2825,9 +3302,6 @@ class StateCommands:
                             next_cursor=next_cursor,
                             conversation_agent_run=conversation_agent_run,
                             conversation_checkpoint=conversation_checkpoint,
-                            recovery_checkpoint=recovery_checkpoint,
-                            recovery_run=recovery_run,
-                            recovery_agent_run_checkpoint=recovery_agent_run_checkpoint,
                             execution_run=execution_run,
                             execution_events=execution_events,
                             execution_checkpoints=execution_checkpoints,
@@ -2870,8 +3344,16 @@ class StateCommands:
                             error=error,
                         )
 
+                publication_confirmed = False
+
+                async def publish_terminal() -> ExecutionTerminalCommitResult:
+                    nonlocal publication_confirmed
+                    value = await stores[0].storage_group.mutate(stores, callback)
+                    publication_confirmed = True
+                    return value
+
                 result = await run_durable_commit(
-                    lambda: stores[0].storage_group.mutate(stores, callback),
+                    publish_terminal,
                     readback,
                     background_tasks=owner_tasks,
                 )
@@ -2880,6 +3362,8 @@ class StateCommands:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     if prepared is not None:
                         await prepared.settle()
+                    if publication_confirmed and next_cursor is not None and prepared_conversation:
+                        await self._confirm_conversation_context(self._conversation_run_store, next_cursor, prepared_conversation[0], archive_records=shared_archive)
                     if result.cancelled:
                         raise asyncio.CancelledError
                     return result.value
@@ -2896,57 +3380,42 @@ class StateCommands:
             finally:
                 if prepared is not None:
                     await prepared.abort()
-        recovery_pending = False
-        if recovery_checkpoint is not None:
-            actual_recovery = await self._checkpoint.checkpoints.get(
-                recovery_checkpoint.execution_id,
-                tenant_id=self._tenant_id,
+        if (session_id is not None and commit.execution.started_at is None
+                and (commit.execution.recovery is None
+                     or commit.execution.recovery.handoff_phase is RecoveryHandoffPhase.NONE)):
+            # A rejected split-store admission can still own the session. Keep
+            # its release obligation on the terminal row until it is confirmed.
+            handoff = RecoveryTerminalHandoff(
+                outcome=RecoveryTerminalOutcome(
+                    terminal_status=commit.execution.status,
+                    error_code=commit.execution.error_code,
+                    safe_error_details=commit.execution.safe_error_details,
+                    stop_reason=commit.result.stop_reason,
+                    output=commit.result.output,
+                    object_source_domain=None,
+                    usage=commit.result.usage,
+                    terminal_event_type=commit.terminal_event_type,
+                    terminal_event_payload=commit.terminal_event_payload,
+                    result_created_at=commit.result.created_at,
+                    error_diagnostics=commit.execution.error_diagnostics,
+                ),
+                source_agent_run_id=None,
+                conversation=None,
             )
-            if actual_recovery is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if actual_recovery == recovery_checkpoint:
-                if not await self._terminal_targets_visible(
-                    effective_commit,
-                    expected_execution=expected_execution,
-                    pending_event_count=len(audit_events),
-                    session_id=session_id,
-                    next_cursor=next_cursor,
-                    conversation_agent_run=conversation_agent_run,
-                    conversation_checkpoint=conversation_checkpoint,
-                    recovery_checkpoint=recovery_checkpoint,
-                    recovery_run=recovery_run,
-                    recovery_agent_run_checkpoint=recovery_agent_run_checkpoint,
-                    execution_run=execution_run,
-                    execution_events=execution_events,
-                    execution_checkpoints=execution_checkpoints,
-                    execution_projections=execution_projections,
-                    audit_events=audit_events,
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                execution = await self._load_execution(
-                    commit.execution.execution_id,
-                    tenant_id=self._tenant_id,
-                )
-                if execution is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if self._capability_writes is not None:
-                    prefix = await self._capability_writes.prepare_terminal(
-                        commit.execution.execution_id, capability_run_id, self._execution.state_store.storage_group,
-                    )
-                    try:
-                        if not await prefix.readback():
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        await prefix.settle()
-                    finally:
-                        await prefix.abort()
-                return ExecutionTerminalCommitResult(execution, commit.result)
-            if not _recovery_completion_predecessor(actual_recovery, recovery_checkpoint):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            recovery_pending = True
-        has_recovery_run_target = (
-            recovery_run is not None or recovery_agent_run_checkpoint is not None
-        )
-        checkpoint_archive_merged = False
+            commit = replace(commit, execution=replace(
+                commit.execution,
+                recovery=replace(
+                    commit.execution.recovery or ExecutionRecoveryDetail(),
+                    handoff_phase=RecoveryHandoffPhase.PREPARED,
+                    terminal_handoff=handoff,
+                    pending_tools=None,
+                ),
+            ))
+            effective_commit = commit
+        if session_id is None and conversation_agent_run is not None:
+            await self._materialize_prepared_checkpoint_with_reconciliation(
+                self._conversation_run_store, conversation_agent_run, prepared_conversation,
+            )
         if session_id is not None and conversation_agent_run is not None and conversation_checkpoint is not None:
             if next_cursor is None or self._conversation_run_store is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2957,11 +3426,15 @@ class StateCommands:
             ]
 
             async def commit_conversation(group: StateGroupTransaction) -> None:
+                nonlocal next_cursor
                 conversation_transaction = group.transaction(self._conversation.state_store)
-                await self._conversation_run_store.materialize_checkpoint_in_transaction(
+                sequence = await self._conversation_run_store.materialize_checkpoint_in_transaction(
                     group.transaction(self._conversation_run_store.state_store),
                     conversation_agent_run,
                     prepared_conversation[0],
+                )
+                next_cursor = await self._pin_conversation_cursor(
+                    self._conversation_run_store, next_cursor, prepared_conversation[0], sequence,
                 )
                 session = await self._conversation.get_in_transaction(
                     conversation_transaction,
@@ -3012,6 +3485,9 @@ class StateCommands:
                     conversation_agent_run,
                     prepared_conversation,
                 )
+                next_cursor = await self._pin_conversation_cursor(
+                    self._conversation_run_store, next_cursor, prepared_conversation[0], None,
+                )
 
                 async def commit_conversation_state(
                     transaction: StateTransaction,
@@ -3060,44 +3536,23 @@ class StateCommands:
             if self._execution_run_store is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             execution_stores.extend(self._execution_run_store.transaction_stores)
-        recovery_state_merged = (
-            recovery_pending
-            and recovery_checkpoint is not None
-            and self._checkpoint.checkpoints.state_store.storage_group is self._execution.state_store.storage_group
-        )
-        if recovery_state_merged:
-            if has_recovery_run_target:
-                if self._checkpoint_archive is None or recovery_run is None or recovery_agent_run_checkpoint is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                checkpoint_archive_merged = (
-                    self._checkpoint_archive.state_store.storage_group
-                    is self._execution.state_store.storage_group
-                )
-            execution_stores.append(self._checkpoint.checkpoints.state_store)
-            if checkpoint_archive_merged:
-                execution_stores.extend(self._checkpoint_archive.transaction_stores)
-        if recovery_pending and has_recovery_run_target and not checkpoint_archive_merged:
-            if self._checkpoint_archive is None or recovery_run is None or recovery_agent_run_checkpoint is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await self._materialize_prepared_checkpoint_with_reconciliation(
-                self._checkpoint_archive,
-                recovery_run,
-                prepared_recovery,
-            )
-
         execution_run_store_in_transaction = False
         execution_prefix: "PreparedCapabilityWrites | None" = None
 
         async def commit_execution(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
             nonlocal effective_commit
             execution_transaction = group.transaction(self._execution.state_store)
-            head, head_record = await self._execution.require_open_history_head_in_transaction(
-                execution_transaction,
-                commit.execution.execution_id,
-                expected_producer_generation=commit.producer_generation,
-            )
+            if commit.producer_generation is not None:
+                execution_guard = await self._execution.require_execution_producer_in_transaction(
+                    execution_transaction, commit.execution.execution_id,
+                    expected_producer_generation=commit.producer_generation,
+                )
+            else:
+                execution_guard = await self._execution.require_execution_history_write_in_transaction(
+                    execution_transaction, commit.execution.execution_id,
+                )
             effective_commit = await self._effective_terminal_commit(
-                execution_transaction, commit, expected_execution=expected_execution,
+                execution_transaction, commit, expected_execution=expected_execution, start_identity=start_identity,
             )
             if execution_run is not None and execution_run_store_in_transaction:
                 execution_transaction_for_steps = group.transaction(
@@ -3115,7 +3570,7 @@ class StateCommands:
                             observation=projection.observation,
                             producer_generation=projection.producer_generation,
                             execution_id=commit.execution.execution_id,
-                            history_head_guard=(head, head_record),
+                            execution_guard=execution_guard,
                         )
                 else:
                     await self._execution_run_store.sync_projection_in_transaction(
@@ -3131,34 +3586,10 @@ class StateCommands:
                             else ()
                         ),
                         execution_id=commit.execution.execution_id,
-                        history_head_guard=(head, head_record),
+                        execution_guard=execution_guard,
                     )
             if seal is not None:
                 await self._execution.put_history_seal_in_transaction(execution_transaction, seal)
-            await self._execution.replace_history_head_in_transaction(
-                execution_transaction,
-                head_record,
-                replace(
-                    head,
-                    state=ExecutionHistoryState.SEALED if seal is not None else ExecutionHistoryState.CLOSED,
-                    revision=head.revision + 1,
-                    seal_digest=None if seal is None else seal.seal_digest,
-                ),
-            )
-            if recovery_state_merged:
-                if checkpoint_archive_merged:
-                    await self._checkpoint_archive.materialize_checkpoint_in_transaction(
-                        group.transaction(self._checkpoint_archive.state_store),
-                        recovery_run,
-                        prepared_recovery[0],
-                    )
-                await self._checkpoint.checkpoints.compare_and_swap_in_transaction(
-                    group.transaction(self._checkpoint.checkpoints.state_store),
-                    recovery_checkpoint.execution_id,
-                    tenant_id=self._tenant_id,
-                    expected_revision=recovery_checkpoint.revision - 1,
-                    next_record=recovery_checkpoint,
-                )
             if execution_prefix is not None:
                 await execution_prefix.apply(group)
             return await self._execution.commit_terminal_in_transaction(
@@ -3176,18 +3607,12 @@ class StateCommands:
                 next_cursor=next_cursor,
                 conversation_agent_run=conversation_agent_run,
                 conversation_checkpoint=conversation_checkpoint,
-                recovery_checkpoint=recovery_checkpoint if recovery_state_merged else None,
-                recovery_run=recovery_run if checkpoint_archive_merged else None,
-                recovery_agent_run_checkpoint=(
-                    recovery_agent_run_checkpoint if checkpoint_archive_merged else None
-                ),
                 execution_run=execution_run,
                 execution_events=execution_events,
                 execution_checkpoints=execution_checkpoints,
                 execution_projections=execution_projections,
                 audit_events=audit_events,
                 require_session_release=False,
-                require_recovery=recovery_state_merged,
             )
 
         async def commit_execution_with_reconciliation(
@@ -3308,23 +3733,7 @@ class StateCommands:
                     checkpoints=execution_checkpoints,
                 )
             terminal_stores = [self._execution.state_store]
-            if recovery_state_merged:
-                terminal_stores.append(self._checkpoint.checkpoints.state_store)
-                if checkpoint_archive_merged:
-                    terminal_stores.extend(self._checkpoint_archive.transaction_stores)
             result = await commit_execution_with_reconciliation(terminal_stores)
-        if recovery_state_merged and recovery_checkpoint is not None:
-            actual_recovery = await self._checkpoint.checkpoints.get(
-                recovery_checkpoint.execution_id,
-                tenant_id=self._tenant_id,
-            )
-            if actual_recovery == recovery_checkpoint:
-                recovery_pending = False
-            elif actual_recovery is not None and not _recovery_completion_predecessor(
-                actual_recovery,
-                recovery_checkpoint,
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if session_id is not None:
             async def release_conversation(transaction: StateTransaction) -> None:
                 if turn_payloads is not None:
@@ -3358,8 +3767,6 @@ class StateCommands:
                         if turn_payloads is not None:
                             await self.verify_conversation_turn(effective_commit.execution, effective_commit.result)
                         break
-        if recovery_pending and recovery_checkpoint is not None:
-            await self._complete_recovery_checkpoint(recovery_checkpoint)
         return result
 
     async def finish_conversation_turn(
@@ -3522,15 +3929,13 @@ class StateCommands:
         )
         if checkpoint is None:
             return False
-        projection = await archive.transcript_repository.load_projection(
-            prepared.owner_id
-        )
+        sequence = await archive.latest_checkpoint_sequence(agent_run_id=run.agent_run_id)
+        stored = await archive.checkpoint_at_sequence(agent_run_id=run.agent_run_id, checkpoint_sequence=sequence)
         return (
             checkpoint.step_index == prepared.stored.step_index
             and checkpoint.timestamp == prepared.stored.timestamp
             and checkpoint.state == prepared.stored.state
-            and projection is not None
-            and projection.digest == prepared.projection.digest
+            and stored == prepared.stored
         )
 
     async def _step_checkpoint_visible(
@@ -3647,39 +4052,6 @@ class StateCommands:
             ) from result.error
         raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
 
-    async def _complete_recovery_checkpoint(self, target: ExecutionCheckpoint) -> None:
-        current = await self._checkpoint.checkpoints.get(target.execution_id, tenant_id=self._tenant_id)
-        if current is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if current == target:
-            return
-        if not _recovery_completion_predecessor(current, target):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for _ in range(2):
-            try:
-                await self._checkpoint.checkpoints.compare_and_swap(
-                    target.execution_id,
-                    tenant_id=self._tenant_id,
-                    expected_revision=current.revision,
-                    next_record=target,
-                )
-                return
-            except AIError as error:
-                if error.code not in {
-                    ErrorCode.STORAGE_COMMIT_UNKNOWN,
-                    ErrorCode.STORAGE_CONFLICT,
-                }:
-                    raise
-                observed = await self._checkpoint.checkpoints.get(target.execution_id, tenant_id=self._tenant_id)
-                if observed == target:
-                    return
-                if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or observed is None:
-                    raise
-                if not _recovery_completion_predecessor(observed, target):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-                current = observed
-        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
-
     def _require_conversation(self) -> None:
         if self._conversation is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -3694,6 +4066,7 @@ class StateCommands:
         commit: ExecutionTerminalCommit,
         *,
         expected_execution: ExecutionRecord | None = None,
+        start_identity: IdempotencyRecord | None = None,
     ) -> ExecutionTerminalCommit:
         if expected_execution is not None:
             current = await self._execution.get_in_transaction(
@@ -3716,7 +4089,7 @@ class StateCommands:
             commit,
             idempotency=await self._execution.terminal_idempotency_in_transaction(
                 transaction,
-                commit,
+                commit, **({"identity": start_identity} if type(self._execution) is ExecutionRepositoryImpl else {}),
             ),
         )
 
@@ -3724,9 +4097,9 @@ class StateCommands:
         self,
         claim: ExecutionStartClaim,
         *,
-        recovery_checkpoint: ExecutionCheckpoint | None,
         session_id: str | None,
         expected_cursor: ConversationCursor | None,
+        expected_session: SessionRecord | None = None,
     ) -> ExecutionRecord | None:
         execution = await self._load_execution(
             claim.execution_id,
@@ -3762,28 +4135,13 @@ class StateCommands:
             != ExecutionEventType.EXECUTION_STARTED.value
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if recovery_checkpoint is not None:
-            actual = await self._checkpoint.checkpoints.get(
-                recovery_checkpoint.execution_id,
-                tenant_id=self._tenant_id,
-            )
-            if (
-                actual is None
-                or actual.execution_id != recovery_checkpoint.execution_id
-                or actual.agent_run_id is not None
-                or actual.state is not ExecutionCheckpointState.ADMITTED
-                or actual.handoff_phase is not RecoveryHandoffPhase.NONE
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if session_id is not None:
             session = await self._load_session(session_id, tenant_id=self._tenant_id)
-            if (
-                session is None
-                or session.status is not SessionStatus.OPEN
-                or session.active_execution_id != claim.execution_id
-                or session.continuation != expected_cursor
-            ):
+            if (session is None or session.active_execution_id != claim.execution_id
+                    or session.continuation != expected_cursor):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if expected_session is not None:
+                _require_session_capture(session, expected_session)
         return execution
 
     async def _terminal_targets_visible(
@@ -3796,16 +4154,12 @@ class StateCommands:
         next_cursor: ConversationCursor | None,
         conversation_agent_run: AgentRunRecord | None,
         conversation_checkpoint: AgentRunCheckpoint | None,
-        recovery_checkpoint: ExecutionCheckpoint | None,
-        recovery_run: AgentRunRecord | None,
-        recovery_agent_run_checkpoint: AgentRunCheckpoint | None,
         execution_run: AgentRunRecord | None,
         execution_events: Sequence[StepEvent],
         execution_checkpoints: Sequence[AgentRunCheckpoint],
         execution_projections: Sequence[PreparedExecutionProjection],
         audit_events: Sequence[ExecutionEventAppend],
         require_session_release: bool = True,
-        require_recovery: bool = True,
     ) -> bool:
         execution = await self._load_execution(
             commit.execution.execution_id,
@@ -3821,20 +4175,9 @@ class StateCommands:
             else execution.revision == commit.expected_revision
             and execution.event_seq == commit.expected_event_seq
         ):
-            head = await self._execution.get_history_head(
-                execution.execution_id, tenant_id=self._tenant_id,
-            )
-            seal = await self._execution.get_history_seal(
-                execution.execution_id, tenant_id=self._tenant_id,
-            )
-            if head is None or head.state is not ExecutionHistoryState.OPEN or seal is not None:
+            seal = await self._execution.get_history_seal(execution.execution_id, tenant_id=self._tenant_id)
+            if execution.history_seal_digest is not None or seal is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if recovery_checkpoint is not None and require_recovery:
-                recovery = await self._checkpoint.checkpoints.get(
-                    execution.execution_id, tenant_id=self._tenant_id,
-                )
-                if recovery == recovery_checkpoint:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if expected_execution is not None and not _same_execution_except_hold_metadata(execution, expected_execution):
                 raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
             return False
@@ -3854,15 +4197,7 @@ class StateCommands:
         ) if execution.durable_trace else None
         if execution.durable_trace and history_seal is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        history_head = await self._execution.get_history_head(
-            commit.execution.execution_id,
-            tenant_id=self._tenant_id,
-        )
-        if (
-            history_head is None
-            or history_head.state is not (ExecutionHistoryState.SEALED if execution.durable_trace else ExecutionHistoryState.CLOSED)
-            or history_head.seal_digest != (None if history_seal is None else history_seal.seal_digest)
-        ):
+        if execution.history_seal_digest != (None if history_seal is None else history_seal.seal_digest):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if execution.durable_trace and (execution_projections or execution_run is None):
             expected_seal = _execution_history_seal(
@@ -3954,27 +4289,9 @@ class StateCommands:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if session_id is not None and commit.execution.conversation and require_session_release:
             await self.verify_conversation_turn(commit.execution, commit.result)
-        if recovery_checkpoint is not None and require_recovery:
-            actual = await self._checkpoint.checkpoints.get(
-                recovery_checkpoint.execution_id,
-                tenant_id=self._tenant_id,
-            )
-            if actual != recovery_checkpoint:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for archive, run, checkpoint in (
-            (
-                self._conversation_run_store,
-                conversation_agent_run,
-                conversation_checkpoint,
-            ),
-            (
-                self._checkpoint_archive,
-                recovery_run,
-                recovery_agent_run_checkpoint,
-            ),
-        ):
-            if run is None and checkpoint is None:
-                continue
+        if conversation_agent_run is not None or conversation_checkpoint is not None:
+            archive = self._conversation_run_store
+            run, checkpoint = conversation_agent_run, conversation_checkpoint
             if archive is None or run is None or checkpoint is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             stored_run = await archive.get_agent_run(agent_run_id=run.agent_run_id)
@@ -4014,10 +4331,13 @@ class StateCommands:
         tenant_id: str,
         execution_id: str,
         expected: ConversationCursor | None,
+        expected_session: SessionRecord | None = None,
     ) -> None:
         session = await self._conversation.get(session_id, tenant_id=tenant_id)
         if session is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        if expected_session is not None:
+            _require_session_capture(session, expected_session)
         owner_id = session.active_execution_id
         if owner_id not in {None, execution_id}:
             owner = await self._execution.get(owner_id, tenant_id=tenant_id)
@@ -4047,8 +4367,20 @@ class StateCommands:
             tenant_id=tenant_id,
             execution_id=execution_id,
             expected=expected,
+            expected_session=expected_session,
         )
 
+
+
+def _require_session_capture(current: SessionRecord, expected: SessionRecord) -> None:
+    if current.session_id != expected.session_id:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if current.owner_principal_id != expected.owner_principal_id:
+        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+    if current.agent_id != expected.agent_id:
+        raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
+    if current.cwd != expected.cwd:
+        raise AIError(ErrorCode.SESSION_CONFLICT)
 
 
 def _dedupe_stores(stores: Sequence[StateStore]) -> tuple[StateStore, ...]:
@@ -4070,24 +4402,6 @@ def _partial_integrity(
         DurableCommitState.PARTIAL_INTEGRITY_ERROR,
         error=error or AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
     )
-
-
-def _require_durable_pair(
-    outcome: DurableCommitResult[tuple[ExecutionRecord, ExecutionCheckpoint]],
-) -> tuple[ExecutionRecord, ExecutionCheckpoint]:
-    if outcome.state is DurableCommitState.COMMITTED:
-        if outcome.value is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if outcome.cancelled:
-            raise asyncio.CancelledError
-        return outcome.value
-    if outcome.state is DurableCommitState.NOT_COMMITTED:
-        if outcome.error is not None:
-            raise outcome.error
-        raise AIError(ErrorCode.STORAGE_CONFLICT)
-    if outcome.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from outcome.error
-    raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from outcome.error
 
 
 def _require_durable_record(
@@ -4114,26 +4428,6 @@ def _same_group(stores: Sequence[StateStore]) -> bool:
 
 
 
-def _recovery_completion_predecessor(
-    current: ExecutionCheckpoint,
-    target: ExecutionCheckpoint,
-) -> bool:
-    return (
-        current.state is ExecutionCheckpointState.HANDOFF
-        and current.handoff_phase is RecoveryHandoffPhase.PREPARED
-        and target.state is ExecutionCheckpointState.COMPLETED
-        and target.handoff_phase is RecoveryHandoffPhase.COMPLETED
-        and replace(
-            current,
-            state=target.state,
-            handoff_phase=target.handoff_phase,
-            terminal_handoff=target.terminal_handoff,
-            pending_operation_id=target.pending_operation_id,
-            revision=target.revision,
-            updated_at=target.updated_at,
-        )
-        == target
-    )
 
 
 __all__ = ["StateCommands"]
