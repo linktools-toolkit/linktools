@@ -86,6 +86,7 @@ from ._task_state import (
 _logger = environ.get_logger("ai.runtime.state.task_repository")
 _ValueT = TypeVar("_ValueT")
 _TASK_EVENT_RETRY_LIMIT = 16
+_TASK_NODE_READ_BATCH_SIZE = 256
 _TASK_EVENT_RETRY_BASE_SECONDS = 0.001
 _TASK_EVENT_RETRY_MAX_SECONDS = 0.05
 _MAX_PENDING_TASK_OPERATIONS = 64
@@ -505,7 +506,11 @@ class TaskRepositoryImpl(RepositoryBase):
         keys = tuple(self._result_key(graph_id, node_id) for node_id in node_ids)
 
         async def read(transaction: StateTransaction) -> Mapping[str, TaskResultRecord]:
-            records = await transaction.get_records(keys)
+            records: dict[bytes, StoredRecord] = {}
+            for offset in range(0, len(keys), _TASK_NODE_READ_BATCH_SIZE):
+                records.update(await transaction.get_records(
+                    keys[offset:offset + _TASK_NODE_READ_BATCH_SIZE],
+                ))
             result: dict[str, TaskResultRecord] = {}
             for node_id, key in zip(node_ids, keys, strict=True):
                 record = records.get(key)
@@ -673,6 +678,7 @@ class TaskRepositoryImpl(RepositoryBase):
                 (
                     self._graph_key(lease.graph_id),
                     self._state_key(lease.graph_id, lease.node_id),
+                    self._definition_key(lease.graph_id, lease.node_id),
                 )
             )
             graph_record = records.get(self._graph_key(lease.graph_id))
@@ -1134,7 +1140,12 @@ class TaskRepositoryImpl(RepositoryBase):
         )
 
         async def read(transaction: StateTransaction) -> tuple[TaskNodeView, ...]:
-            records = await transaction.get_records(state_keys + definition_keys)
+            records: dict[bytes, StoredRecord] = {}
+            for offset in range(0, len(node_ids), _TASK_NODE_READ_BATCH_SIZE):
+                end = offset + _TASK_NODE_READ_BATCH_SIZE
+                records.update(await transaction.get_records(
+                    state_keys[offset:end] + definition_keys[offset:end],
+                ))
             states: list[TaskNodeView] = []
             for node_id, state_key, definition_key in zip(
                 node_ids,
@@ -2685,7 +2696,10 @@ class TaskRepositoryImpl(RepositoryBase):
             node_key = self._state_key(target_graph_id, target_node_id)
             result_key = self._result_key(target_graph_id, target_node_id)
             records = await transaction.get_records(
-                (graph_key, node_key, result_key),
+                (
+                    graph_key, node_key, result_key,
+                    self._definition_key(target_graph_id, target_node_id),
+                ),
             )
             graph_record = records.get(graph_key)
             node_record = records.get(node_key)
