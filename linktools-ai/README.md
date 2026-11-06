@@ -1612,10 +1612,52 @@ binding metadata; portable PersistenceStorage restore therefore requires the
 corresponding Asset history to remain available through the AssetStore supplied
 when the Runtime is reopened.
 
+For a native checkpoint store in the same SQL resource as Runtime control state,
+open Persistence first and borrow its Execution route through the public factory:
+
+```python
+from pydantic_ai_harness.step_persistence import StepPersistence
+from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+
+storage = PersistenceStorage.from_root(runtime_root, exclusive_writer=True)
+async with Persistence.open("service-runtime", storage=storage) as persistence:
+    steps = await persistence.create_step_store()
+    try:
+        features = RuntimeFeatures("checkpointed-runtime")
+        features.capability(StepPersistence(store=steps, capture_frontier=True))
+        # Add the application's model and Agent declarations to these features.
+        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+            ...
+    finally:
+        await steps.close()
+```
+
+The adapter uses Persistence's namespace and tenant and borrows the exact
+Execution SQL context, including a local SQLite writer owner when configured.
+Native checkpoint writes can therefore join the Runtime control transaction.
+It does not open another engine, add another database file, or acquire a separate
+writer lease. Close or hand off Runtime producers before closing the adapter;
+Persistence owns the physical resource and closes last. A borrowed shared SQL
+engine remains owned by its caller. Read-only Persistence and in-memory Execution
+routes reject this factory; explicitly ephemeral applications can use the native
+`InMemoryStepStore` instead, without a durability or atomic SQL guarantee.
+
+A new local Execution database includes the five native tables in its initial
+atomic schema publication. `create_step_store()` does not inspect schemas,
+create missing tables, or migrate existing databases. Shared SQL must be
+provisioned explicitly. Missing or incompatible native tables fail at the first
+affected operation; deployment checks can use `validate_sql` with
+`build_step_sql_metadata()` from `linktools.ai.persistence.schema`. Existing
+pre-release checkpoint records and archives are not implicitly migrated.
+
 Native `StepPersistence(store=...)` is another caller-owned backup resource.
 Quiesce writers and back up its database consistently with Runtime control state.
-For `SqlStepStore`, include all six `ai_step_*` tables and the Runtime business
+For `SqlStepStore`, include all five `ai_step_*` tables and the Runtime business
 tables in the same database backup; an external MediaStore must be backed up too.
+For `from_root`, one SQLite online backup of `runtime.db` includes both control
+and native checkpoint rows. Filesystem objects and Asset history still require
+their own consistent backup after writers and cleanup have been quiesced.
 Portable export returns `SNAPSHOT_UNSUPPORTED` when persisted executions depend
 on native checkpoints, rather than producing an incomplete recovery archive.
 Executions without checkpoints retain their existing portable export behavior.
@@ -1623,7 +1665,7 @@ Old checkpoint archive formats and portable packages are not a compatibility
 path for this version. Schema deployment remains an explicit maintenance action.
 
 
-SQLite-backed `PersistenceStorage` supports the built-in durable TaskGraph scheduler without a SQLite-specific launcher or an external lock. Normal internal Task optimistic-CAS races are reread and converged by the Task domain. Durable ToolOperation terminal persistence is also lease-aware: a same-lease heartbeat racing terminal persistence is reconciled without replaying the tool effect. Genuine ownership, fence, idempotency, tool-result, effect-unknown, integrity, and storage errors remain observable. A newly created local SQLite database initializes its Runtime and `ai_objects` schema; an existing SQLite database is opened without automatic schema validation and is never implicitly migrated or repaired. When `object_store` is omitted, durable SQLite Runtime objects are stored in the same database through the built-in `ai_objects` and `ai_object_chunks` tables. An explicitly supplied ObjectStore remains available when object payloads should live outside SQLite. External SQL backends still require explicit schema provisioning/migration. Process workers must initialize their own Runtime and SQL engine inside the worker process; initialized Runtime, engine, session, or connection objects must not be reused after `fork()`.
+SQLite-backed `PersistenceStorage` supports the built-in durable TaskGraph scheduler without a SQLite-specific launcher or an external lock. Normal internal Task optimistic-CAS races are reread and converged by the Task domain. Durable ToolOperation terminal persistence is also lease-aware: a same-lease heartbeat racing terminal persistence is reconciled without replaying the tool effect. Genuine ownership, fence, idempotency, tool-result, effect-unknown, integrity, and storage errors remain observable. A newly created local SQLite database initializes its Runtime schema, the five native `ai_step_*` tables on the Execution route, and `ai_objects` when using the built-in SQL ObjectStore; an existing SQLite database is opened without automatic schema validation and is never implicitly migrated or repaired. When `object_store` is omitted, durable SQLite Runtime objects are stored in the same database through the built-in `ai_objects` and `ai_object_chunks` tables. An explicitly supplied ObjectStore remains available when object payloads should live outside SQLite. External SQL backends still require explicit schema provisioning/migration. Process workers must initialize their own Runtime and SQL engine inside the worker process; initialized Runtime, engine, session, or connection objects must not be reused after `fork()`.
 
 SQL Runtime, Asset, and Metrics initialization and ordinary reads do not inspect
 table schemas by default. Schema diagnostics are an explicit deployment or
