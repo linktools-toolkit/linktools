@@ -8,6 +8,7 @@ from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from copy import copy, deepcopy
 from dataclasses import dataclass, fields
+from itertools import groupby
 from typing import TYPE_CHECKING
 
 from pydantic import TypeAdapter
@@ -192,17 +193,22 @@ class SqlStepStore:
         await self.initialize()
 
         async def write(session: "AsyncSession") -> None:
-            await self._write_event(session, event)
+            await self._write_events(session, (event,))
 
         await self._context.run_mutation(write, domain="steps.event")
 
-    async def _write_event(self, session: "AsyncSession", event: StepEvent) -> None:
-        values = self._run_values(event.run_id) | self._record_values(event)
-        values["key_digest"] = _optional_digest(event.idempotency_key)
-        await self._context.dialect.insert_ignore_conflict(
-            session, table=self._table("events"), values=values,
-            index_elements=("store_digest", "run_digest", "key_digest"),
-        )
+    async def _write_events(self, session: "AsyncSession", events: Sequence[StepEvent]) -> None:
+        for keyed, group in groupby(events, key=lambda event: event.idempotency_key is not None):
+            rows = [self._run_values(event.run_id) | self._record_values(event)
+                    | {"key_digest": _optional_digest(event.idempotency_key)} for event in group]
+            # MySQL retries an entire driver batch after a duplicate. Unkeyed
+            # events must remain single writes so an earlier prefix cannot repeat.
+            batch_size = _BATCH_SIZE if keyed else 1
+            for offset in range(0, len(rows), batch_size):
+                await self._context.dialect.insert_ignore_conflict_many(
+                    session, table=self._table("events"), rows=rows[offset:offset + batch_size],
+                    index_elements=("store_digest", "run_digest", "key_digest"),
+                )
 
     async def list_events(self, *, run_id: str) -> list[StepEvent]:
         from sqlalchemy import select
@@ -245,8 +251,7 @@ class SqlStepStore:
     ) -> StepWriteReceipt:
         if prepared.run is not None:
             await self._write_run(session, prepared.run, replay=True)
-        for event in prepared.events:
-            await self._write_event(session, event)
+        await self._write_events(session, prepared.events)
         confirmed = ()
         if prepared.snapshot is not None and prepared.snapshot_values is not None:
             confirmed = await self._write_snapshot(

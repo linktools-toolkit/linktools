@@ -933,6 +933,14 @@ class StateCommands:
                                     identity.request_digest, initial.created_at)
 
         async def mutate(group: StateGroupTransaction) -> ExecutionStartReservationResult | None:
+            if initial.session_id is not None and isinstance(group, GroupRecordReader):
+                keys = {self._execution.state_store: (
+                    self._execution.execution_record_key(initial.execution_id),
+                    self._execution.start_idempotency_record_key(identity),
+                )}
+                store = self._conversation.state_store
+                keys[store] = (*keys.get(store, ()), self._conversation.session_record_key(initial.session_id))
+                await group.get_records(keys)
             # Busy, stale-owner and changed-cursor admissions retain the existing
             # reservation/rejection path, including durable failed request keys.
             if initial.session_id is not None:
