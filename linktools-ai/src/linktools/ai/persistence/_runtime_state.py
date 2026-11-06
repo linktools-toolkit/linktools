@@ -34,7 +34,9 @@ from .snapshots import SnapshotResources, RuntimeSnapshotOperations, restore_sna
 from ._object_cleanup import ObjectCleanupResult
 
 if TYPE_CHECKING:
+    from pydantic_ai_harness.media import MediaStore
     from pydantic_ai_harness.step_persistence import StepStore
+    from ._step_store import SqlStepStore
     from ._materializer import _MaterializedRuntimeStorage
     from ._object_router import _RuntimeObjectRouter
     from ._retention import RuntimeRetentionController
@@ -234,6 +236,46 @@ class Persistence:
                 self.capability_stores[identity] = store
                 if self._plan.route(PersistenceDomain.EXECUTION).retention is StorageRetentionMode.DURABLE:
                     self.durable_capability_ids = self.durable_capability_ids | {identity}
+            return store
+
+    async def create_step_store(
+        self,
+        *,
+        tool_effect_store: "StepStore | None" = None,
+        media_store: "MediaStore | None" = None,
+        media_threshold_bytes: int = 64 * 1024,
+        max_snapshots_per_run: int | None = None,
+        max_cached_messages: int = 4096,
+    ) -> "SqlStepStore":
+        """Create a caller-owned native adapter over the Execution SQL resource.
+
+        The adapter borrows this scope's context and namespace/tenant, so native
+        boundaries can join Runtime control transactions. Close its Runtime
+        producers first, then the adapter, then this Persistence. No schema
+        inspection or migration occurs here; only a new local SQLite database
+        initializes native tables. Memory routes are not a durable substitute.
+        """
+        from ._sql import SqlStateStore
+        from ._step_store import SqlStepStore
+
+        async with self._lock:
+            self._require_ready()
+            if self._read_only:
+                raise AIError(ErrorCode.STORAGE_READ_ONLY)
+            state = self._stores[PersistenceDomain.EXECUTION]
+            if not isinstance(state, SqlStateStore):
+                raise AIError(
+                    ErrorCode.STORAGE_CAPABILITY_MISSING,
+                    "Native SQL steps require a SQLite or SQL Execution route",
+                )
+            store = SqlStepStore(
+                state.context, namespace=self.namespace, tenant_id=self.tenant_id,
+                tool_effect_store=tool_effect_store, media_store=media_store,
+                media_threshold_bytes=media_threshold_bytes,
+                max_snapshots_per_run=max_snapshots_per_run,
+                max_cached_messages=max_cached_messages,
+            )
+            await store.initialize()
             return store
 
     async def create_agent_run_store(self, *, step_store: "StepStore | None" = None) -> "RuntimeAgentRunStore":

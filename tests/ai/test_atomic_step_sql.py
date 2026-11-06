@@ -172,6 +172,21 @@ async def test_parallel_compound_calls_preserve_native_keys_and_each_event_order
 
 
 @pytest.mark.asyncio
+async def test_compound_events_preserve_unkeyed_occurrences_and_first_keyed_value(
+    atomic_store: tuple[SqlStepStore, AsyncEngine],
+) -> None:
+    store, _ = atomic_store
+    first = StepEvent(run_id="run", kind="run_started", step_index=0, idempotency_key="first")
+    unkeyed = replace(first, kind="model_request_started", idempotency_key=None)
+    tail = [replace(first, kind="model_request_completed", step_index=index, idempotency_key=str(index))
+            for index in range(129)]
+    await store.commit_step(events=(first, replace(first, error="ignored"), unkeyed, unkeyed, *tail))
+    assert await store.list_events(run_id="run") == [first, unkeyed, unkeyed, *tail]
+    await store.commit_step(events=(replace(first, error="still ignored"), unkeyed, *tail))
+    assert await store.list_events(run_id="run") == [first, unkeyed, unkeyed, *tail, unkeyed]
+
+
+@pytest.mark.asyncio
 async def test_inflight_compound_group_is_invisible_to_cold_reader_and_cache(
     atomic_store: tuple[SqlStepStore, AsyncEngine], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -182,8 +197,9 @@ async def test_inflight_compound_group_is_invisible_to_cold_reader_and_cache(
 
     async def pause_after_bodies(session, **kwargs):
         result = await original(session, **kwargs)
-        inserted.set()
-        await release.wait()
+        if kwargs["table"].name == "ai_step_messages":
+            inserted.set()
+            await release.wait()
         return result
 
     monkeypatch.setattr(store._context.dialect, "insert_ignore_conflict_many", pause_after_bodies)
