@@ -220,6 +220,99 @@ async def test_compaction_request_is_budgeted_before_provider_dispatch(budgets):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("limit", (0, 1))
+@pytest.mark.parametrize("streaming", (False, True))
+async def test_model_admission_precedes_preparation_and_nested_compaction(budgets, limit, streaming):
+    from pydantic_ai import Agent
+    from pydantic_ai.capabilities import AbstractCapability
+    from linktools.ai.runtime._metric_capability import ModelObservationCapability
+    from linktools.ai.persistence.state import active_state_transaction
+
+    await budgets.ensure("scope", RunBudget(model_requests=limit))
+    budget = RunBudgetContext(budgets, "scope", "execution", "run")
+    journal = ModelRequestJournal(source_namespace="budget-boundaries", tenant_id="tenant",
+                                  execution_id="execution", agent_run_id="run")
+    preparations = []
+
+    class PrepareSummary(AbstractCapability):
+        async def before_model_request(self, ctx, request_context):
+            assert active_state_transaction(budgets.state_store) is None
+            preparations.append((await budgets.read("scope")).model_requests)
+            summary = _ObservedCompactionModel(
+                TestModel(), ctx=ctx, journal=journal, observer=None, recorder=None,
+                source_messages=(), budget=budget,
+            )
+            await summary.request([], None, ModelRequestParameters())
+            return request_context
+
+    observation = ModelObservationCapability(
+        None, source_namespace="budget-boundaries", tenant_id="tenant", execution_id="execution",
+        session_id=None, agent_run_id="run", agent_id="agent", journal=journal, budget=budget,
+    )
+    agent = Agent(TestModel(), capabilities=[observation, PrepareSummary()])
+    with pytest.raises(AIError) as rejected:
+        if streaming:
+            async with agent.run_stream("work") as response:
+                await response.get_output()
+        else:
+            await agent.run("work")
+    assert rejected.value.code is ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED
+    assert preparations == ([] if limit == 0 else [1])
+    usage = await budgets.read("scope")
+    assert usage.model_requests == usage.unknown_model_requests == limit
+    assert usage.in_flight_model_requests == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ("success", "failure", "cancel"))
+async def test_completion_observer_sees_settlement_before_shared_budget_work(budgets, outcome):
+    from linktools.ai.core import ExecutionEventType
+    from linktools.ai.runtime._metric_capability import ModelObservationCapability
+    from linktools.ai.persistence.state import active_state_transaction
+    from .test_model_request_lifecycle import _context
+
+    await budgets.ensure("scope", RunBudget(total_tokens=10))
+    budget = RunBudgetContext(budgets, "scope", "execution", "run")
+    observations = []
+
+    async def publish(event_type, payload):
+        if event_type is not ExecutionEventType.MODEL_REQUEST_FINISHED:
+            return
+        assert active_state_transaction(budgets.state_store) is None
+        usage = await budgets.read("scope")
+        observations.append(usage)
+        with pytest.raises(AIError) as rejected:
+            await budget.admit_tool("observer")
+        assert rejected.value.safe_details["reason"] == (
+            "limit_exceeded" if outcome == "success" else "unknown_usage"
+        )
+
+    async def handler(request_context):
+        assert active_state_transaction(budgets.state_store) is None
+        if outcome == "failure":
+            raise RuntimeError("provider failed")
+        if outcome == "cancel":
+            raise asyncio.CancelledError
+        return ModelResponse([TextPart("done")], usage=RequestUsage(input_tokens=6, output_tokens=4))
+
+    observation = ModelObservationCapability(
+        None, source_namespace="budget-boundaries", tenant_id="tenant", execution_id="execution",
+        session_id=None, agent_run_id="run", agent_id="agent", event_sink=publish, budget=budget,
+    )
+    context, request = _context(TestModel())
+    if outcome == "success":
+        await observation.wrap_model_request(context, request_context=request, handler=handler)
+    else:
+        with pytest.raises(asyncio.CancelledError if outcome == "cancel" else RuntimeError):
+            await observation.wrap_model_request(context, request_context=request, handler=handler)
+    assert len(observations) == 1
+    usage = observations[0]
+    assert usage.model_requests == 1 and usage.tool_calls == usage.in_flight_model_requests == 0
+    assert usage.total_tokens == (10 if outcome == "success" else 0)
+    assert usage.unknown_model_requests == int(outcome != "success")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("effect_policy", ["none", "non_replay_safe"])
 async def test_expired_graph_budget_blocks_callable_without_unknown_effect(effect_policy: str) -> None:
     from datetime import datetime, timedelta, timezone

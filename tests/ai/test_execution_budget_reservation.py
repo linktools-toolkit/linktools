@@ -26,6 +26,51 @@ from ._runtime_test_helpers import RuntimeUsageModels
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("prepared_start", (False, True), ids=("atomic-start", "prepared-start"))
+async def test_launch_preserves_confirmed_limits_and_inherited_usage(
+    monkeypatch: pytest.MonkeyPatch, prepared_start: bool,
+) -> None:
+    from linktools.ai.capability import ExecutionCapability
+    from linktools.ai.runtime import RuntimeFeatures
+
+    features = RuntimeFeatures("budget-launch")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
+    async with Persistence.open("budget-launch", storage=PersistenceStorage.in_memory()) as persistence, Runtime.attach(
+        persistence=persistence, features=model_features(RuntimeUsageModels(), features),
+    ) as runtime:
+        service = runtime._execution_service
+        backend = service._backend
+        prepare_start, launch = backend.prepare_start, backend.launch
+        prepared, launched = {}, {}
+
+        async def capture_prepare(request, execution, identity):
+            prepared[execution.execution_id] = request.budget
+            return await prepare_start(request, execution, identity)
+
+        async def capture_launch(request, execution):
+            launched[execution.execution_id] = request.budget
+            return await launch(request, execution)
+
+        monkeypatch.setattr(backend, "prepare_start", capture_prepare)
+        monkeypatch.setattr(backend, "launch", capture_launch)
+        if prepared_start:
+            monkeypatch.setattr(service._runtime_bridge, "prepare_reserved_start", None)
+        limits = RunBudget(model_requests=1)
+        root = await runtime.agents.get().start("first", budget=limits)
+        assert (await root.wait()).result.status is ExecutionStatus.SUCCEEDED
+        child = await root.retry("same scope")
+        assert (await child.wait()).result.status is ExecutionStatus.FAILED
+        assert launched == {root.execution_id: limits, child.execution_id: limits}
+        if prepared_start:
+            assert prepared == {root.execution_id: limits, child.execution_id: None}
+        usage = await root.budget_usage()
+        assert usage == await child.budget_usage()
+        assert usage.model_requests == 1
+        assert usage.in_flight_model_requests == usage.unknown_model_requests == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("local_sqlite", "sqlite"))
 @pytest.mark.parametrize("budget", (None, RunBudget(model_requests=2)))
 async def test_caller_cancelled_reservation_completes_and_snapshot_replays(
