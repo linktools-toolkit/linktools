@@ -61,7 +61,7 @@ async def test_agent_task_binding_preserves_snapshot_and_distinct_port_surfaces(
     )
     task = Task.from_agent("agent-task", SimpleNamespace(execution_port=port))
     admissions = SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(
-        graph_id="graph", budget_scope_id=None,
+        graph_id="graph", budget_scope_id=None, tool_effects="live",
     )))
     executor = None
 

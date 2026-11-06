@@ -97,10 +97,13 @@ async def test_runtime_open_compiles_routes_without_eager_model_loading() -> Non
     features = RuntimeFeatures()
     features.model("default", load)
     features.model("unused", lambda: pytest.fail("unused model loaded"))
-    features.agent("assistant", model="default")
+    features.agent("assistant", model="default", allow_subagents=())
     async with Persistence.open('lazy-model-test', storage=PersistenceStorage.in_memory()) as persistence_96, Runtime.attach(persistence=persistence_96, features=features) as runtime:
         assert calls == []
-        binding = runtime.agents.get("assistant").model
+        agent = runtime.agents.get("assistant")
+        assert calls == []
+        binding = (await agent.resolve()).model
+        assert binding is not None
         assert calls == [1]
         assert binding.model_identity == "openai:fixture"
         assert calls == [1]

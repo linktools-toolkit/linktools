@@ -40,9 +40,20 @@ async def test_workspace_capability_is_the_only_workspace_registration(tmp_path:
     assert {item.id for item in capture.contributions if item.kind == "tool"} == {
         tool.name for tool in capability.tool_definitions()
     }
-    with pytest.raises(AIError) as duplicate:
-        features.capability(FileSystem(workspace), scope="runtime")
-    assert duplicate.value.code is ErrorCode.CAPABILITY_CONFLICT
+    replacement = Workspace.load(tmp_path / "replacement")
+    features.capability(FileSystem(replacement), scope="runtime")
+    current = await features.resolve()
+    assert current.workspace is replacement
+    assert capture.workspace is workspace
+    assert tuple((item.kind, item.id, item.revision) for item in current.contributions) == tuple(
+        (item.kind, item.id, item.revision) for item in capture.contributions
+    )
+    competing = FileSystem(workspace)
+    competing.id = "other.filesystem"
+    with pytest.raises(AIError) as conflict:
+        features.capability(competing, scope="runtime")
+    assert conflict.value.code is ErrorCode.CAPABILITY_CONFLICT
+    assert (await features.resolve()).workspace is replacement
 
 
 @pytest.mark.asyncio
@@ -147,7 +158,7 @@ async def test_prefixed_workspace_write_still_checks_original_tool_policy(tmp_pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cycle", (False, True))
-async def test_workspace_boundary_rejects_unrelated_or_cyclic_wrapper(tmp_path: Path, cycle: bool) -> None:
+async def test_workspace_boundary_dispatches_captured_leaf_without_following_wrapper_chain(tmp_path: Path, cycle: bool) -> None:
     from dataclasses import replace
     from pydantic_ai.tools import RunContext
     from pydantic_ai.toolsets import FunctionToolset, WrapperToolset
@@ -166,8 +177,12 @@ async def test_workspace_boundary_rejects_unrelated_or_cyclic_wrapper(tmp_path: 
         foreign = WrapperToolset(FunctionToolset())
         if cycle:
             foreign.wrapped = foreign
+        assert await boundary.call_tool(
+            "list_files", {}, ctx, replace(tools["list_files"], toolset=foreign),
+        ) == "(empty directory)"
+        unrelated = BoundaryToolset((), {}, id="unrelated", workspace_backend=session)
         with pytest.raises(AIError) as denied:
-            await boundary.call_tool("list_files", {}, ctx, replace(tools["list_files"], toolset=foreign))
+            await unrelated.call_tool("list_files", {}, ctx, tools["list_files"])
         assert denied.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
     finally:
         await session.close()

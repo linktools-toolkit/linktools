@@ -106,6 +106,60 @@ async def test_session_admission_reuses_verified_history_root(tmp_path: Path, mo
 
 
 @pytest.mark.asyncio
+async def test_session_admission_captures_current_rules_without_rewriting_history(tmp_path: Path) -> None:
+    from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
+    from linktools.ai.capability import AssetCapability
+    from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
+    from linktools.ai.storage import StorageOverlay
+
+    backend = InMemoryAssetBackend()
+    assets = AssetStore(StorageOverlay(backend, writer=backend))
+    await assets.initialize()
+    observed = []
+
+    async def model(messages, info):
+        observed.append(info.instructions or "")
+        return ModelResponse(parts=[TextPart("answer")])
+
+    features = RuntimeFeatures("current-instructions")
+    features.capability(AssetCapability(assets))
+    features.capability(ExecutionCapability(retain_history=True))
+    features.agent("default", model="default", allow_tools=())
+    rule = AssetKey("rule", "current.md")
+    expected = RepositoryInstructions((RepositoryInstructionDocument("rule:current", ".", "Rule added after startup"),))
+    try:
+        async with Persistence.open("current-instructions", storage=PersistenceStorage.sqlite(tmp_path / "rules.db")) as persistence, Runtime.attach(
+            persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
+        ) as runtime:
+            session = await runtime.agents.get().create_session("session")
+            records = []
+            for index in range(3):
+                if index == 1:
+                    await assets.put(rule, b"Rule added after startup")
+                elif index == 2:
+                    await assets.delete(rule)
+                result = (await session.run(f"question {index}", timeout_seconds=5)).result
+                assert result.status is ExecutionStatus.SUCCEEDED
+                record = await persistence.execution.executions.get(result.execution_id, tenant_id=runtime.tenant_id)
+                assert record is not None
+                records.append(record)
+            assert records[0].repository_instructions is None
+            assert records[2].repository_instructions is None
+            reader = runtime._execution_service.runtime_backend()
+            assert await reader.load_repository_instructions(records[1].repository_instructions) == expected
+            contexts = [await reader.load_input_context(record.input_context) for record in records]
+            assert all(context is not None for context in contexts)
+            assert contexts[0].repository_instructions is None
+            assert contexts[1].repository_instructions == expected.to_payload()
+            assert contexts[2].repository_instructions is None
+            assert "Rule added after startup" not in observed[0]
+            assert "Rule added after startup" in observed[1]
+            assert "Rule added after startup" not in observed[2]
+    finally:
+        await assets.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('rounds', (2, 4))
 async def test_projection_boundary_read_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rounds: int) -> None:
     import json

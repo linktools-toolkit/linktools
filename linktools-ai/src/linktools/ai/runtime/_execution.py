@@ -44,7 +44,6 @@ from ..agent import (
 )
 from ..core import (
     BudgetUsage,
-    CommitPolicy,
     AuthorizationAction,
     AuthorizationPolicy,
     CorrelationData,
@@ -387,22 +386,12 @@ class DefaultExecutionService(TaskExecutionService):
         object_key_factory: "ObjectKeyFactory | None" = None,
         payload_policy: "PayloadPolicy | None" = None,
         input_materializer: "ExecutionInputMaterializer | None" = None,
-        session_execution_ready: bool = True,
         task_admissions: TaskAdmissionRepository | None = None,
-        tool_responses: ToolResponseFixture | None = None,
         object_reader: "Callable[[PersistenceDomain, ObjectRef], Awaitable[bytes]] | None" = None,
-        restart_checkpoints: bool = False,
-        durable_trace: bool = False,
-        conversation: bool = False,
-        commit: CommitPolicy = CommitPolicy.sync(),
         context_archive: ExecutionContextArchive | None = None,
         retained_turn_confirmed: Callable[[ExecutionRecord], bool] | None = None,
         retained_publication: Callable[..., ExecutionTerminalPublication | None] | None = None,
     ) -> None:
-        if any(not isinstance(value, bool) for value in (
-            restart_checkpoints, durable_trace, conversation,
-        )):
-            raise TypeError("execution persistence guarantees must be bool")
         self._state = state
         self._retained_publication = retained_publication
         self._object_store = object_store
@@ -419,14 +408,7 @@ class DefaultExecutionService(TaskExecutionService):
             release_terminal=release_terminal, payload_policy=payload_policy,
             retained_turn_confirmed=retained_turn_confirmed,
         )
-        self._restart_checkpoints = restart_checkpoints
-        self._durable_trace = durable_trace
-        self._conversation = conversation
-        if not isinstance(commit, CommitPolicy) or commit.mode not in {"sync", "terminal"}:
-            raise ValueError("Execution requires sync or terminal commit")
-        self._commit = commit
         self._context_archive = context_archive
-        self._tool_responses = tool_responses
         self._catalog = catalog
         self._compiler = compiler
         self._restore_binding = restore_binding
@@ -434,8 +416,6 @@ class DefaultExecutionService(TaskExecutionService):
         self._live_broker = live_broker
         self._history_reader = history_reader
         self._history_service = history_service
-        if not isinstance(session_execution_ready, bool):
-            raise TypeError("session_execution_ready must be bool")
         if instruction_resolver is not None and (
             object_key_factory is None or payload_policy is None
         ):
@@ -444,7 +424,6 @@ class DefaultExecutionService(TaskExecutionService):
             )
         self._instruction_resolver = instruction_resolver
         self._input_materializer = input_materializer
-        self._session_execution_ready = session_execution_ready
         self._session_locks: dict[tuple[str, str], _SessionLockEntry] = {}
         self._session_locks_guard = asyncio.Lock()
         self._accepting = True
@@ -1462,9 +1441,10 @@ class DefaultExecutionService(TaskExecutionService):
                             documents.setdefault(document.source, document)
                     resolved_instructions = RepositoryInstructions(tuple(documents.values()))
                     self._instruction_resolver.validate(resolved_instructions)
-                    repository_instructions = self._capture_repository_instructions(
-                        resolved_instructions,
-                    )
+                    if resolved_instructions.documents:
+                        repository_instructions = self._capture_repository_instructions(
+                            resolved_instructions,
+                        )
             else:
                 instruction_path: str = "."
                 if session_id is not None:
@@ -1490,11 +1470,10 @@ class DefaultExecutionService(TaskExecutionService):
                         documents.setdefault(document.source, document)
                 resolved_instructions = RepositoryInstructions(tuple(documents.values()))
                 self._instruction_resolver.validate(resolved_instructions)
-                repository_instructions = (
-                    self._capture_repository_instructions(
+                if resolved_instructions.documents:
+                    repository_instructions = self._capture_repository_instructions(
                         resolved_instructions,
                     )
-                )
 
         now = datetime.now(timezone.utc)
         execution = ExecutionRecord(

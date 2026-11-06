@@ -417,3 +417,183 @@ async def test_task_child_resolution_cannot_replace_declared_named_revision() ->
             original.subagent_bindings[0], agent_spec=replace(original.subagent_bindings[0].agent_spec, revision=2),
         ),))
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_restored_handle_resolves_hooks_and_routes_added_after_runtime_start() -> None:
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from linktools.ai.core import TaskStatus
+    from linktools.ai.inputs import AgentTaskInput
+    from linktools.ai.persistence import Persistence, PersistenceStorage
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+    from linktools.ai.task import Task, TaskGraph, TaskNode
+    from linktools.ai.task.engine import TaskEngine
+    from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
+
+    async def respond(messages, info):
+        return ModelResponse(parts=[TextPart("current")])
+
+    model = _Models(_UsageFunctionModel(respond))
+    features = model_features(model, RuntimeFeatures("live-restore"))
+    features.agent("root", allow_subagents=())
+    async with Persistence.open("live-restore", storage=PersistenceStorage.in_memory()) as persistence:
+        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+            features.capability(_Extra(), revision=2, scope="agent")
+            features.model("added", model)
+            features.agent("root", revision=2, model="added", allow_subagents=())
+            current = await runtime.agents.get("root").resolve()
+            contract = current.execution_port.binding_contract
+            live_derived = current.derive(instructions=("Current observation",))
+            with pytest.raises(AIError) as unresolved:
+                Task.from_agent("unresolved", live_derived)
+            assert unresolved.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+            live_derived = await live_derived.resolve()
+            derived_task = Task.from_agent("current-observation", live_derived)
+            assert derived_task.agent_execution.binding_contract.selected == contract.selected
+            restored = runtime.agents.restore(contract)
+            assert restored.revision == 2 and restored.model is None
+            observed = await restored.resolve()
+            assert observed.execution_port.binding_contract == contract
+            assert [(item.id, item.revision) for item in observed.compiled.selected_capabilities] == [("extra", 2)]
+            task = Task.from_agent("restored", restored)
+            async with TaskEngine.open(task, persistence=persistence) as engine:
+                graph = await engine.start(TaskGraph("restored", (
+                    TaskNode("answer", task=task, input=AgentTaskInput("question")),
+                )), idempotency_key="restored")
+                assert (await graph.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED
+                execution = await graph.execution("answer")
+                record = await persistence.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+                assert record.binding == contract
+            features.capability(_Extra(), revision=3, scope="agent")
+            with pytest.raises(AIError) as raised:
+                await restored.start("cannot change admitted hook")
+            assert raised.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_live_derived_handle_validates_current_scope_and_keeps_ordered_overlays() -> None:
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from linktools.ai.core import ExecutionStatus
+    from linktools.ai.persistence import Persistence, PersistenceStorage
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+    from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
+
+    async def respond(messages, info):
+        return ModelResponse(parts=[TextPart("current")])
+
+    features = model_features(_Models(_UsageFunctionModel(respond)), RuntimeFeatures("live-derive"))
+    features.agent("root", allow_tools=("before",), allow_skills=("before",), allow_subagents=())
+    async with Persistence.open("live-derive", storage=PersistenceStorage.in_memory()) as persistence:
+        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+            features.agent("root", revision=2, allow_tools=("before", "after"),
+                           allow_skills=("before", "after"), allow_subagents=())
+            derived = runtime.agents.get("root").derive(allow_tools=("after",), allow_skills=("after",))
+            with pytest.raises(AIError) as unresolved:
+                _ = derived.execution_port.binding_contract
+            assert unresolved.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+            with pytest.raises(AIError) as widened:
+                await derived.derive(allow_tools=("before",)).resolve()
+            assert widened.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+            derived = derived.derive(instructions=("Additional instruction",))
+            observed = await derived.resolve()
+            assert observed.revision == 2
+            assert observed.compiled.spec.allow_tools == observed.compiled.spec.allow_skills == ("after",)
+            assert observed.compiled.spec.instructions == ("Additional instruction",)
+            execution = await derived.start("question")
+            assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
+            features.agent("root", revision=3, allow_tools=("before",), allow_skills=("before",), allow_subagents=())
+            with pytest.raises(AIError) as revoked:
+                await observed.start("scope changed")
+            assert revoked.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ("agent", "session", "task"))
+async def test_restored_derivation_keeps_historical_contract_across_entry_points(entry: str) -> None:
+    from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+    from linktools.ai.agent import bind_output
+    from linktools.ai.core import ExecutionStatus, TaskStatus
+    from linktools.ai.inputs import AgentTaskInput
+    from linktools.ai.persistence import Persistence, PersistenceStorage
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+    from linktools.ai.task import Task, TaskGraph, TaskNode
+    from linktools.ai.task.engine import TaskEngine
+    from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
+
+    requests: list[str] = []
+
+    async def original(messages, info):
+        raise AssertionError("Explicitly derived model route must be used")
+
+    async def selected(messages, info):
+        requests.append(str(messages))
+        if info.output_tools:
+            return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {"value": 7})])
+        return ModelResponse(parts=[TextPart("uncaptured output")])
+
+    features = model_features(_Models(_UsageFunctionModel(original)), RuntimeFeatures("captured-derive"))
+    features.model("selected", _Models(_UsageFunctionModel(selected)))
+    features.capability(_Extra(), scope="agent")
+    features.agent("root", revision=1, system_prompt="HISTORICAL_PROMPT", allow_tools=("before",),
+                   allow_subagents=("child",), metadata={"origin": "historical"})
+    features.agent("child", revision=1, allow_subagents=())
+    async with Persistence.open("captured-derive", storage=PersistenceStorage.in_memory()) as persistence:
+        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+            observed = await runtime.agents.get("root").resolve()
+            output = bind_output(_Answer)
+            historical = replace(observed.execution_port.binding_contract,
+                                 output_mode=output.mode, output_schema=output.schema_definition)
+            features.agent("root", revision=2, system_prompt="REPLACEMENT_PROMPT", allow_tools=("*",),
+                           allow_subagents=(), metadata={"origin": "current"})
+            features.agent("child", revision=2, allow_subagents=())
+            restored = runtime.agents.restore(historical)
+            with pytest.raises(AIError) as widened:
+                restored.derive(allow_tools=("after",))
+            assert widened.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+            derived = restored.derive(model="selected", instructions=("ADDED_INSTRUCTION",))
+            expected = replace(historical, agent_spec=replace(historical.agent_spec,
+                               model="selected", instructions=("ADDED_INSTRUCTION",)))
+            assert derived.execution_port.binding_contract == expected
+            assert (await derived.resolve()).execution_port.binding_contract == expected
+            if entry == "task":
+                task = Task.from_agent("historical", derived)
+                async with TaskEngine.open(task, persistence=persistence) as engine:
+                    graph = await engine.start(TaskGraph("historical", (
+                        TaskNode("answer", task=task, input=AgentTaskInput("question")),
+                    )), idempotency_key="historical")
+                    assert (await graph.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED
+                    execution = await graph.execution("answer")
+            else:
+                target = derived if entry == "agent" else derived.session("historical")
+                execution = await target.start("question")
+            result = (await execution.wait()).result
+            assert result.status is ExecutionStatus.SUCCEEDED and result.output == {"value": 7}
+            record = await persistence.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+            assert record.binding == expected
+            assert record.binding.selected == historical.selected
+            assert record.binding.subagent_bindings == historical.subagent_bindings
+            assert "HISTORICAL_PROMPT" in requests[0] and "ADDED_INSTRUCTION" in requests[0]
+            assert "REPLACEMENT_PROMPT" not in requests[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("agent_id", "revision", "accepted"), (("root", 1, True), ("other", 1, False), ("root", 2, False)))
+async def test_unresolved_captured_port_recovery_checks_recorded_agent_identity(agent_id, revision, accepted) -> None:
+    from unittest.mock import AsyncMock
+
+    compiler = _compiler((AgentSpec("root", allow_subagents=()),))
+    binding = compiler.bind(compiler.compile_registered("root"))
+    recover = AsyncMock(return_value="recovered")
+    port = replace(_port(compiler, _resolver(compiler, compiler), _Admissions(), captured=binding),
+                   compiled=None, service=SimpleNamespace(runtime_backend=lambda: SimpleNamespace(recover_execution=recover)))
+    recorded = replace(binding.binding_contract, agent_spec=replace(binding.compiled_agent.spec, id=agent_id, revision=revision))
+    execution = SimpleNamespace(requires_task_invocation_capture=True, binding=recorded, execution_id="execution", revision=4)
+    operation = SimpleNamespace(tenant_id="tenant", execution_id="execution", resource_id="execution")
+    if accepted:
+        assert await port.recover_bound_execution(execution, recovery_operation=operation) == "recovered"
+        recover.assert_awaited_once_with("execution", tenant_id="tenant", expected_revision=4, recovery_operation=operation)
+    else:
+        with pytest.raises(AIError) as raised:
+            await port.recover_bound_execution(execution, recovery_operation=operation)
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        recover.assert_not_awaited()

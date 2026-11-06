@@ -9,14 +9,17 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 
 import pytest
+from linktools.ai.agent import AgentBinding, AgentCompiler
+from linktools.ai.capability import CapabilityContribution, ExecutionCapability
 from linktools.ai.core import CommitPolicy, Principal
+from linktools.ai.model import create_model
+from linktools.ai.spec import AgentSpec
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence.coordination import PendingTurnCoordination
 from linktools.ai.storage import InMemoryCacheBackend
 
 from .persistence.test_execution_start_service import (
-    _binding,
     _Launcher,
     _request,
     _service,
@@ -25,6 +28,17 @@ from .test_remote_pending_execution_consumers import _RemotePendingTurns
 from .test_session_admission_conformance import _session
 
 _PRINCIPAL = Principal("owner", "tenant", "service")
+
+
+def _binding(commit: CommitPolicy = CommitPolicy.terminal()) -> AgentBinding:
+    spec = AgentSpec("agent", model="model")
+    execution = ExecutionCapability(commit=commit, retain_history=True)
+    compiler = AgentCompiler(
+        models={"model": create_model(api="openai", model="gpt-test")},
+        candidates=(CapabilityContribution("capability", execution.id, execution, scope="runtime"),),
+        agents={spec.id: spec},
+    )
+    return compiler.bind(compiler.compile(spec))
 
 
 class _Coordinator(PendingTurnCoordination):
@@ -84,8 +98,9 @@ async def _writers():
     # Both writers support sessions; only the pending writer binds pending_start.
     for commit in (CommitPolicy.terminal(), CommitPolicy.sync()):
         coordinator = _Coordinator(cache)
-        service = _service(state, backend=_Launcher(state.execution.executions), commit=commit)
-        service._conversation = True
+        service = _service(
+            state, backend=_Launcher(state.execution.executions), binding=_binding(commit),
+        )
         service._runtime_bridge.pending_turns = _RemotePendingTurns(coordinator)
 
         async def run_turn(reservation, principal, admit, *, service=service, coordinator=coordinator):

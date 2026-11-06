@@ -22,16 +22,13 @@ from ..core import ToolEffects
 from ..errors import AIError, ErrorCode
 from ..spec import CapabilityRef, MCPServerSpecCodec
 from ._budget import RunBudgetContext
-from ._mcp import (
-    _MCPBinding, _mcp_execution_policy, close_mcp_resources,
-    materialize_mcp_capabilities, prepare_mcp_projections,
-)
 from ._tool import ToolOperationBridge
 from ._tool_boundary import BoundaryToolset, managed_tool_descriptor_from_metadata, require_tool_effects
 from ._tool_metrics import ToolMetricContext
 from ._tool_response_fixture import _ToolResponseManifest
 
 if TYPE_CHECKING:
+    from ._mcp import _MCPBinding
     from pydantic_ai.capabilities import AbstractCapability
     from pydantic_ai.workspaces import WorkspaceBackend
     from ..capability import RunCallbacks
@@ -192,6 +189,8 @@ def _candidate_mcp_binding(
     candidate: CapabilityContribution[object], workspace_backend: WorkspaceBackend | None,
     response_fixture: _ToolResponseManifest | None,
 ) -> _MCPBinding:
+    from ._mcp import _MCPBinding, _mcp_execution_policy
+
     server, contract = candidate.value, candidate.contract
     codec = MCPServerSpecCodec()
     versions = codec.decode_binding_payload(contract, declaration=server)
@@ -246,6 +245,8 @@ class _MCPToolsetScope(AbstractToolset[AgentContext[object]]):
         return self
 
     async def __aenter__(self) -> _MCPToolsetScope:
+        from ._mcp import materialize_mcp_capabilities, prepare_mcp_projections
+
         self._owner.claim_resources(self)
         try:
             self._materializer = AssetMaterializer()
@@ -313,6 +314,8 @@ class _MCPToolsetScope(AbstractToolset[AgentContext[object]]):
             raise cancelled
 
     async def _close_resources(self, *, workspace_closed: bool) -> None:
+        from ._mcp import close_mcp_resources
+
         failure: BaseException | None = None
         try:
             await close_mcp_resources(self._mcp)

@@ -69,15 +69,16 @@ class AgentExecutionPort(Generic[AppT]):
     async def resolve_definition(self) -> AgentBinding:
         """Read the current declaration for inspection, without changing this port."""
         self.operations.ensure_open()
-        if self.captured or self.resolve_current is None:
+        if self.captured:
+            return (
+                await self.restore_binding(self.binding_contract)
+                if self.restore_binding is not None
+                else self.compiler.restore(self.binding_contract,
+                                           model=None if self.compiled is None else self.compiled.model)
+            )
+        if self.resolve_current is None:
             if self.compiled is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            if self.captured:
-                return (
-                    await self.restore_binding(self.binding_contract)
-                    if self.restore_binding is not None
-                    else self.compiler.restore(self.binding_contract, model=self.compiled.model)
-                )
             return self.compiler.bind(self.compiled)
         agent_id = self.agent_id if self.compiled is None else self.compiled.spec.id
         if agent_id is None:
@@ -113,12 +114,12 @@ class AgentExecutionPort(Generic[AppT]):
     ) -> ExecutionRecord:
         """Resume the producer after its task owner validates and authorizes the binding."""
         self.operations.ensure_open()
+        spec = self.binding_contract.agent_spec
         if (
-            self.compiled is None
-            or not execution.requires_task_invocation_capture
+            not execution.requires_task_invocation_capture
             or not isinstance(execution.binding, AgentBindingContract)
-            or execution.binding.agent_spec.id != self.compiled.spec.id
-            or execution.binding.agent_spec.revision != self.compiled.spec.revision
+            or execution.binding.agent_spec.id != spec.id
+            or execution.binding.agent_spec.revision != spec.revision
             or recovery_operation.tenant_id != self.persistence.tenant_id
             or recovery_operation.execution_id != execution.execution_id
             or recovery_operation.resource_id != execution.execution_id
@@ -175,15 +176,16 @@ class AgentExecutionPort(Generic[AppT]):
             binding = await self.resolve_current(agent_id, self.derivations, output)
         else:
             compiled_agent = self.compiled
-            if compiled_agent is None:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             if not captured:
+                if compiled_agent is None:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                 binding = self.compiler.bind(compiled_agent, output=output)
             else:
                 binding = (
                     await self.restore_binding(self.binding_contract)
                     if self.restore_binding is not None
-                    else self.compiler.restore(self.binding_contract, model=compiled_agent.model)
+                    else self.compiler.restore(self.binding_contract,
+                                               model=None if compiled_agent is None else compiled_agent.model)
                 )
                 if output is not None:
                     output_binding = output if isinstance(output, OutputBinding) else bind_output(output)

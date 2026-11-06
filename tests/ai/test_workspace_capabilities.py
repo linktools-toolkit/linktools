@@ -50,9 +50,9 @@ from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
 
-def _workspace_tool_contributions(workspace: Workspace):
+async def _workspace_tool_contributions(workspace: Workspace):
     return tuple(
-        item for item in workspace_features("workspace", workspace=workspace)._contributions
+        item for item in (await workspace_features("workspace", workspace=workspace).resolve()).contributions
         if item.kind == "tool"
     )
 
@@ -158,9 +158,10 @@ def test_workspace_constructor_normalizes_root(
     assert workspace.root == (tmp_path / "project").resolve()
 
 
-def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
-    contributions = _workspace_tool_contributions(workspace)
+    contributions = await _workspace_tool_contributions(workspace)
 
     assert tuple(sorted(item.id for item in contributions)) == (
         "check_command",
@@ -179,7 +180,7 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
         **{name: "shell" for name in ("check_command", "run_command", "start_command", "stop_command")},
     }
     assert tuple(item.revision for item in contributions) == tuple(
-        item.revision for item in _workspace_tool_contributions(workspace)
+        item.revision for item in await _workspace_tool_contributions(workspace)
     )
 
 
@@ -381,7 +382,7 @@ def test_workspace_sandbox_capability_id_is_reserved() -> None:
 async def test_workspace_runtime_tool_contracts_match_durable_contributions(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
     workspace = Workspace.load(tmp_path)
-    contributions = _workspace_tool_contributions(workspace)
+    contributions = await _workspace_tool_contributions(workspace)
     expected = {item.id: item.contract for item in contributions
                 if item.contract["metadata"]["linktools.ai.tool_class"] != "shell"}
     capability = filesystem_capabilities(

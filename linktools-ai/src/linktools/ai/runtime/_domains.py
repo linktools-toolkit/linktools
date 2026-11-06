@@ -32,7 +32,7 @@ class RuntimeAgents(Generic[AppT]):
         return self._get_agent(agent_id)
 
     def restore(self, binding: AgentBindingContract) -> "Agent[AppT]":
-        """Restore the immutable behavior recorded with a prior execution."""
+        """Keep recorded behavior; resolve current resources when observed or started."""
         return self._restore_agent(binding)
 
 

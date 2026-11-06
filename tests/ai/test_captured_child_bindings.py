@@ -4,7 +4,7 @@ from linktools.ai.task import Task
 from linktools.ai.task.engine import TaskEngine
 
 from linktools.ai.persistence import Persistence
-"""Captured Task executions retain child bindings independently of live declarations."""
+"""Captured Tasks retain child agent contracts while tools resolve live."""
 
 from collections.abc import Callable
 from pathlib import Path
@@ -17,7 +17,6 @@ from pydantic_ai.models.function import AgentInfo
 from linktools.ai.agent import AgentBindingContract
 from linktools.ai.capability import AgentContext
 from linktools.ai.core import ExecutionStatus, JsonValue, Principal, TaskStatus
-from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.inputs import AgentTaskInput, CaptureInputRequest
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.persistence import PersistenceStorage
@@ -69,7 +68,7 @@ def _features(
                    allow_skills=(), allow_subagents=())
     if tool_revision is not None:
         def lookup(context: AgentContext[None]) -> str:
-            return "synthetic lookup"
+            return f"synthetic lookup revision {tool_revision}"
         features.tool(lookup, revision=tool_revision, effect_policy="none")
     return model_features(_Models(_UsageFunctionModel(respond)), features)
 
@@ -143,7 +142,7 @@ async def test_captured_task_preserves_child_contract_after_reopen(
 
 
 @pytest.mark.asyncio
-async def test_captured_task_rejects_unavailable_child_tool_revision(tmp_path: Path) -> None:
+async def test_captured_task_resolves_current_child_tool_after_reopen(tmp_path: Path) -> None:
     async with Persistence.open('captured-tool', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_141, Runtime.attach(persistence=persistence_141, features=_features(1, None, tool_revision=1)) as runtime, TaskEngine.open(persistence=persistence_141, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("capture-owner", runtime.tenant_id)
         source = await runtime.agents.get().start("delegate sample inspection", principal=principal)
@@ -157,20 +156,29 @@ async def test_captured_task_rejects_unavailable_child_tool_revision(tmp_path: P
     def observe(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         if "delegate_task" not in {tool.name for tool in info.function_tools}:
             child_model_requests.append(messages)
+            assert {tool.name for tool in info.function_tools} == {"lookup"}
+            assert not info.output_tools
+            results = [part for message in messages for part in message.parts
+                       if isinstance(part, ToolReturnPart) and part.tool_name == "lookup"]
+            if not results:
+                return ModelResponse(parts=[ToolCallPart("lookup", {}, "current-lookup")])
+            assert len(results) == 1
+            assert results[0].tool_call_id == "current-lookup"
+            assert results[0].content == "synthetic lookup revision 2"
         return _respond(messages, info)
 
-    with pytest.raises(AIError) as close_error:
-        async with Persistence.open('captured-tool', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_158, Runtime.attach(persistence=persistence_158, features=_features(2, _CurrentOutput.model_json_schema(), tool_revision=2, respond=observe)) as runtime, TaskEngine.open(persistence=persistence_158, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
-            captured_capture = await runtime_engine.inputs.read_agent(capture, principal=principal)
-            captured_capture.require_importable()
-            captured = Task.from_agent("unavailable-child", runtime.agents.restore(captured_capture.binding))
-            run = await runtime_engine.with_definitions(captured).start(TaskGraph("unavailable-child", (
-                TaskNode("historical", task=captured, input=AgentTaskInput("delegate sample inspection")),
-            )), principal=principal, idempotency_key="unavailable-child")
-            assert (await run.wait(timeout_seconds=20)).result.status is TaskStatus.FAILED
-            execution = await run.execution("historical")
-            with pytest.raises(AIError) as wait_error:
-                await execution.wait(timeout_seconds=10)
-            assert wait_error.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
-    assert close_error.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
-    assert child_model_requests == []
+    async with Persistence.open('captured-tool', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_158, Runtime.attach(persistence=persistence_158, features=_features(2, _CurrentOutput.model_json_schema(), tool_revision=2, respond=observe)) as runtime, TaskEngine.open(persistence=persistence_158, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        captured_capture = await runtime_engine.inputs.read_agent(capture, principal=principal)
+        captured_capture.require_importable()
+        captured = Task.from_agent("current-child-tool", runtime.agents.restore(captured_capture.binding))
+        run = await runtime_engine.with_definitions(captured).start(TaskGraph("current-child-tool", (
+            TaskNode("historical", task=captured, input=AgentTaskInput("delegate sample inspection")),
+        )), principal=principal, idempotency_key="current-child-tool")
+        assert (await run.wait(timeout_seconds=20)).result.status is TaskStatus.SUCCEEDED
+        assert await run.result("historical") == {"text": "complete"}
+        execution = await run.execution("historical")
+        child, = await runtime.executions.list_children(execution.execution_id, principal=principal)
+        assert (await runtime.executions.result(child.execution_id, principal=principal)).output == {
+            "text": "historical text",
+        }
+    assert len(child_model_requests) == 2

@@ -24,7 +24,7 @@ from linktools.core import environ
 from pydantic import ValidationError
 from pydantic_ai.workspaces import WorkspaceBackend
 from pydantic_ai import Agent as PydanticAgent
-from pydantic_ai import TextOutput, Tool
+from pydantic_ai import TextOutput
 from pydantic_ai.capabilities import (
     AbstractCapability,
     WrapperCapability,
@@ -934,25 +934,15 @@ async def _materialize_agent(
 ]:
     compiled_agent = scope.binding.compiled_agent
     repository_boundary = scope.repository_instruction_boundary
-    business_tools: list[Tool[AgentContext[object]]] = []
     workspace_names: list[str] = []
-    business_descriptors: dict[str, ManagedToolDescriptor] = {}
     workspace_descriptors: dict[str, ManagedToolDescriptor] = {}
     compaction_policy = CompactionPolicy()
     for candidate in compiled_agent.selected_tools:
         metadata = _bound_tool_metadata(candidate)
-        tool = candidate.materialize_tool()
         tool_class = tool_class_from_metadata(metadata)
         if tool_class is None:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        descriptor = replace(
-            managed_tool_descriptor_from_metadata(metadata),
-            capability_ref=CapabilityRef("tool", candidate.id, candidate.revision),
-        )
-        if tool_class == "business":
-            business_tools.append(tool)
-            business_descriptors[candidate.id] = descriptor
-        elif tool_class == "memory":
+        if tool_class in {"business", "memory"}:
             continue
         elif tool_class in {
             "filesystem.read",
@@ -960,12 +950,13 @@ async def _materialize_agent(
             "shell",
         }:
             workspace_names.append(candidate.id)
-            workspace_descriptors[candidate.id] = descriptor
+            workspace_descriptors[candidate.id] = replace(
+                managed_tool_descriptor_from_metadata(metadata),
+                capability_ref=CapabilityRef("tool", candidate.id, candidate.revision),
+            )
         else:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
-    if any(tool.name in scope.memory_tool_names for tool in business_tools):
-        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
     def observe_tool_validation(call: ToolCallPart, tool_def: ToolDefinition) -> None:
         # Native validation wrappers can skip their inner validation lifecycle.
         reference = tool_capability_ref(tool_def)

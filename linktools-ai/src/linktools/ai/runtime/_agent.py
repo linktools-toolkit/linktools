@@ -255,7 +255,7 @@ class Agent(Generic[AppT]):
     @property
     def model(self) -> ModelBinding | None:
         """Observed model declaration, not a live source lookup or provider client."""
-        if self._agent_revision is None:
+        if self._compiled_agent is None:
             return None
         compiled = self._runtime._compiled_agent(self.id, self.revision, self._compiled_agent)
         return compiled.model

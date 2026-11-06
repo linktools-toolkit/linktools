@@ -508,7 +508,7 @@ async def test_builtin_loader_batches_declaration_version_reads() -> None:
 
 def test_capability_group_does_not_expose_logical_asset_crud() -> None:
     group = RuntimeFeatures[object]("group")
-    assert not hasattr(group, "resolve")
+    assert callable(group.resolve)
     assert not hasattr(group, "put")
     assert not hasattr(group, "delete")
     assert not hasattr(group, "list")

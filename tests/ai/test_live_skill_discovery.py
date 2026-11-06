@@ -133,7 +133,7 @@ async def test_derived_skill_permissions_compare_selectors_without_catalog_membe
             assert root.derive(allow_skills=()).compiled.skill_definitions == ()
             for selectors in (("*",), ("other",)):
                 with pytest.raises(AIError) as error:
-                    root.derive(allow_skills=selectors)
+                    await root.derive(allow_skills=selectors).resolve()
                 assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 

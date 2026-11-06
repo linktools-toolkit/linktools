@@ -969,7 +969,7 @@ async def test_mcp_resource_resolution_rejects_selected_asset_version_race() -> 
     try:
         with pytest.raises(AIError) as error:
             await _capture_mcp_resource_versions(store, server)
-        assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+        assert error.value.code is ErrorCode.STORAGE_CONFLICT
     finally:
         await store.close()
 

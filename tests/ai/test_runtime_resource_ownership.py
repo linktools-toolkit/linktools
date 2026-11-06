@@ -396,3 +396,70 @@ async def test_late_execution_buffer_replacement_is_not_silently_ignored() -> No
         assert error.value.safe_details["reason"] == "runtime_resource_replacement"
         features.capability(ExecutionCapability(commit=CommitPolicy.terminal()))
         assert (await runtime.agents.get().run("same resources")).result.output == {"text": "done"}
+
+
+async def test_asset_replacement_during_initialize_cannot_change_claimed_owner() -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class Backend(InMemoryAssetBackend):
+        async def initialize(self):
+            await super().initialize()
+            entered.set()
+            await release.wait()
+
+    original, replacement = _assets(Backend()), _assets()
+    await replacement.initialize()
+    features = _features(AssetCapability(original))
+    runtime = Runtime.open("initializing-owner", storage=PersistenceStorage.in_memory(), features=features)
+    opening = asyncio.create_task(runtime.__aenter__())
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        features.capability(AssetCapability(replacement))
+        release.set()
+        with pytest.raises(AIError) as error:
+            await opening
+        assert error.value.safe_details["reason"] == "runtime_resource_replacement"
+        assert not original.ready and replacement.ready
+    finally:
+        release.set()
+        await runtime.close()
+        await replacement.close()
+
+
+async def test_asset_replacement_during_load_keeps_the_resolved_reader() -> None:
+    from linktools.ai.runtime._factory import _resolution_asset_readers
+
+    original, replacement = _assets(), _assets()
+    await replacement.initialize()
+    declaration = AssetCapability(original)
+    features = _features(declaration)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class Loader:
+        async def load(self, context):
+            entered.set()
+            await release.wait()
+            return ()
+
+    declaration.loader("blocked", Loader())
+    runtime = Runtime.open("resolving-owner", storage=PersistenceStorage.in_memory(), features=features)
+    opening = asyncio.create_task(runtime.__aenter__())
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        features.capability(AssetCapability(replacement))
+        release.set()
+        await opening
+        # The first resolution belongs to original; later admission cannot adopt replacement.
+        with pytest.raises(AIError) as error:
+            await runtime.agents.get().start("new physical owner")
+        assert error.value.safe_details["reason"] == "runtime_resource_replacement"
+        features.capability(declaration)
+        resolution = await features.resolve()
+        assert _resolution_asset_readers(resolution) == {features.id: original}
+        assert (await runtime.agents.get().run("same owner")).result.output == {"text": "done"}
+        await runtime.close()
+        assert not original.ready and replacement.ready
+    finally:
+        release.set()
+        await runtime.close()
+        await replacement.close()

@@ -1468,8 +1468,7 @@ class LocalExecutionBackend:
         try:
             while self._turn_owners.get(execution_id) is owner:
                 # Promotion is an upstream cache control hint, not lease policy.
-                if (promotion is None and self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is not None
-                        and owner.reservation.execution.conversation
+                if (promotion is None and owner.reservation.execution.conversation
                         and self._pending_turns.coordination.supports_pending_views):
                     promotion = asyncio.create_task(self._watch_pending_promotion(owner))
                 signal = await owner.scope.wait_signal()

@@ -339,7 +339,7 @@ async def test_failed_step_materializations_stay_owned_until_quiescence(
         return {}
 
     monkeypatch.setattr(module, "MCPToolset", FailingMCP)
-    monkeypatch.setattr(adapter, "prepare_mcp_projections", prepare)
+    monkeypatch.setattr("linktools.ai.runtime._mcp.prepare_mcp_projections", prepare)
     try:
         key = AssetKey("mcp", "owned.txt")
         await store.put(key, b"must outlive the process")

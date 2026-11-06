@@ -4038,9 +4038,9 @@ async def test_task_execution_port_replay_rejects_changed_runtime_memory_scope()
             admitted = await port.start("return a result", **start)
             replayed = await port.start("return a result", **start)
             assert replayed.execution_id == admitted.execution_id
-            changed = replace(port, memory_scope="other-memory")
+            features.capability(MemoryCapability(scope="other-memory"))
             with pytest.raises(AIError) as conflict:
-                await changed.start("return a result", **start)
+                await port.start("return a result", **start)
             assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
             record = await persistence.execution.executions.get(
                 admitted.execution_id, tenant_id=runtime.tenant_id,

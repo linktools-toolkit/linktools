@@ -64,7 +64,7 @@ async def test_executor_uses_saved_fixture_and_never_projects_live_stdio_resourc
             seen.append("saved-case")
             return "model-boundary"
 
-        monkeypatch.setattr("linktools.ai.runtime._current_toolsets.prepare_mcp_projections", project)
+        monkeypatch.setattr("linktools.ai.runtime._mcp.prepare_mcp_projections", project)
         monkeypatch.setattr(AgentExecutor, "_execute", execute)
         executor = AgentExecutor(SkillSourceRegistry(()), tool_responses=configured)
         result = await executor._execute_with_workspace(
@@ -87,7 +87,7 @@ async def test_executor_rejects_live_fixture_mode_mismatch_before_any_model_or_t
         async def forbidden(*args: object, **kwargs: object) -> None:
             raise AssertionError("mismatched fixture mode cannot reach live resources or a model")
 
-        monkeypatch.setattr("linktools.ai.runtime._current_toolsets.prepare_mcp_projections", forbidden)
+        monkeypatch.setattr("linktools.ai.runtime._mcp.prepare_mcp_projections", forbidden)
         monkeypatch.setattr(AgentExecutor, "_execute", forbidden)
         executor = AgentExecutor(
             SkillSourceRegistry(()), tool_responses=None if historical_fixture else fixture,

@@ -326,3 +326,35 @@ async def test_loader_host_capabilities_use_the_same_current_tool_projection(tmp
         assert not any(item.kind == "tool" for item in (await features.resolve()).contributions)
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_host_resource_inspection_does_not_materialize_tool_schemas(tmp_path, monkeypatch) -> None:
+    from linktools.ai.capability import FileSystem, MemoryCapability, ShellCapability
+    from linktools.ai.workspace import Workspace
+
+    calls = {kind: 0 for kind in (MemoryCapability, ShellCapability, FileSystem)}
+
+    def count(kind):
+        original = kind.tool_definitions
+
+        def definitions(self):
+            calls[kind] += 1
+            return original(self)
+
+        monkeypatch.setattr(kind, "tool_definitions", definitions)
+
+    for kind in calls:
+        count(kind)
+    features = RuntimeFeatures()
+    features.capability(MemoryCapability())
+    features.capability(ShellCapability())
+    workspace = Workspace.load(tmp_path)
+    features.capability(FileSystem(workspace))
+    assert features.assets is None
+    assert features.workspace is workspace
+    assert set(calls.values()) == {0}
+    for expected in (1, 2):
+        resolved = await features.resolve()
+        assert any(item.kind == "tool" for item in resolved.contributions)
+        assert set(calls.values()) == {expected}

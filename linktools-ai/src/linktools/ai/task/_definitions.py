@@ -181,12 +181,13 @@ class Task(Generic[AppT, _ResultT]):
         if build_input is not None and not inspect.iscoroutinefunction(build_input):
             raise TypeError("build_input must be async")
         port = agent.execution_port
+        binding = port.binding_contract
         contract: dict[str, JsonValue] = {
             "version": 1, "type": "agent", "effect_policy": "none",
             "output_contract": {"kind": "json"}, "reconcile": False,
             "config": {
-                "agent_id": port.compiled.spec.id, "agent_revision": port.compiled.spec.revision,
-                "binding_contract": port.binding_contract.to_payload(),
+                "agent_id": binding.agent_spec.id, "agent_revision": binding.agent_spec.revision,
+                "binding_contract": binding.to_payload(),
                 "input_mode": "projected" if build_input is not None else "literal",
             },
         }

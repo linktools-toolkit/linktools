@@ -116,7 +116,7 @@ methods are a public surface. Task currently consumes the following paths:
 
 | Consumer path | Current operation / result | Contract that a narrower boundary must preserve |
 | --- | --- | --- |
-| `Task.from_agent`; `AgentTaskRunner` construction | Read `compiled.spec` and `binding_contract` | Capture declaration identity, planning/thinking defaults and the full binding once; do not recapture per operation |
+| `Task.from_agent`; `AgentTaskRunner` construction | Read `binding_contract.agent_spec` and `binding_contract` | Capture declaration identity, planning/thinking defaults and the full binding once; do not recapture per operation |
 | `TaskEngine` and runner binding | Exact `persistence` identity; `operations.ensure_open()` | A matching database URL does not replace shared ownership; reject a closed producer before work |
 | Admission input | `canonicalize_files(files)` → tuple; `materialize_input(prompt, files=())` → canonical input | Canonical Workspace-relative paths, original tenant and the existing captured content boundary |
 | Durable binding validation | `resolve_contract(contract)` → `AgentBindingContract` | Resolve the saved selection, not current wildcard expansion; reject contract drift |

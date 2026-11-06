@@ -263,6 +263,10 @@ class Runtime(Generic[AppT]):
                         store = assets.claim_store()
                         self._owned_assets = assets
                         await store.initialize()
+                        current_assets = self._features.assets
+                        if current_assets is not None and current_assets.reader is not store:
+                            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                                          safe_details={"reason": "runtime_resource_replacement"})
                     self._feature_source = self._features.borrow()
                 else:
                     self._feature_source = self._features
@@ -562,9 +566,10 @@ class Runtime(Generic[AppT]):
     def _restore_agent(self, binding: AgentBindingContract) -> Agent[AppT]:
         self._ensure_open()
         self._require_agents()
-        restored = self._compiler.restore(binding)
-        compiled = restored.compiled_agent
-        return Agent(self, compiled.spec.id, compiled.spec.revision, compiled, binding)
+        if not isinstance(binding, AgentBindingContract):
+            raise TypeError("binding must be AgentBindingContract")
+        return Agent(self, binding.agent_spec.id, binding.agent_spec.revision,
+                     _binding_contract=binding)
 
     async def _get_execution(
         self,
@@ -637,10 +642,16 @@ class Runtime(Generic[AppT]):
             changes["allow_tools"] = tuple(allow_tools)
         if allow_skills is not None:
             changes["allow_skills"] = tuple(allow_skills)
+        if agent._binding_contract is not None:
+            binding = agent._binding_contract
+            spec = self._compiler.derive_spec(binding.agent_spec, changes)
+            return self._restore_agent(replace(binding, agent_spec=spec))
         derived = None
-        if root is not None:
-            spec = self._compiler.derive_spec(root.spec, changes)
+        # Only the startup observation belongs to this compiler. Resolved live
+        # handles must observe their derivation before capturing a Task contract.
+        if root is not None and agent._observed_binding is None:
             try:
+                spec = self._compiler.derive_spec(root.spec, changes)
                 derived = self._compiler.compile(spec)
             except AIError as error:
                 if error.code not in {
@@ -682,7 +693,7 @@ class Runtime(Generic[AppT]):
     ) -> AgentExecutionPort[AppT]:
         self._ensure_open()
         selected = compiled
-        if selected is None and revision is not None:
+        if selected is None and revision is not None and binding_contract is None:
             selected = self._compiled_agent(agent_id, revision)
         resolver = self._binding_resolver
         if resolver is None:

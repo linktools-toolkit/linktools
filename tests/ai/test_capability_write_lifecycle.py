@@ -21,7 +21,7 @@ from .test_capability_atomic_writes import _opened
 pytestmark = pytest.mark.asyncio
 
 
-async def test_ordinary_runs_do_not_allocate_optional_writer_manager() -> None:
+async def test_ordinary_runs_do_not_allocate_optional_writes() -> None:
     async def model(messages, info):
         return ModelResponse(parts=[TextPart("done")])
 
@@ -31,7 +31,14 @@ async def test_ordinary_runs_do_not_allocate_optional_writer_manager() -> None:
         for _ in range(12):
             execution = await runtime.agents.get().start("question")
             assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
-            assert runtime._run_store.capability_writes is None
+            manager = runtime._run_store.capability_writes
+            assert runtime._state.capability_stores == {}
+            if manager is not None:
+                assert manager.stores == {}
+                assert manager._scopes == {}
+                assert manager._tasks == set()
+                assert not manager._bound
+                assert manager._sealed == set()
             assert runtime._run_store._execution_producers == {}
 
 

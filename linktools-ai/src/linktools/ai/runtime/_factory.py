@@ -20,7 +20,6 @@ from ..capability import (
     ToolResponsesCapability,
     SessionCapability,
     MemoryCapability,
-    ExecutionCapability,
     StepPersistenceCapability,
     AgentContext,
     AssetCapability,
@@ -35,6 +34,7 @@ from ._feature_policy import _RuntimeFeaturePolicy, _runtime_feature_policy
 from ._features import (
     RuntimeFeatures,
     RuntimeFeaturesSource,
+    RuntimeFeaturesResolution,
 )
 from ..core import (
     CommitPolicy,
@@ -182,6 +182,16 @@ class _AgentLifecycle:
         await self._coordinator.handoff()
 
 
+def _resolution_asset_readers(resolution: RuntimeFeaturesResolution | None) -> dict[str, AssetStoreReader]:
+    if resolution is None:
+        return {}
+    return {
+        resolution.group_id: leaf.reader
+        for contribution in resolution.contributions if contribution.kind == "capability"
+        for leaf in runtime_feature_leaves(contribution.value) if isinstance(leaf, AssetCapability)
+    }
+
+
 async def compose_runtime_components(
     *,
     persistence: Persistence,
@@ -226,7 +236,7 @@ async def compose_runtime_components(
         asset_sources: dict[str, AssetStoreReader] = {}
         if captured is not None:
             candidates.extend(captured.contributions)
-            asset_sources.update(source.asset_readers)
+            asset_sources.update(_resolution_asset_readers(captured))
         _validate_candidate_uniqueness(candidates)
         policy = _runtime_feature_policy(candidates)
         runtime_capabilities = policy.capabilities
@@ -263,7 +273,7 @@ async def compose_runtime_components(
                 if (selected_workspace is not None and (workspace is None
                         or selected_workspace.root != workspace.root or selected_workspace.policy != workspace.policy)
                         or current.workspace_factory is not workspace_factory
-                        or any(asset_sources.get(key) is not reader for key, reader in source.asset_readers.items())
+                        or any(asset_sources.get(key) is not reader for key, reader in _resolution_asset_readers(current).items())
                         or _runtime_feature_policy(current.contributions).execution.commit.buffer is not policy.execution.commit.buffer):
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
                                   safe_details={"reason": "runtime_resource_replacement"})
@@ -635,16 +645,6 @@ async def _build_local_components(
         persistence_capabilities: list[AbstractCapability[object]] = []
         for capability in runtime_capabilities:
             persistence_capabilities.extend(runtime_feature_leaves(capability))
-        restart_checkpoints = any(
-            isinstance(value, StepPersistence) for value in persistence_capabilities
-        )
-        durable_trace = any(
-            isinstance(value, TraceCapability) for value in persistence_capabilities
-        )
-        conversation = any(
-            isinstance(value, ExecutionCapability) and value.retain_history
-            for value in persistence_capabilities
-        )
         metric_buffer = None if metrics is None else MetricsService(metrics)
         lifecycle.metric_buffer = metric_buffer
         metric_source_namespace = None if metric_buffer is None else namespace
@@ -696,13 +696,7 @@ async def _build_local_components(
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
             input_materializer=input_materializer,
-            session_execution_ready=session_execution_ready,
-            tool_responses=tool_responses,
             object_reader=state.read_object,
-            restart_checkpoints=restart_checkpoints,
-            durable_trace=durable_trace,
-            conversation=conversation,
-            commit=commit,
             context_archive=ExecutionContextArchive(
                 state.execution.executions.state_store,
                 state.archive_object_store(PersistenceDomain.EXECUTION),

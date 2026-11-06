@@ -120,11 +120,6 @@ class RuntimeFeaturesSource(Generic[AppT]):
     async def resolve(self) -> "RuntimeFeaturesResolution[AppT]":
         return await self.declaration.resolve()
 
-    @property
-    def asset_readers(self) -> Mapping[str, AssetStoreReader]:
-        assets = self.declaration.assets
-        return {} if assets is None else {self.declaration.id: assets.reader}
-
 
 class RuntimeFeatures(Generic[AppT]):
     """Register and resolve one named set of runtime candidate definitions."""
@@ -172,11 +167,12 @@ class RuntimeFeatures(Generic[AppT]):
     @property
     def assets(self) -> "AssetCapability[AppT] | None":
         """Return the declared Asset source for Runtime composition."""
-        return _project_capabilities(self._contributions)[1]
+        return _runtime_declarations(self._contributions)[0]
 
     @property
     def workspace(self) -> "Workspace | None":
-        return _project_capabilities(self._contributions)[2]
+        filesystem = _runtime_declarations(self._contributions)[1]
+        return None if filesystem is None else filesystem.workspace
 
     @property
     def workspace_factory(self) -> "Callable[..., WorkspaceBackend] | None":
@@ -251,7 +247,7 @@ class RuntimeFeatures(Generic[AppT]):
         )
         previous = [item for item in self._contributions
                     if (item.kind, item.id) != (contribution.kind, contribution.id)]
-        _project_capabilities((*previous, contribution))
+        _runtime_declarations((*previous, contribution))
         self._register(contribution)
         return capability
 
@@ -311,7 +307,7 @@ class RuntimeFeatures(Generic[AppT]):
     async def resolve(self) -> "RuntimeFeaturesResolution[AppT]":
         """Resolve current registrations, routes and loaders for one caller."""
         registered = tuple(self._contributions)
-        _, assets, _ = _project_capabilities(registered)
+        assets, _, _, _ = _runtime_declarations(registered)
         limits = self._limits
         models = MappingProxyType(dict(self._models))
         capability_filter = self._filter
@@ -359,8 +355,8 @@ class RuntimeFeatures(Generic[AppT]):
         return RuntimeFeaturesSource(self)
 
 
-def _project_capabilities(contributions):
-    """Expand current host declarations, regardless of their registration source."""
+def _runtime_declarations(contributions):
+    """Find host resources without materializing their tool schemas."""
     filesystem_capabilities: list[FileSystem] = []
     shells: list[ShellCapability] = []
     memories: list[MemoryCapability] = []
@@ -411,18 +407,25 @@ def _project_capabilities(contributions):
                           "host capabilities require Runtime scope")
     if any(len(values) > 1 for values in (filesystem_capabilities, asset_capabilities, response_capabilities)):
         raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+    return (asset_capabilities[0] if asset_capabilities else None,
+            filesystem_capabilities[0] if filesystem_capabilities else None,
+            tuple(shells), tuple(memories))
+
+
+def _project_capabilities(contributions):
+    """Materialize current host tools once for this resolution."""
+    assets, filesystem, shells, memories = _runtime_declarations(contributions)
     tools = []
     for capability in (*memories, *shells):
         tools.extend(CapabilityContribution.from_opaque("tool", tool.name, tool)
                      for tool in capability.tool_definitions())
     workspace = None
-    if filesystem_capabilities:
-        capability = filesystem_capabilities[0]
-        workspace = capability.workspace
+    if filesystem is not None:
+        workspace = filesystem.workspace
         declarations = {item.name: item for item in filesystem_tool_declarations()}
         tools.extend(CapabilityContribution.from_opaque("tool", tool.name, tool,
-                     revision=declarations[tool.name].revision) for tool in capability.tool_definitions())
-    return tuple(tools), asset_capabilities[0] if asset_capabilities else None, workspace
+                     revision=declarations[tool.name].revision) for tool in filesystem.tool_definitions())
+    return tuple(tools), assets, workspace
 
 
 def _validate_filter(value: object) -> None:
