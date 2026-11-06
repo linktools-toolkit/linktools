@@ -261,7 +261,7 @@ class SqlStepStore:
         confirmed = ()
         if prepared.snapshot is not None and prepared.snapshot_values is not None:
             confirmed = await self._write_snapshot(
-                session, prepared.snapshot, prepared.snapshot_values, prepared.messages,
+                session, prepared.snapshot_values, prepared.messages,
             )
         return StepWriteReceipt(confirmed)
 
@@ -292,7 +292,7 @@ class SqlStepStore:
         prepared = await self._prepare_snapshot(snapshot)
 
         async def write(session: "AsyncSession") -> tuple[str, ...]:
-            return await self._write_snapshot(session, snapshot, *prepared)
+            return await self._write_snapshot(session, *prepared)
 
         confirmed = await self._context.run_mutation(write, domain="steps.snapshot")
         self._confirm_messages(confirmed)
@@ -300,6 +300,7 @@ class SqlStepStore:
     async def _prepare_snapshot(
         self, snapshot: ContinuableSnapshot,
     ) -> "tuple[dict[str, SqlValue], list[tuple[str, str]]]":
+        values = self._record_values(snapshot)
         messages = json.loads(ModelMessagesTypeAdapter.dump_json(snapshot.messages))
         if self._media_store is not None:
             messages = await externalize_media(
@@ -311,19 +312,17 @@ class SqlStepStore:
         for message in messages:
             body = json.dumps(message, separators=(",", ":"))
             keyed.append((_digest(body), body))
-        values = self._run_values(snapshot.run_id) | self._record_values(snapshot)
         values["messages"] = json.dumps({"stored_messages": len(keyed)})
         values["pruned"] = False
 
         return values, keyed
 
     async def _write_snapshot(
-        self, session: "AsyncSession", snapshot: ContinuableSnapshot,
-        values: "dict[str, SqlValue]", keyed: Sequence[tuple[str, str]],
+        self, session: "AsyncSession", values: "dict[str, SqlValue]", keyed: Sequence[tuple[str, str]],
     ) -> tuple[str, ...]:
-        values = values | self._run_values(snapshot.run_id)
-        values["key_digest"] = _replay_digest(self._store_digest, values["run_digest"], snapshot.idempotency_key)
-        if snapshot.idempotency_key is None:
+        values = values | self._run_values(values["run_id"])
+        values["key_digest"] = _replay_digest(self._store_digest, values["run_digest"], values["idempotency_key"])
+        if values["idempotency_key"] is None:
             result = await session.execute(self._table("snapshots").insert().values(values))
             snapshot_id = result.inserted_primary_key[0]
         else:
@@ -350,7 +349,7 @@ class SqlStepStore:
                      "position": position, "sha256": key} for position, (key, _) in enumerate(keyed)]
         for offset in range(0, len(ref_rows), _BATCH_SIZE):
             await session.execute(self._table("message_refs").insert(), ref_rows[offset:offset + _BATCH_SIZE])
-        await self._prune_snapshots(session, snapshot.run_id)
+        await self._prune_snapshots(session, values["run_id"])
         return tuple(dict(keyed))
 
     def _confirm_messages(self, confirmed: Sequence[str]) -> None:

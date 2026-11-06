@@ -327,6 +327,44 @@ async def test_unkeyed_physical_identity_collision_fails_without_losing_append(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("field, changed", (("run_id", "other"), ("idempotency_key", "other-key")))
+async def test_snapshot_publication_uses_captured_run_and_replay_identity(
+    atomic_store: tuple[SqlStepStore, AsyncEngine], monkeypatch: pytest.MonkeyPatch,
+    field: str, changed: str,
+) -> None:
+    store, _ = atomic_store
+    snapshot = ContinuableSnapshot(run_id="run", step_index=0, messages=[], idempotency_key="key")
+    captured = replace(snapshot)
+    prepared, release = asyncio.Event(), asyncio.Event()
+    context_type = type(store.storage_context)
+    original = context_type.run_mutation
+
+    async def pause(context, callback, **kwargs):
+        if context is store.storage_context:
+            prepared.set()
+            await release.wait()
+        return await original(context, callback, **kwargs)
+
+    monkeypatch.setattr(context_type, "run_mutation", pause)
+    task = asyncio.create_task(store.save_snapshot(snapshot))
+    try:
+        await prepared.wait()
+        setattr(snapshot, field, changed)
+        release.set()
+        await task
+        assert await store.latest_snapshot(run_id="run") == captured
+        await store.save_snapshot(replace(captured, step_index=1))
+        assert await store.list_snapshots(run_id="run") == [captured]
+        other = replace(captured, idempotency_key="other-key", step_index=2)
+        await store.save_snapshot(other)
+        assert await store.list_snapshots(run_id="run") == [captured, other]
+        assert await store.latest_snapshot(run_id="other") is None
+    finally:
+        release.set()
+        await task
+
+
+@pytest.mark.asyncio
 async def test_native_transaction_rejects_separate_context_and_expired_scope(tmp_path: Path) -> None:
     from linktools.ai.persistence.state import StateTransactionNestingError
     from .test_state_group_record_batch import _database
