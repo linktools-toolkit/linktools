@@ -8,7 +8,7 @@ import pytest
 from asyncmy.connection import Connection
 from asyncmy.cursors import Cursor
 from pydantic_ai.messages import ModelRequest, UserPromptPart
-from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
+from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepEvent
 from sqlalchemy import Column, Integer, MetaData, String, Table, Text, UniqueConstraint, event, select, text
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.dialects.mysql.asyncmy import dialect as mysql_dialect
@@ -138,6 +138,58 @@ async def test_mysql_duplicate_after_partial_batch_replays_all_rows_with_bounded
     assert all(len(packet) <= cursor.max_stmt_length for packet in retried)
     expected = cursor.mogrify("%s", (body,)).encode("utf8")
     assert sum(packet.count(expected) for packet in retried) == len(rows)
+
+
+@pytest.mark.asyncio
+async def test_mysql_event_retry_does_not_replay_neighboring_unkeyed_events() -> None:
+    class EventCursor(_PacketCursor):
+        async def execute(
+            self, query: str | bytes, args: tuple[SqlValue, ...] | None = None,
+        ) -> int:
+            result = await super().execute(query, args)
+            if len(self.packets) == 3:
+                raise IntegrityError("insert", {}, Exception(1062, "Duplicate entry"))
+            return result
+
+    engine = create_async_engine("mysql+asyncmy://")
+    store = SqlStepStore(engine, namespace="events", tenant_id="one")
+    cursor = EventCursor()
+    unkeyed = StepEvent(run_id="run", kind="model_request_started", step_index=0,
+                       error="unkeyed-marker")
+    keyed = [replace(unkeyed, idempotency_key=str(index), error="x" * (80 * 1024))
+             for index in range(64)]
+    try:
+        await store._write_events(_PacketSession(cursor), (unkeyed, *keyed, unkeyed))
+        assert any(b"ON DUPLICATE KEY UPDATE" in packet for packet in cursor.packets)
+        assert sum(packet.count(b"unkeyed-marker") for packet in cursor.packets) == 2
+        assert all(len(packet) <= cursor.max_stmt_length for packet in cursor.packets)
+    finally:
+        await store.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("_server", ("mysql",), indirect=True)
+async def test_mysql_mixed_event_batch_preserves_occurrences_after_packet_conflict(
+    _server: tuple[str, list[str]],
+) -> None:
+    _, command = _server
+    socket = next(value.split("=", 1)[1] for value in command if value.startswith("--socket="))
+    url = URL.create("mysql+asyncmy", username="root", database=command[-1],
+                     query={"unix_socket": socket, "charset": "utf8mb4"})
+    engine = create_async_engine(url, hide_parameters=True)
+    store = SqlStepStore(engine, namespace="mixed-events", tenant_id="one")
+    unkeyed = StepEvent(run_id="run", kind="model_request_started", step_index=0)
+    keyed = [replace(unkeyed, idempotency_key=str(index), error="x" * (80 * 1024))
+             for index in range(64)]
+    try:
+        await provision_database(engine)
+        await store.append_event(keyed[-1])
+        await store.commit_step(events=(unkeyed, *keyed[:-1], replace(keyed[-1], error="ignored"), unkeyed))
+        assert await store.list_events(run_id="run") == [keyed[-1], unkeyed, *keyed[:-1], unkeyed]
+    finally:
+        await store.close()
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
