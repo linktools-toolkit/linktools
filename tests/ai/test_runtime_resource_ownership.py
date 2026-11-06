@@ -86,7 +86,6 @@ async def test_resolution_is_inspection_only_and_cannot_transfer_asset_ownership
         await assets.initialize()
         source = _features(AssetCapability(assets)).borrow()
         resolution = await source.resolve()
-        assert not hasattr(resolution, "verify_source_revision")
         async with Persistence.open("inspection", storage=PersistenceStorage.in_memory()) as persistence:
             with pytest.raises(TypeError, match="RuntimeFeaturesSource"):
                 if attach:

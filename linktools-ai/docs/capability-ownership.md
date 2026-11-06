@@ -119,7 +119,7 @@ methods are a public surface. Task currently consumes the following paths:
 | `Task.from_agent`; `AgentTaskRunner` construction | Read `binding_contract.agent_spec` and `binding_contract` | Capture declaration identity, planning/thinking defaults and the full binding once; do not recapture per operation |
 | `TaskEngine` and runner binding | Exact `persistence` identity; `operations.ensure_open()` | A matching database URL does not replace shared ownership; reject a closed producer before work |
 | Admission input | `canonicalize_files(files)` → tuple; `materialize_input(prompt, files=())` → canonical input | Canonical Workspace-relative paths, original tenant and the existing captured content boundary |
-| Durable binding validation | `resolve_contract(contract)` → `AgentBindingContract` | Resolve the saved selection, not current wildcard expansion; reject contract drift |
+| Durable binding validation | `resolve_contract(contract)` → `AgentBindingContract` | Preserve the admitted Agent, hooks and child contracts; new business/MCP calls and Skill reads use current candidates within the recorded selectors |
 | Start and get | Overridable `start(...)` / `get(execution_id, principal)` → `Execution` | Original principal, output contract, correlation, graph budget scope, invocation-capture requirement and dependency hold |
 | Invocation capture | Optional `captures.record_invocation(execution_id, invocation)` | Persist Task-to-execution capture before releasing the handoff obligation |
 | Authorized reads | `service.inspect`, `result`, `result_payload_size`, `wait`, `list_children`, `budget_usage` | Existing authorization and exact producer service. Service `wait` returns `ExecutionResult`, not the observer's `WaitResult` |

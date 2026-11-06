@@ -6,6 +6,7 @@ from linktools.ai.persistence import Persistence
 from ._runtime_test_helpers import model_features
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
@@ -112,10 +113,12 @@ async def test_task_agent_trace_survives_terminal_release_and_reopen(tmp_path, d
 @pytest.mark.asyncio
 @pytest.mark.parametrize("restart", (False, True))
 @pytest.mark.parametrize("trace", (False, True))
-async def test_delegated_guarantees_follow_frozen_parent_after_defaults_change(
+async def test_delegated_guarantees_follow_parent_after_admission_policy_change(
     tmp_path, monkeypatch: pytest.MonkeyPatch, restart: bool, trace: bool,
 ) -> None:
-    entered = {prompt: asyncio.Event() for prompt in ("root", "child", "grandchild")}
+    from linktools.ai.runtime import _execution
+
+    entered = {prompt: asyncio.Event() for prompt in ("root", "current", "child", "grandchild")}
     release = {prompt: asyncio.Event() for prompt in entered}
 
     async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -138,32 +141,43 @@ async def test_delegated_guarantees_follow_frozen_parent_after_defaults_change(
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "inherited-guarantees.db"
     original = PersistenceStorage.sqlite(database)
-    async with Persistence.open('inheritance', storage=original) as persistence_133, Runtime.attach(persistence=persistence_133, features=model_features(models, capabilities(True))) as owner:
+    features = model_features(models, capabilities(True))
+    async with Persistence.open('inheritance', storage=original) as persistence_133, Runtime.attach(persistence=persistence_133, features=features) as owner:
         root = await owner.agents.get().start("root", idempotency_key="root")
         try:
             await asyncio.wait_for(entered["root"].wait(), 5)
-            # This private admission test exercises inherited source guarantees,
-            # not a public nested-delegation or foreign-worker execution API.
-            with monkeypatch.context() as patch:
-                patch.setattr(owner._execution_service, "_restart_checkpoints", False)
-                patch.setattr(owner._execution_service, "_durable_trace", False)
-                child_id = await _start_delegated_execution(owner, owner._state, root.execution_id, "child")
-                await asyncio.wait_for(entered["child"].wait(), 5)
-                grandchild_id = await _start_delegated_execution(owner, owner._state, child_id, "grandchild")
-                await asyncio.wait_for(entered["grandchild"].wait(), 5)
-                identities = (root.execution_id, child_id, grandchild_id)
-                for execution_id in identities:
-                    record = await owner._state.execution.executions.get(execution_id, tenant_id=owner.tenant_id)
-                    assert record is not None
-                    assert (record.restart_checkpoints, record.durable_trace) == (restart, trace)
-                # Private admission does not make a parent await its child.
-                # Finish leaves first so a parent cannot stop a live child turn.
-                for prompt, execution_id in (("grandchild", grandchild_id), ("child", child_id),
-                                             ("root", root.execution_id)):
-                    release[prompt].set()
-                    execution = await owner.executions.get(execution_id)
-                    result = (await execution.wait(timeout_seconds=10)).result
-                    assert result.status is ExecutionStatus.SUCCEEDED
+            original_policy = _execution._runtime_feature_policy
+
+            def admission_policy(candidates):
+                return replace(original_policy(candidates), capabilities=())
+
+            # Change admission defaults without revoking the native checkpoint
+            # provider required to fulfill the parent's admitted guarantees.
+            monkeypatch.setattr(_execution, "_runtime_feature_policy", admission_policy)
+            current = await owner.agents.get().start("current", idempotency_key="current")
+            await asyncio.wait_for(entered["current"].wait(), 5)
+            record = await owner._state.execution.executions.get(current.execution_id, tenant_id=owner.tenant_id)
+            assert record is not None and not record.restart_checkpoints and not record.durable_trace
+            release["current"].set()
+            assert (await current.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
+            # Private admission isolates inheritance from nested delegation policy.
+            child_id = await _start_delegated_execution(owner, owner._state, root.execution_id, "child")
+            await asyncio.wait_for(entered["child"].wait(), 5)
+            grandchild_id = await _start_delegated_execution(owner, owner._state, child_id, "grandchild")
+            await asyncio.wait_for(entered["grandchild"].wait(), 5)
+            identities = (root.execution_id, child_id, grandchild_id)
+            for execution_id in identities:
+                record = await owner._state.execution.executions.get(execution_id, tenant_id=owner.tenant_id)
+                assert record is not None
+                assert (record.restart_checkpoints, record.durable_trace) == (restart, trace)
+            # Private admission does not make a parent await its child.
+            # Finish leaves first so a parent cannot stop a live child turn.
+            for prompt, execution_id in (("grandchild", grandchild_id), ("child", child_id),
+                                         ("root", root.execution_id)):
+                release[prompt].set()
+                execution = await owner.executions.get(execution_id)
+                result = (await execution.wait(timeout_seconds=10)).result
+                assert result.status is ExecutionStatus.SUCCEEDED
         finally:
             for event in release.values():
                 event.set()

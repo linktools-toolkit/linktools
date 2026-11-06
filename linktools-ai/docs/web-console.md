@@ -350,12 +350,14 @@ conversation is empty.
 
 ## Observation and ownership
 
-The CLI shares one live RuntimeFeatures source for inspection and composition,
-opens one `Runtime.open(namespace, storage=..., features=source)` context, and
-runs one HTTP server. Inspection uses `await source.resolve()`; it does not freeze
-later registrations or Asset declarations. Runtime closes its owned Persistence after the server
-stops; the CLI then closes its separately owned AssetStore. `create_app` accepts already-open public Runtime/History and
-Metrics objects for embedding and testing; the caller owns their lifespan.
+The CLI declares one live RuntimeFeatures group, opens one
+`Runtime.open(namespace, storage=..., features=features)` context, and runs one
+HTTP server. Inspection uses `await runtime.features.resolve()`; it does not
+freeze later registrations or Asset declarations. After the server stops,
+Runtime stops its producers, closes its owned StepStore adapter and AssetStore,
+then closes its owned Persistence. `create_app` accepts already-open public
+Runtime/History and Metrics objects for embedding and testing; the caller owns
+their lifespan.
 
 Sending a message returns its execution ID independently of the SSE connection.
 A browser disconnect closes its observer, not the execution. Stop requests

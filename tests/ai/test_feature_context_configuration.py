@@ -14,7 +14,7 @@ from pydantic_ai.capabilities import CombinedCapability, PrefixTools
 
 from linktools.ai.capability import ToolResponsesCapability
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import AuthorizationAction, PromptLimits, ResourceKind, ResourceRef, service_principal
+from linktools.ai.core import AuthorizationAction, ExecutionStatus, PromptLimits, ResourceKind, ResourceRef, service_principal
 from linktools.ai.errors import AIError, ErrorCode
 
 from linktools.ai.history import History
@@ -22,6 +22,7 @@ from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 
 from .test_tool_response_fixture import _manifest, _store
+from .test_explicit_runtime_features import _FeatureModels
 
 
 class Policy:
@@ -110,7 +111,7 @@ async def test_history_uses_current_host_policy(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_response_capability_scope_uniqueness_and_bootstrap_consumption():
+async def test_response_capability_scope_uniqueness_and_admission_consumption():
     store, fixture = await _store(_manifest())
     try:
         feature = ToolResponsesCapability(fixture)
@@ -129,12 +130,19 @@ async def test_response_capability_scope_uniqueness_and_bootstrap_consumption():
         with pytest.raises(AIError) as caught:
             RuntimeFeatures('duplicate').capability(CombinedCapability([feature, replacement], id='duplicate.responses'))
         assert caught.value.code is ErrorCode.CAPABILITY_CONFLICT
-        async with Persistence.open('test', storage=PersistenceStorage.in_memory()) as persistence_125, Runtime.attach(persistence=persistence_125, features=features) as runtime:
-            assert runtime._execution_service._tool_responses is fixture
         wrapped = RuntimeFeatures('wrapped')
         wrapped.capability(PrefixTools(CombinedCapability([ToolResponsesCapability(fixture)]), prefix='test'), id='wrapped.responses', scope='runtime')
-        async with Persistence.open('wrapped', storage=PersistenceStorage.in_memory()) as persistence_129, Runtime.attach(persistence=persistence_129, features=wrapped) as runtime:
-            assert runtime._execution_service._tool_responses is fixture
+        for declared in (features, wrapped):
+            async with Runtime.open(
+                declared.id, storage=PersistenceStorage.in_memory(),
+                features=model_features(_FeatureModels(), declared),
+            ) as runtime:
+                execution = await runtime.agents.get().start("Use the declared fixture")
+                assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
+                record = await runtime._state.execution.executions.get(
+                    execution.execution_id, tenant_id=runtime.tenant_id,
+                )
+                assert record is not None and record.tool_response_ref == fixture.ref
     finally:
         await store.close()
 

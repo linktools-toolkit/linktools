@@ -69,7 +69,6 @@ assert get_type_hints(RuntimeFeatures.resolve)['return'].__origin__ is RuntimeFe
 assert get_type_hints(RuntimeFeatures.borrow)['return'].__origin__ is RuntimeFeaturesSource
 assert get_type_hints(RuntimeFeaturesSource.resolve)['return'].__origin__ is RuntimeFeaturesResolution
 assert get_type_hints(RuntimeFeaturesResolution)['contributions'].__args__[0].__origin__ is CapabilityContribution
-assert not hasattr(RuntimeFeatures, 'capture')
 for owner in (RuntimeFeatures, RuntimeFeaturesResolution, RuntimeFeaturesSource):
     for name, value in vars(owner).items():
         if isinstance(value, property):

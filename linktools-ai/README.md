@@ -1108,7 +1108,13 @@ spec = AgentSpec(
 )
 ```
 
-The compiler resolves non-Skill selectors from the captured candidate universe. Skill selectors are also applied to current candidates on list/load; missing explicit Skill names can become available later without widening the selector. Missing or conflicting required non-Skill candidates fail closed. MCP selectors use
+Selectors apply to current declarations at their lifecycle boundary: Agent hooks
+and delegation targets at admission, business and MCP tools at each model step,
+and Skills on list/load. Explicit names can become available later without
+widening the allowed selectors. Invalid selectors and conflicting declarations
+are rejected. Already-admitted hooks and calls retain their recorded
+`kind/id/revision`; an unavailable revision is not replaced with a newer one.
+MCP selectors use
 `mcp:<encoded-server>:<encoded-tool>` or `mcp:<encoded-server>:*`; use
 `mcp_server_selector()` and `mcp_tool_selector()` to encode logical ids and
 upstream tool names. For example, `security/audit` and `scan:file` become
