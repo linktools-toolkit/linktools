@@ -64,14 +64,13 @@ async def test_planning_tool_rejects_duplicate_ids_before_store() -> None:
     assert toolset is not None
     tools = await toolset.get_tools(context)
     duplicate = HarnessPlanItem(id="same", content="step")
+    validate = tools["write_plan"].args_validator_func
+    assert validate is not None
 
     with pytest.raises(ToolCallRetry, match="ids must be unique"):
-        await toolset.call_tool(
-            "write_plan",
-            {"items": [duplicate, duplicate.model_copy(deep=True)]},
-            context,
-            tools["write_plan"],
-        )
+        validate(context, items=[duplicate, duplicate.model_copy(deep=True)])
+
+    assert await capability.store.get_items() == []
 
 
 async def test_runtime_plan_request_error_is_model_correctable() -> None:
