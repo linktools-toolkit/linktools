@@ -258,10 +258,10 @@ class Runtime(Generic[AppT]):
                 )
                 if isinstance(self._features, RuntimeFeatures):
                     assets = self._features.assets
-                    owned_store = None if assets is None else assets.claim_owned_store()
-                    if owned_store is not None:
+                    if assets is not None:
+                        store = assets.claim_store()
                         self._owned_assets = assets
-                        await owned_store.initialize()
+                        await store.initialize()
                     self._feature_capture = await self._features.capture()
                 else:
                     self._feature_capture = self._features
@@ -949,7 +949,7 @@ class Runtime(Generic[AppT]):
                 self._close_agent,
             ]
             if self._owned_assets is not None:
-                actions.append(self._owned_assets.close_owned_store)
+                actions.append(self._owned_assets.close_store)
             if self._persistence_cleanup is not None:
                 actions.append(self._persistence_cleanup)
             elif self._owns_persistence:

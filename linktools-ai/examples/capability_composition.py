@@ -100,11 +100,12 @@ async def captured_assets_and_workspace(root: Path) -> None:
             ToolCallPart("run_command", {"command": "printf capability-example"}, tool_call_id="command"),
         ])
 
-    async with AssetCapability.open(store) as assets:
+    try:
+        await store.initialize()
         await store.put(skill, b"---\nname: guide\ndescription: Example guide\n---\nCaptured instructions")
         await store.put(resource, b"captured resource")
         features = RuntimeFeatures("capability-assets")
-        features.capability(assets)
+        features.capability(AssetCapability(store))
         features.capability(CombinedCapability([
             FileSystem(Workspace.load(root)).prefix_tools("files"),
             ShellCapability(),
@@ -129,6 +130,8 @@ async def captured_assets_and_workspace(root: Path) -> None:
             assert runs == [execution.execution_id]
             assert (await execution.model_interactions()).items
         assert store.ready
+    finally:
+        await store.close()
     assert not store.ready
     print("Captured Skill resources, wrapped FileSystem, Shell and native hook passed")
 

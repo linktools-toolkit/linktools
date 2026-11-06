@@ -11,7 +11,7 @@ from pydantic_ai_harness.step_persistence import InMemoryStepStore, RunRecord, S
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.asset import AssetStore, InMemoryAssetBackend
+from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import AssetCapability, StepPersistenceCapability
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
@@ -36,9 +36,12 @@ def _features(*capabilities: object) -> RuntimeFeatures:
 
 
 @pytest.mark.parametrize("attach", (False, True))
-async def test_runtime_owns_declared_assets_but_not_attached_persistence(attach: bool) -> None:
+@pytest.mark.parametrize("initialized", (False, True))
+async def test_runtime_owns_declared_assets_but_not_attached_persistence(attach: bool, initialized: bool) -> None:
     assets = _assets()
-    features = _features(AssetCapability.owned(assets))
+    if initialized:
+        await assets.initialize()
+    features = _features(AssetCapability(assets))
     async with Persistence.open("assets", storage=PersistenceStorage.in_memory()) as persistence:
         owner = (Runtime.attach(persistence=persistence, features=features) if attach else
                  Runtime.open("assets", storage=PersistenceStorage.in_memory(), features=features))
@@ -51,18 +54,29 @@ async def test_runtime_owns_declared_assets_but_not_attached_persistence(attach:
 
 
 async def test_captured_assets_are_borrowed_and_runtime_reuses_capture() -> None:
-    assets = _assets()
-    async with AssetCapability.open(assets) as capability:
-        capture = await _features(capability).capture()
-        async with Runtime.open("borrowed", storage=PersistenceStorage.in_memory(), features=capture) as runtime:
-            assert runtime.features is capture
+    backend = InMemoryAssetBackend()
+    assets = AssetStore(StorageOverlay(backend, writer=backend))
+    try:
+        await assets.initialize()
+        key = AssetKey("rule", "shared.md")
+        await assets.put(key, b"shared instructions")
+        capture = await _features(AssetCapability(assets)).capture()
+        async with Runtime.open("first", storage=PersistenceStorage.in_memory(), features=capture) as first:
+            async with Runtime.open("second", storage=PersistenceStorage.in_memory(), features=capture) as second:
+                assert first.features is second.features is capture
+                assert assets.ready
+            assert assets.ready
+            assert await capture.asset_reader.get(key) == b"shared instructions"
+            assert (await first.agents.get().run("still live")).result.output == {"text": "done"}
         assert assets.ready
+    finally:
+        await assets.close()
     assert not assets.ready
 
 
 async def test_owned_asset_declaration_rejects_second_runtime_without_closing_first() -> None:
     assets = _assets()
-    features = _features(AssetCapability.owned(assets))
+    features = _features(AssetCapability(assets))
     async with Runtime.open("first", storage=PersistenceStorage.in_memory(), features=features) as first:
         with pytest.raises(AIError, match="already belongs"):
             async with Runtime.open("second", storage=PersistenceStorage.in_memory(), features=features):
@@ -75,7 +89,7 @@ async def test_owned_asset_declaration_rejects_second_runtime_without_closing_fi
 @pytest.mark.parametrize("cancelled", (False, True))
 async def test_owned_assets_close_after_capture_failure_or_cancellation(cancelled: bool) -> None:
     assets = _assets()
-    capability = AssetCapability.owned(assets)
+    capability = AssetCapability(assets)
     entered = asyncio.Event()
 
     class Loader:
@@ -108,7 +122,7 @@ async def test_asset_close_failure_preserves_owner_and_can_retry() -> None:
 
     backend = Backend()
     assets = _assets(backend)
-    features = _features(AssetCapability.owned(assets))
+    features = _features(AssetCapability(assets))
     runtime = Runtime.open("retry", storage=PersistenceStorage.in_memory(), features=features)
     await runtime.__aenter__()
     with pytest.raises(ValueError, match="asset close failed"):
@@ -245,7 +259,7 @@ async def test_producer_close_failure_keeps_owned_dependencies_until_retry(tmp_p
     monkeypatch.setattr(RuntimeAgentRunStore, "preflight_close", preflight_close)
     async with Persistence.open("close-order", storage=PersistenceStorage.from_root(tmp_path)) as persistence:
         runtime = Runtime.attach(persistence=persistence, features=_features(
-            AssetCapability.owned(assets), StepPersistenceCapability(),
+            AssetCapability(assets), StepPersistenceCapability(),
         ))
         await runtime.__aenter__()
         await runtime.agents.get().run("question")
@@ -273,7 +287,7 @@ async def test_owned_assets_clean_partial_initialization() -> None:
     backend = Backend()
     assets = _assets(backend)
     runtime = Runtime.open("partial-assets", storage=PersistenceStorage.in_memory(),
-                           features=_features(AssetCapability.owned(assets)))
+                           features=_features(AssetCapability(assets)))
     with pytest.raises(ValueError, match="initialize failed"):
         await runtime.__aenter__()
     assert not assets.ready and not backend.allocated

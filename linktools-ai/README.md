@@ -661,13 +661,15 @@ capability discovers Agent, Skill, or
 MCP declarations from Workspace paths.
 
 Agent, Skill, MCP, and repository rule files use one explicit source: register
-`AssetCapability` with `features.capability(assets)`. Use `AssetCapability.owned(store)`
-with an uncaptured `RuntimeFeatures` to let Runtime initialize the store, capture
-once, and close it after all producers stop. An owned declaration belongs to one Runtime lifetime. `runtime.features` exposes the same capture used for composition.
-`AssetCapability(store)` borrows an already initialized store without closing it.
-For a capture shared by multiple Runtimes, `AssetCapability.open(store)` instead
-owns the store externally; keep its context open through every use of that capture.
-Passing a prebuilt capture always borrows its Asset reader. A store-backed group
+`AssetCapability(store)` with `features.capability(...)`. Runtime initializes the
+declared store, captures once, and closes it after all producers stop. A declaration
+and its store belong to one Runtime lifetime; wrapping the same store in another
+declaration does not make an independent resource. This transfers lifecycle even
+if the store is already initialized; readiness does not select a borrowing mode.
+`runtime.features` exposes the same capture used for composition. To share a prebuilt capture, its external owner initializes the
+AssetStore before `features.capture()` and keeps it open through every use, then
+closes it. Passing a prebuilt capture borrows its Asset reader; it does not transfer
+the source store's lifetime. A store-backed group
 captures the declaration metadata visible when capture begins. Assets added
 afterward are ignored for that capture; assets actually read by a loader must
 still match their captured metadata through verification. Conflicting
@@ -678,7 +680,7 @@ from linktools.ai.capability import AssetCapability
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 
 features = RuntimeFeatures("application")
-features.capability(AssetCapability.owned(store))
+features.capability(AssetCapability(store))
 async with Runtime.open("application", storage=storage, features=features) as runtime:
     capture = runtime.features
     # Inspect this capture and use Runtime inside the same lifetime.

@@ -35,16 +35,17 @@ def _features(store, *, capability=None):
 
 
 @pytest.mark.asyncio
-async def test_asset_capability_open_keeps_captured_reads_available_through_runtime() -> None:
+async def test_external_capture_keeps_asset_reads_available_through_runtime() -> None:
     from ._runtime_test_helpers import RuntimeUsageModels
 
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     key = AssetKey("rule", "base.md")
 
-    async with AssetCapability.open(store) as assets:
+    try:
+        await store.initialize()
         await store.put(key, b"runtime instructions")
-        features, _ = _features(store, capability=assets)
+        features, _ = _features(store)
         model_features(RuntimeUsageModels(), features)
         capture = await features.capture()
         async with Runtime.open(
@@ -53,7 +54,8 @@ async def test_asset_capability_open_keeps_captured_reads_available_through_runt
             assert await capture.asset_reader.get(key) == b"runtime instructions"
             assert (await runtime.agents.get().run("question")).result.output == {"text": "done"}
         assert await capture.asset_reader.get(key) == b"runtime instructions"
-
+    finally:
+        await store.close()
     assert not store.ready
     with pytest.raises(AIError):
         await capture.asset_reader.get(key)
@@ -61,7 +63,7 @@ async def test_asset_capability_open_keeps_captured_reads_available_through_runt
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancelled", (False, True))
-async def test_asset_capability_open_closes_after_capture_failure_or_cancellation(cancelled: bool) -> None:
+async def test_runtime_closes_assets_after_capture_failure_or_cancellation(cancelled: bool) -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     entered = asyncio.Event()
@@ -75,10 +77,10 @@ async def test_asset_capability_open_closes_after_capture_failure_or_cancellatio
             raise failure
 
     async def capture() -> None:
-        async with AssetCapability.open(store) as assets:
-            assets.loader("custom", Loader())
-            features, _ = _features(store, capability=assets)
-            await features.capture()
+        features, assets = _features(store)
+        assets.loader("custom", Loader())
+        async with Runtime.open("capture-failure", storage=PersistenceStorage.in_memory(), features=features):
+            pytest.fail("capture must fail before Runtime becomes ready")
 
     task = asyncio.create_task(capture())
     await entered.wait()
@@ -94,7 +96,7 @@ async def test_asset_capability_open_closes_after_capture_failure_or_cancellatio
 
 
 @pytest.mark.asyncio
-async def test_asset_capability_open_cleans_partial_initialization() -> None:
+async def test_runtime_cleans_partial_asset_initialization() -> None:
     class Backend(InMemoryAssetBackend):
         allocated = False
         fail_cleanup = True
@@ -112,14 +114,16 @@ async def test_asset_capability_open_cleans_partial_initialization() -> None:
     backend = Backend()
     store = AssetStore(StorageOverlay(backend))
     with pytest.raises(ValueError, match="initialize failed"):
-        async with AssetCapability.open(store):
+        async with Runtime.open("partial-assets", storage=PersistenceStorage.in_memory(), features=_features(store)[0]):
             pytest.fail("uninitialized capability must not be available")
     assert not backend.allocated
     assert not store.ready
 
 
 @pytest.mark.asyncio
-async def test_asset_capability_open_preserves_primary_error_when_close_fails() -> None:
+async def test_runtime_preserves_primary_error_when_asset_close_fails() -> None:
+    from ._runtime_test_helpers import RuntimeUsageModels
+
     failure = ValueError("capture failed")
     cleanup_failure = RuntimeError("close failed")
 
@@ -132,15 +136,18 @@ async def test_asset_capability_open_preserves_primary_error_when_close_fails() 
 
     backend = Backend()
     store = AssetStore(StorageOverlay(backend))
+    features, _ = _features(store)
+    model_features(RuntimeUsageModels(), features)
+    runtime = Runtime.open("body-failure", storage=PersistenceStorage.in_memory(), features=features)
     try:
         with pytest.raises(ValueError) as error:
-            async with AssetCapability.open(store):
+            async with runtime:
                 raise failure
         assert error.value is failure
         assert error.value.__cause__ is cleanup_failure
     finally:
         backend.fail_cleanup = False
-        await store.close()
+        await runtime.close()
 
 
 @pytest.mark.asyncio

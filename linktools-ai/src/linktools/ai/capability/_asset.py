@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 """Asset-backed declarations captured before Agent compilation."""
 
-from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import Generic, TypeVar
 
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 
@@ -16,18 +15,16 @@ from ._declaration import BuiltinDeclarationLoader
 from ._loading import CapabilityLoadContext, CapabilityLoader
 from ._skill import SkillDefinition
 
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-    from typing import Self
-
 AppT = TypeVar("AppT")
 
 
 class AssetCapability(AbstractCapability[AgentContext[AppT]], Generic[AppT]):
     """Load declarations from one versioned AssetStore.
 
-    The constructor borrows a ready store; owned() delegates its lifetime to
-    Runtime. open() owns the store for explicitly managed captures.
+    Runtime owns the declared store when consuming RuntimeFeatures. A prebuilt
+    capture instead borrows its reader from an externally managed store.
+    Declare a store for one Runtime lifetime; wrapping that same store again
+    does not create an independent resource. Share a capture across Runtimes.
     RuntimeFeatures consumes this Runtime-scoped capability during capture;
     it does not participate in native Agent execution hooks.
     """
@@ -38,55 +35,24 @@ class AssetCapability(AbstractCapability[AgentContext[AppT]], Generic[AppT]):
         if not isinstance(store, AssetStore):
             raise TypeError("store must be AssetStore")
         self._store = store
-        self._owns_store = False
         self._store_claimed = False
         self._loaders: dict[str, CapabilityLoader[AppT]] = {
             kind: BuiltinDeclarationLoader(kind) for kind in ("agent", "skill", "mcp", "rule")
         }
 
-    @classmethod
-    def owned(cls, store: AssetStore) -> "Self":
-        """Declare a store whose lifetime belongs to the consuming Runtime.
-
-        Pass this declaration in RuntimeFeatures, not a prebuilt capture.
-        A captured Asset reader is always borrowed from its existing owner.
-        """
-        capability = cls(store)
-        capability._owns_store = True
-        return capability
-
-    def claim_owned_store(self) -> "AssetStore | None":
-        """Claim an owned declaration before Runtime initializes its store."""
-        if not self._owns_store:
-            return None
+    def claim_store(self) -> AssetStore:
+        """Reserve this declaration for one Runtime before initialization."""
         if self._store_claimed:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
                           "Asset declaration already belongs to an active Runtime")
         self._store_claimed = True
         return self._store
 
-    async def close_owned_store(self) -> None:
+    async def close_store(self) -> None:
         """Release a claimed store only after its close completes successfully."""
         if self._store_claimed:
             await self._store.close()
             self._store_claimed = False
-
-    @classmethod
-    @asynccontextmanager
-    async def open(cls, store: AssetStore) -> "AsyncIterator[Self]":
-        """Initialize and close the store around capture and all Runtime use."""
-        capability = cls(store)
-        try:
-            await store.initialize()
-            yield capability
-        except BaseException as primary_error:
-            try:
-                await store.close()
-            except BaseException as cleanup_error:
-                raise primary_error from cleanup_error
-            raise
-        else:
-            await store.close()
 
     def for_agent(self, agent: object) -> "AssetCapability[AppT]":
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,

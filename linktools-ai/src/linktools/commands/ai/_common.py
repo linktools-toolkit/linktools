@@ -222,7 +222,7 @@ async def _open_local_runtime(
 
     features = RuntimeFeatures("workspace")
     features.model("default", model)
-    features.capability(AssetCapability.owned(_local_runtime_assets(workspace)))
+    features.capability(AssetCapability(_local_runtime_assets(workspace)))
     features.capability(FileSystem(workspace))
     features.capability(ShellCapability())
     features.capability(MemoryCapability())

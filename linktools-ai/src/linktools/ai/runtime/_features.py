@@ -154,7 +154,7 @@ class RuntimeFeatures(Generic[AppT]):
 
     @property
     def assets(self) -> "AssetCapability[AppT] | None":
-        """Return the declared Asset source and its explicit ownership policy."""
+        """Return the declared Asset source for Runtime composition."""
         return self._asset_capability
 
     @property
