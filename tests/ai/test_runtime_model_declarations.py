@@ -27,7 +27,7 @@ async def test_model_capture_is_lazy_isolated_and_success_is_shared() -> None:
         return binding
     features = RuntimeFeatures()
     features.model("assistant", load)
-    captured = await features.capture()
+    captured = await features.resolve()
     features.model("assistant", create_model(api="anthropic", model="replacement"))
     assert calls == []
     resolved = _ModelResolver(captured.models).resolve("assistant")
@@ -37,7 +37,7 @@ async def test_model_capture_is_lazy_isolated_and_success_is_shared() -> None:
     assert identities == ["openai:fixture"] * 8
     assert calls == ["load"]
     assert dict(resolved.contract) == dict(binding.contract)
-    assert _ModelResolver((await features.capture()).models).resolve("assistant").model_identity == "anthropic:replacement"
+    assert _ModelResolver((await features.resolve()).models).resolve("assistant").model_identity == "anthropic:replacement"
     assert calls == ["load"]
 
 
@@ -47,7 +47,7 @@ async def test_unused_model_loader_is_not_called() -> None:
     def fail():
         pytest.fail("unused loader called")
     features.model("unused", fail)
-    await features.capture()
+    await features.resolve()
 
 
 def test_lazy_model_failure_can_be_retried_and_async_result_is_rejected() -> None:
@@ -129,7 +129,7 @@ async def test_callable_custom_binding_is_not_mistaken_for_a_loader() -> None:
     binding = CallableBinding()
     features = RuntimeFeatures()
     features.model("custom", binding)
-    capture = await features.capture()
+    capture = await features.resolve()
     assert reads == []
     assert _ModelResolver(capture.models).resolve("custom") is binding
     assert _ModelResolver(capture.models).resolve("custom").contract["provider"] == "custom"
@@ -161,7 +161,7 @@ async def test_each_model_resolution_owns_one_immutable_configuration(monkeypatc
         return create_model(api="openai", model="fixture", api_key=configuration["api_key"])
     features = RuntimeFeatures()
     features.model("assistant", load)
-    capture = await features.capture()
+    capture = await features.resolve()
     binding = _ModelResolver(capture.models).resolve("assistant")
     contract = dict(binding.contract)
     assert loads == [1] and clients == []

@@ -4,7 +4,7 @@
 
 from ..spec import SubagentRef
 from ._capture import AgentInputCaptureRef
-from ._binding import AgentBinding, AgentBindingContract, CapabilityPin
+from ._binding import AgentBinding, AgentBindingContract
 from ._catalog import AgentCatalog
 from ._compiler import AgentCompiler, CapabilityFilter
 from ._compiled import CompiledAgent
@@ -29,7 +29,6 @@ __all__ = [
     "AssistantTextOutput",
     "OutputBinding",
     "OutputMode",
-    "CapabilityPin",
     "SubagentRef",
     "bind_output",
     "canonicalize_output_schema_v1",

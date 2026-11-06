@@ -56,7 +56,7 @@ async def test_builtin_loader_captures_agent_skill_and_mcp_declarations() -> Non
 
     asset_features = RuntimeFeatures("workspace")
     asset_features.capability(AssetCapability(store), scope="runtime")
-    capture = await asset_features.capture()
+    capture = await asset_features.resolve()
 
     assert [(item.kind, item.id) for item in capture.contributions] == [
         ("agent", "agent"),
@@ -83,7 +83,7 @@ async def test_group_capture_exposes_only_read_only_asset_access() -> None:
 
     asset_features = RuntimeFeatures("workspace")
     asset_features.capability(AssetCapability(store), scope="runtime")
-    capture = await asset_features.capture()
+    capture = await asset_features.resolve()
     reader = capture.asset_reader
 
     assert isinstance(reader, AssetStoreReader)
@@ -94,9 +94,9 @@ async def test_group_capture_exposes_only_read_only_asset_access() -> None:
     frozen_version = (await reader.resolve_versions((key,)))[0]
 
     await store.put(key, b"changed")
-    with pytest.raises(AIError) as error:
-        await capture.verify_source_revision()
-    assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+    current = await asset_features.resolve()
+    assert current.source_revision != capture.source_revision
+    assert await current.asset_reader.get(key) == b"changed"
     assert await reader.get(key) == b"contents"
     assert await reader.read_versions((frozen_version,)) == (b"contents",)
 
@@ -150,7 +150,7 @@ async def test_builtin_loader_rejects_declaration_identity_mismatch() -> None:
     with pytest.raises(AIError) as error:
         asset_features = RuntimeFeatures("workspace")
         asset_features.capability(AssetCapability(store), scope="runtime")
-        await asset_features.capture()
+        await asset_features.resolve()
 
     assert error.value.code is ErrorCode.ASSET_CONTENT_MISMATCH
 
@@ -163,7 +163,7 @@ async def test_store_group_requires_initialized_asset_store() -> None:
     with pytest.raises(AIError) as error:
         asset_features = RuntimeFeatures("workspace")
         asset_features.capability(AssetCapability(store), scope="runtime")
-        await asset_features.capture()
+        await asset_features.resolve()
 
     assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
 
@@ -199,7 +199,7 @@ async def test_custom_loader_receives_capture_metadata_and_reads_explicit_keys_o
     group.capability(group_assets, scope="runtime")
     group_assets.loader("custom", loader)
 
-    assert [(item.kind, item.id) for item in (await group.capture()).contributions] == [("capability", "runtime.assets")]
+    assert [(item.kind, item.id) for item in (await group.resolve()).contributions] == [("capability", "runtime.assets")]
     assert loader.calls == 1
     assert [entry.key for entry in loader.entries] == [AssetKey("custom", "a"), AssetKey("custom", "b")]
     assert loader.read_value == b"a"
@@ -224,7 +224,7 @@ async def test_replacing_skill_loader_disables_builtin_skill_layout_validation()
     group.capability(group_assets, scope="runtime")
     group_assets.loader("skill", _NoopLoader())
 
-    assert [(item.kind, item.id) for item in (await group.capture()).contributions] == [("capability", "runtime.assets")]
+    assert [(item.kind, item.id) for item in (await group.resolve()).contributions] == [("capability", "runtime.assets")]
 
 
 class _ForeignSkillSourceLoader:
@@ -252,7 +252,7 @@ async def test_custom_loader_cannot_bind_skill_resources_to_another_group() -> N
     group_assets.loader("skill", _ForeignSkillSourceLoader())
 
     with pytest.raises(AIError) as error:
-        await group.capture()
+        await group.resolve()
 
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
@@ -296,7 +296,7 @@ async def test_custom_loader_cannot_prebind_skill_versions() -> None:
     group_assets.loader("skill", _PinnedSkillVersionLoader())
 
     with pytest.raises(AIError) as error:
-        await group.capture()
+        await group.resolve()
 
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
@@ -324,7 +324,7 @@ async def test_custom_loader_cannot_read_key_outside_snapshot_metadata() -> None
     group_assets.loader("custom", _OutsideSnapshotLoader())
 
     with pytest.raises(AIError) as error:
-        await group.capture()
+        await group.resolve()
     assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
 
 
@@ -362,7 +362,7 @@ async def test_duplicate_candidate_identity_is_rejected_after_all_loaders_finish
     group_assets.loader("custom", _DuplicateAgentLoader())
 
     with pytest.raises(AIError) as error:
-        await group.capture()
+        await group.resolve()
 
     assert error.value.code is ErrorCode.CAPABILITY_CONFLICT
 
@@ -379,12 +379,12 @@ class _RaceStore(AssetStore):
         values = await super().read_versions(refs)
         if not self._raced:
             self._raced = True
-            await self.put(AssetKey("skill", "late/SKILL.md"), b"late")
+            await self.put(AssetKey("skill", "late/SKILL.md"), b"---\nname: late\ndescription: Late skill.\n---\nlate")
         return values
 
 
 @pytest.mark.asyncio
-async def test_capture_rejects_assets_added_during_declaration_loading() -> None:
+async def test_resolution_tolerates_assets_added_during_declaration_loading() -> None:
     backend = InMemoryAssetBackend()
     store = _RaceStore(backend)
     await store.initialize()
@@ -393,16 +393,16 @@ async def test_capture_rejects_assets_added_during_declaration_loading() -> None
         b"---\nname: first\ndescription: First skill.\n---\nfirst",
     )
 
-    with pytest.raises(AIError) as error:
-        asset_features = RuntimeFeatures("workspace")
-        asset_features.capability(AssetCapability(store), scope="runtime")
-        await asset_features.capture()
-
-    assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+    asset_features = RuntimeFeatures("workspace")
+    asset_features.capability(AssetCapability(store), scope="runtime")
+    first = await asset_features.resolve()
+    assert {item.id for item in first.contributions if item.kind == "skill"} == {"first"}
+    current = await asset_features.resolve()
+    assert {item.id for item in current.contributions if item.kind == "skill"} == {"first", "late"}
 
 
 @pytest.mark.asyncio
-async def test_group_capture_rejects_source_changes_before_admission() -> None:
+async def test_group_resolves_current_source_without_invalidating_prior_reads() -> None:
     store = await _store()
     await store.put(
         AssetKey("agent", "agent"),
@@ -410,17 +410,13 @@ async def test_group_capture_rejects_source_changes_before_admission() -> None:
     )
     asset_features = RuntimeFeatures("workspace")
     asset_features.capability(AssetCapability(store), scope="runtime")
-    capture = await asset_features.capture()
+    capture = await asset_features.resolve()
     await store.put(AssetKey("other", "late"), b"changed")
 
-    with pytest.raises(AIError) as error:
-        await capture.verify_source_revision()
-
-    assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
-    asset_features_2 = RuntimeFeatures("workspace")
-    asset_features_2.capability(AssetCapability(store), scope="runtime")
-    updated = await asset_features_2.capture()
+    updated = await asset_features.resolve()
     assert updated.source_revision != capture.source_revision
+    assert await updated.asset_reader.get(AssetKey("other", "late")) == b"changed"
+    assert await capture.asset_reader.get(AssetKey("other", "late")) is None
 
 
 class _BatchReadStore(AssetStore):
@@ -494,7 +490,7 @@ async def test_builtin_loader_batches_declaration_version_reads() -> None:
 
     asset_features = RuntimeFeatures("workspace")
     asset_features.capability(AssetCapability(store), scope="runtime")
-    capture = await asset_features.capture()
+    capture = await asset_features.resolve()
 
     assert [item.id for item in capture.contributions] == [
         "agent",

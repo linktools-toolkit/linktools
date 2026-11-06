@@ -46,7 +46,7 @@ async def test_group_agent_skill_requirements_survive_capture(
         selections = ["guide", "guide"]
         declared = group.agent("agent", allow_skills=selections)
         selections.clear()
-        capture = await group.capture()
+        capture = await group.resolve()
         captured = next(item.value for item in capture.contributions if item.kind == "agent")
         assert isinstance(captured, AgentSpec)
         assert captured.allow_skills == declared.allow_skills == ("guide",)

@@ -3,7 +3,7 @@
 """Agent and Session behavior with independently owned Execution handles."""
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Awaitable, Callable, Generic, TypeVar
 
 from pydantic import BaseModel
@@ -17,7 +17,7 @@ from ..execution import ExecutionResult, ExecutionTreeEvent, SessionHistoryItem,
 
 if TYPE_CHECKING:
     from .agent_execution import AgentExecutionPort
-    from ..agent import CompiledAgent, AgentBindingContract
+    from ..agent import CompiledAgent, AgentBinding, AgentBindingContract
     from ._runtime_service import Runtime
 
 AppT = TypeVar("AppT")
@@ -32,12 +32,13 @@ class Session(Generic[AppT]):
     _principal: "Principal | None" = None
     _compiled_agent: "CompiledAgent | None" = None
     _binding_contract: "AgentBindingContract | None" = None
+    _derivations: tuple[Mapping[str, object], ...] = ()
+    _observed_binding: "AgentBinding | None" = None
 
     def _definition(self) -> "Agent[AppT]":
-        if self._agent_revision is None:
-            return self._runtime.agents.get(self.agent_id)
         return Agent(self._runtime, self.agent_id, self._agent_revision,
-                     self._compiled_agent, self._binding_contract)
+                     self._compiled_agent, self._binding_contract, self._derivations,
+                     self._observed_binding)
 
     async def start(
         self,
@@ -228,13 +229,18 @@ class Session(Generic[AppT]):
 class Agent(Generic[AppT]):
     _runtime: "Runtime[AppT]"
     id: str
-    _agent_revision: int
+    _agent_revision: int | None
     _compiled_agent: "CompiledAgent | None" = None
     _binding_contract: "AgentBindingContract | None" = None
+    _derivations: tuple[Mapping[str, object], ...] = ()
+    _observed_binding: "AgentBinding | None" = None
 
     @property
     def execution_port(self) -> "AgentExecutionPort[AppT]":
-        return self._runtime._agent_execution_port(self.id, self.revision, self.compiled, self._binding_contract)
+        return self._runtime._agent_execution_port(
+            self.id, self.revision, self.compiled, self._binding_contract,
+            derivations=self._derivations, observed_binding=self._observed_binding,
+        )
 
     @property
     def runtime(self) -> "Runtime[AppT]":
@@ -242,18 +248,29 @@ class Agent(Generic[AppT]):
         return self._runtime
 
     @property
-    def revision(self) -> int:
+    def revision(self) -> int | None:
+        """Observed definition revision, or None before this handle is resolved."""
         return self._agent_revision
 
     @property
-    def model(self) -> ModelBinding:
-        """Current model for inspection; no provider client is created."""
+    def model(self) -> ModelBinding | None:
+        """Observed model declaration, not a live source lookup or provider client."""
+        if self._agent_revision is None:
+            return None
         compiled = self._runtime._compiled_agent(self.id, self.revision, self._compiled_agent)
-        return self._runtime._compiler.bind(compiled).compiled_agent.model
+        return compiled.model
 
     @property
     def compiled(self) -> "CompiledAgent | None":
         return self._compiled_agent
+
+    async def resolve(self) -> "Agent[AppT]":
+        """Inspect a current definition without pinning subsequent admissions."""
+        binding = await self.execution_port.resolve_definition()
+        return replace(
+            self, _agent_revision=binding.compiled_agent.spec.revision,
+            _compiled_agent=binding.compiled_agent, _observed_binding=binding,
+        )
 
     def derive(
         self,
@@ -403,6 +420,8 @@ class Agent(Generic[AppT]):
             principal,
             self._compiled_agent,
             self._binding_contract,
+            self._derivations,
+            self._observed_binding,
         )
 
     async def create_session(

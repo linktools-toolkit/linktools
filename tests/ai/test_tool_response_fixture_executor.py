@@ -7,24 +7,26 @@ from types import SimpleNamespace
 import pytest
 from pydantic_ai.usage import RunUsage, UsageLimits
 
-from linktools.ai.capability import SkillSourceRegistry
+from linktools.ai.capability import CapabilityContribution, SkillSourceRegistry, ToolResponsesCapability
 from linktools.ai.core import PromptLimits, canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_executor import AgentExecutor, _AgentRunScope
-from linktools.ai.runtime._mcp import _MCPBinding
 from linktools.ai.capability import ToolResponseFixture
 from linktools.ai.spec import MCPServerSpec, mcp_server_selector
 
 from .test_tool_response_fixture import _manifest, _store
 
 
-def _scope(ref: object) -> _AgentRunScope:
+def _scope(ref: object, fixture: ToolResponseFixture | None = None) -> _AgentRunScope:
     async def sink(value: object) -> None:
         raise AssertionError("the test stops before model execution")
 
     return _AgentRunScope(
         binding=SimpleNamespace(compiled_agent=SimpleNamespace(
             selected_tools=(), skill_definitions=(),
+            runtime_contributions=(() if fixture is None else (CapabilityContribution.from_opaque(
+                "capability", ToolResponsesCapability.id, ToolResponsesCapability(fixture), scope="runtime",
+            ),)),
             mcp_servers=(MCPServerSpec("server", "never-start", revision=3),),
             mcp_policy=(mcp_server_selector("server"),),
         )),
@@ -49,18 +51,12 @@ async def test_executor_uses_saved_fixture_and_never_projects_live_stdio_resourc
         configured = ToolResponseFixture(new_ref, store)
         seen: list[object] = []
 
-        monkeypatch.setattr(
-            "linktools.ai.runtime._agent_executor._mcp_bindings",
-            lambda binding: {"server": _MCPBinding(None, None, {"boundary": "saved"})},
-        )
-
         async def project(servers: object, *args: object, **kwargs: object) -> dict:
             assert servers == ()
             return {}
 
         async def execute(self: AgentExecutor, scope: _AgentRunScope, **kwargs: object) -> str:
             assert scope.workspace_backend is None
-            assert scope.mcp_projections == {}
             tool = scope.response_fixture.server("server").tools[0]
             assert tool.result({"query": "ready", "options": {"a": 1, "b": 2}}) == {
                 "url": "https://example.test/info",
@@ -68,7 +64,7 @@ async def test_executor_uses_saved_fixture_and_never_projects_live_stdio_resourc
             seen.append("saved-case")
             return "model-boundary"
 
-        monkeypatch.setattr("linktools.ai.runtime._mcp.prepare_mcp_projections", project)
+        monkeypatch.setattr("linktools.ai.runtime._current_toolsets.prepare_mcp_projections", project)
         monkeypatch.setattr(AgentExecutor, "_execute", execute)
         executor = AgentExecutor(SkillSourceRegistry(()), tool_responses=configured)
         result = await executor._execute_with_workspace(
@@ -87,19 +83,18 @@ async def test_executor_rejects_live_fixture_mode_mismatch_before_any_model_or_t
 ) -> None:
     store, fixture = await _store(_manifest())
     try:
-        monkeypatch.setattr("linktools.ai.runtime._agent_executor._mcp_bindings", lambda binding: {})
 
         async def forbidden(*args: object, **kwargs: object) -> None:
             raise AssertionError("mismatched fixture mode cannot reach live resources or a model")
 
-        monkeypatch.setattr("linktools.ai.runtime._mcp.prepare_mcp_projections", forbidden)
+        monkeypatch.setattr("linktools.ai.runtime._current_toolsets.prepare_mcp_projections", forbidden)
         monkeypatch.setattr(AgentExecutor, "_execute", forbidden)
         executor = AgentExecutor(
             SkillSourceRegistry(()), tool_responses=None if historical_fixture else fixture,
         )
         with pytest.raises(AIError) as raised:
             await executor._execute_with_workspace(
-                _scope(fixture.ref if historical_fixture else None),
+                _scope(fixture.ref if historical_fixture else None, None if historical_fixture else fixture),
                 run_usage=RunUsage(), usage_limits=UsageLimits(),
             )
         assert raised.value.code is (

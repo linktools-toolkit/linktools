@@ -544,12 +544,12 @@ async def test_native_and_custom_approvals_restore_observed_frontier_with_valida
     source = features.tool(checked, effect_policy="none")
     source.requires_approval = kind == "native"
     features.agent("reader", model="default", allow_tools=("checked",), tool_retries=0, output_retries=0)
-    capture = await model_features(_Models(_UsageFunctionModel(model)), features).capture()
-    features = replace(capture, contributions=tuple(
+    model_features(_Models(_UsageFunctionModel(model)), features)
+    features._contributions = [
         CapabilityContribution.from_opaque("tool", "checked", source)
         if item.kind == "tool" and item.id == "checked" else item
-        for item in capture.contributions
-    ))
+        for item in features._contributions
+    ]
     async with Persistence.open("native-approval", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as persistence:
         async with Runtime.attach(persistence=persistence, features=features) as runtime:
             execution = await runtime.agents.get("reader").start("check")
@@ -614,7 +614,7 @@ async def test_concurrent_runtime_initial_scope_discovery_preserves_same_request
     features = workspace_features("scope-admission", workspace=Workspace.load(tmp_path))
     features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
     features.agent("reader", model="default", allow_tools=())
-    features = await model_features(_Models(_UsageFunctionModel(model)), features).capture()
+    features = model_features(_Models(_UsageFunctionModel(model)), features).borrow()
     async with AsyncExitStack() as stack:
         runtimes = []
         for _ in range(2):

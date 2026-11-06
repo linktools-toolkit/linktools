@@ -23,6 +23,8 @@ from ..core import (
     ThinkingValue,
     canonical_sha256,
     normalize_correlation,
+    normalize_tool_effects,
+    ToolEffects,
     normalize_execution_mode,
     normalize_thinking,
     validate_agent_id,
@@ -277,8 +279,10 @@ class ResumeSessionRequest:
     correlation: CorrelationData = field(default_factory=dict)
     files: tuple[str, ...] = ()
     budget: RunBudget | None = None
+    tool_effects: ToolEffects = "live"
 
     def __post_init__(self) -> None:
+        normalize_tool_effects(self.tool_effects)
         if self.budget is not None and not isinstance(self.budget, RunBudget):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))

@@ -4,7 +4,6 @@
 
 import asyncio
 from contextlib import asynccontextmanager
-from dataclasses import replace
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
@@ -12,7 +11,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 from linktools.ai import Runtime
 from linktools.ai.agent import AgentBindingContract, AgentCatalog, AgentCompiler
 from linktools.ai.asset import AssetKey, AssetStore, DirectoryAssetBackend, InMemoryAssetBackend, PrefixAssetPathAdapter
-from linktools.ai.capability import AssetCapability, CapabilityContribution, ExecutionCapability, SkillCapability, SkillDefinition, SkillResource, SkillSourceRef, SkillSourceRegistry
+from linktools.ai.capability import AssetCapability, AssetSkillSource, CapabilityContribution, ExecutionCapability, SkillCapability, SkillDefinition, SkillResource, SkillSourceRef, SkillSourceRegistry
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -102,10 +101,16 @@ async def test_new_resource_membership_does_not_advertise_an_existing_mount():
     try:
         await store.put(AssetKey("skill", "guide/SKILL.md"), _declaration("guide", "First"))
         await store.put(AssetKey("skill", "guide/old.txt"), b"old")
-        source = AssetCapability(store).skill_source("live")
-        definitions = await source.discover()
+        features = RuntimeFeatures("live")
+        features.capability(AssetCapability(store))
+
+        async def discover():
+            return tuple(item.value for item in (await features.resolve()).contributions if item.kind == "skill")
+
+        source = AssetSkillSource("live", store)
+        definitions = await discover()
         capability = SkillCapability(
-            definitions, SkillSourceRegistry((source,)), discover=source.discover,
+            definitions, SkillSourceRegistry((source,)), discover=discover,
             resource_paths={"guide": "/sandbox/guide"}, mounted_resources={"guide": definitions[0].source_ref},
         )
         assert (await capability.load_skill("guide"))["location"] == "/sandbox/guide"
@@ -249,7 +254,7 @@ async def test_recovery_keeps_committed_skill_observation_and_reads_current_with
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wrapped", (False, True))
-async def test_custom_skill_loader_keeps_ownership_and_frozen_slot(tmp_path, wrapped):
+async def test_custom_skill_loader_keeps_ownership_and_resolves_current_slot(tmp_path, wrapped):
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
@@ -264,7 +269,11 @@ async def test_custom_skill_loader_keeps_ownership_and_frozen_slot(tmp_path, wra
             assert await context.read(other_resource) == b"Other resource"
             if not context.list(kind="skill"):
                 return ()
-            definition = SkillDefinition(SkillSpec("custom", (await context.read(key)).decode()))
+            reference, = context.bind_versions((key,))
+            definition = SkillDefinition(
+                SkillSpec("custom", (await context.read(key)).decode()),
+                SkillSourceRef(context.group_id, "custom", (SkillResource("custom.txt", reference),)),
+            )
             return (
                 CapabilityContribution.from_declaration(definition) if wrapped else definition,
                 AgentSpec("extra", allow_tools=()),
@@ -280,9 +289,12 @@ async def test_custom_skill_loader_keeps_ownership_and_frozen_slot(tmp_path, wra
                 context.group_id, "other", (SkillResource("guide.txt", reference),),
             )),)
 
-    class ReplacedLoader:
+    replacement_calls = []
+
+    class ReplacedLoader(Loader):
         async def load(self, context):
-            raise AssertionError("The captured loader slot must not be replaced")
+            replacement_calls.append(context.group_id)
+            return await super().load(context)
 
     assets = AssetCapability(store)
     assets.loader("skill", Loader())
@@ -305,7 +317,7 @@ async def test_custom_skill_loader_keeps_ownership_and_frozen_slot(tmp_path, wra
             await store.delete(key)
             stage += 1
             return ModelResponse(parts=[ToolCallPart("list_skills", {}, "remaining")])
-        assert {item["id"] for item in returns[-1].content} == {"inline", "other"}
+        assert returns[-1].content == []
         stage += 1
         return ModelResponse(parts=[TextPart("done")])
 
@@ -317,24 +329,25 @@ async def test_custom_skill_loader_keeps_ownership_and_frozen_slot(tmp_path, wra
     features.capability(assets)
     features.model("default", _Models(_UsageFunctionModel(respond)))
     features.agent("default", allow_tools=())
-    capture = await features.capture()
+    capture = await features.resolve()
     custom = next(item.value for item in capture.contributions if item.kind == "skill" and item.id == "custom")
     other = next(item.value for item in capture.contributions if item.kind == "skill" and item.id == "other")
-    assert custom.source_ref is not None and custom.source_ref.source_id == "custom-loader/skills"
+    assert custom.source_ref is not None and custom.source_ref.source_id == "custom-loader"
     assert other.source_ref is not None and other.source_ref.source_id == "custom-loader"
     custom_contribution = next(item for item in capture.contributions if item.kind == "skill" and item.id == "custom")
     assert SkillDefinition.from_contract(custom_contribution.contract).source_ref == custom.source_ref
-    capture = replace(capture, contributions=(*capture.contributions, CapabilityContribution.from_declaration(SkillDefinition(SkillSpec("inline", "Inline")))))
+    features._contributions.append(CapabilityContribution.from_declaration(SkillDefinition(SkillSpec("inline", "Inline"))))
     assets.loader("skill", ReplacedLoader())
     try:
         async with Persistence.open("custom-loader", storage=PersistenceStorage.sqlite(tmp_path / "custom.db")) as persistence:
-            async with Runtime.attach(persistence=persistence, features=capture) as runtime:
-                assert {skill.id for skill in runtime.agents.get().derive(model="default").compiled.skill_definitions} == {"inline", "other"}
+            async with Runtime.attach(persistence=persistence, features=features.borrow()) as runtime:
+                assert {skill.id for skill in runtime.agents.get().derive(model="default").compiled.skill_definitions} == {"custom", "inline", "other"}
                 visible_static = False
                 execution = await runtime.agents.get().start("Use custom", idempotency_key="start")
                 result = (await execution.wait(timeout_seconds=10)).result
                 assert result.status is ExecutionStatus.SUCCEEDED, result
         assert stage == 4
+        assert replacement_calls
     finally:
         await store.close()
 
@@ -354,10 +367,16 @@ async def test_same_named_resource_switching_overlay_layer_does_not_advertise_ol
     ))
     await store.initialize()
     try:
-        source = AssetCapability(store).skill_source("overlay")
-        definitions = await source.discover()
+        features = RuntimeFeatures("overlay")
+        features.capability(AssetCapability(store))
+
+        async def discover():
+            return tuple(item.value for item in (await features.resolve()).contributions if item.kind == "skill")
+
+        source = AssetSkillSource("overlay", store)
+        definitions = await discover()
         capability = SkillCapability(
-            definitions, SkillSourceRegistry((source,)), discover=source.discover,
+            definitions, SkillSourceRegistry((source,)), discover=discover,
             resource_paths={"guide": "/sandbox/old-guide"},
             mounted_resources={"guide": definitions[0].source_ref},
         )

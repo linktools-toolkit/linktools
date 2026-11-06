@@ -3,7 +3,6 @@
 """Instruction synchronization is feedback, not an ordinary tool retry."""
 
 from pathlib import Path
-from dataclasses import replace
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
@@ -163,12 +162,12 @@ async def test_instruction_feedback_does_not_swallow_a_sibling_approval_pause(tm
     source = features.tool(checked, effect_policy="none")
     source.requires_approval = True
     features.agent("reader", allow_tools=("read_file", "checked"), tool_retries=0, output_retries=0)
-    capture = await model_features(_Models(_UsageFunctionModel(model)), features).capture()
-    features = replace(capture, contributions=tuple(
+    model_features(_Models(_UsageFunctionModel(model)), features)
+    features._contributions = [
         CapabilityContribution.from_opaque("tool", "checked", source)
         if item.kind == "tool" and item.id == "checked" else item
-        for item in capture.contributions
-    ))
+        for item in features._contributions
+    ]
     async with Persistence.open("instruction-pause", storage=PersistenceStorage.in_memory()) as persistence:
         async with Runtime.attach(persistence=persistence, features=features) as runtime:
             execution = await runtime.agents.get("reader").start("read and ask")

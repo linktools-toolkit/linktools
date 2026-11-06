@@ -201,7 +201,7 @@ async def test_local_skill_resource_discovery_ignores_noise_but_explicit_read_wo
     try:
         asset_features = RuntimeFeatures("local")
         asset_features.capability(AssetCapability(store), scope="runtime")
-        capture = await asset_features.capture()
+        capture = await asset_features.resolve()
         definition = capture.contributions[0].value
         assert isinstance(definition, SkillDefinition)
         assert definition.source_ref is not None
@@ -516,7 +516,7 @@ async def test_rule_catalog_ignores_hidden_and_cache_discovery_paths(tmp_path: P
     try:
         asset_features = RuntimeFeatures("rules")
         asset_features.capability(AssetCapability(store), scope="runtime")
-        capture = await asset_features.capture()
+        capture = await asset_features.resolve()
     finally:
         await store.close()
 

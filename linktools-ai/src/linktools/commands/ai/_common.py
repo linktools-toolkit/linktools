@@ -233,8 +233,9 @@ async def _open_local_runtime(
     async with Runtime.open(
         "default", storage=_local_runtime_storage(workspace), features=features, metrics=metrics,
     ) as runtime:
-        capture = runtime.features
-        assert capture is not None
+        source = runtime.features
+        assert source is not None
+        capture = await source.resolve()
         declarations: tuple[dict[str, str | int], ...] = tuple(
             {"kind": item.kind, "id": item.id, "revision": item.revision} for item in capture.contributions
         )

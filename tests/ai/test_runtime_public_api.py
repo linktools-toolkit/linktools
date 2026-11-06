@@ -13,7 +13,7 @@ def test_runtime_exports_only_composition_and_domain_entry_points() -> None:
 
     expected = {
         "Agent", "Session", "Runtime", "RuntimeStatus", "RuntimeFeatures",
-        "RuntimeFeaturesCapture", "RuntimeAgents", "RuntimeExecutions",
+        "RuntimeFeaturesResolution", "RuntimeFeaturesSource", "RuntimeAgents", "RuntimeExecutions",
         "RuntimeMetrics", "RuntimeSessions", "RuntimeTasks", "RuntimeEvaluations",
         "RuntimeMetricsStatus", "RuntimeMetricsFlushResult",
     }

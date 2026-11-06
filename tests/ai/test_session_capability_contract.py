@@ -80,13 +80,13 @@ async def test_disabled_session_does_not_disable_independent_execution_or_cold_r
 
 
 @pytest.mark.asyncio
-async def test_same_captured_declarations_bind_two_runtimes_without_owner_leakage(tmp_path):
+async def test_same_live_source_binds_two_runtimes_without_owner_leakage(tmp_path):
     session_policy = SessionCapability(enabled=False)
     execution_policy = ExecutionCapability(commit=CommitPolicy.sync())
     features = _features(session_policy, execution_policy)
     models = _models()
     features.model("default", models)
-    capture = await features.capture()
+    capture = features.borrow()
     features.capability(TraceCapability(), scope='runtime')
     first_storage = PersistenceStorage.sqlite(tmp_path / 'first.db')
     second_storage = PersistenceStorage.sqlite(tmp_path / 'second.db')

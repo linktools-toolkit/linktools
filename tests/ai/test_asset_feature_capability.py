@@ -35,7 +35,7 @@ def _features(store, *, capability=None):
 
 
 @pytest.mark.asyncio
-async def test_external_capture_keeps_asset_reads_available_through_runtime() -> None:
+async def test_external_source_keeps_resolution_reads_available_through_runtime() -> None:
     from ._runtime_test_helpers import RuntimeUsageModels
 
     backend = InMemoryAssetBackend()
@@ -47,9 +47,9 @@ async def test_external_capture_keeps_asset_reads_available_through_runtime() ->
         await store.put(key, b"runtime instructions")
         features, _ = _features(store)
         model_features(RuntimeUsageModels(), features)
-        capture = await features.capture()
+        capture = await features.resolve()
         async with Runtime.open(
-            "managed-assets", storage=PersistenceStorage.in_memory(), features=capture,
+            "managed-assets", storage=PersistenceStorage.in_memory(), features=features.borrow(),
         ) as runtime:
             assert await capture.asset_reader.get(key) == b"runtime instructions"
             assert (await runtime.agents.get().run("question")).result.output == {"text": "done"}
@@ -159,12 +159,15 @@ async def test_asset_capability_is_the_single_loading_configuration():
         features = RuntimeFeatures("source")
         assert features.assets is None
         assets = AssetCapability(store)
-        with pytest.raises(AIError, match="requires Runtime scope"):
+        with pytest.raises(AIError, match="require Runtime scope"):
             features.capability(assets, scope="agent")
         features.capability(assets, scope="runtime")
+        replacement = AssetCapability(store)
+        features.capability(replacement, scope="runtime")
+        assert features.assets is replacement
         with pytest.raises(AIError, match="CAPABILITY_CONFLICT"):
-            features.capability(AssetCapability(store), scope="runtime")
-        assert (await features.capture()).asset_reader is not None
+            features.capability(CombinedCapability([AssetCapability(store)], id="second-assets"), scope="runtime")
+        assert (await features.resolve()).asset_reader is not None
     finally:
         await store.close()
 
@@ -190,7 +193,7 @@ async def test_asset_capability_captures_builtin_and_future_kinds_at_one_revisio
                 return (AgentSpec("custom"),)
 
         assets.loader("future-kind", Loader())
-        capture = await features.capture()
+        capture = await features.resolve()
         identities = {(item.kind, item.id) for item in capture.contributions}
         assert {("agent", "root"), ("agent", "custom"), ("skill", "guide"), ("mcp", "server")} <= identities
         assert len(contexts) == 1 and contexts[0].source_revision == capture.source_revision
@@ -202,8 +205,9 @@ async def test_asset_capability_captures_builtin_and_future_kinds_at_one_revisio
         assert filtered.asset_reader is capture.asset_reader
         await store.put(AssetKey("skill", "guide/SKILL.md"), b"---\nname: guide\ndescription: Guide\n---\nNew instructions")
         assert b"Old instructions" in await capture.asset_reader.get(AssetKey("skill", "guide/SKILL.md"))
-        with pytest.raises(AIError, match="SNAPSHOT_CONFLICT"):
-            await capture.verify_source_revision()
+        current = await features.resolve()
+        assert current.source_revision != capture.source_revision
+        assert b"New instructions" in await current.asset_reader.get(AssetKey("skill", "guide/SKILL.md"))
     finally:
         await store.close()
 
@@ -230,7 +234,7 @@ async def test_asset_capability_loader_snapshot_and_same_capture_handwritten_mcp
 
         assets.loader("custom", Loader())
         features.mcp(MCPServerSpec("manual", "python", ("resource:server.py",), AssetKey("mcp", "manual")))
-        task = asyncio.create_task(features.capture())
+        task = asyncio.create_task(features.resolve())
         await entered.wait()
         assets.loader("custom", Replacement())
         release.set()
@@ -252,7 +256,7 @@ async def test_asset_capability_preserves_wrapped_combination_registration():
             id = "other"
         combined = CombinedCapability([AssetCapability(store), Other()], id="asset.bundle")
         features, _ = _features(store, capability=PrefixTools(combined, prefix="wrapped"))
-        capture = await features.capture()
+        capture = await features.resolve()
         assert capture.asset_reader is not None
         assert capture.workspace is None
     finally:
@@ -260,7 +264,7 @@ async def test_asset_capability_preserves_wrapped_combination_registration():
 
 
 @pytest.mark.asyncio
-async def test_asset_capability_rejects_loader_revision_drift_and_declaration_collisions():
+async def test_asset_capability_tolerates_unrelated_changes_but_rejects_declaration_collisions():
     store = await _store()
     try:
         features, assets = _features(store)
@@ -271,8 +275,10 @@ async def test_asset_capability_rejects_loader_revision_drift_and_declaration_co
                 return ()
 
         assets.loader("custom", MutatingLoader())
-        with pytest.raises(AIError, match="SNAPSHOT_CONFLICT"):
-            await features.capture()
+        first = await features.resolve()
+        current = await features.resolve()
+        assert await first.asset_reader.get(AssetKey("custom", "mutation")) is None
+        assert await current.asset_reader.get(AssetKey("custom", "mutation")) == b"changed"
 
         class CollisionLoader:
             async def load(self, context):
@@ -281,7 +287,7 @@ async def test_asset_capability_rejects_loader_revision_drift_and_declaration_co
         assets.loader("custom", CollisionLoader())
         features.agent("duplicate")
         with pytest.raises(AIError, match="CAPABILITY_CONFLICT"):
-            await features.capture()
+            await features.resolve()
     finally:
         await store.close()
 
@@ -304,7 +310,7 @@ async def test_asset_loader_cannot_introduce_an_uncaptured_asset_source(wrapped)
 
         assets.loader("custom", Loader())
         with pytest.raises(AIError, match="cannot introduce AssetCapability"):
-            await features.capture()
+            await features.resolve()
     finally:
         await store.close()
 
@@ -342,7 +348,7 @@ async def test_asset_bootstrap_is_consumed_before_native_agent_hooks():
             return ModelResponse(parts=[TextPart("answer")])
 
         features.model("default", _Models(_UsageFunctionModel(answer)))
-        capture = await features.capture()
+        capture = features.borrow()
         async with Persistence.open('asset-bootstrap', storage=PersistenceStorage.in_memory()) as persistence_226, Runtime.attach(persistence=persistence_226, features=capture) as runtime:
             assert (await runtime.agents.get().run("question")).result.output == {"text": "answer"}
             assert native_calls

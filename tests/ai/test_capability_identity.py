@@ -118,8 +118,8 @@ async def test_capability_identity_is_id_and_revision() -> None:
     second = RuntimeFeatures[None]("second")
     second.capability(_Capability(), revision=2, scope="agent")
 
-    first_candidate = (await first.capture()).contributions[0]
-    second_candidate = (await second.capture()).contributions[0]
+    first_candidate = (await first.resolve()).contributions[0]
+    second_candidate = (await second.resolve()).contributions[0]
 
     assert first_candidate.scope == "agent"
     assert first_candidate.kind == "capability"
@@ -137,8 +137,8 @@ async def test_config_is_contract_data_not_a_second_identity() -> None:
     relaxed = RuntimeFeatures[None]("relaxed")
     relaxed.capability(_Capability(), revision=1, config={"mode": "relaxed"}, scope="agent")
 
-    strict_candidate = (await strict.capture()).contributions[0]
-    relaxed_candidate = (await relaxed.capture()).contributions[0]
+    strict_candidate = (await strict.resolve()).contributions[0]
+    relaxed_candidate = (await relaxed.resolve()).contributions[0]
 
     assert strict_candidate.revision == relaxed_candidate.revision == 1
     assert strict_candidate.contract != relaxed_candidate.contract
@@ -186,7 +186,7 @@ async def test_deferred_generic_capability_keeps_native_behavior() -> None:
     group = RuntimeFeatures[None]("group")
     group.capability(capability, scope="agent")
 
-    candidate = (await group.capture()).contributions[0]
+    candidate = (await group.resolve()).contributions[0]
     assert candidate.value is capability
     assert candidate.value.defer_loading is True
     assert candidate.contract["config"] == {}
@@ -201,20 +201,26 @@ def test_custom_capability_cannot_claim_runtime_namespace(capability_id: str) ->
 
 
 @pytest.mark.asyncio
-async def test_duplicate_capability_id_is_rejected_when_group_freezes() -> None:
+async def test_same_capability_registration_is_replaced_in_the_live_source() -> None:
     group = RuntimeFeatures[None]("group")
-    group.capability(_Capability(), revision=1, scope="agent")
-    group.capability(_Capability(), revision=1, scope="agent")
-    with pytest.raises(AIError) as error:
-        await group.capture()
-    assert error.value.code is ErrorCode.CAPABILITY_CONFLICT
+    original = _Capability()
+    replacement = _Capability()
+    group.capability(original, revision=1, scope="agent")
+    first = await group.resolve()
+    group.capability(replacement, revision=2, scope="agent")
+    current = await group.resolve()
+    assert len(first.contributions) == len(current.contributions) == 1
+    assert first.contributions[0].value is original
+    assert current.contributions[0].value is replacement
+    assert first.contributions[0].revision == 1
+    assert current.contributions[0].revision == 2
 
 
 @pytest.mark.asyncio
 async def test_capability_config_defaults_to_empty() -> None:
     group = RuntimeFeatures[None]("group")
     group.capability(_Capability(), scope="agent")
-    candidate = (await group.capture()).contributions[0]
+    candidate = (await group.resolve()).contributions[0]
     assert candidate.contract["config"] == {}
 
 
@@ -225,8 +231,8 @@ async def test_capability_implementation_class_is_not_identity() -> None:
     second = RuntimeFeatures[None]("second")
     second.capability(_OtherCapability(), revision=1, scope="agent")
 
-    first_candidate = (await first.capture()).contributions[0]
-    second_candidate = (await second.capture()).contributions[0]
+    first_candidate = (await first.resolve()).contributions[0]
+    second_candidate = (await second.resolve()).contributions[0]
     assert first_candidate.revision == second_candidate.revision == 1
     assert first_candidate.contract == second_candidate.contract
 
@@ -250,7 +256,7 @@ async def test_external_capability_keeps_native_pydantic_extension_surface(
 ) -> None:
     group = RuntimeFeatures[None]("group")
     group.capability(capability, scope="agent")
-    candidate = (await group.capture()).contributions[0]
+    candidate = (await group.resolve()).contributions[0]
     assert candidate.value is capability
     assert candidate.revision == 1
 
@@ -259,7 +265,7 @@ async def test_external_capability_keeps_native_pydantic_extension_surface(
 async def test_external_capability_keeps_output_transformation_hooks() -> None:
     group = RuntimeFeatures[None]("group")
     group.capability(_OutputTransformCapability(), config={"mode": "identity"}, scope="agent")
-    candidate = (await group.capture()).contributions[0]
+    candidate = (await group.resolve()).contributions[0]
     assert candidate.id == "output-transform-capability"
 
 
@@ -287,7 +293,7 @@ async def test_anonymous_native_capabilities_require_explicit_ids() -> None:
 
     group.capability(select_model, id="select-model", scope="agent")
     group.capability(prepare_tools, id="prepare-tools", scope="agent")
-    candidates = (await group.capture()).contributions
+    candidates = (await group.resolve()).contributions
 
     assert select_model.id is None
     assert prepare_tools.id is None

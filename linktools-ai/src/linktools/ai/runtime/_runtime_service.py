@@ -6,6 +6,7 @@ import asyncio
 import math
 import secrets
 from dataclasses import replace
+from types import MappingProxyType
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Generic, Protocol, TypedDict, TypeVar, overload
 
@@ -20,7 +21,7 @@ from ..agent import (
     CompiledAgent,
     OutputBinding,
 )
-from ._features import RuntimeFeatures, RuntimeFeaturesCapture
+from ._features import RuntimeFeatures, RuntimeFeaturesSource
 from ..execution.handle import ExecutionBinding
 from ..core import (
     RunBudget,
@@ -149,7 +150,7 @@ class Runtime(Generic[AppT]):
     def __init__(
         self, *, persistence: Persistence, namespace: str, tenant_id: str,
         owns_persistence: bool, context: ExecutionContext[AppT] | None = None,
-        features: RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None = None,
+        features: RuntimeFeatures[AppT] | RuntimeFeaturesSource[AppT] | None = None,
         metrics: MetricRecorderProvider | None = None, authorization: AuthorizationPolicy | None = None,
         auto_recover: bool = True,
     ) -> None:
@@ -157,8 +158,8 @@ class Runtime(Generic[AppT]):
             raise TypeError("persistence must be Persistence")
         if context is not None and not isinstance(context, ExecutionContext):
             raise TypeError("context must be ExecutionContext")
-        if features is not None and not isinstance(features, (RuntimeFeatures, RuntimeFeaturesCapture)):
-            raise TypeError("features must be RuntimeFeatures or RuntimeFeaturesCapture")
+        if features is not None and not isinstance(features, (RuntimeFeatures, RuntimeFeaturesSource)):
+            raise TypeError("features must be RuntimeFeatures or RuntimeFeaturesSource")
         if metrics is not None and not isinstance(metrics, MetricRecorderProvider):
             raise TypeError("metrics must be MetricRecorderProvider or None")
         if not isinstance(auto_recover, bool):
@@ -170,7 +171,7 @@ class Runtime(Generic[AppT]):
         self._persistence_cleanup: Callable[[], Awaitable[None]] | None = None
         self._context = ExecutionContext(None) if context is None else context
         self._features = features
-        self._feature_capture: RuntimeFeaturesCapture[AppT] | None = None
+        self._feature_source: RuntimeFeaturesSource[AppT] | None = None
         self._owned_assets: AssetCapability[AppT] | None = None
         self._metrics_dataset = metrics
         self._authorization = TenantAuthorizationPolicy(self._tenant_id) if authorization is None else authorization
@@ -202,7 +203,7 @@ class Runtime(Generic[AppT]):
     def open(
         cls, namespace: str, *, storage: PersistenceStorage, tenant_id: str = "default",
         context: ExecutionContext[AppT] | None = None,
-        features: RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None = None,
+        features: RuntimeFeatures[AppT] | RuntimeFeaturesSource[AppT] | None = None,
         metrics: MetricRecorderProvider | None = None, authorization: AuthorizationPolicy | None = None,
         auto_recover: bool = True,
     ) -> "Runtime[AppT]":
@@ -221,7 +222,7 @@ class Runtime(Generic[AppT]):
     @classmethod
     def attach(
         cls, *, persistence: Persistence, context: ExecutionContext[AppT] | None = None,
-        features: RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None = None,
+        features: RuntimeFeatures[AppT] | RuntimeFeaturesSource[AppT] | None = None,
         metrics: MetricRecorderProvider | None = None, authorization: AuthorizationPolicy | None = None,
         auto_recover: bool = True,
     ) -> "Runtime[AppT]":
@@ -235,10 +236,10 @@ class Runtime(Generic[AppT]):
         )
 
     @property
-    def features(self) -> "RuntimeFeaturesCapture[AppT] | None":
-        """Return the exact declaration capture admitted by this open Runtime."""
+    def features(self) -> "RuntimeFeaturesSource[AppT] | None":
+        """Return live source inspection without owning a frozen candidate catalog."""
         self._ensure_open()
-        return self._feature_capture
+        return self._feature_source
 
     async def __aenter__(self) -> "Runtime[AppT]":
         initializing = False
@@ -262,15 +263,15 @@ class Runtime(Generic[AppT]):
                         store = assets.claim_store()
                         self._owned_assets = assets
                         await store.initialize()
-                    self._feature_capture = await self._features.capture()
+                    self._feature_source = self._features.borrow()
                 else:
-                    self._feature_capture = self._features
-                if self._feature_capture is not None:
+                    self._feature_source = self._features
+                if self._feature_source is not None:
                     from ._factory import _AgentLifecycle, compose_runtime_components
 
                     self._agent_lifecycle = _AgentLifecycle()
                     components = await compose_runtime_components(
-                        persistence=self._state, app=self.app, features=self._feature_capture,
+                        persistence=self._state, app=self.app, features=self._feature_source,
                         metrics=self._metrics_dataset, authorization=self._authorization,
                         auto_recover=self._auto_recover, lifecycle=self._agent_lifecycle,
                     )
@@ -555,8 +556,8 @@ class Runtime(Generic[AppT]):
         self._ensure_open()
         self._require_agents()
         validate_agent_id(agent_id)
-        root = self._catalog.root_agent(agent_id)
-        return Agent(self, root.spec.id, root.spec.revision)
+        root = self._catalog.observed_agent(agent_id)
+        return Agent(self, agent_id, None if root is None else root.spec.revision, root)
 
     def _restore_agent(self, binding: AgentBindingContract) -> Agent[AppT]:
         self._ensure_open()
@@ -613,7 +614,7 @@ class Runtime(Generic[AppT]):
         self._ensure_open()
         if not isinstance(agent, Agent) or agent.runtime is not self:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
-        root = self._compiled_agent(agent.id, agent.revision, agent.compiled)
+        root = agent.compiled
         if all(
             value is None
             for value in (
@@ -636,26 +637,21 @@ class Runtime(Generic[AppT]):
             changes["allow_tools"] = tuple(allow_tools)
         if allow_skills is not None:
             changes["allow_skills"] = tuple(allow_skills)
-        try:
-            spec = replace(root.spec, **changes)
-            derived = self._compiler.compile(spec)
-        except (TypeError, ValueError) as error:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
-        root_tools = {
-            (item.kind, item.id)
-            for item in (*root.selected_tools, *root.selected_mcp)
-        }
-        derived_tools = {
-            (item.kind, item.id)
-            for item in (*derived.selected_tools, *derived.selected_mcp)
-        }
-        if not derived_tools.issubset(root_tools):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if "*" not in root.spec.allow_skills and not set(
-            derived.spec.allow_skills
-        ).issubset(root.spec.allow_skills):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        return Agent(self, derived.spec.id, derived.spec.revision, derived)
+        derived = None
+        if root is not None:
+            spec = self._compiler.derive_spec(root.spec, changes)
+            try:
+                derived = self._compiler.compile(spec)
+            except AIError as error:
+                if error.code not in {
+                    ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                    ErrorCode.MODEL_CONNECTION_NOT_FOUND,
+                }:
+                    raise
+        return Agent(
+            self, agent.id, None if derived is None else derived.spec.revision, derived,
+            _derivations=(*agent._derivations, MappingProxyType(changes)),
+        )
 
     def _compiled_agent(
         self,
@@ -679,11 +675,15 @@ class Runtime(Generic[AppT]):
         return await self._binding_resolver.resolve(binding)
 
     def _agent_execution_port(
-        self, agent_id: str, revision: int, compiled: CompiledAgent | None = None,
+        self, agent_id: str, revision: int | None, compiled: CompiledAgent | None = None,
         binding_contract: AgentBindingContract | None = None,
+        *, derivations: tuple[Mapping[str, object], ...] = (),
+        observed_binding: AgentBinding | None = None,
     ) -> AgentExecutionPort[AppT]:
         self._ensure_open()
-        selected = self._compiled_agent(agent_id, revision, compiled)
+        selected = compiled
+        if selected is None and revision is not None:
+            selected = self._compiled_agent(agent_id, revision)
         resolver = self._binding_resolver
         if resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -692,6 +692,9 @@ class Runtime(Generic[AppT]):
             self._compiler, self._execution_service, self._session_service, self._execution_binding,
             self._watch_execution_tree, resolver.resolve, self._default_principal, self.correlation,
             self._input_captures, self._memory_scope, binding_contract is not None,
+            agent_id=agent_id, derivations=derivations,
+            resolve_current=resolver.resolve_agent, restore_binding=resolver.restore,
+            observed_binding=observed_binding,
         )
 
     async def _retry_execution(
@@ -861,7 +864,7 @@ class Runtime(Generic[AppT]):
         """Close this Runtime without cancelling its checkpointed executions.
 
         A fresh Runtime must explicitly recover the original execution IDs.
-        Requires durable synchronous admission and StepPersistence.
+        Active executions require durable admission and StepPersistence.
         Unknown external effects still require explicit recovery resolution.
         """
         await self._close(handoff=True)
@@ -884,6 +887,7 @@ class Runtime(Generic[AppT]):
                             safe_details={"capability": "durable_runtime_handoff"})
                     for domain in self._evaluations:
                         domain.preflight_handoff()
+                    self._execution_service.preflight_handoff()
                     self._handoff_requested = True
                 for domain in self._evaluations:
                     domain.stop_admission()

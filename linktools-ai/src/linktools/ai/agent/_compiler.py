@@ -6,18 +6,15 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from inspect import iscoroutine
 from types import MappingProxyType
-from typing import Literal, TypeAlias, cast
+from typing import Literal, TypeAlias
 
 from pydantic import BaseModel
 
 from ..capability import (
     CapabilityContribution,
-    SkillDefinition,
     tool_class_from_metadata,
-    tool_effect_policy_from_metadata,
-    tool_metadata,
 )
-from ..core import ImmutableJsonMapping, JsonValue
+from ..core import ImmutableJsonMapping, JsonValue, validate_agent_id
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding
 from ._model_resolver import _ModelResolver
@@ -25,7 +22,7 @@ from ..spec import (
     DEFAULT_AGENT_RETRIES,
     AgentSpec,
     AgentSpecCodec,
-    MCPServerSpec,
+    CapabilityRef,
     SubagentRef,
     mcp_server_name_token,
     mcp_server_selector,
@@ -34,8 +31,7 @@ from ..spec import (
 from ._binding import (
     AgentBinding,
     AgentBindingContract,
-    CapabilityPin,
-    _compiled_agent_selected_pins,
+    _compiled_agent_selected_refs,
 )
 from ._compiled import CompiledAgent
 from ._output import OutputBinding, bind_output, restore_output
@@ -56,7 +52,7 @@ class _AgentDefaults:
 
 
 class AgentCompiler:
-    """Own the single Agent-level selection boundary for a captured candidate set."""
+    """Own Agent selection within one current source observation."""
 
     def __init__(
         self,
@@ -74,6 +70,7 @@ class AgentCompiler:
         if not isinstance(agent_settings, dict):
             raise TypeError("agent defaults must be a JSON object")
         self._defaults = _AgentDefaults(**agent_settings)
+        self._runtime_contributions = tuple(item for item in candidates if item.scope == "runtime")
         candidates = tuple(item for item in candidates if item.scope == "agent")
         generic = tuple(item for item in candidates if item.kind == "capability")
         declarations = tuple(
@@ -108,8 +105,52 @@ class AgentCompiler:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
             server_tokens[token] = candidate.id
 
+    @property
+    def agent_ids(self) -> tuple[str, ...]:
+        """Registered declarations in this resolution, without loading models."""
+        return tuple(sorted(self._agents))
+
+    def compile_registered(
+        self,
+        agent_id: str,
+        derivations: Sequence[Mapping[str, object]] = (),
+    ) -> CompiledAgent:
+        """Compile one registered declaration and its ordered narrowing overlays."""
+        validate_agent_id(agent_id)
+        try:
+            spec = self._agents[agent_id]
+        except KeyError as error:
+            raise AIError(
+                ErrorCode.AGENT_BINDING_UNAVAILABLE,
+                safe_details={"agent_id": agent_id},
+            ) from error
+        for changes in derivations:
+            spec = self.derive_spec(spec, changes)
+        return self.compile(spec)
+
+    @classmethod
+    def derive_spec(cls, spec: AgentSpec, changes: Mapping[str, object]) -> AgentSpec:
+        """Narrow declared selectors without consulting an observed candidate set."""
+        if not isinstance(spec, AgentSpec):
+            raise TypeError("spec must be AgentSpec")
+        if not set(changes).issubset({
+            "model", "system_prompt", "instructions", "allow_tools", "allow_skills",
+        }):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        try:
+            derived = replace(spec, **changes)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+        for allowed, requested in (
+            (spec.allow_tools, derived.allow_tools),
+            (spec.allow_skills, derived.allow_skills),
+        ):
+            if not all(_selector_is_contained(selector, allowed) for selector in requested):
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        return derived
+
     def compile(self, spec: AgentSpec) -> CompiledAgent:
-        """Compile one current declaration from the captured candidate universe."""
+        """Compile one declaration against this observation of available candidates."""
         if not isinstance(spec, AgentSpec):
             raise TypeError("spec must be AgentSpec")
         spec = replace(
@@ -117,7 +158,12 @@ class AgentCompiler:
             tool_retries=self._defaults.tool_retries if spec.tool_retries is None else spec.tool_retries,
             output_retries=self._defaults.output_retries if spec.output_retries is None else spec.output_retries,
         )
-        model = self._models.resolve(spec.model)
+        return self.compile_current(spec, model=self._models.resolve(spec.model))
+
+    def compile_current(self, spec: AgentSpec, *, model: ModelBinding) -> CompiledAgent:
+        """Select this observation using an already admitted model binding."""
+        if not isinstance(spec, AgentSpec):
+            raise TypeError("spec must be AgentSpec")
         declarations = tuple(item for item in self._candidates if item.kind != "agent")
         delegates = tuple(
             CapabilityContribution.from_declaration(agent) for agent in self._agents.values()
@@ -251,7 +297,7 @@ class AgentCompiler:
                 AgentSpecCodec().to_wire_payload(compiled_agent.spec)
             ),
             model_contract=dict(compiled_agent.model.contract),
-            selected=_compiled_agent_selected_pins(compiled_agent),
+            selected=_compiled_agent_selected_refs(compiled_agent),
             subagents=tuple(subagents),
             output_mode=output_binding.mode,
             output_schema=output_binding.schema_definition,
@@ -265,26 +311,32 @@ class AgentCompiler:
     def restore(
         self, binding_contract: AgentBindingContract, *, model: ModelBinding | None = None,
     ) -> AgentBinding:
-        """Restore exact historical semantics without expanding current selectors."""
+        """Restore admitted Agent facts and hooks with the current tool directory."""
         if not isinstance(binding_contract, AgentBindingContract):
             raise TypeError("binding_contract must be AgentBindingContract")
         try:
             if model is None:
                 model = self._models.resolve(binding_contract.agent_spec.model)
             model = self._models.capture(model)
-            selected = self._restore_selected(binding_contract.selected)
-            tool_policy, mcp_policy = self._restore_policies(
+            selected_capabilities = self._restore_capabilities(binding_contract.selected)
+            candidates = self.filter_capabilities(
                 binding_contract.agent_spec,
-                selected["tool"],
-                selected["mcp"],
+                tuple(item for item in self._candidates if item.kind in {"tool", "skill", "mcp"}),
+                capability_filter=self._capability_filter,
+            )
+            selected_tools, selected_mcp, tool_policy, mcp_policy = self._select_tools(
+                binding_contract.agent_spec, candidates,
+            )
+            selected_skills = self._select_exact_kind(
+                "skill", binding_contract.agent_spec.allow_skills, candidates,
             )
             compiled_agent = self._build_compiled_agent(
                 binding_contract.agent_spec,
                 model=model,
-                selected_tools=selected["tool"],
-                selected_skills=selected["skill"],
-                selected_mcp=selected["mcp"],
-                selected_capabilities=selected["capability"],
+                selected_tools=selected_tools,
+                selected_skills=selected_skills,
+                selected_mcp=selected_mcp,
+                selected_capabilities=selected_capabilities,
                 selected_subagents=binding_contract.subagent_ids,
                 tool_policy=tool_policy,
                 mcp_policy=mcp_policy,
@@ -307,64 +359,16 @@ class AgentCompiler:
             binding_contract,
         )
 
-    def _restore_selected(
-        self,
-        pins: Sequence[CapabilityPin],
-    ) -> "dict[str, tuple[CapabilityContribution[object], ...]]":
-        selected: dict[str, list[CapabilityContribution[object]]] = {
-            "tool": [],
-            "skill": [],
-            "mcp": [],
-            "capability": [],
-        }
-        for pin in pins:
-            if pin.kind == "skill":
-                value = SkillDefinition.from_contract(
-                    pin.contract
-                )
-                candidate = CapabilityContribution.from_declaration(value)
-            elif pin.kind == "mcp":
-                current = self._by_identity.get(("mcp", pin.id))
-                if (
-                    current is None
-                    or current.revision != pin.revision
-                    or not isinstance(current.value, MCPServerSpec)
-                ):
-                    raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
-                try:
-                    candidate = CapabilityContribution.from_mcp_contract(
-                        pin.contract,
-                        current.value,
-                    )
-                except AIError as error:
-                    raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE) from error
-            else:
-                current = self._by_identity.get((pin.kind, pin.id))
-                if (
-                    current is None
-                    or current.revision != pin.revision
-                ):
-                    raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
-                candidate = current
-                if pin.kind == "tool":
-                    tool = current.materialize_tool()
-                    metadata = cast("Mapping[str, object]", pin.contract["metadata"])
-                    tool.metadata = tool_metadata(
-                        base=tool.metadata,
-                        effect_policy=tool_effect_policy_from_metadata(metadata, require=True),
-                    )
-                    candidate = CapabilityContribution.from_opaque(
-                        "tool", pin.id, tool, revision=pin.revision,
-                    )
-            selected[pin.kind].append(candidate)
-        return {
-            kind: (
-                tuple(values)
-                if kind == "capability"
-                else tuple(sorted(values, key=lambda item: item.id))
-            )
-            for kind, values in selected.items()
-        }
+    def _restore_capabilities(
+        self, refs: Sequence[CapabilityRef],
+    ) -> tuple[CapabilityContribution[object], ...]:
+        selected: list[CapabilityContribution[object]] = []
+        for ref in refs:
+            current = self._by_identity.get((ref.kind, ref.id))
+            if ref.kind != "capability" or current is None or current.revision != ref.revision:
+                raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
+            selected.append(current)
+        return tuple(selected)
 
     @classmethod
     def _select_tools(
@@ -412,15 +416,13 @@ class AgentCompiler:
             parsed = parse_mcp_tool_selector(selector)
             if parsed is None:
                 tool_policy.append(selector)
-                if selector not in tools:
-                    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-                selected_tool_ids.add(selector)
+                if selector in tools:
+                    selected_tool_ids.add(selector)
                 continue
             server_id, _tool = parsed
             candidate = mcp_by_id.get(server_id)
-            if candidate is None:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            selected_mcp_by_id[candidate.id] = candidate
+            if candidate is not None:
+                selected_mcp_by_id[candidate.id] = candidate
             mcp_policy.append(selector)
         return (
             tuple(tools[name] for name in sorted(selected_tool_ids)),
@@ -436,15 +438,8 @@ class AgentCompiler:
         selectors: Sequence[str],
         candidates: Sequence[CapabilityContribution[object]],
     ) -> "tuple[CapabilityContribution[object], ...]":
-        values = {
-            candidate.id: candidate
-            for candidate in candidates
-            if candidate.kind == kind
-        }
         select_all = "*" in selectors
         selected_ids = set(selectors).difference({"*"})
-        if kind != "skill" and not selected_ids.issubset(values):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         selected = tuple(
             candidate
             for candidate in candidates
@@ -462,64 +457,15 @@ class AgentCompiler:
         available = set(agent_ids)
         select_all = "*" in spec.allow_subagents
         selected = set(spec.allow_subagents).difference({"*"})
-        if spec.id in selected or not selected.issubset(available):
+        if spec.id in selected:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         return tuple(
             sorted(
                 available.difference({spec.id})
                 if select_all
-                else selected
+                else selected.intersection(available)
             )
         )
-
-    def _restore_policies(
-        self,
-        spec: AgentSpec,
-        selected_tools: Sequence[CapabilityContribution[object]],
-        selected_mcp: Sequence[CapabilityContribution[object]],
-    ) -> "tuple[tuple[str, ...], tuple[str, ...]]":
-        select_all = "*" in spec.allow_tools
-        selected_tool_names = {item.id for item in selected_tools}
-        ordinary: set[str] = {"*"} if select_all else set()
-        workspace_tool_classes = {
-            candidate.id: tool_class_from_metadata(candidate.contract.get("metadata"))
-            for candidate in selected_tools
-        }
-        for selector in spec.allow_tools:
-            if selector == "*":
-                continue
-            workspace_classes = _workspace_selector_classes(selector)
-            if workspace_classes is not None:
-                ordinary.update(
-                    item.id
-                    for item in selected_tools
-                    if item.id in selected_tool_names
-                    and workspace_tool_classes.get(item.id) in workspace_classes
-                )
-            elif parse_mcp_tool_selector(selector) is None:
-                if selector not in selected_tool_names:
-                    raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
-                ordinary.add(selector)
-        allowed_server_ids = {item.id for item in selected_mcp}
-        mcp_policy = (
-            [
-                mcp_server_selector(item.id)
-                for item in sorted(selected_mcp, key=lambda item: item.id)
-            ]
-            if select_all
-            else []
-        )
-        workspace_tool_classes.update({name: "shell" for name in ("run_command", "start_command", "check_command", "stop_command", "shell")})
-        for selector in spec.allow_tools:
-            if selector == "*":
-                continue
-            parsed = parse_mcp_tool_selector(selector)
-            if parsed is None:
-                continue
-            if parsed[0] not in allowed_server_ids:
-                raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
-            mcp_policy.append(selector)
-        return tuple(sorted(ordinary)), tuple(sorted(set(mcp_policy)))
 
     def _build_compiled_agent(
         self,
@@ -544,7 +490,23 @@ class AgentCompiler:
             selected_subagents=tuple(sorted(set(selected_subagents))),
             tool_policy=tuple(tool_policy),
             mcp_policy=tuple(mcp_policy),
+            runtime_contributions=self._runtime_contributions,
         )
+
+
+def _selector_is_contained(selector: str, allowed: Sequence[str]) -> bool:
+    if "*" in allowed or selector in allowed:
+        return True
+    parsed = parse_mcp_tool_selector(selector)
+    if parsed is not None:
+        return mcp_server_selector(parsed[0]) in allowed
+    classes = _workspace_selector_classes(selector)
+    if classes is None:
+        return False
+    allowed_classes = frozenset().union(*(
+        _workspace_selector_classes(value) or frozenset() for value in allowed
+    ))
+    return classes.issubset(allowed_classes)
 
 
 def _workspace_selector_classes(

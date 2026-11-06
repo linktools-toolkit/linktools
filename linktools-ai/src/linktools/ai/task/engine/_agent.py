@@ -215,6 +215,7 @@ class AgentTaskRunner(Generic[AppT]):
             correlation=invocation.correlation,
             dependency_hold_id=dependency_hold_id,
             budget_scope_id=admission.budget_scope_id,
+            tool_effects=admission.tool_effects,
             requires_task_invocation_capture=True,
             input_context=None if invocation.node.input.get("capture_context") is None else ExecutionInputContext.from_payload(invocation.node.input["capture_context"]),
         )

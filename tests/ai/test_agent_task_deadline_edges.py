@@ -171,7 +171,7 @@ async def test_recovery_deadline_guard_does_not_block_pending_cancellation() -> 
         _reconcile_cancelled_tool_claims=AsyncMock(),
         _reconcile_tool_effects=AsyncMock(return_value=((), 0)),
         _pending_cancel_operations=AsyncMock(return_value=()),
-        validate_binding=Mock(),
+        validate_binding=AsyncMock(),
         _reconcile_session_recovery=AsyncMock(return_value=True),
         _recovery_idempotency=AsyncMock(return_value=None),
         _commit_terminal=AsyncMock(),

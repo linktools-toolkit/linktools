@@ -45,7 +45,7 @@ async def _captured_local_skill(
     try:
         asset_features = RuntimeFeatures("local")
         asset_features.capability(AssetCapability(store), scope="runtime")
-        capture = await asset_features.capture()
+        capture = await asset_features.resolve()
         definition = capture.contributions[0].value
         assert isinstance(definition, SkillDefinition)
         assert definition.source_ref is not None
@@ -110,7 +110,7 @@ async def test_sandbox_asset_skill_uses_contained_file_symlink(
     try:
         asset_features = RuntimeFeatures("application")
         asset_features.capability(AssetCapability(store), scope="runtime")
-        capture = await asset_features.capture()
+        capture = await asset_features.resolve()
         binding = next(
             item.value for item in capture.contributions if item.kind == "skill"
         )
@@ -317,14 +317,15 @@ async def test_asset_declaration_symlinks_freeze_valid_external_declarations(
         )
         group_assets = AssetCapability(store)
         group.capability(group_assets, scope="runtime")
-        snapshot = await group.capture()
+        snapshot = await group.resolve()
         assert {(item.kind, item.id) for item in snapshot.contributions} == {
             ("agent", "review"),
             ("mcp", "server"),
             ("skill", "review"),
             ("capability", "runtime.assets"),
         }
-        source = snapshot.skill_source
+        assert snapshot.asset_reader is not None
+        source = AssetSkillSource(snapshot.group_id, snapshot.asset_reader)
         definition = next(
             item.value for item in snapshot.contributions if item.kind == "skill"
         )
@@ -416,7 +417,7 @@ async def test_captured_local_skill_keeps_resources_from_distinct_overlay_roots(
     try:
         asset_features = RuntimeFeatures("local")
         asset_features.capability(AssetCapability(store), scope="runtime")
-        capture = await asset_features.capture()
+        capture = await asset_features.resolve()
         definition = capture.contributions[0].value
         assert isinstance(definition, SkillDefinition)
         assert definition.source_ref is not None

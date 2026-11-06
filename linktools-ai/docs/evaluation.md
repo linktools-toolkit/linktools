@@ -294,7 +294,7 @@ retention and deletion remain the application's separate responsibility.
 
 Register `ToolResponsesCapability(ToolResponseFixture(ref, reader))` from
 `linktools.ai.capability` on the trial's `RuntimeFeatures`,
-then pass the single declaration or capture to `Runtime.open(features=...)`.
+then pass the declaration or its borrowed live source to `Runtime.open(features=...)`.
 This binds one
 case's immutable Asset to a borrowed `AssetStoreReader`. The host owns the
 reader's initialization, authorization, and closing. An Asset version proves
@@ -377,9 +377,15 @@ strict policy keep their ToolOperation semantics. The offline toolset still
 uses the budget and history boundaries without constructing a transport. Cancellation or uncertain result
 settlement can still require native effect resolution; fixture availability
 does not prove terminal success. `external_effects="deny"` and `"read_only"`
-retain their existing admission rules, including the MCP restriction. Explicit
-`"live"` permission is still required. `model_fixtures` only permits declared
-model contracts and does not supply tool responses or replace a model.
+retain their existing restrictions, including the MCP restriction. The admitted
+`tool_effects` value follows the graph and its Agent executions, including expanded
+nodes, subagents, retries, forks, and recovery. Current Tool and MCP declarations
+are checked at each model step before MCP transport setup or tool dispatch;
+`read_only` still permits tools explicitly declared with `effect_policy="none"`.
+Incompatible live declarations fail the execution rather than freezing its tool
+directory at evaluation preparation. Explicit `"live"` permission is still
+required for effects. `model_fixtures` only permits declared model contracts and
+does not supply tool responses or replace a model.
 
 ## Cases and candidate inputs
 

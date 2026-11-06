@@ -13,7 +13,7 @@ from pydantic_ai_harness.step_persistence import RunRecord, StepPersistence
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.capability import AgentContext, ExecutionCapability
-from linktools.ai.core import ApprovalDecision, ExecutionStatus, Principal
+from linktools.ai.core import ApprovalDecision, AuthorizationPolicy, ExecutionStatus, Principal
 from linktools.ai.execution import ApprovalDecisionRequest
 from linktools.ai.migrate import provision_database
 from linktools.ai.model.messages import decode_model_messages
@@ -24,20 +24,23 @@ from ._runtime_test_helpers import _Models, _UsageFunctionModel, _wait_for_commi
 
 
 @asynccontextmanager
-async def _runtime(database: Path, model, tool):
+async def _runtime(database: Path, model, tool, *, restart_checkpoints: bool = True,
+                   authorization: AuthorizationPolicy | None = None):
     engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
     await provision_database(engine)
     steps = SqlStepStore(engine, namespace="native-recovery", tenant_id="default")
     await steps.initialize()
     features = RuntimeFeatures("native-recovery")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    features.capability(StepPersistence(store=steps, capture_frontier=True), scope="runtime")
+    if restart_checkpoints:
+        features.capability(StepPersistence(store=steps, capture_frontier=True), scope="runtime")
     features.tool(tool, effect_policy="replay_safe")
     features.agent("default", model="default", allow_tools=(tool.__name__,))
     try:
         async with Persistence.open("native-recovery", storage=PersistenceStorage.sql(engine)) as persistence:
             async with Runtime.attach(persistence=persistence,
-                features=model_features(_Models(_UsageFunctionModel(model)), features), auto_recover=False) as runtime:
+                features=model_features(_Models(_UsageFunctionModel(model)), features),
+                auto_recover=False, authorization=authorization) as runtime:
                 yield runtime, persistence, steps
     finally:
         await engine.dispose()

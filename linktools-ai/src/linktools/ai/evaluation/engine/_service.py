@@ -1369,6 +1369,7 @@ class Evaluations:
         planning = engine if scorer is None else engine.with_definitions(self._recorder)
         submission = await planning.describe_submission(graph, principal=record.manifest.principal,
             idempotency_key=f"evaluation:{record.experiment_id}:{slot}", limits=limits,
+            tool_effects=policy.external_effects,
             correlation={"evaluation_experiment": record.experiment_id, "evaluation_trial": trial.trial_id,
                          "evaluation_slot": slot})
         timeout = (policy.trial_timeout_seconds if scorer is None else

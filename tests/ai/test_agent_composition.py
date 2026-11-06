@@ -10,14 +10,14 @@ from types import SimpleNamespace
 
 import pytest
 from linktools import ai
-from linktools.ai.agent import AgentBindingContract, AgentCompiler, CapabilityPin
+from linktools.ai.agent import AgentBindingContract, AgentCompiler
 from linktools.ai.capability import CapabilityContribution, SkillDefinition
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 
 from linktools.ai.execution import ExecutionHandle, ExecutionRequest, ResumeSessionRequest
 from linktools.ai.runtime._session import RuntimeSessionService
-from linktools.ai.spec import AgentSpec, MCPServerSpec, SkillSpec
+from linktools.ai.spec import CapabilityRef, AgentSpec, MCPServerSpec, SkillSpec
 from linktools.ai.core import Principal, PrincipalKind, SessionStatus
 from pydantic_ai.capabilities import AbstractCapability
 
@@ -62,12 +62,15 @@ import importlib
 from typing import get_type_hints
 importlib.import_module('linktools.ai.{first}')
 from linktools.ai import RuntimeFeatures as RootFeatures
-from linktools.ai.runtime import RuntimeFeatures, RuntimeFeaturesCapture
+from linktools.ai.runtime import RuntimeFeatures, RuntimeFeaturesResolution, RuntimeFeaturesSource
 from linktools.ai.capability import CapabilityContribution, capture_contributions
 assert RootFeatures is RuntimeFeatures
-assert get_type_hints(RuntimeFeatures.capture)['return'].__origin__ is RuntimeFeaturesCapture
-assert get_type_hints(RuntimeFeaturesCapture)['contributions'].__args__[0].__origin__ is CapabilityContribution
-for owner in (RuntimeFeatures, RuntimeFeaturesCapture):
+assert get_type_hints(RuntimeFeatures.resolve)['return'].__origin__ is RuntimeFeaturesResolution
+assert get_type_hints(RuntimeFeatures.borrow)['return'].__origin__ is RuntimeFeaturesSource
+assert get_type_hints(RuntimeFeaturesSource.resolve)['return'].__origin__ is RuntimeFeaturesResolution
+assert get_type_hints(RuntimeFeaturesResolution)['contributions'].__args__[0].__origin__ is CapabilityContribution
+assert not hasattr(RuntimeFeatures, 'capture')
+for owner in (RuntimeFeatures, RuntimeFeaturesResolution, RuntimeFeaturesSource):
     for name, value in vars(owner).items():
         if isinstance(value, property):
             value = value.fget
@@ -104,34 +107,16 @@ def test_agent_binding_contract_persists_binding_inputs() -> None:
     assert len(binding_contract.binding_digest) == 64
 
 
-def test_capability_pin_persists_contract_once() -> None:
-    pin = CapabilityPin(
-        "capability",
-        "guardrail",
-        {
-            "version": 1,
-            "revision": 3,
-            "defer_loading": False,
-            "config": {},
-        },
-    )
-    payload = pin.to_payload()
+@pytest.mark.parametrize("kind", ("agent", "tool", "skill", "mcp", "capability"))
+def test_capability_reference_persists_only_named_identity(kind: str) -> None:
+    reference = CapabilityRef(kind, "guardrail", 3)
+    payload = reference.to_payload()
 
-    assert payload == {
-        "kind": "capability",
-        "id": "guardrail",
-            "contract": {
-                "version": 1,
-                "revision": 3,
-                "defer_loading": False,
-                "config": {},
-            },
-    }
-    assert CapabilityPin.from_payload(payload) == pin
-    assert pin.revision == 3
+    assert payload == {"kind": kind, "id": "guardrail", "revision": 3}
+    assert CapabilityRef.from_payload(payload) == reference
 
-    decoded = CapabilityPin.from_payload({**payload, "future": True})
-    assert decoded == pin
+    decoded = CapabilityRef.from_payload({**payload, "future": True})
+    assert decoded == reference
     assert "future" not in decoded.to_payload()
 
 
@@ -185,7 +170,7 @@ async def test_binding_preserves_declaration_order_and_capability_registration_o
     group.tool(business, name="z-tool", revision=4)
     group.tool(business, name="a-tool", revision=5)
     group.mcp(MCPServerSpec("server", "python", revision=6))
-    capture = await group.capture()
+    capture = await group.resolve()
     skill = CapabilityContribution.from_declaration(
         SkillDefinition(SkillSpec("guide", "instructions", revision=7))
     )
@@ -196,20 +181,22 @@ async def test_binding_preserves_declaration_order_and_capability_registration_o
         agents={spec.id: spec},
     )
     binding = compiler.bind(compiler.compile(spec))
-    pins = binding.binding_contract.selected
-    assert [(pin.kind, pin.id, pin.revision) for pin in pins] == [
+    refs = binding.binding_contract.selected
+    assert refs == (
+        CapabilityRef("capability", "z-capability", 2),
+        CapabilityRef("capability", "a-capability", 3),
+    )
+    assert binding.binding_contract.to_payload()["selected"] == [ref.to_payload() for ref in refs]
+    assert [(item.kind, item.id, item.revision) for item in (
+        *binding.compiled_agent.selected_mcp,
+        *binding.compiled_agent.selected_skills,
+        *binding.compiled_agent.selected_tools,
+    )] == [
         ("mcp", "server", 6),
         ("skill", "guide", 7),
         ("tool", "a-tool", 5),
         ("tool", "z-tool", 4),
-        ("capability", "z-capability", 2),
-        ("capability", "a-capability", 3),
     ]
-    expected = {
-        (item.kind, item.id): item.contract
-        for item in (*capture.contributions, skill)
-    }
-    assert all(pin.contract == expected[pin.kind, pin.id] for pin in pins)
     restored = compiler.restore(AgentBindingContract.from_payload(binding.binding_contract.to_payload()))
     assert restored.binding_contract == binding.binding_contract
     assert restored.binding_digest == binding.binding_digest

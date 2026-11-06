@@ -103,7 +103,7 @@ async def test_run_only_actor_recovers_native_captured_agent_graph(
                 TaskGraph("native-recovery", (
                     TaskNode("agent", task=task, input_capture=task_capture),
                 )),
-                principal=origin, idempotency_key="captured-graph",
+                principal=origin, idempotency_key="captured-graph", tool_effects="read_only",
             )
             await asyncio.wait_for(entered.wait(), 10)
             bound = await _wait_for_committed(
@@ -167,6 +167,7 @@ async def test_run_only_actor_recovers_native_captured_agent_graph(
             assert current is not None and recovered_head is not None
             assert current.principal_id == origin.principal_id
             assert current.principal_kind == origin.kind
+            assert current.tool_effects == before.tool_effects == "read_only"
             assert current.stored_user_input == before.stored_user_input
             assert recovered_head.producer_generation > head.producer_generation
             actor_actions = [action for principal, action in authorization.calls if principal == actor]

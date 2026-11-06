@@ -57,7 +57,7 @@ async def test_feature_capture_freezes_retry_defaults() -> None:
     agent_defaults = {"tool_retries": 7, "output_retries": 5}
     features = RuntimeFeatures("retries", defaults={"agent": agent_defaults})
     declared = features.agent("agent")
-    capture = await features.capture()
+    capture = await features.resolve()
     assert declared.tool_retries is None and declared.output_retries is None
     agent_defaults.update(tool_retries=9, output_retries=8)
     assert isinstance(capture.defaults, ImmutableJsonMapping)
@@ -110,7 +110,7 @@ async def test_runtime_reconfiguration_does_not_change_restored_retry_limits() -
 async def test_runtime_and_direct_agent_resolution_share_one_default() -> None:
     assert DEFAULT_AGENT_RETRIES == 3
     features = RuntimeFeatures("shared-default")
-    capture = await features.capture()
+    capture = await features.resolve()
     compiler = AgentCompiler(
         models={"default": create_model(api='openai', model="gpt-test")}, candidates=(), agents={},
     )

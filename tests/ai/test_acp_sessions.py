@@ -173,7 +173,7 @@ async def test_acp_application_can_serve_again_after_transport_failure(
         assert namespace == "default"
         assert storage is application.storage
         assert authorization is application.authorization
-        captures.append(await features.capture())
+        captures.append(await features.resolve())
         try:
             yield SimpleNamespace(default_principal=service_principal("default", "acp"))
         finally:

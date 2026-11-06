@@ -13,9 +13,10 @@ from ..asset import AssetVersionRef
 from ..core import (PersistenceDomain, RunBudget, ExecutionEventType, ExecutionLineageKind,
     ExecutionMode, ExecutionStatus, IdempotencyStatus, JsonValue, OperationStatus,
     ResourceKind, StopReason, ThinkingValue, UsageMetrics, canonical_sha256,
-    normalize_correlation, normalize_execution_mode, normalize_thinking)
+    normalize_correlation, normalize_execution_mode, normalize_thinking, normalize_tool_effects, ToolEffects)
 from ..errors import ErrorDiagnostics
 from ..storage import StoredPayload
+from ..spec import CapabilityRef
 from ..model import StoredUserInput
 from ..task import TaskBindingContract
 from ..session import ConversationCursor
@@ -79,6 +80,7 @@ class ExecutionRecord:
     started_at: datetime | None = None
     budget_scope_id: str | None = None
     tool_response_ref: AssetVersionRef | None = None
+    tool_effects: ToolEffects = "live"
     restart_checkpoints: bool = False
     durable_trace: bool = False
     # Whether this execution retains conversation and fork context.
@@ -87,6 +89,7 @@ class ExecutionRecord:
     history_seal_digest: str | None = None
 
     def __post_init__(self) -> None:
+        normalize_tool_effects(self.tool_effects)
         if (isinstance(self.producer_generation, bool)
                 or not isinstance(self.producer_generation, int)
                 or self.producer_generation < 0):
@@ -143,6 +146,7 @@ class ExecutionRecord:
                 or self.input_context is not None
                 or self.context_imported
                 or self.tool_response_ref is not None
+                or self.tool_effects != "live"
                 or self.conversation_agent_run_id is not None
                 or self.parent_execution_id is not None
                 or self.parent_invocation_id is not None
@@ -428,10 +432,13 @@ class PendingDeferredCall:
     tool_name: str
     arguments_payload: StoredPayload
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
+    capability_ref: CapabilityRef | None = None
 
     def __post_init__(self) -> None:
         if not self.tool_call_id or not self.tool_name:
             raise ValueError("deferred call identity is required")
+        if self.capability_ref is not None and not isinstance(self.capability_ref, CapabilityRef):
+            raise ValueError("deferred call capability reference is invalid")
         try:
             object.__setattr__(self, "metadata", dict(self.metadata))
         except (TypeError, ValueError) as error:

@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Asset-backed declarations captured before Agent compilation."""
+"""Resolve current Asset-backed declarations before Agent compilation."""
 
-from dataclasses import replace
 from typing import Generic, TypeVar
 
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 
-from ..asset import AssetStore
+from ..asset import AssetStore, AssetStoreReader
 from ..errors import AIError, ErrorCode
 from ..spec import AgentSpec, MCPServerSpec, RepositoryInstructionDocument
 from ._context import AgentContext
@@ -15,7 +14,6 @@ from ._contribution import CapabilityContribution
 from ._declaration import BuiltinDeclarationLoader
 from ._loading import CapabilityLoadContext, CapabilityLoader
 from ._skill import SkillDefinition
-from ._skill_source import AssetSkillSource, SkillSourceRef
 
 AppT = TypeVar("AppT")
 
@@ -23,11 +21,11 @@ AppT = TypeVar("AppT")
 class AssetCapability(AbstractCapability[AgentContext[AppT]], Generic[AppT]):
     """Load declarations from one versioned AssetStore.
 
-    Runtime owns the declared store when consuming RuntimeFeatures. A prebuilt
-    capture instead borrows its reader from an externally managed store.
+    Runtime owns the declared store when consuming RuntimeFeatures. An explicit live
+    source view instead borrows an externally managed store.
     Declare a store for one Runtime lifetime; wrapping that same store again
-    does not create an independent resource. Share a capture across Runtimes.
-    RuntimeFeatures consumes this Runtime-scoped capability during capture;
+    does not create an independent resource. Share a borrowed live source across Runtimes.
+    RuntimeFeatures consumes this Runtime-scoped capability during source resolution;
     it does not participate in native Agent execution hooks.
     """
 
@@ -41,6 +39,11 @@ class AssetCapability(AbstractCapability[AgentContext[AppT]], Generic[AppT]):
         self._loaders: dict[str, CapabilityLoader[AppT]] = {
             kind: BuiltinDeclarationLoader(kind) for kind in ("agent", "skill", "mcp", "rule")
         }
+
+    @property
+    def reader(self) -> AssetStoreReader:
+        """Return the version-reading source used by Runtime resource adapters."""
+        return self._store
 
     def claim_store(self) -> AssetStore:
         """Reserve this declaration for one Runtime before initialization."""
@@ -58,7 +61,7 @@ class AssetCapability(AbstractCapability[AgentContext[AppT]], Generic[AppT]):
 
     def for_agent(self, agent: object) -> "AssetCapability[AppT]":
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-                      safe_details={"reason": "asset_declaration_requires_capture"})
+                      safe_details={"reason": "asset_declaration_requires_resolution"})
 
     def loader(self, kind: str, loader: CapabilityLoader[AppT]) -> CapabilityLoader[AppT]:
         """Register the sole loader for one Asset kind, replacing its slot."""
@@ -72,45 +75,16 @@ class AssetCapability(AbstractCapability[AgentContext[AppT]], Generic[AppT]):
         self._loaders[kind] = loader
         return loader
 
-    def skill_source(self, group_id: str) -> AssetSkillSource:
-        """Bind current Skill reads to the declared loader and owned store."""
-        loader = self._loaders["skill"]
-
-        async def discover() -> tuple[SkillDefinition, ...]:
-            context = await CapabilityLoadContext.read_current(group_id, self._store)
-            skills: list[SkillDefinition] = []
-            for value in await loader.load(context):
-                _validate_skill_source(value, context)
-                if isinstance(value, CapabilityContribution):
-                    if value.kind != "skill":
-                        continue
-                    value = value.value
-                elif isinstance(value, (AgentSpec, MCPServerSpec, RepositoryInstructionDocument)):
-                    continue
-                if not isinstance(value, SkillDefinition):
-                    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-                skills.append(_bind_skill_source(value, f"{group_id}/skills"))
-            return tuple(skills)
-
-        return AssetSkillSource(f"{group_id}/skills", self._store, discover=discover)
-
-    async def capture(
+    async def load(
         self, group_id: str,
     ) -> tuple[CapabilityLoadContext, tuple[CapabilityContribution[AppT] | RepositoryInstructionDocument, ...]]:
-        """Capture all loader outputs against the same source revision."""
-        loaders = tuple(self._loaders.items())
-        context = await CapabilityLoadContext.capture(group_id, self._store)
+        """Resolve the current loader slots against this call's Asset versions."""
+        loaders = tuple(self._loaders.values())
+        context = await CapabilityLoadContext.read_current(group_id, self._store)
         entries: list[CapabilityContribution[AppT] | RepositoryInstructionDocument] = []
-        for kind, loader in loaders:
+        for loader in loaders:
             for value in await loader.load(context):
                 _validate_skill_source(value, context)
-                if kind == "skill":
-                    if isinstance(value, SkillDefinition):
-                        value = _bind_skill_source(value, f"{group_id}/skills")
-                    elif isinstance(value, CapabilityContribution) and value.kind == "skill":
-                        value = CapabilityContribution.from_declaration(
-                            _bind_skill_source(value.value, f"{group_id}/skills")
-                        )
                 if isinstance(value, (AgentSpec, SkillDefinition, MCPServerSpec)):
                     entries.append(CapabilityContribution.from_declaration(value))
                 elif isinstance(value, (CapabilityContribution, RepositoryInstructionDocument)):
@@ -130,16 +104,8 @@ class AssetCapability(AbstractCapability[AgentContext[AppT]], Generic[AppT]):
                     entries.append(value)
                 else:
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        await context.verify_source_revision()
         return context, tuple(entries)
 
-
-def _bind_skill_source(definition: SkillDefinition, group_id: str) -> SkillDefinition:
-    source = definition.source_ref
-    return replace(
-        definition,
-        source_ref=SkillSourceRef(group_id, definition.id) if source is None else replace(source, source_id=group_id),
-    )
 
 
 def _validate_skill_source(

@@ -26,16 +26,16 @@ from .test_explicit_runtime_features import _FeatureModels
 async def test_workspace_capability_is_the_only_workspace_registration(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
     features = RuntimeFeatures("workspace")
-    assert (await features.capture()).workspace is None
+    assert (await features.resolve()).workspace is None
     with pytest.raises(TypeError):
         RuntimeFeatures("workspace", workspace=workspace)
     capability = FileSystem(workspace)
     with pytest.raises(AIError) as invalid:
         features.capability(capability, scope="agent")
     assert invalid.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-    assert not (await features.capture()).contributions
+    assert not (await features.resolve()).contributions
     features.capability(capability, scope="runtime")
-    capture = await features.capture()
+    capture = await features.resolve()
     assert capture.workspace is workspace
     assert {item.id for item in capture.contributions if item.kind == "tool"} == {
         tool.name for tool in capability.tool_definitions()

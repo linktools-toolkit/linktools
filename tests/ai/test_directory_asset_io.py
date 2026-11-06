@@ -98,7 +98,7 @@ async def test_asset_skill_package_resolution_runs_off_event_loop(
     try:
         asset_features = RuntimeFeatures("application")
         asset_features.capability(AssetCapability(store), scope="runtime")
-        capture = await asset_features.capture()
+        capture = await asset_features.resolve()
         definition = next(
             item.value
             for item in capture.contributions

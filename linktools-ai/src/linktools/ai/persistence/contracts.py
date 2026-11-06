@@ -93,6 +93,7 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
+from ..spec import CapabilityRef
 from ..storage import ObjectRef, StoredPayload
 from ..task import (
     TaskBindingContract,
@@ -970,8 +971,11 @@ class ToolOperationRecord:
     effect_ended_at: datetime | None = None
     effect_idempotency_key: str | None = None
     effect_summary: str | None = None
+    capability_ref: CapabilityRef | None = None
 
     def __post_init__(self) -> None:
+        if self.capability_ref is not None and not isinstance(self.capability_ref, CapabilityRef):
+            raise ValueError("admitted capability reference is invalid")
         if self.producer_generation is not None and (
             isinstance(self.producer_generation, bool)
             or not isinstance(self.producer_generation, int)
@@ -1030,6 +1034,28 @@ class ToolOperationRecord:
                 validate_lease_owner(self.owner)
         except AIError as error:
             raise ValueError("tool operation lease identity is invalid") from error
+
+    def matches_admission(self, request: ToolOperationAdmission) -> bool:
+        """Match a call while preserving the facts and result already admitted."""
+        stored = self.arguments_payload
+        supplied = request.arguments_payload
+        arguments_match = (stored is None if supplied is None else
+                           stored is not None and stored.digest == supplied.digest and stored.size == supplied.size)
+        original = self.capability_ref
+        requested = request.capability_ref
+        return (
+            self.execution_id == request.execution_id
+            and self.tool_operation_id == request.tool_operation_id
+            and self.tool_call_id == request.tool_call_id
+            and self.idempotency_key_digest == request.idempotency_key_digest
+            and self.tool_name == request.tool_name
+            and self.arguments_digest == request.arguments_digest
+            and arguments_match
+            and self.binding_digest == request.binding_digest
+            and self.agent_run_id in {request.agent_run_id, request.recovery_agent_run_id}
+            and (self.status in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}
+                 or (self.replay_safe is request.replay_safe and original == requested))
+        )
 
     def to_tool_effect(self, run_id: str) -> ToolEffectRecord:
         """Expose native observations without weakening dispatch's effect proof."""
@@ -1649,8 +1675,11 @@ class ToolOperationAdmission:
     owner: str
     arguments_payload: StoredPayload | None = None
     producer_generation: int | None = None
+    capability_ref: CapabilityRef | None = None
 
     def __post_init__(self) -> None:
+        if self.capability_ref is not None and not isinstance(self.capability_ref, CapabilityRef):
+            raise ValueError("admitted capability reference is invalid")
         if self.producer_generation is not None and (
             isinstance(self.producer_generation, bool)
             or not isinstance(self.producer_generation, int)

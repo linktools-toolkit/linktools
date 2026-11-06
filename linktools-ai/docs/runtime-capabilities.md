@@ -24,9 +24,8 @@ group.capability(quota, id="host.rate-limit")
 group.model("default", binding)
 group.agent("default", allow_capabilities=())
 
-capture = await group.capture()
 async with Runtime.open("application", storage=storage,
-    features=capture,
+    features=group,
 ) as runtime:
     ...
 ```
@@ -83,10 +82,12 @@ including `ExecutionCapability`, `SessionCapability`, `StepPersistenceCapability
 and `TraceCapability`. The project step declaration binds native Harness hooks;
 explicit native `StepPersistence` declarations remain supported.
 `linktools.ai.runtime` owns Runtime entry points, services, and the
-`RuntimeFeatures` / `RuntimeFeaturesCapture` composition contracts; it does not
+`RuntimeFeatures`, `RuntimeFeaturesSource` and `RuntimeFeaturesResolution` contracts; it does not
 provide duplicate capability exports.
 
-A captured declaration can be reused across Runtime instances. Runtime binds
+A borrowed live source can be shared across Runtime instances while its external
+owner keeps its AssetStore open. `await source.resolve()` is inspection-only;
+pass the source itself to Runtime. Runtime binds
 isolated `ConversationService` and `TraceService` instances for each run.
 The native message models and continuation algorithm are reused, with a fresh
 native run ID for each execution attempt. The built-in declaration is bound to
@@ -104,7 +105,8 @@ Tool-owning capabilities supply their tool declarations and native binding toget
 candidates: the default `allow_tools=("*",)` includes available tools, and explicit
 `allow_tools` or the candidate filter can narrow them. Runtime owns the borrowed storage
 or workspace, not a second tool-name registry. An admitted execution retains its captured
-memory scope and selected native tools even if a later host removes the Memory declaration.
+Memory scope. Later runs and model steps use current tool declarations; removing
+a declaration does not resurrect its tools from the execution binding.
 Imported execution contexts keep their isolated captured memory; they do not acquire the
 host's current scope. An ordinary business tool using a memory tool's name is not silently
 replaced when an imported context enables memory.
@@ -124,8 +126,10 @@ Retained execution history, interrupted-execution recovery and detailed trace
 are separate, explicit Runtime-scoped options. Passing durable storage alone does not
 enable them. Automatic metrics use the independent `Runtime.open(metrics=...)`
 resource described below. Supply one `RuntimeFeatures` declaration or
-its `RuntimeFeaturesCapture` through `features`; complete registrations
-before capture or opening the Runtime.
+its borrowed `RuntimeFeaturesSource` through `features`. New runs use current
+native hooks and declarations. Business tools, MCP and Skills resolve current
+candidates again at each model step and call. An already admitted call or saved
+result retains its original identity and effect receipt.
 
 ```python
 from linktools.ai.runtime import RuntimeFeatures
@@ -277,8 +281,8 @@ features = RuntimeFeatures("application", defaults={
 Custom namespaces are retained for their owning consumers. Agent retry defaults
 are validated when the compiler consumes the `agent` namespace. Omitted keys
 use the shared default of `3`; explicit Agent values, including `0`, win.
-The compiler resolves these values before creating a durable binding. Captures
-freeze the configured defaults, and restoring an execution uses its saved
+The compiler resolves these values before creating a durable binding.
+The declaration owns its immutable default settings, and restoring an execution uses its saved
 resolved values even if a later Runtime has different defaults.
 
 Drain active work and upgrade all Runtime readers and writers sharing a namespace
@@ -300,12 +304,14 @@ unresolved tool effects retain their stronger recovery diagnostic. It does not
 silently convert recovery into cancellation. `auto_recover` still controls startup
 reconciliation; it does not grant a missing execution guarantee.
 
-`Runtime.handoff()` keeps its separate eligibility: synchronous Execution policy,
-native StepPersistence, and durable Execution, Recovery and Checkpoint routes.
-An Execution terminal policy, with or without a buffer, does not enable handoff;
-the call reports `CAPABILITY_REQUIRED_MISSING` before closing. For recoverable
-handoff with delayed Trace publication, keep Execution synchronous and configure
-Trace with `CommitPolicy.terminal(buffer=...)`.
+`Runtime.handoff()` requires durable Execution and Checkpoint routes. Every active
+producer must have been durably admitted with native restart checkpoints; current
+policy changes do not rewrite that guarantee. An idle Runtime needs no checkpoint
+capability. Volatile pending turns and producers without an admitted checkpoint
+guarantee report `CAPABILITY_REQUIRED_MISSING` before closing. Unfinished admission
+reports retryable `RUNTIME_DEPENDENCY_NOT_READY`; retry after it settles. Rejection
+leaves the Runtime usable. Trace publication policy does not define handoff
+eligibility.
 
 For an ordinary Agent without restart checkpoints, explicit
 `execution.cancel(force=True)` may safely revoke the producer after cancellation
@@ -421,9 +427,10 @@ Runtime does not substitute private coordination. Remote preview is provisional.
 Result completion and unknown-commit resolution use authoritative storage, and a
 lost lease never permits two canonical terminal results.
 
-## Capture, identity and lifecycle
+## Live resolution, identity and lifecycle
 
-- A capture exposes every registration in `capture.contributions`, including its
+- `await features.resolve()` exposes current registrations in
+  `resolution.contributions`, including each contribution's
   `scope`. `AgentCompiler.filter_capabilities` returns only Agent candidates;
   Runtime-scoped policies never invoke the selection callback.
 - The existing `id`, `revision`, and `config` registration arguments remain
@@ -431,9 +438,11 @@ lost lease never permits two canonical terminal results.
   Native IDs must not collide across runtime policies or selected capabilities,
   or use the reserved `linktools.` prefix. Native combined capabilities are
   supported, including anonymous leaves. Runtime policies must not defer loading.
-- Registrations are captured once when Runtime opens, or earlier with an explicit
-  capture. Later group registrations do not affect an open Runtime. Do not mutate
-  native capability configuration while its capture is in use.
+- The declaration source stays live for every capability kind. Later registrations
+  and loader replacements affect subsequent resolution without restarting Runtime.
+  Complete native hooks resolve for each new run; business tools, MCP and Skills
+  resolve at each model step and call. A resolution's Asset versions validate that
+  read, while already admitted calls and receipts keep their original identity.
 - Runtime policies are current host configuration, outside durable Agent binding
   identity. Reopening uses the newly supplied host policies while restoring
   historical Agent behavior. Put model-visible, versioned behavior in Agent scope.

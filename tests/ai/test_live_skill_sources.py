@@ -34,15 +34,14 @@ async def test_live_skill_source_discovers_new_packages_and_reads_edits(tmp_path
 
     try:
         await store.initialize()
-        source = AssetSkillSource("skills", store, discover=discover)
-        assert source.dynamic
-        assert await source.discover() == ()
+        source = AssetSkillSource("skills", store)
+        assert await discover() == ()
         package = root / "guide"
         package.mkdir()
         (package / "SKILL.md").write_text(_declaration("Initial instructions"))
         guide = package / "guide.txt"
         guide.write_text("Initial resource")
-        first, = await source.discover()
+        first, = await discover()
         assert "Initial instructions" in first.model_content
         assert first.source_ref is not None
         assert await source.read(first.source_ref, "guide.txt") == b"Initial resource"
@@ -50,7 +49,7 @@ async def test_live_skill_source_discovers_new_packages_and_reads_edits(tmp_path
         (package / "SKILL.md").write_text(_declaration("Updated instructions"))
         (package / "new.txt").write_text("New resource")
         guide.write_text("Updated resource")
-        current, = await source.discover()
+        current, = await discover()
         assert "Updated instructions" in current.model_content
         assert current.source_ref is not None
         assert (await source.inspect(current.source_ref)).resources == ("guide.txt", "new.txt")

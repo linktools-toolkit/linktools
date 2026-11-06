@@ -53,7 +53,7 @@ async def test_runtime_uses_registered_tool_semantics_after_authoring_mutation()
     )
     model = _ModelBinding()
     features.model("default", model)
-    capture = await features.capture()
+    capture = await features.resolve()
     candidate = next(item for item in capture.contributions if item.kind == "tool")
     original = candidate.contract
     source.function_schema.json_schema["properties"]["key"]["description"] = "Changed schema"
@@ -67,7 +67,7 @@ async def test_runtime_uses_registered_tool_semantics_after_authoring_mutation()
     restored = compiler.restore(binding.binding_contract)
     assert restored.binding_contract == binding.binding_contract
 
-    async with Persistence.open('capture', storage=PersistenceStorage.in_memory()) as persistence_67, Runtime.attach(persistence=persistence_67, features=capture) as runtime:
+    async with Persistence.open('capture', storage=PersistenceStorage.in_memory()) as persistence_67, Runtime.attach(persistence=persistence_67, features=features.borrow()) as runtime:
         result = (await runtime.agents.get().run("Call lookup", timeout_seconds=5)).result
         assert result.status is ExecutionStatus.SUCCEEDED
 

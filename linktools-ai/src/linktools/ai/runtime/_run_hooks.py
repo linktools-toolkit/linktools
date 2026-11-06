@@ -17,6 +17,7 @@ from pydantic_ai.tools import DeferredToolRequests
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
 from ..errors import AIError, ErrorCode
+from ..spec import CapabilityRef
 from ._agent_run_recorder import AgentRunRecorder
 from ._run_context import RunContextCapture
 from ..persistence.runs import AgentRunRecord
@@ -45,6 +46,7 @@ class AgentRunCapture(AbstractCapability[None]):
         repr=False,
         compare=False,
     )
+    deferred_capability_refs: dict[str, CapabilityRef] = field(default_factory=dict, repr=False, compare=False)
     _registered: bool = field(default=False, init=False)
     _finished: bool = field(default=False, init=False)
     _captured_request: ModelMessage | None = field(default=None, init=False)
@@ -142,6 +144,10 @@ class AgentRunCapture(AbstractCapability[None]):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if self.deferred_pause_sink is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            pending_ids = {call.tool_call_id for call in (*result.output.approvals, *result.output.calls)}
+            for call_id in tuple(self.deferred_capability_refs):
+                if call_id not in pending_ids:
+                    del self.deferred_capability_refs[call_id]
             self.deferred_pause_sink(self._last_observed_step_index)
             await self.context.save_checkpoint(ctx, messages=result.all_messages(), state="interrupted")
         self._finished = True

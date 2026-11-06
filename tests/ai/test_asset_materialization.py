@@ -419,7 +419,7 @@ async def test_capability_capture_rejects_unmaterializable_resource_paths(
         with pytest.raises(AIError) as error:
             asset_features = RuntimeFeatures("application")
             asset_features.capability(AssetCapability(store), scope="runtime")
-            await asset_features.capture()
+            await asset_features.resolve()
         assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
     finally:
         await store.close()

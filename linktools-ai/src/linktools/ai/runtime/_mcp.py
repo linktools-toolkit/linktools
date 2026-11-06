@@ -4,7 +4,7 @@
 
 import asyncio
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, NoReturn, TYPE_CHECKING
 
@@ -29,10 +29,11 @@ from ..capability import (
 )
 from ..capability.mcp import MCPToolset
 from ..asset import AssetMaterializer, AssetStoreReader, AssetVersionRef
-from ..core import JsonValue, canonical_sha256
+from ..core import JsonValue, ToolEffects, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import (
     MCPServerSpec,
+    CapabilityRef,
     mcp_server_name_token,
     mcp_tool_selector,
     parse_mcp_tool_selector,
@@ -47,6 +48,7 @@ from ._budget import RunBudgetContext
 from ._tool import ToolOperationBridge
 from ._tool_boundary import (
     BoundaryToolset,
+    ManagedToolDescriptor,
     managed_tool_descriptor_from_metadata,
 )
 from ._tool_metrics import ToolMetricContext
@@ -86,6 +88,13 @@ class _MCPProjection:
     resource_root: str | None = None
 
 
+@dataclass(kw_only=True)
+class _MCPModelTool(ToolsetTool[object]):
+    projection: "_MCPModelToolset"
+    source_tool: ToolsetTool[object]
+    upstream_name: str
+
+
 class _MCPModelToolset(WrapperToolset[object]):
     """Apply stable model names while routing calls to original MCP names."""
 
@@ -102,7 +111,6 @@ class _MCPModelToolset(WrapperToolset[object]):
         self._allowed_tools = allowed_tools
         self._required_tools = required_tools
         self._effect_policy = effect_policy
-        self._published: dict[str, str] = {}
 
     async def get_tools(
         self,
@@ -127,10 +135,8 @@ class _MCPModelToolset(WrapperToolset[object]):
             ):
                 continue
             model_name = _model_tool_name(self._server_id, upstream_name)
-            previous = self._published.get(model_name)
-            if previous is not None and previous != upstream_name:
+            if model_name in result:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            self._published[model_name] = upstream_name
             identity = json.dumps(
                 {"server_id": self._server_id, "tool_name": upstream_name},
                 ensure_ascii=False,
@@ -138,9 +144,10 @@ class _MCPModelToolset(WrapperToolset[object]):
             )
             description = tool.tool_def.description or ""
             description = f"[MCP identity: {identity}]\n{description}"
-            result[model_name] = replace(
-                tool,
-                toolset=self,
+            result[model_name] = _MCPModelTool(
+                projection=self, source_tool=tool, upstream_name=upstream_name,
+                toolset=self, max_retries=tool.max_retries,
+                args_validator=tool.args_validator, args_validator_func=tool.args_validator_func,
                 tool_def=replace(
                     tool.tool_def,
                     name=model_name,
@@ -160,14 +167,13 @@ class _MCPModelToolset(WrapperToolset[object]):
         ctx: PydanticRunContext[object],
         tool: ToolsetTool[object],
     ) -> Any:
-        upstream_name = self._published.get(name)
-        if upstream_name is None:
+        if (not isinstance(tool, _MCPModelTool) or tool.projection is not self
+                or name != tool.tool_def.name
+                or name != _model_tool_name(self._server_id, tool.upstream_name)
+                or (self._allowed_tools is not None and tool.upstream_name not in self._allowed_tools)):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        upstream_tool = replace(
-            tool,
-            toolset=self.wrapped,
-            tool_def=replace(tool.tool_def, name=upstream_name),
-        )
+        upstream_name = tool.upstream_name
+        upstream_tool = tool.source_tool
         upstream_context = replace(ctx, tool_name=upstream_name)
         return await self.wrapped.call_tool(
             upstream_name,
@@ -343,6 +349,7 @@ async def materialize_mcp_capabilities(
     tool_operations: "ToolOperationBridge | None",
     tool_metrics: "ToolMetricContext | None",
     budget: "RunBudgetContext | None" = None,
+    tool_effects: ToolEffects = "live",
     response_fixture: "_ToolResponseManifest | None" = None,
     result_callbacks: "RunCallbacks | None" = None,
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
@@ -406,16 +413,15 @@ async def materialize_mcp_capabilities(
                 (mapped,),
                 {},
                 id=f"linktools.mcp.{server.id}",
-                descriptor=(
-                    managed_tool_descriptor_from_metadata(tool_metadata(
-                        effect_policy=fixed_policy, tool_class="mcp",
-                    )) if fixed_policy is not None else
-                    lambda metadata: managed_tool_descriptor_from_metadata(_mcp_tool_metadata(metadata))
+                descriptor=_mcp_descriptor(
+                    CapabilityRef("mcp", server.id, server.revision),
+                    fixed_policy,
                 ),
                 result_callbacks=result_callbacks if response_fixture is None else None,
                 tool_operations=tool_operations,
                 tool_metrics=tool_metrics,
                 budget=budget,
+                tool_effects=tool_effects,
             )
             values.append(
                 _MCPCapability(
@@ -437,6 +443,18 @@ async def materialize_mcp_capabilities(
             _raise_primary_after_cleanup(primary_error, cleanup_error)
         raise
     return tuple(values)
+
+
+
+def _mcp_descriptor(
+    contract: CapabilityRef, fixed_policy: ToolEffectPolicy | None,
+) -> Callable[[Mapping[str, object] | None], ManagedToolDescriptor]:
+    def descriptor(metadata: Mapping[str, object] | None) -> ManagedToolDescriptor:
+        return replace(
+            managed_tool_descriptor_from_metadata(_mcp_tool_metadata(metadata, effect_policy=fixed_policy)),
+            capability_ref=contract,
+        )
+    return descriptor
 
 
 def _bound_resource_versions(

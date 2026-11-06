@@ -200,7 +200,7 @@ async def test_workspace_selector_expands_registered_tool_declarations(
     tool_classes: set[str],
 ) -> None:
     workspace = Workspace.load(tmp_path)
-    snapshot = await workspace_features("workspace", workspace=workspace).capture()
+    snapshot = await workspace_features("workspace", workspace=workspace).resolve()
     spec = AgentSpec(
         "agent",
         allow_tools=selectors,
@@ -234,7 +234,7 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
     workspace = Workspace.load(tmp_path)
-    snapshot = await workspace_features("workspace", workspace=workspace).capture()
+    snapshot = await workspace_features("workspace", workspace=workspace).resolve()
     for selectors in (("new_tool",), ("*", "new_tool"), ("edit_file",), ("*", "edit_file")):
         spec = AgentSpec("agent", allow_tools=selectors)
         compiler = AgentCompiler(
@@ -242,9 +242,8 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
             candidates=snapshot.contributions,
             agents={"agent": spec},
         )
-        with pytest.raises(AIError) as error:
-            compiler.compile(spec)
-        assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+        compiled = compiler.compile(spec)
+        assert compiled.spec.allow_tools == selectors
 
     for field in ("allow_skills", "allow_subagents", "allow_capabilities"):
         kwargs = {
@@ -260,9 +259,8 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
             candidates=(),
             agents={"agent": spec},
         )
-        with pytest.raises(AIError) as error:
-            compiler.compile(spec)
-        assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+        compiled = compiler.compile(spec)
+        assert getattr(compiled.spec, field) == ("*", "missing")
 
     empty = AgentSpec("agent", allow_tools=())
     empty_compiler = AgentCompiler(
@@ -322,7 +320,7 @@ async def test_workspace_group_preserves_custom_asset_path_discovery(tmp_path: P
             "workspace",
             workspace=workspace,
             assets=store,
-        ).capture()
+        ).resolve()
     finally:
         await store.close()
 
@@ -346,7 +344,7 @@ async def test_filesystem_tool_declarations_do_not_depend_on_sandbox_selection(
         workspace_features("workspace", workspace=workspace, workspace_factory=sandbox),
         workspace_features("workspace", workspace=workspace, workspace_factory=None),
     )
-    snapshots = [await group.capture() for group in groups]
+    snapshots = [await group.resolve() for group in groups]
     projected = tuple(
         tuple(
             (item.id, item.revision, item.contract)
@@ -524,7 +522,7 @@ async def test_workspace_group_does_not_discover_declarations(
     workspace = Workspace.load(tmp_path)
 
     group = workspace_features("workspace", workspace=workspace, workspace_factory=sandbox)
-    snapshot = await group.capture()
+    snapshot = await group.resolve()
 
     assert group.workspace is workspace
     assert snapshot.workspace_factory is sandbox

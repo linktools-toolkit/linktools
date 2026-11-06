@@ -1656,7 +1656,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                      "parent_execution_id", "parent_invocation_id", "root_execution_id", "previous_execution_id",
                      "fork_base_execution_id", "lineage_kind", "created_at", "mode", "planning", "thinking",
                      "memory_scope", "repository_instructions", "context_imported", "correlation",
-                     "requires_task_invocation_capture", "budget_scope_id", "restart_checkpoints", "durable_trace",
+                     "requires_task_invocation_capture", "budget_scope_id", "restart_checkpoints", "durable_trace", "tool_effects",
                      "conversation"):
             if getattr(reservation.execution, name) != getattr(commit.execution, name):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

@@ -41,7 +41,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..storage import StoredPayload
-from ..spec import RepositoryInstructionResolver, RepositoryInstructions
+from ..spec import CapabilityRef, RepositoryInstructionResolver, RepositoryInstructions
 from ..inputs import CanonicalUserInput
 from ._repository_instructions import (
     _RepositoryInstructionApproval,
@@ -188,6 +188,7 @@ class _RecoveryCoordinatorPort(Protocol):
         metadata: Mapping[str, object],
         *,
         repository_instruction_frontier: str | None = None,
+        capability_ref: CapabilityRef | None = None,
     ) -> PendingDeferredCall: ...
 
     async def commit_deferred_frontier(
@@ -236,9 +237,10 @@ class _RecoveryCoordinatorPort(Protocol):
     async def claim_deferred_resume(
         self,
         execution: ExecutionRecord,
+        *, recovery_operation: OperationLedgerInput | None = None,
     ) -> ExecutionRecord: ...
 
-    def validate_binding(self, execution: ExecutionRecord, *, binding: AgentBinding | None = None) -> AgentBinding: ...
+    async def validate_binding(self, execution: ExecutionRecord, *, binding: AgentBinding | None = None) -> AgentBinding: ...
 
     async def validate_recovery_inputs(self, execution: ExecutionRecord, *, binding: AgentBinding | None = None) -> AgentBinding: ...
 
@@ -513,6 +515,7 @@ class _RecoveryCoordinator:
         paused_at: datetime,
         producer_generation: int | None = None,
         repository_instruction_frontiers: Mapping[str, str] | None = None,
+        capability_refs: Mapping[str, CapabilityRef] | None = None,
     ) -> ExecutionRecord:
         current = await self._port.load_recovery_execution(
             execution.execution_id, tenant_id=self._port.tenant_id,
@@ -542,6 +545,7 @@ class _RecoveryCoordinator:
                     agent_run_id,
                     call,
                     metadata.get(call.tool_call_id, {}),
+                    capability_ref=None if capability_refs is None else capability_refs.get(call.tool_call_id),
                     repository_instruction_frontier=(
                         None if repository_instruction_frontiers is None
                         else repository_instruction_frontiers.get(call.tool_call_id)
@@ -557,6 +561,7 @@ class _RecoveryCoordinator:
                     agent_run_id,
                     call,
                     metadata.get(call.tool_call_id, {}),
+                    capability_ref=None if capability_refs is None else capability_refs.get(call.tool_call_id),
                 )
             )
         calls = tuple(calls_list)
@@ -863,7 +868,7 @@ class _RecoveryCoordinator:
                 )
                 return False
         if execution.recovery.handoff_phase is not RecoveryHandoffPhase.NONE:
-            self._port.validate_binding(execution)
+            await self._port.validate_binding(execution)
             await self._port._reconcile_handoff(execution)
             return False
         if execution.status in {
@@ -911,7 +916,7 @@ class _RecoveryCoordinator:
             self._port.tenant_id,
             execution.principal_kind,
         )
-        resolved_binding = self._port.validate_binding(execution, binding=resolved_binding)
+        resolved_binding = await self._port.validate_binding(execution, binding=resolved_binding)
         if execution.recovery_state in {
             ExecutionRecoveryState.ADMITTED,
             ExecutionRecoveryState.ACTIVE,
@@ -959,6 +964,7 @@ class _RecoveryCoordinator:
             resume = await self.reconcile_waiting_deferred(
                 execution,
                 binding=resolved_binding,
+                recovery_operation=recovery_operation,
             )
             if resume is None:
                 return False
@@ -986,6 +992,7 @@ class _RecoveryCoordinator:
             thinking=execution.thinking,
             correlation=execution.correlation,
             tool_response_ref=execution.tool_response_ref,
+            tool_effects=execution.tool_effects,
             resolved_binding=resolved_binding,
         )
         if not self._port._prepare_recovery_relaunch(execution.execution_id):
@@ -1038,13 +1045,28 @@ class _RecoveryCoordinator:
             ExecutionStatus.STARTED,
             ExecutionStatus.CANCELLING,
             ExecutionStatus.FINALIZING,
+            ExecutionStatus.WAITING_DEFERRED,
         }:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if current.status is ExecutionStatus.WAITING_DEFERRED:
+            launched = await self.reconcile_execution(
+                current, expected_revision=expected_revision,
+                recovery_operation=recovery_operation,
+            )
+            latest = await self._port.load_execution(execution_id, tenant_id=tenant_id)
+            if latest is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if not launched and (
+                latest.status is ExecutionStatus.CANCELLING
+                or self._deferred_attempt_advanced(current, latest)
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return latest, launched
         if current.status is ExecutionStatus.FINALIZING:
             if (current.recovery is None or current.recovery.terminal_handoff is None
                     or current.recovery.handoff_phase is RecoveryHandoffPhase.NONE):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._port.validate_binding(current)
+            await self._port.validate_binding(current)
             if recovery_operation is not None:
                 await self._port._admit_recovery_without_producer(current, recovery_operation)
             return await self._port._reconcile_handoff(current), False
@@ -1168,6 +1190,7 @@ class _RecoveryCoordinator:
         execution: ExecutionRecord,
         *,
         binding: AgentBinding | None = None,
+        recovery_operation: OperationLedgerInput | None = None,
     ) -> _DeferredResume | None:
         current = await self._port.load_recovery_execution(
             execution.execution_id, tenant_id=self._port.tenant_id,
@@ -1195,7 +1218,9 @@ class _RecoveryCoordinator:
         )
         binding = await self._port.validate_recovery_inputs(current, binding=binding)
         try:
-            resumed_execution = await self._port.claim_deferred_resume(current)
+            resumed_execution = await self._port.claim_deferred_resume(
+                current, recovery_operation=recovery_operation,
+            )
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_CONFLICT:
                 raise

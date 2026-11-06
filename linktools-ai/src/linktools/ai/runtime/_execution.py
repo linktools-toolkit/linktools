@@ -93,6 +93,7 @@ from ._execution_payload import _materialize_execution_payloads
 from ..inputs import ExecutionContextArchive
 from ..capability import ToolResponseFixture
 from ._tool_response_fixture import _load_tool_response_fixture
+from ._feature_policy import _runtime_feature_policy
 from ..core import HandoffGate, HandoffState
 from ..inputs import (
     ExecutionInputMaterializer,
@@ -248,6 +249,8 @@ _TerminalMetricDelivery = Callable[[], Awaitable[None]]
 
 
 class _ExecutionRuntimePort(ExecutionBackend, Protocol):
+    def preflight_handoff(self) -> None: ...
+
     async def load_repository_instructions(
         self, reference: "RuntimePayloadRef | None",
     ) -> RepositoryInstructions | None: ...
@@ -373,6 +376,7 @@ class DefaultExecutionService(TaskExecutionService):
         sessions: SessionRepository,
         catalog: AgentCatalog,
         compiler: AgentCompiler,
+        restore_binding: Callable[[AgentBindingContract], Awaitable[AgentBinding]] | None = None,
         runtime_bridge: _ExecutionRuntimeBridge,
         live_broker: _LiveExecutionStreamBroker,
         operation_ids: "Callable[[], str] | None" = None,
@@ -425,6 +429,7 @@ class DefaultExecutionService(TaskExecutionService):
         self._tool_responses = tool_responses
         self._catalog = catalog
         self._compiler = compiler
+        self._restore_binding = restore_binding
         self._runtime_bridge = runtime_bridge
         self._live_broker = live_broker
         self._history_reader = history_reader
@@ -491,26 +496,26 @@ class DefaultExecutionService(TaskExecutionService):
         )
 
     def _validate_tool_response_mode(
-        self, reference: AssetVersionRef | None, *, session_id: str | None,
+        self, reference: AssetVersionRef | None, *, session_id: str | None, fixture: ToolResponseFixture | None,
     ) -> None:
         if reference is not None:
-            if self._tool_responses is None:
+            if fixture is None:
                 raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING,
                               safe_details={"kind": "tool_response_fixture_reader"})
             if session_id is not None:
                 raise AIError(ErrorCode.BINDING_CONFLICT,
                               safe_details={"reason": "tool_response_fixture_session_unsupported"})
-        elif self._tool_responses is not None:
+        elif fixture is not None:
             raise AIError(ErrorCode.BINDING_CONFLICT,
                           "a tool response fixture cannot replace an admitted live execution")
 
     async def _validate_tool_response_input(
-        self, reference: AssetVersionRef | None, *, session_id: str | None,
+        self, reference: AssetVersionRef | None, *, session_id: str | None, fixture: ToolResponseFixture | None,
     ) -> None:
-        self._validate_tool_response_mode(reference, session_id=session_id)
+        self._validate_tool_response_mode(reference, session_id=session_id, fixture=fixture)
         if reference is not None:
-            assert self._tool_responses is not None
-            await _load_tool_response_fixture(self._tool_responses, reference)
+            assert fixture is not None
+            await _load_tool_response_fixture(fixture, reference)
 
     async def _canonicalize_request(
         self,
@@ -664,7 +669,7 @@ class DefaultExecutionService(TaskExecutionService):
     ) -> ExecutionRequest:
         stored = execution.stored_user_input
         if stored is None:
-            return replace(request, tool_response_ref=execution.tool_response_ref)
+            return replace(request, tool_response_ref=execution.tool_response_ref, tool_effects=execution.tool_effects)
         if self._input_materializer is not None:
             prompt = await self._input_materializer.restore(stored)
         elif stored.codec == "text":
@@ -674,9 +679,10 @@ class DefaultExecutionService(TaskExecutionService):
             if not isinstance(payload, Mapping):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             prompt = decode_user_content_payload(payload)
-        return replace(request, user_prompt=prompt, files=(), tool_response_ref=execution.tool_response_ref)
+        return replace(request, user_prompt=prompt, files=(), tool_response_ref=execution.tool_response_ref,
+                       tool_effects=execution.tool_effects)
 
-    def _binding(
+    async def _binding(
         self,
         binding_digest: str,
         binding_contract: "AgentBindingContract | None" = None,
@@ -686,7 +692,10 @@ class DefaultExecutionService(TaskExecutionService):
             return self._catalog.binding(binding_digest)
         if binding_contract.binding_digest != binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        binding = resolved_binding if resolved_binding is not None else self._compiler.restore(binding_contract)
+        binding = resolved_binding if resolved_binding is not None else (
+            self._compiler.restore(binding_contract) if self._restore_binding is None
+            else await self._restore_binding(binding_contract)
+        )
         if (
             binding.binding_digest != binding_digest
             or binding.binding_contract != binding_contract
@@ -710,6 +719,7 @@ class DefaultExecutionService(TaskExecutionService):
             execution.requires_task_invocation_capture is not requires_task_invocation_capture
             or execution.budget_scope_id != expected_scope
             or execution.tool_response_ref != request.tool_response_ref
+            or execution.tool_effects != request.tool_effects
             or execution.binding_digest != binding.binding_digest
             or execution.planning is not request.planning
             or execution.thinking is not request.thinking
@@ -728,8 +738,6 @@ class DefaultExecutionService(TaskExecutionService):
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
     ) -> ExecutionHandle:
-        if request.tool_response_ref is None:
-            request = replace(request, tool_response_ref=None if self._tool_responses is None else self._tool_responses.ref)
         return await self._start(
             binding_digest,
             request,
@@ -751,8 +759,6 @@ class DefaultExecutionService(TaskExecutionService):
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
     ) -> "ExecutionHandle | None":
-        if request.tool_response_ref is None:
-            request = replace(request, tool_response_ref=None if self._tool_responses is None else self._tool_responses.ref)
         if budget_scope_id is not None and (
             not isinstance(budget_scope_id, str) or not budget_scope_id.strip()
             or request.budget is not None
@@ -762,7 +768,10 @@ class DefaultExecutionService(TaskExecutionService):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        binding = self._binding(binding_digest, binding_contract)
+        binding = await self._binding(binding_digest, binding_contract)
+        fixture = _runtime_feature_policy(binding.compiled_agent.runtime_contributions).tool_responses
+        if request.tool_response_ref is None and fixture is not None:
+            request = replace(request, tool_response_ref=fixture.ref)
         context = await self._canonicalize_request(request)
         request = context.request
         if budget_scope_id is not None:
@@ -840,11 +849,6 @@ class DefaultExecutionService(TaskExecutionService):
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
     ) -> ExecutionHandle:
-        if not self._session_execution_ready:
-            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING, "Session management is disabled")
-        if request.tool_response_ref is None:
-            request = replace(request, tool_response_ref=None if self._tool_responses is None else self._tool_responses.ref)
-        self._validate_tool_response_mode(request.tool_response_ref, session_id=session_id)
         if not session_id.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return await self._start(
@@ -917,7 +921,7 @@ class DefaultExecutionService(TaskExecutionService):
         )
         if execution is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        binding = self._binding(execution.binding_digest, execution.binding)
+        binding = await self._binding(execution.binding_digest, execution.binding)
         if binding.compiled_agent.spec.id != agent_id:
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         if (
@@ -938,6 +942,7 @@ class DefaultExecutionService(TaskExecutionService):
             correlation=execution.correlation,
             files=files,
             tool_response_ref=execution.tool_response_ref,
+            tool_effects=execution.tool_effects,
         )
         handle = await self.start_subagent(
             execution.binding_digest,
@@ -1147,7 +1152,11 @@ class DefaultExecutionService(TaskExecutionService):
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
         context = await self._canonicalize_request(request)
         request = context.request
-        binding = self._binding(binding_digest, binding_contract, resolved_binding)
+        binding = await self._binding(binding_digest, binding_contract, resolved_binding)
+        policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions)
+        fixture = policy.tool_responses
+        if request.tool_response_ref is None and fixture is not None and lineage_kind is ExecutionLineageKind.RUN:
+            request = replace(request, tool_response_ref=fixture.ref)
         request = replace(request, resolved_binding=binding)
         context = replace(context, request=request)
         parent: ExecutionRecord | None = None
@@ -1167,7 +1176,8 @@ class DefaultExecutionService(TaskExecutionService):
             if request.budget is not None:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             budget_scope_id = parent.budget_scope_id
-            request = replace(request, correlation=parent.correlation, tool_response_ref=parent.tool_response_ref)
+            request = replace(request, correlation=parent.correlation, tool_response_ref=parent.tool_response_ref,
+                              tool_effects=parent.tool_effects)
             context = replace(context, request=request)
         conversation_agent_run_id = conversation_agent_run_id
         if session_id is not None and previous_execution_id is None:
@@ -1213,7 +1223,7 @@ class DefaultExecutionService(TaskExecutionService):
         await self._authorization.authorize(
             request.principal, AuthorizationAction.EXECUTION_RUN, resource
         )
-        self._validate_tool_response_mode(request.tool_response_ref, session_id=session_id)
+        self._validate_tool_response_mode(request.tool_response_ref, session_id=session_id, fixture=fixture)
         if budget_scope_id is not None:
             await self.authorize_budget_scope(
                 budget_scope_id,
@@ -1402,10 +1412,10 @@ class DefaultExecutionService(TaskExecutionService):
             )
             return ExecutionHandle(existing.resource_id)
 
-        if session_id is not None and not self._session_execution_ready:
+        if session_id is not None and not policy.session.enabled:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
-        await self._validate_tool_response_input(request.tool_response_ref, session_id=session_id)
+        await self._validate_tool_response_input(request.tool_response_ref, session_id=session_id, fixture=fixture)
         input_instruction_paths = (
             *context.canonical_files,
             *(() if isinstance(request.user_prompt, str) else (
@@ -1514,17 +1524,18 @@ class DefaultExecutionService(TaskExecutionService):
             input_context=input_context,
             context_imported=request.input_context is not None,
             tool_response_ref=request.tool_response_ref,
+            tool_effects=request.tool_effects,
             correlation=request.correlation,
             principal_id=request.principal.principal_id,
             principal_kind=request.principal.kind,
             stored_user_input=context.stored_user_input,
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id or (None if request.budget is None else "execution:" + execution_id),
-            restart_checkpoints=(self._restart_checkpoints
+            restart_checkpoints=(policy.restart_checkpoints
                                  or parent is not None and parent.restart_checkpoints),
-            durable_trace=(self._durable_trace or requires_task_invocation_capture
+            durable_trace=(policy.durable_trace or requires_task_invocation_capture
                            or parent is not None and parent.durable_trace),
-            conversation=self._conversation,
+            conversation=policy.execution.retain_history,
         )
         proposed_reservation = ExecutionStartReservation(
                 execution,
@@ -1570,6 +1581,7 @@ class DefaultExecutionService(TaskExecutionService):
         # Source-first and deferred writers must observe the same admission owner.
         coordinator = self._runtime_bridge.pending_turns.coordination
         execution = proposed_reservation.execution
+        policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions)
 
         async def admit(coordination: TurnCoordination | None) -> ExecutionHandle:
             if not self._accepting:
@@ -1582,7 +1594,7 @@ class DefaultExecutionService(TaskExecutionService):
                     requires_task_invocation_capture=requires_task_invocation_capture,
                     budget_scope_id=budget_scope_id,
                 )
-            if (self._commit.mode == "terminal" and execution.conversation
+            if (policy.execution.commit.mode == "terminal" and execution.conversation
                     and dependency_hold_id is None
                     and self._runtime_bridge.pending_start is not None):
                 pending_id = await ConversationService.prepare_turn(
@@ -2389,7 +2401,7 @@ class DefaultExecutionService(TaskExecutionService):
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         binding_digest = previous.binding_digest
-        self._binding(binding_digest, previous.binding)
+        await self._binding(binding_digest, previous.binding)
         input_context = None
         if previous.context_imported:
             if previous.input_context is None:
@@ -2411,6 +2423,7 @@ class DefaultExecutionService(TaskExecutionService):
             files=request.files,
             input_context=input_context,
             tool_response_ref=previous.tool_response_ref,
+            tool_effects=previous.tool_effects,
         )
         return await self._start(
             binding_digest,
@@ -2441,7 +2454,7 @@ class DefaultExecutionService(TaskExecutionService):
         if not previous.conversation:
             raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
         binding_digest = previous.binding_digest
-        self._binding(binding_digest, previous.binding)
+        await self._binding(binding_digest, previous.binding)
         fork_request = ExecutionRequest(
             user_prompt=request.user_prompt,
             principal=request.principal,
@@ -2456,6 +2469,7 @@ class DefaultExecutionService(TaskExecutionService):
             files=request.files,
             budget=request.budget,
             tool_response_ref=previous.tool_response_ref,
+            tool_effects=previous.tool_effects,
         )
         return await self._start(
             binding_digest,
@@ -2565,6 +2579,16 @@ class DefaultExecutionService(TaskExecutionService):
 
         task.add_done_callback(consume)
 
+    def preflight_handoff(self) -> None:
+        if any(not task.done() for task in self._admission_tasks):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, retryable=True,
+                safe_details={"phase": "runtime_handoff", "reason": "admission_in_progress"})
+        backend = self._runtime_bridge.port
+        if backend is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        backend.preflight_handoff()
+        self._accepting = False
+
     async def preflight_close(self) -> None:
         self._accepting = False
         while True:
@@ -2660,6 +2684,7 @@ class DefaultExecutionService(TaskExecutionService):
                 ExecutionStatus.STARTED,
                 ExecutionStatus.CANCELLING,
                 ExecutionStatus.FINALIZING,
+                ExecutionStatus.WAITING_DEFERRED,
             }:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             await self.runtime_backend().recover_execution(
@@ -2909,6 +2934,7 @@ def _request_digest(
             **({"requires_task_invocation_capture": True} if requires_task_invocation_capture else {}),
             **({"input_context_digest": request.input_context.digest} if request.input_context is not None else {}),
             **({"tool_response_ref": request.tool_response_ref.to_payload()} if request.tool_response_ref is not None else {}),
+            **({"tool_effects": request.tool_effects} if request.tool_effects != "live" else {}),
             "binding_digest": binding_digest,
             "scope": session_id or "execution",
             "principal": principal_identity_payload(request.principal),

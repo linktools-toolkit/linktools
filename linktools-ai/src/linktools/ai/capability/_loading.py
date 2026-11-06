@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Shared Asset capture and loader context for capability groups."""
+"""Versioned Asset inputs for one capability resolution."""
 
 import asyncio
 from collections.abc import Mapping, Sequence
@@ -38,8 +38,6 @@ class _CapabilityAssetReader:
     _metadata: tuple[AssetInfo, ...] = field(repr=False, compare=False)
 
     async def current_revision(self) -> StorageRevision:
-        if await self._store.current_revision() != self._revision:
-            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
         return self._revision
 
     async def get(self, key: AssetKey) -> "bytes | None":
@@ -111,7 +109,7 @@ class _CapabilityAssetReader:
 
 @dataclass(frozen=True, slots=True)
 class CapabilityLoadEntry:
-    """Asset metadata captured at the start of one group capture."""
+    """Asset metadata selected at the start of one resolution."""
 
     key: AssetKey
     digest: str
@@ -137,7 +135,7 @@ class CapabilityLoadEntry:
 
 
 class CapabilityLoadContext:
-    """One immutable Asset capture shared by every loader in a group."""
+    """One set of versioned Asset inputs shared by every loader in a call."""
 
     def __init__(
         self,
@@ -178,13 +176,18 @@ class CapabilityLoadContext:
         """Read current loader inputs without freezing later source reads.
 
         Version references validate the bytes read by this loader call. They do
-        not require unrelated Assets to stop changing or pin later Skill reads.
+        not require unrelated Assets to stop changing or pin later resolutions.
         """
         if not store.ready:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         revision = await store.current_revision()
         metadata = await store.capture_metadata()
-        versions = await store.resolve_versions(tuple(info.key for info in metadata))
+        try:
+            versions = await store.resolve_versions(tuple(info.key for info in metadata))
+        except AIError as error:
+            if error.code is ErrorCode.STORAGE_NOT_FOUND:
+                raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+            raise
         if len(versions) != len(metadata) or any(
             not ref.matches_info(info)
             for info, ref in zip(metadata, versions, strict=True)
@@ -197,56 +200,6 @@ class CapabilityLoadContext:
         version_by_key = {ref.key: ref for ref in versions}
         reader = _CapabilityAssetReader(store, revision, version_by_key, tuple(metadata))
         return cls(group_id, store, revision, entries, version_by_key, reader)
-
-    @classmethod
-    async def capture(
-        cls,
-        group_id: str,
-        store: AssetStore,
-    ) -> "CapabilityLoadContext":
-        if not store.ready:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        source_revision = await store.current_revision()
-        metadata = await store.capture_metadata()
-        try:
-            versions = await store.resolve_versions(
-                tuple(info.key for info in metadata)
-            )
-        except AIError as error:
-            if error.code is ErrorCode.STORAGE_NOT_FOUND:
-                raise AIError(ErrorCode.SNAPSHOT_CONFLICT) from error
-            raise
-        if len(versions) != len(metadata) or any(
-            not ref.matches_info(info)
-            for info, ref in zip(metadata, versions, strict=True)
-        ):
-            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-        if await store.current_revision() != source_revision:
-            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-        version_by_key = {ref.key: ref for ref in versions}
-        entries = tuple(
-            CapabilityLoadEntry(
-                info.key,
-                info.digest,
-                info.size,
-                info.metadata,
-            )
-            for info in metadata
-        )
-        reader = _CapabilityAssetReader(
-            store,
-            source_revision,
-            version_by_key,
-            tuple(metadata),
-        )
-        return cls(
-            group_id,
-            store,
-            source_revision,
-            entries,
-            version_by_key,
-            reader,
-        )
 
     @property
     def group_id(self) -> str:
@@ -308,19 +261,11 @@ class CapabilityLoadContext:
                         ErrorCode.ASSET_VERSION_LAYER_UNKNOWN,
                     }:
                         raise AIError(ErrorCode.SNAPSHOT_CONFLICT) from error
-                    if (
-                        error.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-                        and await self._store.current_revision() != self._source_revision
-                    ):
-                        raise AIError(ErrorCode.SNAPSHOT_CONFLICT) from error
                     raise
                 for key, data in zip(pending, values, strict=True):
                     self._cache[key] = data
         return tuple(self._cache[key] for key in keys)
 
-    async def verify_source_revision(self) -> None:
-        if await self._store.current_revision() != self._source_revision:
-            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
 
 
 class CapabilityLoader(Protocol[AppT]):

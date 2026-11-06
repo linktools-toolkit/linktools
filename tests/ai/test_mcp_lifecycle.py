@@ -156,7 +156,8 @@ async def test_wrapper_exit_cleanup_does_not_replace_primary_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from unittest.mock import AsyncMock
-    from linktools.ai.runtime._agent_executor import _close_mcp_resources
+    from types import SimpleNamespace
+    from linktools.ai.runtime._current_toolsets import _MCPToolsetScope
 
     async def fail_exit(self: MCPToolset, *args: object) -> None:
         raise RuntimeError("private cleanup response")
@@ -173,8 +174,10 @@ async def test_wrapper_exit_cleanup_does_not_replace_primary_failure(
             await toolset.__aexit__(None, None, None)
     assert raised.value is primary
     capability = _MCPCapability("remote", object(), toolset)
+    scope = _MCPToolsetScope(SimpleNamespace(release_resources=lambda scope: None), None, None, None)
+    scope._mcp = (capability,)
     with pytest.raises(AIError) as raised:
-        await _close_mcp_resources((capability,), primary)
+        await scope.__aexit__(type(primary), primary, None)
     assert raised.value is primary
     assert raised.value.__cause__.code is ErrorCode.MCP_CLEANUP_FAILED
     assert close.await_count == 1

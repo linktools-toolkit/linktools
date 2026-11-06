@@ -323,10 +323,10 @@ async def test_handoff_uses_stored_guarantee(monkeypatch, current_conversation, 
 
 
 @pytest.mark.asyncio
-async def test_capture_does_not_reinterpret_later_feature_registration():
+async def test_borrowed_source_resolves_later_feature_registration():
     features = _features(ExecutionCapability(retain_history=True))
     features.model("default", _FeatureModels())
-    captured = await features.capture()
+    captured = features.borrow()
     features.capability(TraceCapability(), scope="runtime")
     storage = PersistenceStorage.in_memory()
     async with Persistence.open('capture', storage=storage) as persistence_327, Runtime.attach(persistence=persistence_327, features=captured) as runtime:
@@ -334,4 +334,4 @@ async def test_capture_does_not_reinterpret_later_feature_registration():
         execution = await session.start("question")
         await execution.wait(timeout_seconds=5)
         record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
-        assert record is not None and record.conversation and not record.durable_trace
+        assert record is not None and record.conversation and record.durable_trace

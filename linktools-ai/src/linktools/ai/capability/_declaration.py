@@ -52,7 +52,7 @@ def capture_contributions(
     *,
     context: CapabilityLoadContext | None = None,
 ) -> tuple[CapabilityContribution[AppT], ...]:
-    """Freeze candidate contracts, binding MCP resources to the captured source."""
+    """Resolve candidate contracts and bind resources to this call's versions."""
     captured = tuple(
         _freeze_contribution(
             _bind_mcp_contribution(item, context) if item.kind == "mcp" else item
@@ -314,8 +314,14 @@ def _bind_mcp_contribution(
         paths.add(relative)
     validate_resource_tree(paths)
     _validate_resource_arguments(value.args, paths)
-    if context.bind_versions(keys) != versions:
-        raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+    try:
+        current = context.bind_versions(keys)
+    except AIError as error:
+        if error.code is ErrorCode.SNAPSHOT_CONFLICT:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+        raise
+    if current != versions:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     return CapabilityContribution.from_mcp_contract(contract, value)
 
 

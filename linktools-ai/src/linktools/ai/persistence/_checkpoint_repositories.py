@@ -486,6 +486,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                     created_at=now,
                     updated_at=now,
                     arguments_payload=request.arguments_payload,
+                    capability_ref=request.capability_ref,
                 )
                 await transaction.insert_record(
                     self._stored(
@@ -1196,28 +1197,17 @@ def _tool_replay_matches(left: ToolOperationRecord, right: ToolOperationRecord) 
             right.arguments_payload,
         )
         and left.binding_digest == right.binding_digest
-        and left.replay_safe == right.replay_safe
+        and (left.status in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}
+             or (left.replay_safe is right.replay_safe
+                 and left.capability_ref
+                 == right.capability_ref))
     )
 
 
 def _tool_admission_matches(
     left: ToolOperationRecord, right: ToolOperationAdmission
 ) -> bool:
-    return (
-        left.execution_id == right.execution_id
-        and left.tool_operation_id == right.tool_operation_id
-        and left.tool_call_id == right.tool_call_id
-        and left.idempotency_key_digest == right.idempotency_key_digest
-        and left.tool_name == right.tool_name
-        and left.arguments_digest == right.arguments_digest
-        and _tool_argument_payloads_match(
-            left.arguments_payload,
-            right.arguments_payload,
-        )
-        and left.binding_digest == right.binding_digest
-        and left.replay_safe is right.replay_safe
-        and left.agent_run_id in {right.agent_run_id, right.recovery_agent_run_id}
-    )
+    return left.matches_admission(right)
 
 
 def _tool_argument_payloads_match(

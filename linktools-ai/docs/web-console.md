@@ -257,7 +257,7 @@ credentials present in the exception. Restrict access and retention accordingly.
 | Former `ai-history` | Paged executions, explicit newest-by-time scan, metadata, paged SDK history/transcript, original client requests/responses, SDK prompt architecture, duration/cache usage | History `list_executions`, `recent_executions`, `inspect_execution`, `history`, `transcript`, `model_interactions` |
 | Former `ai-trace` | Metadata timeline with source execution, run/request/step/tool locators, duration, purpose, token usage and content drill-down | History `trace` and filtered `history` |
 | Former `ai-metrics` | Twelve-metric summary, named metric, time window, dimensions/correlation filters, grouping, aggregation and buckets | Metrics `query` |
-| Former `ai-status` | Runtime & capabilities: workspace/storage locations, model, captured input_mime_types allowlist, credential presence, captured Agent/Tool/Skill/MCP identities | CLI composition and one RuntimeFeatures capture |
+| Former `ai-status` | Runtime & capabilities: workspace/storage locations, model, captured input_mime_types allowlist, credential presence, current Agent/Tool/Skill/MCP identities | CLI composition and RuntimeFeatures source resolution |
 | `ai-acp` | Equivalent explicit session create/load/continue/fork/close/cancel interactions; ACP itself remains a separate stdio transport | The same public Session and Execution APIs |
 
 Retry, fork, recovery and external-effect resolution are explicit actions in the
@@ -350,9 +350,10 @@ conversation is empty.
 
 ## Observation and ownership
 
-The CLI captures RuntimeFeatures once for both inspection and composition,
-opens one `Runtime.open(namespace, storage=..., features=capture)` context, and
-runs one HTTP server. Runtime closes its owned Persistence after the server
+The CLI shares one live RuntimeFeatures source for inspection and composition,
+opens one `Runtime.open(namespace, storage=..., features=source)` context, and
+runs one HTTP server. Inspection uses `await source.resolve()`; it does not freeze
+later registrations or Asset declarations. Runtime closes its owned Persistence after the server
 stops; the CLI then closes its separately owned AssetStore. `create_app` accepts already-open public Runtime/History and
 Metrics objects for embedding and testing; the caller owns their lifespan.
 

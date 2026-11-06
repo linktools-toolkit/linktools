@@ -545,7 +545,7 @@ async def test_business_tool_metadata_is_captured_in_tool_contract() -> None:
         effect_policy="replay_safe",
         plan_safe=True,
     )
-    candidate = (await group.capture()).contributions[0]
+    candidate = (await group.resolve()).contributions[0]
     assert tool.tool_def.metadata == {
         "linktools.ai.effect_policy": "replay_safe",
         "linktools.ai.plan_safe": True,
@@ -877,7 +877,7 @@ async def _capture_mcp_resource_versions(
 ) -> tuple[AssetVersionRef, ...]:
     asset_features = RuntimeFeatures("application")
     asset_features.capability(AssetCapability(store), scope="runtime")
-    capture = await asset_features.capture()
+    capture = await asset_features.resolve()
     contribution = next(
         item
         for item in capture.contributions

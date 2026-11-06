@@ -156,7 +156,10 @@ class RuntimeExecutions(Generic[AppT]):
         """Take over recoverable work after its previous executor stopped.
 
         Reusing a key observes the same recovery attempt. Without a key each
-        invocation can supersede an earlier attempt.
+        invocation can supersede an earlier attempt. A deferred execution resumes
+        only when its persisted approvals and external results are complete. An
+        incomplete frontier stays waiting without consuming the key, so the same
+        key can be retried after its results arrive.
         """
         self._ensure_open()
         return await self._service.recover(

@@ -115,11 +115,13 @@ async def captured_assets_and_workspace(root: Path) -> None:
         features.model("offline", OfflineModel("resources", respond))
         features.agent("default", model="offline", allow_tools=("list_files", "run_command"),
                        allow_skills=("guide",), allow_subagents=(), allow_capabilities=())
-        capture = await features.capture()
-        async with Runtime.open("capability-assets", storage=PersistenceStorage.in_memory(), features=capture) as runtime:
+        resolution = await features.resolve()
+        async with Runtime.open("capability-assets", storage=PersistenceStorage.in_memory(), features=features.borrow()) as runtime:
             await store.put(resource, b"new authoring resource")
-            assert capture.asset_reader is not None
-            assert await capture.asset_reader.get(resource) == b"captured resource"
+            assert resolution.asset_reader is not None
+            assert await resolution.asset_reader.get(resource) == b"captured resource"
+            current = await runtime.features.resolve()
+            assert await current.asset_reader.get(resource) == b"new authoring resource"
             execution = await runtime.agents.get().start("inspect current resources")
             outcome = await execution.wait(timeout_seconds=30)
             assert outcome.result.status is ExecutionStatus.SUCCEEDED
@@ -137,7 +139,7 @@ async def captured_assets_and_workspace(root: Path) -> None:
 
 
 async def admitted_memory_after_reopen(root: Path) -> None:
-    """A retry retains its admitted Memory even when the new host omits it."""
+    """A retry uses current tools while retaining its admitted Memory scope."""
     observations: list[tuple[str, set[str]]] = []
     recalled: list[object] = []
 
@@ -177,6 +179,7 @@ async def admitted_memory_after_reopen(root: Path) -> None:
                             features=current) as runtime:
         fresh = await runtime.agents.get().run("fresh", timeout_seconds=30)
         assert fresh.result.status is ExecutionStatus.SUCCEEDED
+        current.capability(MemoryCapability(scope="new-host-notes"))
         source = await runtime.executions.get(execution_id)
         retry = await source.retry("recall", idempotency_key="recall")
         assert (await retry.wait(timeout_seconds=30)).result.status is ExecutionStatus.SUCCEEDED

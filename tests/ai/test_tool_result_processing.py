@@ -453,7 +453,7 @@ async def test_result_capability_capture_and_restore_preserve_declared_order_and
             assets = AssetCapability(store)
             assets.loader("results", Loader())
             features.capability(assets)
-        capture = await features.capture()
+        capture = await features.resolve()
         spec = AgentSpec("reader", allow_tools=())
         models = {"default": _Binding(None)}
         compiler = AgentCompiler(models=models, candidates=capture.contributions, agents={})

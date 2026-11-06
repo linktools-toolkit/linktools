@@ -47,31 +47,56 @@ async def test_runtime_owns_declared_assets_but_not_attached_persistence(attach:
                  Runtime.open("assets", storage=PersistenceStorage.in_memory(), features=features))
         async with owner as runtime:
             assert assets.ready
-            assert runtime.features.asset_reader is not None
+            assert (await runtime.features.resolve()).asset_reader is not None
             assert (await runtime.agents.get().run("question")).result.output == {"text": "done"}
         assert not assets.ready
         assert persistence.ready
 
 
-async def test_captured_assets_are_borrowed_and_runtime_reuses_capture() -> None:
+async def test_live_assets_are_borrowed_and_shared_by_two_runtimes() -> None:
     backend = InMemoryAssetBackend()
     assets = AssetStore(StorageOverlay(backend, writer=backend))
     try:
         await assets.initialize()
         key = AssetKey("rule", "shared.md")
         await assets.put(key, b"shared instructions")
-        capture = await _features(AssetCapability(assets)).capture()
-        async with Runtime.open("first", storage=PersistenceStorage.in_memory(), features=capture) as first:
-            async with Runtime.open("second", storage=PersistenceStorage.in_memory(), features=capture) as second:
-                assert first.features is second.features is capture
+        source = _features(AssetCapability(assets)).borrow()
+        resolution = await source.resolve()
+        async with Runtime.open("first", storage=PersistenceStorage.in_memory(), features=source) as first:
+            async with Runtime.open("second", storage=PersistenceStorage.in_memory(), features=source) as second:
+                assert first.features is second.features is source
                 assert assets.ready
+                await assets.put(key, b"current shared instructions")
+                for runtime in (first, second):
+                    current = await runtime.features.resolve()
+                    assert await current.asset_reader.get(key) == b"current shared instructions"
             assert assets.ready
-            assert await capture.asset_reader.get(key) == b"shared instructions"
+            assert await resolution.asset_reader.get(key) == b"shared instructions"
             assert (await first.agents.get().run("still live")).result.output == {"text": "done"}
         assert assets.ready
     finally:
         await assets.close()
     assert not assets.ready
+
+
+@pytest.mark.parametrize("attach", (False, True))
+async def test_resolution_is_inspection_only_and_cannot_transfer_asset_ownership(attach: bool) -> None:
+    assets = _assets()
+    try:
+        await assets.initialize()
+        source = _features(AssetCapability(assets)).borrow()
+        resolution = await source.resolve()
+        assert not hasattr(resolution, "verify_source_revision")
+        async with Persistence.open("inspection", storage=PersistenceStorage.in_memory()) as persistence:
+            with pytest.raises(TypeError, match="RuntimeFeaturesSource"):
+                if attach:
+                    Runtime.attach(persistence=persistence, features=resolution)
+                else:
+                    Runtime.open("inspection", storage=PersistenceStorage.in_memory(), features=resolution)
+            assert assets.ready
+            assert persistence.ready
+    finally:
+        await assets.close()
 
 
 async def test_owned_asset_declaration_rejects_second_runtime_without_closing_first() -> None:
@@ -338,3 +363,36 @@ async def test_default_steps_recover_after_runtime_handoff_and_reopen(tmp_path: 
         result = await successor.executions.inspect(execution.execution_id, principal=successor.default_principal)
         assert result.status is ExecutionStatus.SUCCEEDED
     assert declaration.store is None
+
+
+async def test_late_asset_replacement_does_not_transfer_or_alias_open_store() -> None:
+    original, replacement = _assets(), _assets()
+    await replacement.initialize()
+    declaration = AssetCapability(original)
+    features = _features(declaration)
+    try:
+        async with Runtime.open("resource-owner", storage=PersistenceStorage.in_memory(), features=features) as runtime:
+            features.capability(AssetCapability(replacement))
+            with pytest.raises(AIError) as error:
+                await runtime.agents.get().start("do not alias stores")
+            assert error.value.safe_details["reason"] == "runtime_resource_replacement"
+            features.capability(declaration)
+            assert (await runtime.agents.get().run("original store")).result.output == {"text": "done"}
+        assert not original.ready and replacement.ready
+    finally:
+        await replacement.close()
+
+
+async def test_late_execution_buffer_replacement_is_not_silently_ignored() -> None:
+    from linktools.ai.capability import ExecutionCapability
+    from linktools.ai.core import CommitPolicy
+    from .test_execution_terminal_payload_runtime import _PayloadBuffer
+
+    features = _features()
+    async with Runtime.open("buffer-owner", storage=PersistenceStorage.in_memory(), features=features) as runtime:
+        features.capability(ExecutionCapability(commit=CommitPolicy.terminal(buffer=_PayloadBuffer())))
+        with pytest.raises(AIError) as error:
+            await runtime.agents.get().start("new buffer")
+        assert error.value.safe_details["reason"] == "runtime_resource_replacement"
+        features.capability(ExecutionCapability(commit=CommitPolicy.terminal()))
+        assert (await runtime.agents.get().run("same resources")).result.output == {"text": "done"}
