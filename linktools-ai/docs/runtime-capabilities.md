@@ -71,7 +71,7 @@ as completed. A recovered ordinary tool keeps its admitted effect policy even if
 the host's default has since changed; unrelated same-revision configuration
 continues to use the current declaration.
 
-Keep `CommitPolicy.sync()` with native `StepPersistence` when a replacement worker
+Keep `CommitPolicy.sync()` with `StepPersistenceCapability` when a replacement worker
 must recover the existing execution. `CommitPolicy.terminal()` without ongoing
 checkpoints is a different durability choice, not an equivalent recovery mode.
 Idempotent tools alone do not make an uncommitted execution recoverable.
@@ -79,8 +79,9 @@ Idempotent tools alone do not make an uncommitted execution recoverable.
 ## Capability and service ownership
 
 Runtime capability declarations are imported from `linktools.ai.capability`,
-including `ExecutionCapability`, `SessionCapability`, and `TraceCapability`.
-Recovery uses `StepPersistence` directly from `pydantic_ai_harness.step_persistence`.
+including `ExecutionCapability`, `SessionCapability`, `StepPersistenceCapability`,
+and `TraceCapability`. The project step declaration binds native Harness hooks;
+explicit native `StepPersistence` declarations remain supported.
 `linktools.ai.runtime` owns Runtime entry points, services, and the
 `RuntimeFeatures` / `RuntimeFeaturesCapture` composition contracts; it does not
 provide duplicate capability exports.
@@ -128,8 +129,7 @@ before capture or opening the Runtime.
 
 ```python
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.capability import ExecutionCapability, TraceCapability
-from pydantic_ai_harness.step_persistence import StepPersistence, SqliteStepStore
+from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability, TraceCapability
 
 chat = RuntimeFeatures("chat")
 chat.agent("default", model="default")
@@ -138,9 +138,7 @@ chat.capability(ExecutionCapability(retain_history=True))
 
 persistent_work = RuntimeFeatures("persistent-work")
 persistent_work.agent("default", model="default")
-persistent_work.capability(StepPersistence(
-    store=SqliteStepStore(database="steps.db"), capture_frontier=True,
-))
+persistent_work.capability(StepPersistenceCapability())
 persistent_work.capability(TraceCapability())
 # Runtime.open(..., features=persistent_work) supports recovery and audit.
 ```
@@ -156,11 +154,16 @@ history unavailable, and later resume or Session fork fails with
 History retention enabled later cannot reconstruct that missing history. Execution forks
 require an admitted conversation guarantee; checkpoint or trace data alone does
 not grant it.
-`StepPersistence` retains the official committed snapshots. `capture_frontier=True`
-also saves accepted input and model tool-call frontiers before tool dispatch.
-The supplied store is caller-owned. For a provisioned SQL database, use
-`linktools.ai.persistence.SqlStepStore(engine, namespace="app", tenant_id="default")`;
-it implements the official protocol using the project SQL schema.
+`StepPersistenceCapability` retains the official committed snapshots. Its default
+`capture_frontier=True` also saves accepted input and model tool-call frontiers
+before tool dispatch. Runtime creates and closes the default native adapter over
+Persistence's Execution SQL resource, for both `Runtime.open` and `Runtime.attach`.
+It never creates a separate database or invents durable storage for a memory route.
+An explicit `store=...` is borrowed; custom native `StepPersistence` declarations
+retain their existing hook behavior and caller-owned store lifetime. Hosts can use
+`await persistence.create_step_store()` for a separately managed same-group adapter,
+or `SqlStepStore(engine, namespace="app", tenant_id="default")` over an externally
+provisioned SQL database. Runtime does not create or migrate production schemas.
 `TraceCapability()` retains execution transcript, step facts and model interactions;
 trace alone cannot resume an interrupted run. Register the combination required
 by the application. Each capability requires Runtime scope; duplicate registrations
@@ -218,8 +221,10 @@ For plan-based construction, caches live on the routes rather than a second
 `PersistenceStorage.sqlite(path, cache=cache)` apply the cache to their generated routes.
 
 `PersistencePlan(checkpoint=route, trace=route, ...)` configures Runtime control
-and Trace storage. `StepPersistence(store=...)` owns its explicit native store;
-its snapshots are not also written to a Runtime checkpoint archive. The Checkpoint
+and Trace storage. `StepPersistenceCapability()` uses that same Execution SQL group;
+explicit `StepPersistenceCapability(store=...)` and native `StepPersistence(store=...)`
+borrow their store from the caller. Native snapshots are not also written to a
+Runtime checkpoint archive. The Checkpoint
 control route retains approvals, external results and the single tool-effect/result
 ledger, and shares the execution transaction group. The native snapshot store may
 be separate: its successful write is confirmed before terminal state is published.

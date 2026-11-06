@@ -26,7 +26,8 @@ AppT = TypeVar("AppT")
 class AssetCapability(AbstractCapability[AgentContext[AppT]], Generic[AppT]):
     """Load declarations from one versioned AssetStore.
 
-    The constructor borrows a ready store; open() owns its store's lifetime.
+    The constructor borrows a ready store; owned() delegates its lifetime to
+    Runtime. open() owns the store for explicitly managed captures.
     RuntimeFeatures consumes this Runtime-scoped capability during capture;
     it does not participate in native Agent execution hooks.
     """
@@ -37,9 +38,38 @@ class AssetCapability(AbstractCapability[AgentContext[AppT]], Generic[AppT]):
         if not isinstance(store, AssetStore):
             raise TypeError("store must be AssetStore")
         self._store = store
+        self._owns_store = False
+        self._store_claimed = False
         self._loaders: dict[str, CapabilityLoader[AppT]] = {
             kind: BuiltinDeclarationLoader(kind) for kind in ("agent", "skill", "mcp", "rule")
         }
+
+    @classmethod
+    def owned(cls, store: AssetStore) -> "Self":
+        """Declare a store whose lifetime belongs to the consuming Runtime.
+
+        Pass this declaration in RuntimeFeatures, not a prebuilt capture.
+        A captured Asset reader is always borrowed from its existing owner.
+        """
+        capability = cls(store)
+        capability._owns_store = True
+        return capability
+
+    def claim_owned_store(self) -> "AssetStore | None":
+        """Claim an owned declaration before Runtime initializes its store."""
+        if not self._owns_store:
+            return None
+        if self._store_claimed:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                          "Asset declaration already belongs to an active Runtime")
+        self._store_claimed = True
+        return self._store
+
+    async def close_owned_store(self) -> None:
+        """Release a claimed store only after its close completes successfully."""
+        if self._store_claimed:
+            await self._store.close()
+            self._store_claimed = False
 
     @classmethod
     @asynccontextmanager

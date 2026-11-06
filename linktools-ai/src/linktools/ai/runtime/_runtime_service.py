@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from ..inputs import InputCaptures
     from ..history import History
     from ..asset import AssetStoreReader
+    from ..capability import AssetCapability
     from ._factory import _AgentLifecycle
 from .agent_execution import AgentExecutionPort
 from ._agent import Agent, Session
@@ -169,6 +170,8 @@ class Runtime(Generic[AppT]):
         self._persistence_cleanup: Callable[[], Awaitable[None]] | None = None
         self._context = ExecutionContext(None) if context is None else context
         self._features = features
+        self._feature_capture: RuntimeFeaturesCapture[AppT] | None = None
+        self._owned_assets: AssetCapability[AppT] | None = None
         self._metrics_dataset = metrics
         self._authorization = TenantAuthorizationPolicy(self._tenant_id) if authorization is None else authorization
         self._auto_recover = auto_recover
@@ -231,6 +234,12 @@ class Runtime(Generic[AppT]):
             authorization=authorization, auto_recover=auto_recover,
         )
 
+    @property
+    def features(self) -> "RuntimeFeaturesCapture[AppT] | None":
+        """Return the exact declaration capture admitted by this open Runtime."""
+        self._ensure_open()
+        return self._feature_capture
+
     async def __aenter__(self) -> "Runtime[AppT]":
         initializing = False
         try:
@@ -247,12 +256,21 @@ class Runtime(Generic[AppT]):
                     execution_producer=self._features is not None,
                     owns_persistence=self._owns_persistence,
                 )
-                if self._features is not None:
+                if isinstance(self._features, RuntimeFeatures):
+                    assets = self._features.assets
+                    owned_store = None if assets is None else assets.claim_owned_store()
+                    if owned_store is not None:
+                        self._owned_assets = assets
+                        await owned_store.initialize()
+                    self._feature_capture = await self._features.capture()
+                else:
+                    self._feature_capture = self._features
+                if self._feature_capture is not None:
                     from ._factory import _AgentLifecycle, compose_runtime_components
 
                     self._agent_lifecycle = _AgentLifecycle()
                     components = await compose_runtime_components(
-                        persistence=self._state, app=self.app, features=self._features,
+                        persistence=self._state, app=self.app, features=self._feature_capture,
                         metrics=self._metrics_dataset, authorization=self._authorization,
                         auto_recover=self._auto_recover, lifecycle=self._agent_lifecycle,
                     )
@@ -930,6 +948,8 @@ class Runtime(Generic[AppT]):
                 *(engine.close for engine in reversed(self._task_engines)),
                 self._close_agent,
             ]
+            if self._owned_assets is not None:
+                actions.append(self._owned_assets.close_owned_store)
             if self._persistence_cleanup is not None:
                 actions.append(self._persistence_cleanup)
             elif self._owns_persistence:

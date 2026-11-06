@@ -214,41 +214,36 @@ async def _open_local_runtime(
     model: "ModelBinding",
     status: "Mapping[str, object] | None" = None,
 ) -> "AsyncIterator[LocalRuntime]":
-    from linktools.ai.capability import AssetCapability, FileSystem, MemoryCapability, ShellCapability
-    from linktools.ai.runtime import RuntimeFeatures
-    from linktools.ai.capability import ExecutionCapability, TraceCapability
-    from pydantic_ai_harness.step_persistence import StepPersistence, SqliteStepStore
-    from linktools.ai.runtime import Runtime
+    from linktools.ai.capability import (
+        AssetCapability, ExecutionCapability, FileSystem, MemoryCapability,
+        ShellCapability, StepPersistenceCapability, TraceCapability,
+    )
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
 
-    async with AssetCapability.open(_local_runtime_assets(workspace)) as assets:
-        features = RuntimeFeatures("workspace")
-        features.model("default", model)
-        features.capability(assets)
-        features.capability(FileSystem(workspace))
-        features.capability(ShellCapability())
-        features.capability(MemoryCapability())
-        features.capability(ExecutionCapability(retain_history=True))
-        features.capability(StepPersistence(
-            store=SqliteStepStore(database=_local_runtime_root(workspace) / "steps.db"),
-            capture_frontier=True,
-        ))
-        features.capability(TraceCapability())
-        metrics = await _local_metrics(workspace)
-        capture = await features.capture()
+    features = RuntimeFeatures("workspace")
+    features.model("default", model)
+    features.capability(AssetCapability.owned(_local_runtime_assets(workspace)))
+    features.capability(FileSystem(workspace))
+    features.capability(ShellCapability())
+    features.capability(MemoryCapability())
+    features.capability(ExecutionCapability(retain_history=True))
+    features.capability(StepPersistenceCapability())
+    features.capability(TraceCapability())
+    metrics = await _local_metrics(workspace)
+    async with Runtime.open(
+        "default", storage=_local_runtime_storage(workspace), features=features, metrics=metrics,
+    ) as runtime:
+        capture = runtime.features
+        assert capture is not None
         declarations: tuple[dict[str, str | int], ...] = tuple(
             {"kind": item.kind, "id": item.id, "revision": item.revision} for item in capture.contributions
         )
         if not any(item["kind"] == "agent" and item["id"] == "default" for item in declarations):
             declarations = ({"kind": "agent", "id": "default", "revision": 1}, *declarations)
-        async with Runtime.open(
-            "default", storage=_local_runtime_storage(workspace),
-            features=capture,
-            metrics=metrics,
-        ) as runtime:
-            yield LocalRuntime(runtime, metrics, declarations, {
-                "workspace": str(workspace.root), "asset_root": str(workspace.storage_root),
-                **({} if status is None else status),
-            })
+        yield LocalRuntime(runtime, metrics, declarations, {
+            "workspace": str(workspace.root), "asset_root": str(workspace.storage_root),
+            **({} if status is None else status),
+        })
 
 
 def run_local(args: Namespace, execute: "Callable[[LocalRuntime], Awaitable[int]]") -> int:

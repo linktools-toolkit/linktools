@@ -140,7 +140,7 @@ and provider retry boundaries.
 
 Context retention, interrupted-run recovery and detailed trace are independent
 Runtime-scoped opt-ins: `ExecutionCapability(retain_history=True)`,
-native `StepPersistence(store=..., capture_frontier=True)`, and `TraceCapability()`. Durable storage alone enables
+`StepPersistenceCapability()`, and `TraceCapability()`. Durable storage alone enables
 none of these optional guarantees. `Runtime.open(..., metrics=dataset)` independently enables automatic
 Agent observations and supplies the dataset to Runtime-bound Task engines for
 Task and evaluation execution observations. Each producer owns its recorder
@@ -661,10 +661,13 @@ capability discovers Agent, Skill, or
 MCP declarations from Workspace paths.
 
 Agent, Skill, MCP, and repository rule files use one explicit source: register
-`AssetCapability` with `features.capability(assets)`. `AssetCapability.open(store)`
-initializes and closes the store; keep its context open through capture and every
-Runtime using that capture. `AssetCapability(store)` instead borrows an already
-initialized store without closing it. A store-backed group
+`AssetCapability` with `features.capability(assets)`. Use `AssetCapability.owned(store)`
+with an uncaptured `RuntimeFeatures` to let Runtime initialize the store, capture
+once, and close it after all producers stop. An owned declaration belongs to one Runtime lifetime. `runtime.features` exposes the same capture used for composition.
+`AssetCapability(store)` borrows an already initialized store without closing it.
+For a capture shared by multiple Runtimes, `AssetCapability.open(store)` instead
+owns the store externally; keep its context open through every use of that capture.
+Passing a prebuilt capture always borrows its Asset reader. A store-backed group
 captures the declaration metadata visible when capture begins. Assets added
 afterward are ignored for that capture; assets actually read by a loader must
 still match their captured metadata through verification. Conflicting
@@ -672,13 +675,13 @@ identities or layouts fail closed. Omitting `AssetCapability` contributes no Ass
 
 ```python
 from linktools.ai.capability import AssetCapability
-from linktools.ai.runtime import RuntimeFeatures
+from linktools.ai.runtime import Runtime, RuntimeFeatures
 
-async with AssetCapability.open(store) as assets:
-    features = RuntimeFeatures("application")
-    features.capability(assets)
-    capture = await features.capture()
-    # Open and use Runtime with this capture inside the context.
+features = RuntimeFeatures("application")
+features.capability(AssetCapability.owned(store))
+async with Runtime.open("application", storage=storage, features=features) as runtime:
+    capture = runtime.features
+    # Inspect this capture and use Runtime inside the same lifetime.
 ```
 
 Every Asset kind uses `AssetVersionRef` for byte-version reads through
@@ -1612,26 +1615,29 @@ binding metadata; portable PersistenceStorage restore therefore requires the
 corresponding Asset history to remain available through the AssetStore supplied
 when the Runtime is reopened.
 
-For a native checkpoint store in the same SQL resource as Runtime control state,
-open Persistence first and borrow its Execution route through the public factory:
+For native checkpoints in the same SQL resource as Runtime control state,
+register the project capability. Runtime creates and owns the adapter for both
+`open()` and `attach()`; explicit `store=...` values remain caller-owned.
 
 ```python
-from pydantic_ai_harness.step_persistence import StepPersistence
-from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.capability import StepPersistenceCapability
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 
+features = RuntimeFeatures("checkpointed-runtime")
+features.capability(StepPersistenceCapability())
+# Add the application's model and Agent declarations to these features.
 storage = PersistenceStorage.from_root(runtime_root, exclusive_writer=True)
-async with Persistence.open("service-runtime", storage=storage) as persistence:
-    steps = await persistence.create_step_store()
-    try:
-        features = RuntimeFeatures("checkpointed-runtime")
-        features.capability(StepPersistence(store=steps, capture_frontier=True))
-        # Add the application's model and Agent declarations to these features.
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
-            ...
-    finally:
-        await steps.close()
+async with Runtime.open("service-runtime", storage=storage, features=features) as runtime:
+    ...
 ```
+
+`StepPersistenceCapability` binds the existing native step hooks and defaults to
+`capture_frontier=True`. Advanced hosts can still call
+`await persistence.create_step_store()` and supply that borrowed adapter through
+`StepPersistenceCapability(store=steps)` or native `StepPersistence(store=steps)`.
+Such hosts close their own adapters after Runtime exits. Native subclasses retain
+their custom hooks.
 
 The adapter uses Persistence's namespace and tenant and borrows the exact
 Execution SQL context, including a local SQLite writer owner when configured.
@@ -1650,6 +1656,10 @@ provisioned explicitly. Missing or incompatible native tables fail at the first
 affected operation; deployment checks can use `validate_sql` with
 `build_step_sql_metadata()` from `linktools.ai.persistence.schema`. Existing
 pre-release checkpoint records and archives are not implicitly migrated.
+The local CLI now stores native steps in `runtime.db`; previous standalone
+`steps.db` records are not imported or read as a fallback. Existing `runtime.db`
+files without the current native schema require explicit provisioning or a new
+local root. Reopening a current database is not a migration of earlier CLI data.
 
 Native `StepPersistence(store=...)` is another caller-owned backup resource.
 Quiesce writers and back up its database consistently with Runtime control state.

@@ -21,6 +21,7 @@ from ..capability import (
     SessionCapability,
     MemoryCapability,
     ExecutionCapability,
+    StepPersistenceCapability,
     AgentContext,
     AssetCapability,
     AssetSkillSource,
@@ -136,6 +137,7 @@ class _AgentLifecycle:
         self.execution: DefaultExecutionService | None = None
         self.backend: LocalExecutionBackend | None = None
         self.session: RuntimeSessionService | None = None
+        self.step_store_cleanup: Callable[[], Awaitable[None]] | None = None
         self._coordinator: _RuntimeCloseCoordinator | None = None
 
     def configure(
@@ -143,9 +145,10 @@ class _AgentLifecycle:
         actions: Sequence[tuple[str, Callable[[], Awaitable[None]]]],
         handoff_actions: Sequence[tuple[str, Callable[[], Awaitable[None]]]],
     ) -> None:
+        resource_actions = (() if self.step_store_cleanup is None else (self.step_store_cleanup,))
         self._coordinator = _RuntimeCloseCoordinator(
-            tuple(action for _, action in actions),
-            tuple(action for _, action in handoff_actions),
+            (*tuple(action for _, action in actions), *resource_actions),
+            (*tuple(action for _, action in handoff_actions), *resource_actions),
         )
 
     async def close(self) -> None:
@@ -232,6 +235,7 @@ async def compose_runtime_components(
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "Persistent capabilities require runtime scope")
             if isinstance(capability, (
                 StepPersistence,
+                StepPersistenceCapability,
                 TraceCapability,
                 ToolResponsesCapability,
                 SessionCapability,
@@ -386,6 +390,25 @@ async def compose_runtime_components(
         for identity in capability_ids:
             await persistence.capability_store(identity)
 
+        step_declaration = next((leaf for feature in runtime_capabilities for leaf in runtime_feature_leaves(feature)
+                                 if isinstance(leaf, StepPersistenceCapability)), None)
+        if step_declaration is not None:
+            step_store = step_declaration.store
+            if step_store is None:
+                step_store = await persistence.create_step_store()
+                lifecycle.step_store_cleanup = step_store.close
+            native_steps = step_declaration.bind(step_store)
+
+            def bind_steps(capability: AbstractCapability[AgentContext[AppT]]) -> AbstractCapability[AgentContext[AppT]]:
+                if capability is step_declaration:
+                    return native_steps
+                if isinstance(capability, WrapperCapability):
+                    bound = copy(capability)
+                    bound.wrapped = capability.wrapped.visit_and_replace(bind_steps)
+                    return bound
+                return capability
+
+            runtime_capabilities = tuple(capability.visit_and_replace(bind_steps) for capability in runtime_capabilities)
         step_features = [leaf for feature in runtime_capabilities for leaf in runtime_feature_leaves(feature)
                          if isinstance(leaf, StepPersistence)]
         run_store = await persistence.create_agent_run_store(

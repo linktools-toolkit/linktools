@@ -63,6 +63,15 @@ composition details, not a connectivity or storage health check. SQL connection
 strings and provider credentials are never included. Workspace and model
 configuration remain console display metadata.
 
+A saved browser URL selects identities within the current Runtime. If a session or
+execution is unavailable, the console stops its observation and disables actions
+that require its loaded metadata. Refresh to retry, choose a conversation from the
+current list, or explicitly create a new conversation. Missing and unauthorized
+resources share the same error; it does not establish a cookie or login problem.
+Check the workspace and Runtime namespace/tenant in settings if you started the
+console with a different project or storage. Reading an unavailable identity never
+creates it or changes authorization.
+
 ### Finding details and controls
 
 The default **Conversation** view is the everyday workspace: conversation list,

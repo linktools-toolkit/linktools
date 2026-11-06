@@ -153,6 +153,11 @@ class RuntimeFeatures(Generic[AppT]):
         return self._defaults
 
     @property
+    def assets(self) -> "AssetCapability[AppT] | None":
+        """Return the declared Asset source and its explicit ownership policy."""
+        return self._asset_capability
+
+    @property
     def workspace(self) -> "Workspace | None":
         return self._workspace
 

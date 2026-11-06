@@ -169,6 +169,51 @@ async def test_session_execution_history_trace_result_and_metrics_use_runtime() 
 
 
 @pytest.mark.asyncio
+async def test_reopened_console_preserves_history_and_hides_unavailable_resources(tmp_path: Path) -> None:
+    from linktools.ai.core import Principal
+
+    storage = PersistenceStorage.from_root(tmp_path)
+
+    def features() -> RuntimeFeatures:
+        result = model_features(RuntimeUsageModels(), RuntimeFeatures("web-reopen"))
+        result.capability(ExecutionCapability(retain_history=True), scope="runtime")
+        result.capability(native_checkpoint(), scope="runtime")
+        return result
+
+    async with Persistence.open("web-reopen", storage=storage) as persistence:
+        async with Runtime.attach(persistence=persistence, features=features()) as runtime:
+            visible = await runtime.agents.get().create_session("visible")
+            other = Principal("other-owner", runtime.tenant_id, "service")
+            await runtime.agents.get().create_session("private", principal=other)
+            visible_execution = await visible.start("visible message")
+            await visible_execution.wait()
+
+    async with Persistence.open("web-reopen", storage=storage, tenant_id="other-tenant") as persistence:
+        async with Runtime.attach(persistence=persistence, features=features()) as runtime:
+            foreign_execution = await runtime.agents.get().start("other tenant message")
+            await foreign_execution.wait()
+
+    async with Persistence.open("web-reopen", storage=storage) as persistence:
+        async with Runtime.attach(persistence=persistence, features=features()) as runtime:
+            async with client(create_app(runtime=runtime)) as http:
+                restored = await http.get("/api/session?session_id=visible")
+                assert restored.status_code == 200, restored.text
+                assert restored.json()["timeline"]["items"][0]["execution_id"] == visible_execution.execution_id
+                assert (await http.get(f"/api/executions/{visible_execution.execution_id}")).status_code == 200
+                paths = [f"/api/session?session_id={identity}" for identity in ("missing", "private")]
+                paths.extend(f"/api/executions/{identity}{suffix}"
+                             for identity in ("missing", foreign_execution.execution_id) for suffix in ("", "/events"))
+                for path in paths:
+                    response = await http.get(path)
+                    assert response.status_code == 404, response.text
+                    assert response.json()["code"] == "AUTHORIZATION_DENIED"
+                assert (await runtime.history.inspect_session("private", principal=other)).session_id == "private"
+                created = await http.post("/api/sessions", json={"session_id": "new", "request_id": "new"}, headers=_HEADERS)
+                assert created.status_code == 201, created.text
+                assert (await http.get("/api/session?session_id=new")).status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_rejected_message_needs_new_identity_after_session_owner_finishes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
