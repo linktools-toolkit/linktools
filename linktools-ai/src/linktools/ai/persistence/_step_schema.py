@@ -38,7 +38,6 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
     def table(name: str, comment: str, *columns: "Column") -> "Table":
         result = Table(
             name, metadata, sql_id_column(),
-            digest("store_digest", "Physical namespace and tenant partition."),
             *columns, *sql_audit_columns(), comment=comment,
             **sql_table_options(),
         )
@@ -53,6 +52,7 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
 
     runs = table(
         "ai_step_runs", "Upstream agent run lineage and registration records.",
+        digest("store_digest", "Physical namespace and tenant partition."),
         *run_columns(),
         text("conversation_id", "Original upstream conversation identifier."),
         digest("conversation_digest", "Physical conversation lookup digest.", nullable=True),
@@ -69,6 +69,7 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
 
     events = table(
         "ai_step_events", "Append-only upstream agent execution boundary events.",
+        digest("store_digest", "Physical namespace and tenant partition."),
         *run_columns(),
         Column("kind", sql_state(), nullable=False, comment="Upstream boundary event kind."),
         Column("step_index", BigInteger, nullable=False, comment="Upstream graph step index."),
@@ -81,13 +82,14 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
         text("error", "Upstream boundary error text."),
         text("metadata", "Upstream string metadata encoded as JSON.", nullable=False),
         text("idempotency_key", "Upstream boundary replay key."),
-        digest("key_digest", "Physical lookup digest of the boundary replay key.", nullable=True),
+        digest("key_digest", "SHA-256 identity of the scoped run and replay key or append occurrence."),
     )
-    sql_unique(events, "store_digest", "run_digest", "key_digest")
-    sql_query_index(events, "store_digest", "run_digest", "id")
+    sql_unique(events, "key_digest")
+    sql_query_index(events, "store_digest", "run_digest")
 
     snapshots = table(
         "ai_step_snapshots", "Upstream complete or interrupted message-history snapshots.",
+        digest("store_digest", "Physical namespace and tenant partition."),
         *run_columns(),
         Column("step_index", BigInteger, nullable=False, comment="Upstream graph step index."),
         text("conversation_id", "Original upstream conversation identifier."),
@@ -97,14 +99,15 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
         Column("state", sql_state(), nullable=False, comment="Upstream complete or interrupted state."),
         text("messages", "Upstream stored_messages count for the ordered references.", nullable=False),
         text("idempotency_key", "Upstream boundary replay key."),
-        digest("key_digest", "Physical lookup digest of the snapshot replay key.", nullable=True),
+        digest("key_digest", "SHA-256 identity of the scoped run and replay key or append occurrence."),
         Column("pruned", Boolean, nullable=False, default=False, comment="Retired snapshot identity without retained message references."),
     )
-    sql_unique(snapshots, "store_digest", "run_digest", "key_digest")
-    sql_query_index(snapshots, "store_digest", "run_digest", "id")
+    sql_unique(snapshots, "key_digest")
+    sql_query_index(snapshots, "store_digest", "run_digest")
 
     messages = table(
         "ai_step_messages", "Deduplicated upstream ModelMessage JSON bodies.",
+        digest("store_digest", "Physical namespace and tenant partition."),
         digest("sha256", "SHA-256 of the exact stored upstream message JSON."),
         text("message", "One upstream ModelMessage JSON body.", nullable=False),
     )
@@ -116,7 +119,7 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
         Column("position", BigInteger, nullable=False, comment="Zero-based position in the upstream message history."),
         digest("sha256", "SHA-256 of the referenced upstream message JSON."),
     )
-    sql_unique(refs, "store_digest", "snapshot_id", "position")
+    sql_unique(refs, "snapshot_id", "position")
     return metadata
 
 

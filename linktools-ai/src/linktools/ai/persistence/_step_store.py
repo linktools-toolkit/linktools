@@ -10,6 +10,7 @@ from copy import copy, deepcopy
 from dataclasses import dataclass, fields
 from itertools import groupby
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from pydantic import TypeAdapter
 from pydantic_ai.messages import ModelMessagesTypeAdapter
@@ -200,14 +201,19 @@ class SqlStepStore:
     async def _write_events(self, session: "AsyncSession", events: Sequence[StepEvent]) -> None:
         for keyed, group in groupby(events, key=lambda event: event.idempotency_key is not None):
             rows = [self._run_values(event.run_id) | self._record_values(event)
-                    | {"key_digest": _optional_digest(event.idempotency_key)} for event in group]
-            # MySQL retries an entire driver batch after a duplicate. Unkeyed
-            # events must remain single writes so an earlier prefix cannot repeat.
+                    for event in group]
+            for row in rows:
+                row["key_digest"] = _replay_digest(self._store_digest, row["run_digest"], row["idempotency_key"])
+            # An unkeyed append must fail rather than silently suppress a
+            # colliding physical occurrence identity.
             batch_size = _BATCH_SIZE if keyed else 1
             for offset in range(0, len(rows), batch_size):
+                if not keyed:
+                    await session.execute(self._table("events").insert().values(rows[offset]))
+                    continue
                 await self._context.dialect.insert_ignore_conflict_many(
                     session, table=self._table("events"), rows=rows[offset:offset + batch_size],
-                    index_elements=("store_digest", "run_digest", "key_digest"),
+                    index_elements=("key_digest",),
                 )
 
     async def list_events(self, *, run_id: str) -> list[StepEvent]:
@@ -307,7 +313,6 @@ class SqlStepStore:
             keyed.append((_digest(body), body))
         values = self._run_values(snapshot.run_id) | self._record_values(snapshot)
         values["messages"] = json.dumps({"stored_messages": len(keyed)})
-        values["key_digest"] = _optional_digest(snapshot.idempotency_key)
         values["pruned"] = False
 
         return values, keyed
@@ -316,13 +321,19 @@ class SqlStepStore:
         self, session: "AsyncSession", snapshot: ContinuableSnapshot,
         values: "dict[str, SqlValue]", keyed: Sequence[tuple[str, str]],
     ) -> tuple[str, ...]:
-        result = await self._context.dialect.insert_ignore_conflict(
-            session, table=self._table("snapshots"), values=values,
-            index_elements=("store_digest", "run_digest", "key_digest"),
-        )
-        if not result.inserted:
-            return ()
-        snapshot_id = result.row_id
+        values = values | self._run_values(snapshot.run_id)
+        values["key_digest"] = _replay_digest(self._store_digest, values["run_digest"], snapshot.idempotency_key)
+        if snapshot.idempotency_key is None:
+            result = await session.execute(self._table("snapshots").insert().values(values))
+            snapshot_id = result.inserted_primary_key[0]
+        else:
+            result = await self._context.dialect.insert_ignore_conflict(
+                session, table=self._table("snapshots"), values=values,
+                index_elements=("key_digest",),
+            )
+            if not result.inserted:
+                return ()
+            snapshot_id = result.row_id
         if snapshot_id is None:
             raise RuntimeError("snapshot insertion did not return its physical identity")
         message_rows = []
@@ -335,7 +346,7 @@ class SqlStepStore:
                 rows=message_rows[offset:offset + _BATCH_SIZE],
                 index_elements=("store_digest", "sha256"),
             )
-        ref_rows = [{"store_digest": self._store_digest, "snapshot_id": snapshot_id,
+        ref_rows = [{"snapshot_id": snapshot_id,
                      "position": position, "sha256": key} for position, (key, _) in enumerate(keyed)]
         for offset in range(0, len(ref_rows), _BATCH_SIZE):
             await session.execute(self._table("message_refs").insert(), ref_rows[offset:offset + _BATCH_SIZE])
@@ -407,7 +418,7 @@ class SqlStepStore:
         refs = self._table("message_refs")
         for offset in range(0, len(removed), _BATCH_SIZE):
             ids = removed[offset:offset + _BATCH_SIZE]
-            await session.execute(refs.delete().where(refs.c.store_digest == self._store_digest, refs.c.snapshot_id.in_(ids)))
+            await session.execute(refs.delete().where(refs.c.snapshot_id.in_(ids)))
             await session.execute(table.update().where(
                 table.c.store_digest == self._store_digest, table.c.id.in_(ids),
             ).values(pruned=True, messages="{}"))
@@ -436,9 +447,9 @@ class SqlStepStore:
                 found = (await session.execute(select(
                     refs.c.snapshot_id, refs.c.position, refs.c.sha256, messages.c.message,
                 ).select_from(refs.outerjoin(messages, and_(
-                    messages.c.store_digest == refs.c.store_digest,
+                    messages.c.store_digest == self._store_digest,
                     messages.c.sha256 == refs.c.sha256,
-                ))).where(refs.c.store_digest == self._store_digest, refs.c.snapshot_id.in_(ids))
+                ))).where(refs.c.snapshot_id.in_(ids))
                     .order_by(refs.c.snapshot_id, refs.c.position))).all()
                 for ref in found:
                     histories.setdefault(ref.snapshot_id, []).append((ref.position, ref.sha256, ref.message))
@@ -492,6 +503,11 @@ def _digest(value: str) -> str:
 
 def _optional_digest(value: str | None) -> str | None:
     return None if value is None else _digest(value)
+
+
+def _replay_digest(store_digest: str, run_digest: str, value: str | None) -> str:
+    identity = [store_digest, run_digest, "occurrence", uuid4().hex] if value is None else [store_digest, run_digest, "key", value]
+    return _digest(json.dumps(identity))
 
 
 __all__ = ["PreparedStep", "SqlStepStore", "StepWriteReceipt"]

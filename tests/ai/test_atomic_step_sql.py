@@ -12,7 +12,7 @@ import pytest_asyncio
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepEvent
 from sqlalchemy import event, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSessionTransaction, create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
@@ -285,6 +285,45 @@ async def test_native_boundary_failure_rolls_back_control_and_native_rows(tmp_pa
         assert await native.latest_snapshot(run_id="run") is None
         assert not native._confirmed_messages
         await native.close()
+
+
+@pytest.mark.asyncio
+async def test_unkeyed_prepared_boundary_appends_on_each_publication(tmp_path: Path) -> None:
+    from .test_state_group_record_batch import _database
+
+    async with _database(tmp_path / "append-prepared.db") as (_, state, _):
+        native = SqlStepStore(state.context, namespace="steps", tenant_id="one")
+        snapshot = ContinuableSnapshot(run_id="run", step_index=0, messages=[])
+        event_record = StepEvent(run_id="run", kind="model_request_started", step_index=0)
+        prepared = await native.prepare_step(events=(event_record,), snapshot=snapshot)
+        try:
+            for _ in range(2):
+                receipt = await state.mutate(lambda transaction: native.write_prepared_step(transaction, prepared))
+                native.confirm_prepared_step(receipt)
+            assert await native.list_events(run_id="run") == [event_record, event_record]
+            assert await native.list_snapshots(run_id="run") == [snapshot, snapshot]
+        finally:
+            await native.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ("event", "snapshot"))
+async def test_unkeyed_physical_identity_collision_fails_without_losing_append(
+    atomic_store: tuple[SqlStepStore, AsyncEngine], monkeypatch: pytest.MonkeyPatch, kind: str,
+) -> None:
+    from uuid import UUID
+    from linktools.ai.persistence import _step_store as step_module
+
+    store, _ = atomic_store
+    monkeypatch.setattr(step_module, "uuid4", lambda: UUID(int=1))
+    item = (StepEvent(run_id="run", kind="model_request_started", step_index=0) if kind == "event"
+            else ContinuableSnapshot(run_id="run", step_index=0, messages=[]))
+    write = store.append_event if kind == "event" else store.save_snapshot
+    await write(item)
+    with pytest.raises(IntegrityError):
+        await write(item)
+    items = await store.list_events(run_id="run") if kind == "event" else await store.list_snapshots(run_id="run")
+    assert items == [item]
 
 
 @pytest.mark.asyncio
