@@ -1858,8 +1858,10 @@ class DefaultExecutionService(TaskExecutionService):
         async def prepare() -> None:
             if self._backend is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            launch_request = request
             if execution.budget_scope_id is not None:
-                await self._state.budgets.read(execution.budget_scope_id)
+                usage = await self._state.budgets.read(execution.budget_scope_id)
+                launch_request = replace(request, budget=usage.limits)
             identity = ExecutionStartIdentity(
                 scope, idempotency_key_digest, request_digest,
                 expected_session,
@@ -1882,7 +1884,7 @@ class DefaultExecutionService(TaskExecutionService):
             if started is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await self._launch_started(
-                request,
+                launch_request,
                 started,
                 scope=scope,
                 idempotency_key_digest=idempotency_key_digest,
@@ -2162,7 +2164,7 @@ class DefaultExecutionService(TaskExecutionService):
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
         if launch_record.status is not ExecutionStatus.STARTED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if launch_record.budget_scope_id is not None:
+        if launch_record.budget_scope_id is not None and (not confirmed_start or request.budget is None):
             usage = await self._state.budgets.read(launch_record.budget_scope_id)
             request = replace(request, budget=usage.limits)
         if launch_record.agent_run_seq > 0:

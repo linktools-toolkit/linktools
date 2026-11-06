@@ -164,3 +164,36 @@ PY
 
 This is a deterministic workload and I/O attribution check, not the full test
 suite, backend parity, process-recovery acceptance, or a latency benchmark.
+
+## Confirmed-start budget limits
+
+The launch path reuses immutable budget limits confirmed by its own admission.
+A prepared start passes the limits it has already read to launch without changing
+the request supplied to `prepare_start`. An unconfirmed start or a request
+without resolved limits still reads the budget source. Model and tool admission
+continue to read and atomically update current shared usage.
+
+A matched run against the reference source, with the same dependency versions
+and `TURN_IO_TOOL_BUDGET=3`, measured the following first/second turn counts:
+
+| Quantity | Reference | Confirmed-start reuse |
+| --- | ---: | ---: |
+| SELECT calls | 29 / 27 | 28 / 26 |
+| Transactions begun | 38 / 36 | 37 / 35 |
+| Write commits | 27 / 27 | 27 / 27 |
+| SQL write calls | 99 / 98 | 99 / 98 |
+| Decoded state records | 33 / 36 | 32 / 35 |
+
+Both runs selected and passed the one official probe after architecture and lint
+checks. Each turn still used four models, three tools, and 229 / 273 tokens, with
+unchanged usage and no duplicate effects after replay. This removes one read-only
+transaction per turn, not a model admission or settlement commit.
+
+The eight model-budget commits remain separate from native checkpoints because
+their observable boundaries differ. Budget admission precedes request-preparation
+hooks and nested compaction; native pre-model publication follows them. Budget
+settlement precedes completion observers, while the native completed checkpoint
+follows the SDK node. Moving those facts across hooks can change which shared
+request is admitted, allow work against unsettled tokens, or omit an UNKNOWN
+reservation after preparation fails. No SQL transaction spans those hooks or the
+provider call.
