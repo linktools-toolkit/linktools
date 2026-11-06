@@ -2650,6 +2650,55 @@ class TaskRepositoryImpl(RepositoryBase):
 
         return await self._mutate_with_event_retry(mutate)
 
+    async def _terminal_state_in_transaction(
+        self,
+        transaction: StateTransaction,
+        graph_record: StoredRecord,
+        graph_id: str,
+        node_id: str,
+    ) -> _TaskEventState:
+        header = await self._decode(graph_record, TaskGraphView)
+        _require_canonical_graph_status(header.status)
+        state_records = await transaction.list_records(
+            RecordQuery(
+                parent_digest=self._state_parent(graph_id),
+                kind="task_node_state",
+            )
+        )
+        states: list[TaskNodeView] = []
+        definition_ids = {node_id}
+        for record in state_records:
+            value = await self._decode(record, TaskNodeView)
+            self._validate_state_record(record, graph_id, value.node_id)
+            states.append(value)
+            if value.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:
+                definition_ids.add(value.node_id)
+        definition_keys = tuple(
+            self._definition_key(graph_id, definition_id)
+            for definition_id in sorted(definition_ids)
+        )
+        definition_records: dict[bytes, StoredRecord] = {}
+        for offset in range(0, len(definition_keys), _TASK_NODE_READ_BATCH_SIZE):
+            definition_records.update(await transaction.get_records(
+                definition_keys[offset:offset + _TASK_NODE_READ_BATCH_SIZE],
+            ))
+        definitions: dict[str, TaskNode] = {}
+        for definition_id, key in zip(sorted(definition_ids), definition_keys):
+            record = definition_records.get(key)
+            if record is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            definition = await self._decode(record, TaskNode)
+            self._validate_definition_record(record, graph_id, definition.node_id)
+            definitions[definition_id] = definition
+        return _TaskEventState(
+            replace(header, nodes=tuple(definitions.values())),
+            tuple(
+                replace(value, dependencies=definitions[value.node_id].dependencies)
+                if value.node_id == node_id else value
+                for value in states
+            ),
+        )
+
     async def complete(
         self,
         lease: TaskLease | None,
@@ -2712,42 +2761,8 @@ class TaskRepositoryImpl(RepositoryBase):
                     transaction, target_graph_id,
                 )
             else:
-                header = await self._decode(graph_record, TaskGraphView)
-                _require_canonical_graph_status(header.status)
-                state_records = await transaction.list_records(
-                    RecordQuery(
-                        parent_digest=self._state_parent(target_graph_id),
-                        kind="task_node_state",
-                    )
-                )
-                states: list[TaskNodeView] = []
-                definition_ids = {target_node_id}
-                for record in state_records:
-                    value = await self._decode(record, TaskNodeView)
-                    self._validate_state_record(record, target_graph_id, value.node_id)
-                    states.append(value)
-                    if value.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:
-                        definition_ids.add(value.node_id)
-                definition_keys = tuple(
-                    self._definition_key(target_graph_id, node_id)
-                    for node_id in sorted(definition_ids)
-                )
-                definition_records = await transaction.get_records(definition_keys)
-                definitions: dict[str, TaskNode] = {}
-                for node_id, key in zip(sorted(definition_ids), definition_keys):
-                    record = definition_records.get(key)
-                    if record is None:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    definition = await self._decode(record, TaskNode)
-                    self._validate_definition_record(record, target_graph_id, definition.node_id)
-                    definitions[node_id] = definition
-                before = _TaskEventState(
-                    replace(header, nodes=tuple(definitions.values())),
-                    tuple(
-                        replace(value, dependencies=definitions[value.node_id].dependencies)
-                        if value.node_id == target_node_id else value
-                        for value in states
-                    ),
+                before = await self._terminal_state_in_transaction(
+                    transaction, graph_record, target_graph_id, target_node_id,
                 )
             if before is None:
                 raise AIError(ErrorCode.TASK_FENCE_STALE)
@@ -3122,19 +3137,18 @@ class TaskRepositoryImpl(RepositoryBase):
         async def mutate(transaction: StateTransaction) -> TaskTerminalRecord:
             graph_key = self._graph_key(target_graph_id)
             node_key = self._state_key(target_graph_id, target_node_id)
-            records = await transaction.get_records((graph_key, node_key))
+            records = await transaction.get_records(
+                (graph_key, node_key, self._definition_key(target_graph_id, target_node_id)),
+            )
             graph_record = records.get(graph_key)
             node_record = records.get(node_key)
             if graph_record is None or node_record is None:
                 raise AIError(ErrorCode.TASK_FENCE_STALE)
             self._validate_graph_record(graph_record, target_graph_id)
             self._validate_state_record(node_record, target_graph_id, target_node_id)
-            before = await self._event_state_in_transaction(
-                transaction,
-                target_graph_id,
+            before = await self._terminal_state_in_transaction(
+                transaction, graph_record, target_graph_id, target_node_id,
             )
-            if before is None:
-                raise AIError(ErrorCode.TASK_FENCE_STALE)
             node = next(
                 (
                     value
@@ -3238,7 +3252,10 @@ class TaskRepositoryImpl(RepositoryBase):
                 value if state.node_id == target_node_id else state
                 for state in before.node_states
             )
-            after_status = _isolated_graph_status(after_states, before.graph.nodes)
+            after_status = _aggregate_graph_status(
+                after_states,
+                {definition.node_id: definition.failure_policy for definition in before.graph.nodes},
+            )
             after = _TaskEventState(
                 TaskGraphView(target_graph_id, after_status, before.graph.nodes),
                 after_states,
